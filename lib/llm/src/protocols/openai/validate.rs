@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::Display;
@@ -66,6 +66,9 @@ pub const MAX_N: u8 = 128;
 /// Allowed range of values for `n` (number of choices)
 pub const N_RANGE: (u8, u8) = (MIN_N, MAX_N);
 
+/// Maximum allowed total number of choices (batch_size × n)
+pub const MAX_TOTAL_CHOICES: usize = 128;
+
 /// Minimum allowed value for OpenAI's `logit_bias` values
 pub const MIN_LOGIT_BIAS: f32 = -100.0;
 /// Maximum allowed value for OpenAI's `logit_bias` values
@@ -85,8 +88,6 @@ pub const MAX_TOOLS: usize = 128;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
-/// Maximum allowed value for Prompt IntegerArray elements
-pub const MAX_PROMPT_TOKEN_ID: u32 = 50256;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -95,6 +96,56 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 //
 // Shared Fields
 //
+
+/// Validates that no unsupported fields are present in the request
+pub fn validate_no_unsupported_fields(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    if !unsupported_fields.is_empty() {
+        let fields: Vec<_> = unsupported_fields
+            .keys()
+            .map(|s| format!("`{}`", s))
+            .collect();
+        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    }
+    Ok(())
+}
+
+/// Validates response_format for chat completions.
+///
+/// Dynamo currently supports translating:
+/// - `{"type":"json_object"}` -> guided decoding JSON object schema
+/// - `{"type":"json_schema","json_schema":{"schema": ...}}` -> guided decoding JSON schema
+///
+/// `{"type":"text"}` is accepted and means no structured constraint.
+pub fn validate_response_format(
+    response_format: &Option<dynamo_async_openai::types::ResponseFormat>,
+) -> Result<(), anyhow::Error> {
+    use dynamo_async_openai::types::ResponseFormat;
+
+    let Some(fmt) = response_format else {
+        return Ok(());
+    };
+
+    match fmt {
+        ResponseFormat::Text => Ok(()),
+        ResponseFormat::JsonObject => Ok(()),
+        ResponseFormat::JsonSchema { json_schema } => {
+            // Validate name field format
+            if json_schema.name.is_empty() {
+                anyhow::bail!("`response_format.json_schema.name` cannot be empty");
+            }
+
+            // Validate schema presence
+            if json_schema.schema.is_none() {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
+                );
+            }
+            Ok(())
+        }
+    }
+}
 
 /// Validates the temperature parameter
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
@@ -245,6 +296,21 @@ pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
         && !(MIN_N..=MAX_N).contains(&value)
     {
         anyhow::bail!("n must be between {} and {}, got {}", MIN_N, MAX_N, value);
+    }
+    Ok(())
+}
+
+/// Validates total choices (batch_size × n) doesn't exceed maximum
+pub fn validate_total_choices(batch_size: usize, n: u8) -> Result<(), anyhow::Error> {
+    let total_choices = batch_size * (n as usize);
+    if total_choices > MAX_TOTAL_CHOICES {
+        anyhow::bail!(
+            "Total choices (batch_size × n = {} × {} = {}) exceeds maximum of {}",
+            batch_size,
+            n,
+            total_choices,
+            MAX_TOTAL_CHOICES
+        );
     }
     Ok(())
 }
@@ -426,16 +492,6 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
-            for (i, &token_id) in arr.iter().enumerate() {
-                if token_id > MAX_PROMPT_TOKEN_ID {
-                    anyhow::bail!(
-                        "Token ID at index {} must be between 0 and {}, got {}",
-                        i,
-                        MAX_PROMPT_TOKEN_ID,
-                        token_id
-                    );
-                }
-            }
         }
         dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
@@ -445,19 +501,77 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
                 if inner_arr.is_empty() {
                     anyhow::bail!("Prompt integer array at index {} cannot be empty", i);
                 }
-                for (j, &token_id) in inner_arr.iter().enumerate() {
-                    if token_id > MAX_PROMPT_TOKEN_ID {
-                        anyhow::bail!(
-                            "Token ID at index [{}][{}] must be between 0 and {}, got {}",
-                            i,
-                            j,
-                            MAX_PROMPT_TOKEN_ID,
-                            token_id
-                        );
-                    }
-                }
             }
         }
+    }
+    Ok(())
+}
+
+/// Validates prompt and prompt_embeds fields together.
+///
+/// This function consolidates all prompt-related validation:
+/// - Ensures at least one of prompt or prompt_embeds is provided
+/// - If prompt_embeds is provided, validates its format (base64, size limits)
+/// - If prompt_embeds is NOT provided, validates that prompt is non-empty
+///
+/// Format for prompt_embeds: PyTorch tensor serialized with torch.save() and base64-encoded
+pub fn validate_prompt_or_embeds(
+    prompt: Option<&dynamo_async_openai::types::Prompt>,
+    prompt_embeds: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    // Check that at least one is provided
+    if prompt.is_none() && prompt_embeds.is_none() {
+        anyhow::bail!("At least one of 'prompt' or 'prompt_embeds' must be provided");
+    }
+
+    // If prompt_embeds is provided, validate it
+    if let Some(embeds) = prompt_embeds {
+        validate_prompt_embeds_format(embeds)?;
+    } else if let Some(p) = prompt {
+        // Only validate prompt content if prompt_embeds is NOT provided
+        // When embeddings are present, prompt can be empty/placeholder
+        validate_prompt(p)?;
+    }
+
+    Ok(())
+}
+
+/// Validates prompt_embeds format (internal helper)
+/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
+fn validate_prompt_embeds_format(embeds: &str) -> Result<(), anyhow::Error> {
+    use base64::{Engine as _, engine::general_purpose};
+
+    // Validate base64 encoding first
+    let decoded = general_purpose::STANDARD
+        .decode(embeds)
+        .map_err(|_| anyhow::anyhow!("prompt_embeds must be valid base64-encoded data"))?;
+
+    // Check minimum size on decoded bytes (100 bytes)
+    const MIN_SIZE: usize = 100;
+    if decoded.len() < MIN_SIZE {
+        anyhow::bail!(
+            "prompt_embeds decoded data must be at least {MIN_SIZE} bytes, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    // Check maximum size on decoded bytes (10MB)
+    const MAX_SIZE: usize = 10 * 1024 * 1024;
+    if decoded.len() > MAX_SIZE {
+        anyhow::bail!(
+            "prompt_embeds decoded data exceeds maximum size of 10MB, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Validates prompt_embeds field (public wrapper for standalone validation)
+/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
+pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow::Error> {
+    if let Some(embeds) = prompt_embeds {
+        validate_prompt_embeds_format(embeds)?;
     }
     Ok(())
 }

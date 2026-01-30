@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -50,7 +50,7 @@ class MiddleServer:
 async def main():
     """Start the middle server"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
+    runtime = DistributedRuntime(loop, "file", "nats")
 
     # Create middle server handler
     handler = MiddleServer(runtime)
@@ -58,7 +58,6 @@ async def main():
 
     # Create middle server component
     component = runtime.namespace("demo").component("middle")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
 

@@ -1,0 +1,24 @@
+{
+    "num_prefill_pools": 2,
+    "num_decode_pools": 1,
+    "prefill_pool_dynamo_namespaces": ["prefill_pool_0", "prefill_pool_1"],
+    "decode_pool_dynamo_namespaces": ["decode_pool_0"],
+    "prefill_pool_selection_strategy": {
+        "ttft_min": 10,
+        "ttft_max": 1000,
+        "ttft_resolution": 2,
+        "isl_min": 0,
+        "isl_max": 32000,
+        "isl_resolution": 2,
+        "prefill_pool_mapping": [[0,1],[0,1]]
+    },
+    "decode_pool_selection_strategy": {
+        "itl_min": 10,
+        "itl_max": 100,
+        "itl_resolution": 2,
+        "context_length_min": 0,
+        "context_length_max": 32000,
+        "context_length_resolution": 2,
+        "decode_pool_mapping": [[0,0],[0,0]]
+    }
+}

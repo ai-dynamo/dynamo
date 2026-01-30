@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 #![cfg(feature = "integration")]
 
 use dynamo_runtime::{
-    DistributedRuntime, Result, Runtime, pipeline::PushRouter, protocols::annotated::Annotated,
+    DistributedRuntime, Result, Runtime, config::environment_names::runtime::system as env_system,
+    pipeline::PushRouter, protocols::annotated::Annotated,
 };
 use futures::StreamExt;
 use rand::Rng;
@@ -15,9 +16,8 @@ use tokio::time::{Duration, sleep};
 
 #[tokio::test]
 async fn test_backend_with_metrics() -> Result<()> {
-    // Set environment variables for dynamic port allocation
-    env::set_var("DYN_SYSTEM_ENABLED", "true");
-    env::set_var("DYN_SYSTEM_PORT", "0");
+    // Set environment variable for dynamic port allocation (0 = auto-assign)
+    env::set_var(env_system::DYN_SYSTEM_PORT, "0");
 
     // Generate a random endpoint name to avoid collisions
     let random_suffix = rand::rng().random_range(1000..9999);
@@ -38,9 +38,7 @@ async fn test_backend_with_metrics() -> Result<()> {
             info.port()
         }
         None => {
-            panic!(
-                "System status server not started - check DYN_SYSTEM_ENABLED environment variable"
-            );
+            panic!("System status server not started - check DYN_SYSTEM_PORT environment variable");
         }
     };
 

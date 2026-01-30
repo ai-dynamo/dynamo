@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -77,7 +77,6 @@ class EmbeddingsProcessor:
     async def initialize(self):
         """Initialize the connector for embeddings processing"""
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
     async def process_embeddings(self, request: SglangMultimodalRequest):
         """Process embeddings from serialized request"""
@@ -103,7 +102,6 @@ class EmbeddingsProcessor:
                 "Connector is None - this should not happen after initialization"
             )
             self._connector = connect.Connector()
-            await self._connector.initialize()
 
         read_op = await self._connector.begin_read(
             request.serialized_request, descriptor
@@ -135,30 +133,26 @@ class StreamProcessor:
 
     @staticmethod
     async def process_sglang_stream(stream_source) -> AsyncIterator[str]:
-        """Process SGLang stream output following backend pattern"""
-        num_output_tokens_so_far = 0
+        """Process SGLang stream output.
 
+        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
+        containing only new tokens since the last output. We pass these through directly.
+        """
         try:
             async for res in stream_source:
                 try:
-                    next_total_toks = len(res["output_ids"])
-
-                    # Return incremental tokens
+                    # With stream_output=True, output_ids contains only new tokens (disjoint)
                     output = {
-                        "token_ids": res["output_ids"][num_output_tokens_so_far:],
+                        "token_ids": res["output_ids"],
                         "text": res.get("text", ""),
                         "finished": False,
                     }
-                    num_output_tokens_so_far = next_total_toks
 
                     # Check for finish reason
                     finish_reason = res.get("meta_info", {}).get("finish_reason")
                     if finish_reason:
                         output.update(
                             {
-                                "token_ids": res["output_ids"][
-                                    num_output_tokens_so_far:
-                                ],
                                 "finish_reason": finish_reason.get("type", "stop"),
                                 "finished": True,
                             }
@@ -243,7 +237,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         config: Config,
         prefill_client: Client = None,
     ):
-        super().__init__(component, engine, config, None, prefill_client)
+        super().__init__(component, engine, config, None)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()

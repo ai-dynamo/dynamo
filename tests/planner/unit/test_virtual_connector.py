@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 #
@@ -13,7 +13,12 @@ import pytest
 from dynamo._core import DistributedRuntime, VirtualConnectorClient
 from dynamo.planner import SubComponentType, TargetReplica, VirtualConnector
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 logger = logging.getLogger(__name__)
 
 NAMESPACE = "test_virtual_connector"
@@ -31,7 +36,7 @@ def get_runtime():
     except Exception:
         # If no existing runtime, create a new one
         loop = asyncio.get_running_loop()
-        _runtime_instance = DistributedRuntime(loop, False)
+        _runtime_instance = DistributedRuntime(loop, "etcd", "nats")
 
     return _runtime_instance
 

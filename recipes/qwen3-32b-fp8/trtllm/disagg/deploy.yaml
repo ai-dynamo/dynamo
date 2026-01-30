@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: v1
 kind: ConfigMap
@@ -201,7 +201,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: qwen3-32b-fp8-disagg
       extraPodSpec:
         affinity:
           podAntiAffinity:
@@ -219,16 +218,15 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
       replicas: 1
     TrtllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
-      dynamoNamespace: qwen3-32b-fp8-disagg
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/models
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -251,12 +249,11 @@ spec:
               --tensor-parallel-size 1 \
               --max-batch-size 1 \
               --free-gpu-memory-fraction 0.9 \
-              --disaggregation-mode prefill \
-              --disaggregation-strategy prefill_first
+              --disaggregation-mode prefill
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
@@ -266,11 +263,13 @@ spec:
             value: "/opt/dynamo/configs/config-prefill.yaml"
           - name: MODEL_PATH
             value: "Qwen/Qwen3-32B-FP8"
+          - name: HF_HOME
+            value: "/opt/models"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-prefill
             readOnly: true
-          workingDir: /workspace/components/backends/trtllm
+          workingDir: /workspace/examples/backends/trtllm
         volumes:
         - configMap:
             name: llm-config-prefill
@@ -284,11 +283,10 @@ spec:
     TrtllmDecodeWorker:
       componentType: worker
       subComponentType: decode
-      dynamoNamespace: qwen3-32b-fp8-disagg
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/models
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -311,12 +309,11 @@ spec:
               --tensor-parallel-size 2 \
               --max-batch-size 128 \
               --free-gpu-memory-fraction 0.9 \
-              --disaggregation-mode decode \
-              --disaggregation-strategy prefill_first
+              --disaggregation-mode decode
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
@@ -326,11 +323,13 @@ spec:
             value: "/opt/dynamo/configs/config-decode.yaml"
           - name: MODEL_PATH
             value: "Qwen/Qwen3-32B-FP8"
+          - name: HF_HOME
+            value: "/opt/models"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-decode
             readOnly: true
-          workingDir: /workspace/components/backends/trtllm
+          workingDir: /workspace/examples/backends/trtllm
         volumes:
         - configMap:
             name: llm-config-decode

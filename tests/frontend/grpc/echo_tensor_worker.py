@@ -1,4 +1,4 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 # Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
@@ -13,10 +13,9 @@ from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def echo_tensor_worker(runtime: DistributedRuntime):
     component = runtime.namespace("tensor").component("echo")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
 
@@ -54,15 +53,12 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
     )
     assert model_config == retrieved_model_config
 
-    # [gluo FIXME] register_llm will attempt to load a LLM model,
-    # which is not well-defined for Tensor yet. Currently provide
-    # a valid model name to pass the registration.
+    # Use register_llm for tensor-based backends (skips HuggingFace downloads)
     await register_llm(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
-        "Qwen/Qwen3-0.6B",
-        "echo",
+        "echo",  # model_path (used as display name for tensor-based models)
         runtime_config=runtime_config,
     )
 
@@ -79,6 +75,25 @@ async def generate(request, context):
     params = {}
     if "parameters" in request:
         params.update(request["parameters"])
+        if "malformed_response" in request["parameters"]:
+            request["tensors"][0]["data"] = {"values": [0, 1, 2]}
+            yield {
+                "model": request["model"],
+                "tensors": request["tensors"],
+                "parameters": params,
+            }
+            return
+        elif "data_mismatch" in request["parameters"]:
+            # Modify the data type to trigger data mismatch error
+            request["tensors"][0]["data"]["values"] = []
+            yield {
+                "model": request["model"],
+                "tensors": request["tensors"],
+                "parameters": params,
+            }
+            return
+        elif "raise_exception" in request["parameters"]:
+            raise ValueError("Intentional exception raised by echo_tensor_worker.")
 
     params["processed"] = {"bool": True}
 

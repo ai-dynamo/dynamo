@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,7 +41,7 @@ class RouterResponse(BaseModel):
 
 
 class LoadMetrics(BaseModel):
-    gpu_cache_usage: float
+    kv_cache_usage: float
     num_waiting_reqs: int
 
 
@@ -101,7 +101,7 @@ class KvRouter:
                 try:
                     metrics_dict = self.load_listeners[worker_id].recv_json(zmq.NOBLOCK)
                     metrics = LoadMetrics.model_validate(metrics_dict)
-                    self.kv_usages[worker_id] = metrics.gpu_cache_usage
+                    self.kv_usages[worker_id] = metrics.kv_cache_usage
                     self.waitings[worker_id] = metrics.num_waiting_reqs
                 except zmq.Again:
                     pass

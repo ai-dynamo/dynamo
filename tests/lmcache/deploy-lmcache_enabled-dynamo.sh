@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # ASSUMPTION: dynamo and its dependencies are properly installed
@@ -32,5 +32,5 @@ sleep 2
 echo "🔧 Starting dynamo worker with LMCache enabled..."
 
 python -m dynamo.frontend &
-ENABLE_LMCACHE=1 \
-  python3 -m dynamo.vllm --model $MODEL_URL
+
+python3 -m dynamo.vllm --model $MODEL_URL --connector lmcache

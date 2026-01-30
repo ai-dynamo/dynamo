@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -28,9 +28,9 @@ impl Resources {
             event_mgr.clone()
         } else if let Some(consolidator_config) = config.consolidator_config.clone() {
             tracing::info!(
-                "Creating DynamoEventManager with kv event consolidator config: vllm={}, output={}",
-                consolidator_config.vllm_event_endpoint,
-                consolidator_config.consolidated_event_endpoint
+                "Creating DynamoEventManager with kv event consolidator config: engine={}, source={:?}",
+                consolidator_config.engine_event_endpoint,
+                consolidator_config.engine_source
             );
             // Create DynamoEventManager with consolidator config (async)
             match DynamoEventManager::new_with_config(consolidator_config).await {
@@ -56,13 +56,6 @@ impl Resources {
                 let agent = NixlAgent::new(&worker_id.to_string())?;
 
                 tracing::debug!("Creating NIXL backends");
-
-                if let Ok((_, ucx_params)) = agent.get_plugin_params("UCX") {
-                    let backend = agent.create_backend("UCX", &ucx_params)?;
-                    nixl_backends.insert("UCX".to_string(), Arc::new(backend));
-                } else {
-                    tracing::warn!("No UCX plugin found; will not create UCX backend");
-                }
 
                 if config.disk_layout.is_some() {
                     if let Ok((_, gds_mt_params)) = agent.get_plugin_params("GDS_MT") {

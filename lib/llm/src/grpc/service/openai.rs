@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
@@ -315,6 +315,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         })
     }
 }

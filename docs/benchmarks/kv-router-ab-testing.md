@@ -163,7 +163,7 @@ spec:
                         - gpu-h200-sxm  # Adjust to your GPU node type
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
@@ -234,7 +234,7 @@ spec:
                         - gpu-h200-sxm  # Adjust to your GPU node type
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c

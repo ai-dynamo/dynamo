@@ -1,4 +1,4 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 """
@@ -14,6 +14,8 @@ import os
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["HealthCheckPayload", "load_health_check_from_env"]
 
 
 def load_health_check_from_env(
@@ -94,3 +96,9 @@ class HealthCheckPayload:
             # Check for environment override
             self._payload = load_health_check_from_env() or self.default_payload
         return self._payload
+
+    def __repr__(self) -> str:
+        """Return a string representation of the health check payload."""
+        class_name = self.__class__.__name__
+        payload = self.to_dict()
+        return f"{class_name}(payload={payload!r})"

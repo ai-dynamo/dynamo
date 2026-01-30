@@ -1,19 +1,19 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    DistributedRuntime, Result, Runtime, Worker, logging, pipeline::PushRouter,
+    DistributedRuntime, Runtime, Worker, logging, pipeline::PushRouter,
     protocols::annotated::Annotated, stream::StreamExt,
 };
 use hello_world::DEFAULT_NAMESPACE;
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     logging::init();
     let worker = Worker::from_settings()?;
     worker.execute(app)
 }
 
-async fn app(runtime: Runtime) -> Result<()> {
+async fn app(runtime: Runtime) -> anyhow::Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let client = distributed

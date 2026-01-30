@@ -11,7 +11,6 @@ permissions:
 
 jobs:
   lychee:
-    if: false  # Job disabled until fixed
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -26,52 +25,26 @@ jobs:
           key: cache-lychee-${{ github.sha }}
           restore-keys: cache-lychee-
 
-      # https://github.com/lycheeverse/lychee/issues/1487
-      - name: Install CA Certificates for lychee
-        run: |
-          sudo apt-get install ca-certificates
-
-      - name: Install lychee
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/bin"
-          cd "$RUNNER_TEMP"
-          # TODO: Lychee v0.19.1 doesn't support regex in --exclude-path, so use nightly
-          # release until there is a released version containing regex support.
-          curl -sSL -o lychee.tar.gz \
-            https://github.com/lycheeverse/lychee/releases/download/nightly/lychee-x86_64-unknown-linux-gnu.tar.gz
-          tar -xzf lychee.tar.gz
-          BIN_PATH=$(find . -maxdepth 2 -type f -name lychee | head -n1)
-          install -m 0755 "$BIN_PATH" "$HOME/.local/bin/lychee"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          lychee --version
-
       - name: Check documentation links with lychee
-        env:
-          # Set GITHUB_TOKEN to avoid github rate limits on URL checks
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # Set offline mode for pull requests, full check for pushes to main
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "Running lychee in offline mode (internal links only) for PR check"
-            OFFLINE_FLAG="--offline"
-          else
-            echo "Running lychee in full mode (all links) for main branch"
-            OFFLINE_FLAG=""
-          fi
-
-          # Run lychee against all files in repo
-          lychee \
-            --cache \
-            --no-progress \
-            --root-dir "${{ github.workspace }}" \
-            --exclude-path ".*ATTRIBUTIONS.*" \
-            --accept "200..=299, 403, 429" \
-            --exclude-all-private --exclude 0.0.0.0 \
-            $OFFLINE_FLAG \
+        uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.0.2
+        with:
+          args: >-
+            --cache
+            --no-progress
+            --max-retries 2
+            --retry-wait-time 2
+            --timeout 20
+            --root-dir ${{ github.workspace }}
+            --exclude-path ".*ATTRIBUTIONS.*"
+            --exclude-path "./lib/llm/tests/data/.*"
+            --accept "200..=299, 403, 429"
+            --exclude-all-private
+            --exclude 0.0.0.0
+            ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             .
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   broken-links-check:
     name: Check for broken markdown links
@@ -101,6 +74,7 @@ jobs:
           python3 .github/workflows/detect_broken_links.py \
             --verbose \
             --format json \
+            --check-symlinks \
             --output broken-links-report.json \
             .
           exit_code=$?
@@ -137,8 +111,13 @@ jobs:
 
               summary = report['summary']
               broken_links = report['broken_links']
+              problematic_symlinks = report.get('problematic_symlinks', {})
 
-              print('❌ BROKEN LINKS DETECTED')
+              has_broken_links = bool(broken_links)
+              has_problematic_symlinks = bool(problematic_symlinks)
+
+              if has_broken_links:
+                  print('❌ BROKEN LINKS DETECTED')
               print('=' * 50)
               print(f'📊 Summary:')
               print(f'  • Total files processed: {summary[\"total_files_processed\"]}')
@@ -159,28 +138,76 @@ jobs:
                           line = link['line']
                           link_text = link['link_text']
                           link_url = link['link_url']
+                          error_reason = link.get('error_reason', 'Link target not found')
                           github_url = link.get('github_url', '')
 
                           # Create GitHub annotation for each broken link
-                          annotation_msg = f'Broken link: [{link_text}]({link_url})'
+                          annotation_msg = f'Broken link: [{link_text}]({link_url}) - {error_reason}'
                           if github_url:
                               annotation_msg += f' - View: {github_url}'
                           print(f'::error file={file_path},line={line}::{annotation_msg}')
 
                           # Display in workflow output
                           print(f'   {i}. Line {line}: [{link_text}]({link_url})')
+                          print(f'      ❌ {error_reason}')
                           if github_url:
                               print(f'      🔗 View on GitHub: {github_url}')
                           else:
                               print(f'      📍 Target: {link_url}')
                           print()
 
+              if has_problematic_symlinks:
+                  if has_broken_links:
+                      print('\\n' + '=' * 50)
+                  print('🔗 PROBLEMATIC SYMBOLIC LINKS DETECTED')
                   print('=' * 50)
-                  print('✅ Next Steps:')
+                  print(f'📊 Summary:')
+                  print(f'  • Total problematic symlinks: {summary.get(\"total_problematic_symlinks\", 0)}')
+                  print()
+
+                  for category, symlinks in problematic_symlinks.items():
+                      if symlinks:
+                          category_icons = {
+                              'broken': '💔',
+                              'circular': '🔄',
+                              'external': '🌐',
+                              'suspicious': '⚠️'
+                          }
+                          icon = category_icons.get(category, '❓')
+                          print(f'{icon} {category.upper()} SYMLINKS ({len(symlinks)}):')
+                          print('-' * 40)
+
+                          for i, symlink in enumerate(symlinks, 1):
+                              symlink_path = symlink['symlink_path']
+                              target_path = symlink['target_path']
+                              issue = symlink['issue']
+
+                              # Create GitHub annotation for each problematic symlink
+                              annotation_msg = f'Problematic symlink: {issue}'
+                              print(f'::error file={symlink_path}::{annotation_msg}')
+
+                              # Display in workflow output
+                              print(f'   {i}. {symlink_path}')
+                              print(f'      → {target_path}')
+                              print(f'      ❌ {issue}')
+                              print()
+
+              print('=' * 50)
+              print('✅ Next Steps:')
+              if has_broken_links:
                   print('1. Check the annotations above in the Files Changed tab (for PRs)')
                   print('2. Click the GitHub links to jump directly to each broken link')
                   print('3. Fix all broken links before merging')
-                  print('4. Re-run this workflow to verify fixes')
+              if has_problematic_symlinks:
+                  step_num = 4 if has_broken_links else 1
+                  print(f'{step_num}. Review and fix problematic symbolic links')
+                  print(f'{step_num + 1}. Consider replacing broken symlinks with actual files or fixing targets')
+                  print(f'{step_num + 2}. Evaluate if suspicious symlinks with many traversals are necessary')
+              final_step = (7 if has_broken_links and has_problematic_symlinks
+                           else 4 if has_broken_links
+                           else 4 if has_problematic_symlinks
+                           else 1)
+              print(f'{final_step}. Re-run this workflow to verify fixes')
 
           except Exception as e:
               print(f'❌ Error reading broken links report: {e}')

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -78,7 +78,7 @@ class KubernetesMonitor:
             "-n",
             self.namespace,
             "--selector",
-            f"nvidia.com/dynamo-namespace={self.deployment_name}",
+            f"nvidia.com/dynamo-namespace={self.namespace}-{self.deployment_name}",
             "-o",
             "json",
         ]

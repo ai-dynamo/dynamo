@@ -2,38 +2,56 @@
 
 ## Migration Tests
 
-The migration directory contains tests for worker fault tolerance with migration support.
+The migration directory contains tests for worker fault tolerance with migration support across multiple backends (vLLM, SGLang, TRT-LLM) in both aggregated and disaggregated modes.
+
+### Test Parameterization
+
+All migration tests are parameterized with the following dimensions:
+
+| Parameter IDs | Description |
+|---------------|-------------|
+| `migration_enabled`, `migration_disabled` | Controls whether migration is allowed |
+| `worker_failure` (SIGKILL), `graceful_shutdown` (SIGTERM) | Worker termination method |
+| `chat`, `completion` (skipped) | API endpoint to test |
+| `stream`, `unary` (skipped) | Streaming vs unary responses |
+| `nats`, `tcp` | Request plane transport |
 
 ### Test Matrix
 
-| Test | Shutdown Method | Migration Enabled | Expected Result | Verification |
-|------|----------------|-------------------|-----------------|--------------|
-| `test_request_migration_vllm_worker_failure` | SIGKILL (immediate) | Yes (default) | Request succeeds | "Stream disconnected... recreating stream..." in logs |
-| `test_request_migration_vllm_graceful_shutdown` | SIGTERM (10s timeout) | Yes (default) | Request succeeds | "Stream disconnected... recreating stream..." in logs |
-| `test_no_request_migration_vllm_worker_failure` | SIGKILL (immediate) | No (migration_limit=0) | Request fails (500) | "Migration limit exhausted" in logs |
-| `test_no_request_migration_vllm_graceful_shutdown` | SIGTERM (10s timeout) | No (migration_limit=0) | Request fails (500) | "Migration limit exhausted" in logs |
+Each backend (vLLM, SGLang, TRT-LLM) has the following test types:
+
+| Test | Mode | Setup |
+|------|------|-------|
+| `test_request_migration_{backend}_aggregated` | Aggregated | 2 workers |
+| `test_request_migration_{backend}_prefill` | Disaggregated | 1 decode + 2 prefill |
+| `test_request_migration_{backend}_kv_transfer` | Disaggregated | 1 prefill + 2 decode |
+| `test_request_migration_{backend}_decode` | Disaggregated | 1 prefill + 2 decode |
+
+Where `{backend}` is one of: `vllm`, `sglang`, `trtllm`
 
 ### Common Test Flow
 
-All migration tests follow this pattern:
-
 1. Start a Dynamo frontend with round-robin routing
-2. Start 2 vLLM workers sequentially
-3. Send a long completion request (max_tokens=8192) in a separate daemon thread
-4. Use parallel polling to determine which worker received the request (checks for "New Request ID:" in logs)
-5. Terminate the worker processing the request (method varies by test)
-6. Validate the request outcome (success or failure based on migration setting)
-7. Verify migration behavior in frontend logs
+2. Start workers (configuration varies by mode: aggregated or disaggregated)
+3. Send a request (chat/completion, streaming/unary) in a background thread
+4. Determine which worker received the request via log polling
+5. For decode tests: wait for initial responses before termination
+6. Terminate the worker processing the request (SIGKILL or SIGTERM)
+7. Validate the request outcome based on `migration_limit`:
+   - `migration_limit > 0`: Request succeeds, verify TTFT/TPOT if streaming and migration metrics
+   - `migration_limit = 0`: Request fails with expected error
+8. Verify migration behavior in frontend logs
 
 **Run examples:**
 ```bash
-# With migration enabled
-pytest tests/fault_tolerance/migration/test_vllm.py::test_request_migration_vllm_worker_failure -v -s
-pytest tests/fault_tolerance/migration/test_vllm.py::test_request_migration_vllm_graceful_shutdown -v -s
+# Run all vLLM migration tests
+pytest tests/fault_tolerance/migration -m vllm -v -s
 
-# With migration disabled
-pytest tests/fault_tolerance/migration/test_vllm.py::test_no_request_migration_vllm_worker_failure -v -s
-pytest tests/fault_tolerance/migration/test_vllm.py::test_no_request_migration_vllm_graceful_shutdown -v -s
+# Run aggregated or decode tests for SGLang
+pytest tests/fault_tolerance/migration -m sglang -k "aggregated or decode" -v -s
+
+# Run specific parameter combination
+pytest tests/fault_tolerance/migration -m trtllm -k "aggregated and nats and stream and chat and worker_failure and migration_enabled" -v -s
 ```
 
 ## Cancellation Tests
@@ -60,19 +78,17 @@ pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellatio
 
 #### TRT-LLM Cancellation Tests
 
-| Test | Mode | Strategy | Cancellation Phase | Request Type | Setup |
-|------|------|----------|-------------------|--------------|-------|
-| `test_request_cancellation_trtllm_aggregated` | Aggregated | N/A | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (prefill_and_decode) |
-| `test_request_cancellation_trtllm_decode_first_decode_cancel` | Disaggregated | Decode-first | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
-| `test_request_cancellation_trtllm_decode_first_remote_prefill_cancel` | Disaggregated | Decode-first | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
-| `test_request_cancellation_trtllm_prefill_first_prefill_cancel` | Disaggregated | Prefill-first | Local prefill | Completion (long prompt) | Decode + Prefill workers |
-| `test_request_cancellation_trtllm_prefill_first_remote_decode_cancel` | Disaggregated | Prefill-first | Remote decode | Streaming chat (5 responses read) | Decode + Prefill workers |
+| Test | Mode | Cancellation Phase | Request Type | Setup |
+|------|------|--------------------|--------------|-------|
+| `test_request_cancellation_trtllm_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (prefill_and_decode) |
+| `test_request_cancellation_trtllm_disagg_decode_cancel` | Disaggregated | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
+| `test_request_cancellation_trtllm_disagg_prefill_cancel` | Disaggregated | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
 
 **Run examples:**
 ```bash
 pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_aggregated -v -s
-pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_decode_first_decode_cancel -v -s
-# ... (other tests follow same pattern)
+pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_disagg_decode_cancel -v -s
+pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_disagg_prefill_cancel -v -s
 ```
 
 #### SGLang Cancellation Tests
@@ -99,5 +115,5 @@ pytest tests/fault_tolerance/cancellation/test_sglang.py::test_request_cancellat
 
 **Verification patterns:**
 - Aggregated mode: "Aborted Request ID" in worker logs
-- Remote prefill: "Aborted Request ID" in prefill, "Aborted Remote Request ID" in decode
-- Remote decode: "Aborted Request ID" in decode, "Aborted Remote Request ID" in prefill
+- Disaggregated - prefill cancellation: "Aborted Request ID" in prefill worker (cancellation during prefill)
+- Disaggregated - decode cancellation: "Aborted Request ID" in decode worker (cancellation during decode)

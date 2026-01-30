@@ -1,4 +1,4 @@
-<!-- # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+<!-- # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,7 @@ This directory contains benchmarking scripts and tools for performance evaluatio
 ## Quick Start
 
 ### Benchmark a Dynamo Deployment
-First, deploy your DynamoGraphDeployment using the [deployment documentation](../components/backends/), then:
+First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/kubernetes/), then:
 
 ```bash
 # Port-forward your deployment to http://localhost:8000

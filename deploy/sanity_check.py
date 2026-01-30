@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
 Dynamo System Information Checker
 
-A comprehensive diagnostic tool that displays system configuration and Dynamo project status
+Diagnostic tool that displays system configuration and Dynamo project status
 in a hierarchical tree format. This script checks for:
 
+Default checks:
 - System resources (OS, CPU, memory, GPU)
+- Container/host context (execution context, /dev/shm sizing, selected env)
 - Development tools (Cargo/Rust, Maturin, Python)
 - LLM frameworks (vllm, sglang, tensorrt_llm)
 - Dynamo runtime and framework components
-- File system (permissions and disk space, detailed with --thorough-check)
-- HuggingFace model cache (detailed with --thorough-check)
 - Installation status and component availability
+
+Additional checks with --thorough-check:
+- File system permissions (file-level analysis)
+- Directory sizes and disk space
+- Ulimits (resource limits)
+- CUDA/NVIDIA information (nvidia-smi, nvcc, env vars, dpkg, pip packages)
+- DYN_* environment variables
+- HuggingFace model cache details
 
 IMPORTANT: This script is STANDALONE and uses only Python stdlib (no Dynamo components).
 
@@ -30,9 +38,7 @@ The output uses status indicators:
 - ⚠️ Warning condition
 - ❓ Component not found (for optional items)
 
-By default, the tool runs quickly by checking only directory permissions and skipping
-size calculations. Use --thorough-check for detailed file-level permission analysis,
-directory size information, and disk space checking.
+`--json-output` prints a minified JSON tree (terse subset) for copy/paste into issues.
 
 Exit codes:
 - 0: All critical components are present
@@ -42,8 +48,13 @@ Example output (default mode):
 
 System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
+│  ├─ Execution context: container
+│  ├─ DYNAMO_COMMIT_SHA: <sha or "not set">
+│  └─ Shared memory (/dev/shm): <used/total/avail>
 ├─ User info: user=ubuntu, uid=1000, gid=1000
-├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
+├─ ✅ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation, Power=23.25/300.00 W, Memory=289/49140 MiB
+│  ├─ Driver version: 570.133.07
+│  └─ nvidia-smi CUDA: 12.8 (driver max supported)
 ├─ 🤖Framework
 │  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
 │  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
@@ -54,43 +65,86 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 │  ├─ ✅ Cargo home ($HOME/.cargo) writable
 │  ├─ ✅ Cargo target ($HOME/dynamo/.build/target) writable
 │  └─ ✅ Python site-packages ($HOME/dynamo/venv/lib/python3.12/site-packages) writable
-├─ ✅ Hugging Face Cache 3 models in ~/.cache/huggingface/hub
-├─ ✅ Cargo $HOME/.cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
-│  ├─ Cargo home directory CARGO_HOME=$HOME/.cargo
-│  └─ Cargo target directory CARGO_TARGET_DIR=$HOME/dynamo/.build/target
-│     ├─ Debug $HOME/dynamo/.build/target/debug, modified=2025-08-30 16:26:49 PDT
-│     ├─ Release $HOME/dynamo/.build/target/release, modified=2025-08-30 18:21:12 PDT
-│     └─ Binary $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so, modified=2025-08-30 16:25:37 PDT
-├─ ✅ Maturin /opt/dynamo/venv/bin/maturin, maturin 1.9.3
-├─ ✅ Python 3.12.3, /opt/dynamo/venv/bin/python
-│  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
-│  └─ PYTHONPATH not set
-└─ Dynamo $HOME/dynamo, SHA: a03d29066, Date: 2025-08-30 16:22:29 PDT
-   ├─ ✅ Runtime components ai-dynamo-runtime 0.4.1
-   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info: created=2025-08-30 19:14:29 PDT
-   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth: modified=2025-08-30 19:14:29 PDT
-   │  │  └─ →: $HOME/dynamo/lib/bindings/python/src
-   │  ├─ ✅ dynamo._core             $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so, modified=2025-08-30 19:14:29 PDT
+├─ ✅ Hugging Face Cache: 3 models in ~/.cache/huggingface/hub (host mount)
+├─ ✅ Cargo: $HOME/.cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
+│  ├─ Cargo home directory: CARGO_HOME=$HOME/.cargo
+│  └─ Cargo target directory: CARGO_TARGET_DIR=$HOME/dynamo/.build/target
+│     ├─ Debug: $HOME/dynamo/.build/target/debug, modified=2025-08-30 16:26:49 PDT
+│     ├─ Release: $HOME/dynamo/.build/target/release, modified=2025-08-30 18:21:12 PDT
+│     └─ Binary: $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so, modified=2025-08-30 16:25:37 PDT
+├─ ✅ Maturin: /opt/dynamo/venv/bin/maturin, maturin 1.9.3
+├─ ✅ Python: 3.12.3, /opt/dynamo/venv/bin/python
+│  ├─ ✅ PyTorch: 2.7.1+cu128, ✅torch.cuda.is_available
+│  └─ PYTHONPATH: not set
+└─ Dynamo: $HOME/dynamo
+   ├─ Git HEAD: a03d29066, branch=main, Date: 2025-08-30 16:22:29 PDT
+   ├─ ✅ Runtime components: ai-dynamo-runtime 0.4.1
+   │  ├─ ✅ dynamo._core             $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so
    │  ├─ ✅ dynamo.logits_processing $HOME/dynamo/lib/bindings/python/src/dynamo/logits_processing/__init__.py
    │  ├─ ✅ dynamo.nixl_connect      $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
    │  ├─ ✅ dynamo.llm               $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
    │  └─ ✅ dynamo.runtime           $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
-   └─ ✅ Framework components ai-dynamo 0.5.0
-      │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.5.0.dist-info: created=2025-09-05 16:20:35 PDT
+   └─ ✅ Framework components: ai-dynamo 0.5.0
       ├─ ✅ dynamo.frontend  $HOME/dynamo/components/src/dynamo/frontend/__init__.py
       ├─ ✅ dynamo.llama_cpp $HOME/dynamo/components/src/dynamo/llama_cpp/__init__.py
-      ├─ ✅ dynamo.mocker    $HOME/dynamo/components/src/dynamo/mocker/__init__.py
-      ├─ ✅ dynamo.planner   $HOME/dynamo/components/src/dynamo/planner/__init__.py
       ├─ ✅ dynamo.sglang    $HOME/dynamo/components/src/dynamo/sglang/__init__.py
       ├─ ✅ dynamo.trtllm    $HOME/dynamo/components/src/dynamo/trtllm/__init__.py
       └─ ✅ dynamo.vllm      $HOME/dynamo/components/src/dynamo/vllm/__init__.py
 
+Additional output with --thorough-check:
+
+├─ File System
+│  ├─ ✅ Dynamo workspace ($HOME/dynamo) writable, size=1.2 GiB, disk=500 GiB free
+│  │  ├─ Total files: 1234, Total dirs: 567
+│  │  └─ Writable files: 1234, Writable dirs: 567
+│  └─ ... (similar detail for other directories)
+├─ ✅ Hugging Face Cache: 3 models in ~/.cache/huggingface/hub (host mount)
+│  ├─ Model 1: meta-llama/Llama-2-7b-hf, downloaded=2025-01-05, size=13.5 GiB
+│  ├─ Model 2: meta-llama/Llama-2-13b-hf, downloaded=2025-01-06, size=26.0 GiB
+│  └─ Model 3: mistralai/Mistral-7B-v0.1, downloaded=2025-01-07, size=14.5 GiB
+├─ ✅ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation, Power=23.25/300.00 W, Memory=289/49140 MiB
+│  ├─ Driver version: 570.133.07
+│  ├─ nvidia-smi CUDA: 12.8 (driver max supported)
+│  ├─ nvcc CUDA: 12.9 (installed toolkit)
+│  └─ CUDA/NVIDIA Information (with --thorough)
+│     ├─ nvidia-smi: NVIDIA-SMI 570.133.07, Driver 570.133.07, CUDA 12.8
+│     ├─ nvcc: Cuda compilation tools, release 12.9, V12.9.41
+│     ├─ CUDA_VERSION: CUDA_VERSION=12.9.0
+│     ├─ NV_CUDA_CUDART_VERSION: NV_CUDA_CUDART_VERSION=12.9.37-1
+│     ├─ NV_CUDA_LIB_VERSION: NV_CUDA_LIB_VERSION=12.9.0-1
+│     ├─ NV_LIBNCCL_PACKAGE: NV_LIBNCCL_PACKAGE=libnccl2=2.26.5-1+cuda12.9
+│     ├─ NVIDIA_REQUIRE_CUDA: NVIDIA_REQUIRE_CUDA=cuda>=12.9 brand=unknown,driver>=535...
+│     ├─ dpkg:cuda-*
+│     │  ├─ ii  cuda-command-line-tools-12-9    12.9.1-1
+│     │  ├─ ii  cuda-cudart-12-9                12.9.37-1
+│     │  └─ ... (more packages)
+│     ├─ dpkg:libcublas/libnccl
+│     │  └─ hi  libcublas-12-9                  12.9.0.13-1
+│     └─ pip:cuda-related
+│        ├─ nvidia-cublas-cu12==12.9.1.4
+│        ├─ nvidia-cudnn-cu12==9.10.2.21
+│        ├─ torch==2.9.0+cu129
+│        └─ ... (more packages)
+├─ Ulimits
+│  ├─ Max open files: 1048576
+│  ├─ Max processes: 257698
+│  ├─ Stack size: 8388608 bytes
+│  └─ Core file size: unlimited
+└─ DYN_* environment variables
+   ├─ DYN_VAR1=value1
+   └─ DYN_VAR2=value2
+
 Usage:
-    python deploy/sanity_check.py [--thorough-check] [--terse]
+    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check-only] [--json-output]
 
 Options:
-    --thorough-check  Enable thorough checking (file permissions, directory sizes, HuggingFace model details)
-    --terse           Enable terse output mode (show only essential info and errors)
+    --thorough-check              Enable thorough checking (file permissions, directory sizes, disk space, ulimits, CUDA/NVIDIA info, DYN_* env, HuggingFace model details)
+    --terse                       Enable terse output mode (show only essential info and errors)
+    --json-output                 Output a JSON representation (terse subset) suitable for copy/paste
+    --runtime-check-only          Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
+                                  and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
+    --no-gpu-check                Skip GPU detection and information collection (useful for environments without GPU access)
+    --no-framework-check          Skip LLM framework package checks (vllm, sglang, tensorrt_llm)
 """
 
 import datetime
@@ -99,6 +153,7 @@ import json
 import logging
 import os
 import platform
+import resource
 import shutil
 import subprocess
 import sys
@@ -229,6 +284,48 @@ class NodeInfo:
         for line in self.render():
             print(line)
 
+    def to_json_obj(self) -> Dict[str, Any]:
+        """
+        Convert this node into a JSON-serializable object.
+
+        Why: `--json-output` needs a copy/pasteable representation of the tree without
+        relying on terminal formatting characters or emojis.
+        """
+
+        def _clean_json_text(text: str) -> str:
+            # Why: tree output uses emojis and padding for human readability. In
+            # JSON mode we have explicit `status`, so we strip UI-only prefixes.
+            text = text.strip()
+            for prefix in ("✅", "❌", "⚠️", "❓"):
+                if text.startswith(prefix):
+                    text = text[len(prefix) :].lstrip()
+                    break
+            if text.startswith("🤖"):
+                text = text[len("🤖") :].lstrip()
+            return text.strip()
+
+        obj: Dict[str, Any] = {"label": _clean_json_text(self.label)}
+        if self.desc is not None:
+            obj["desc"] = _clean_json_text(self.desc)
+
+        # Keep status stable and machine-friendly.
+        # NOTE: `NodeStatus.INFO` exists but typically doesn't render a symbol.
+        if self.status != NodeStatus.NONE:
+            obj["status"] = self.status.value
+
+        if self.metadata:
+            # Exclude internal metadata keys used for rendering.
+            metadata = {
+                k: v for k, v in self.metadata.items() if k != "part_of_previous"
+            }
+            if metadata:
+                obj["meta"] = metadata
+
+        if self.children:
+            obj["children"] = [child.to_json_obj() for child in self.children]
+
+        return obj
+
     def has_errors(self) -> bool:
         """Check if this node or any of its children have errors"""
         # Check if this node has an error
@@ -297,9 +394,15 @@ class SystemInfo(NodeInfo):
         hostname: Optional[str] = None,
         thorough_check: bool = False,
         terse: bool = False,
+        runtime_check: bool = False,
+        no_gpu_check: bool = False,
+        no_framework_check: bool = False,
     ):
         self.thorough_check = thorough_check
         self.terse = terse
+        self.runtime_check = runtime_check
+        self.no_gpu_check = no_gpu_check
+        self.no_framework_check = no_framework_check
         if hostname is None:
             hostname = platform.node()
 
@@ -319,38 +422,216 @@ class SystemInfo(NodeInfo):
 
         # Collect and add all system information
         # Always show: OS, User, GPU, Framework, Dynamo
-        self.add_child(OSInfo())
+        os_info = OSInfo()
+        # Put execution context and build SHA directly under OS for quick triage when
+        # scanning logs.
+        os_info.add_child(
+            NodeInfo(
+                label="Execution context",
+                desc="container"
+                if self._is_inside_container()
+                else "host (non-docker)",
+                status=NodeStatus.INFO,
+            )
+        )
+        dynamo_commit_sha = os.environ.get("DYNAMO_COMMIT_SHA")
+        os_info.add_child(
+            NodeInfo(
+                label="DYNAMO_COMMIT_SHA",
+                desc=dynamo_commit_sha.strip() if dynamo_commit_sha else "not set",
+                status=NodeStatus.INFO,
+            )
+        )
+        # Attach host/container context directly under OS (no wrapper node), so it is
+        # visible near the top when copy/pasting logs.
+        os_info.add_child(self._dev_shm_info_node())
+        indicators = self._container_indicators_node()
+        if indicators is not None:
+            os_info.add_child(indicators)
+        selected_env = self._selected_env_node()
+        if selected_env is not None:
+            os_info.add_child(selected_env)
+        if self.thorough_check:
+            dyn_env = self._dyn_env_node()
+            if dyn_env is not None:
+                os_info.add_child(dyn_env)
+            os_info.add_child(self._ulimit_info_node())
+
+        self.add_child(os_info)
         self.add_child(UserInfo())
 
-        # Add GPU info (always show, even if not found)
-        gpu_info = GPUInfo()
-        self.add_child(gpu_info)
+        # Add GPU info (always show, even if not found) unless --no-gpu-check or --no-framework-check
+        # (GPU is primarily for framework usage, so skip if frameworks are skipped)
+        if not self.no_gpu_check and not self.no_framework_check:
+            gpu_info = GPUInfo(thorough_check=self.thorough_check)
+            self.add_child(gpu_info)
 
         # Add Framework info (vllm, sglang, tensorrt_llm)
-        self.add_child(FrameworkInfo())
+        self.add_child(FrameworkInfo(no_framework_check=self.no_framework_check))
 
         # In terse mode, only add other components if they have errors
         if not self.terse:
             # Add file permissions check
-            self.add_child(FilePermissionsInfo(thorough_check=self.thorough_check))
+            self.add_child(
+                FilePermissionsInfo(
+                    thorough_check=self.thorough_check, runtime_check=self.runtime_check
+                )
+            )
 
             # Add HuggingFace cache check
             self.add_child(HuggingFaceInfo(thorough_check=self.thorough_check))
 
-            # Add Cargo (always show, even if not found)
-            self.add_child(CargoInfo(thorough_check=self.thorough_check))
+            # Skip compile-time dependencies in runtime-check mode
+            if not self.runtime_check:
+                # Add Cargo (always show, even if not found)
+                self.add_child(CargoInfo(thorough_check=self.thorough_check))
 
-            # Add Maturin (Python-Rust build tool)
-            self.add_child(MaturinInfo())
+                # Add Maturin (Python-Rust build tool)
+                self.add_child(MaturinInfo())
 
             # Add Python info
-            self.add_child(PythonInfo())
+            self.add_child(PythonInfo(runtime_check=self.runtime_check))
         else:
             # In terse mode, only add components that have errors
             self._add_error_only_components()
 
         # Add Dynamo workspace info (always show, even if not found)
-        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
+        self.add_child(
+            DynamoInfo(
+                thorough_check=self.thorough_check, runtime_check=self.runtime_check
+            )
+        )
+
+    def _dev_shm_info_node(self) -> NodeInfo:
+        """Report /dev/shm sizing and mount options (common source of container issues)."""
+        path = "/dev/shm"
+        if not os.path.exists(path):
+            return NodeInfo(
+                label="Shared memory (/dev/shm)",
+                desc="not present",
+                status=NodeStatus.WARNING,
+            )
+
+        status = NodeStatus.INFO
+        desc = path
+        try:
+            st = os.statvfs(path)
+            total = st.f_frsize * st.f_blocks
+            avail = st.f_frsize * st.f_bavail
+            used = max(total - avail, 0)
+
+            def _fmt_gib(n: int) -> str:
+                return f"{(n / (1024**3)):.2f} GiB"
+
+            desc = f"{_fmt_gib(used)}/{_fmt_gib(total)} used (avail {_fmt_gib(avail)})"
+
+            # Heuristic: small /dev/shm is a common default in Docker and can break
+            # shared-memory heavy workloads.
+            if total < 1 * 1024**3:
+                status = NodeStatus.WARNING
+        except Exception:
+            desc = "unable to statvfs"
+            status = NodeStatus.WARNING
+
+        node = NodeInfo(label="Shared memory (/dev/shm)", desc=desc, status=status)
+        node.add_metadata("writable", str(os.access(path, os.W_OK)).lower())
+
+        # Best-effort mount info from /proc/mounts (stdlib only).
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[1] == path:
+                        node.add_metadata("fstype", parts[2])
+                        node.add_metadata("opts", parts[3])
+                        break
+        except Exception:
+            pass
+
+        return node
+
+    def _container_indicators_node(self) -> Optional[NodeInfo]:
+        """Return a node describing container indicators, or None if none are present."""
+        indicators = NodeInfo(label="Container indicators", status=NodeStatus.INFO)
+        if os.path.exists("/.dockerenv"):
+            indicators.add_metadata("dockerenv", "true")
+        if os.path.exists("/run/.containerenv"):
+            indicators.add_metadata("containerenv", "true")
+
+        container_env = os.environ.get("container")
+        if container_env is not None and container_env != "":
+            indicators.add_metadata("container", container_env)
+
+        docker_container_env = os.environ.get("DOCKER_CONTAINER")
+        if docker_container_env is not None and docker_container_env != "":
+            indicators.add_metadata("DOCKER_CONTAINER", docker_container_env)
+
+        if not indicators.metadata:
+            return None
+        return indicators
+
+    def _selected_env_node(self) -> Optional[NodeInfo]:
+        """Return a small set of env vars that are often relevant for debugging."""
+        env_node = NodeInfo(label="Selected env", status=NodeStatus.INFO)
+        for k in [
+            "DYNAMO_HOME",
+            "CUDA_VISIBLE_DEVICES",
+            "NVIDIA_VISIBLE_DEVICES",
+            "NVIDIA_DRIVER_CAPABILITIES",
+            "DYN_SYSTEM_PORT",
+        ]:
+            v = os.environ.get(k)
+            if v is not None and v != "":
+                env_node.add_metadata(k, v)
+        if not env_node.metadata:
+            return None
+        return env_node
+
+    def _dyn_env_node(self) -> Optional[NodeInfo]:
+        """Return all DYN_* env vars, one per line, or None if none are set."""
+        dyn_env = {k: v for k, v in os.environ.items() if k.startswith("DYN_")}
+        if not dyn_env:
+            return None
+        dyn_env_node = NodeInfo(
+            label="DYN_* env",
+            desc=f"{len(dyn_env)} variables",
+            status=NodeStatus.INFO,
+        )
+        for k in sorted(dyn_env.keys()):
+            v = dyn_env.get(k)
+            if v is None:
+                continue
+            dyn_env_node.add_child(NodeInfo(label=k, desc=v, status=NodeStatus.INFO))
+        return dyn_env_node
+
+    def _ulimit_info_node(self) -> NodeInfo:
+        """Summarize key RLIMITs (similar to `ulimit`) using stdlib only."""
+        node = NodeInfo(label="Ulimits", status=NodeStatus.INFO)
+
+        def _fmt_limit(value: int) -> str:
+            # resource.RLIM_INFINITY is typically a very large integer.
+            if value == resource.RLIM_INFINITY:
+                return "unlimited"
+            return str(value)
+
+        # Keep this list small and high-signal for serving workloads.
+        limits: List[Tuple[str, int]] = [
+            ("nofile", resource.RLIMIT_NOFILE),
+            ("nproc", resource.RLIMIT_NPROC),
+            ("memlock", resource.RLIMIT_MEMLOCK),
+            ("stack", resource.RLIMIT_STACK),
+            ("core", resource.RLIMIT_CORE),
+        ]
+
+        for name, rlim in limits:
+            try:
+                soft, hard = resource.getrlimit(rlim)
+                node.add_metadata(name, f"{_fmt_limit(soft)}:{_fmt_limit(hard)}")
+            except Exception:
+                # Avoid failing sanity_check on platforms/containers that restrict access.
+                pass
+
+        return node
 
     def _get_ip_address(self) -> Optional[str]:
         """Get the primary IP address of the system."""
@@ -389,11 +670,23 @@ class SystemInfo(NodeInfo):
         """In terse mode, only add components that have errors"""
         # Create components and check their status
         components_to_check = [
-            ("File System", FilePermissionsInfo(thorough_check=self.thorough_check)),
-            ("Cargo", CargoInfo(thorough_check=self.thorough_check)),
-            ("Maturin", MaturinInfo()),
-            ("Python", PythonInfo()),
+            (
+                "File System",
+                FilePermissionsInfo(
+                    thorough_check=self.thorough_check, runtime_check=self.runtime_check
+                ),
+            ),
+            ("Python", PythonInfo(runtime_check=self.runtime_check)),
         ]
+
+        # Skip compile-time dependencies in runtime-check mode
+        if not self.runtime_check:
+            components_to_check.extend(
+                [
+                    ("Cargo", CargoInfo(thorough_check=self.thorough_check)),
+                    ("Maturin", MaturinInfo()),
+                ]
+            )
 
         for name, component in components_to_check:
             # Only add if the component has an error status
@@ -497,9 +790,15 @@ class OSInfo(NodeInfo):
 
 
 class GPUInfo(NodeInfo):
-    """NVIDIA GPU information"""
+    """NVIDIA GPU information.
 
-    def __init__(self):
+    Displays GPU model, driver version, power/memory stats, and CUDA versions.
+    In thorough mode (--thorough-check), also collects detailed CUDA/NVIDIA
+    environment information (nvcc, env vars, dpkg packages, pip packages).
+    """
+
+    def __init__(self, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         # Find nvidia-smi executable (check multiple paths)
         nvidia_smi = shutil.which("nvidia-smi")
         if not nvidia_smi:
@@ -582,16 +881,8 @@ class GPUInfo(NodeInfo):
 
             # Handle single vs multiple GPUs
             if len(gpu_names) == 1:
-                # Single GPU - compact format
+                # Single GPU - just show GPU name in main label
                 value = gpu_names[0]
-                if driver or cuda:
-                    driver_cuda = []
-                    if driver:
-                        driver_cuda.append(f"driver {driver}")
-                    if cuda:
-                        driver_cuda.append(f"CUDA {cuda}")
-                    value += f", {', '.join(driver_cuda)}"
-
                 super().__init__(label="NVIDIA GPU", desc=value, status=NodeStatus.OK)
 
                 # Add power and memory metadata for single GPU
@@ -599,14 +890,6 @@ class GPUInfo(NodeInfo):
             else:
                 # Multiple GPUs - show count in main label
                 value = f"{len(gpu_names)} GPUs"
-                if driver or cuda:
-                    driver_cuda = []
-                    if driver:
-                        driver_cuda.append(f"driver {driver}")
-                    if cuda:
-                        driver_cuda.append(f"CUDA {cuda}")
-                    value += f", {', '.join(driver_cuda)}"
-
                 super().__init__(label="NVIDIA GPU", desc=value, status=NodeStatus.OK)
 
                 # Add each GPU as a child node
@@ -619,6 +902,14 @@ class GPUInfo(NodeInfo):
                     if power_mem:
                         gpu_child.add_metadata("Stats", power_mem)
                     self.add_child(gpu_child)
+
+            # Add nvidia-smi (driver max CUDA) and nvcc (installed toolkit) info
+            self._add_cuda_version_children(cuda, driver)
+
+            # Add CUDA/NVIDIA info in thorough mode
+            if self.thorough_check:
+                cuda_info = self._collect_cuda_info()
+                self.add_child(cuda_info)
 
         except Exception:
             super().__init__(
@@ -654,6 +945,67 @@ class GPUInfo(NodeInfo):
         except Exception:
             pass
         return driver, cuda
+
+    def _add_cuda_version_children(
+        self, driver_cuda: Optional[str], driver_version: Optional[str]
+    ):
+        """Add child nodes showing driver, nvidia-smi (driver max) and nvcc (installed toolkit) versions."""
+        import re
+
+        # Add driver version
+        if driver_version:
+            driver_node = NodeInfo(
+                label="Driver version",
+                desc=driver_version,
+                status=NodeStatus.INFO,
+            )
+            self.add_child(driver_node)
+
+        # Add nvidia-smi CUDA version (driver's max supported version)
+        if driver_cuda:
+            smi_node = NodeInfo(
+                label="nvidia-smi CUDA",
+                desc=f"{driver_cuda} (driver max supported)",
+                status=NodeStatus.INFO,
+            )
+            self.add_child(smi_node)
+
+        # Add nvcc version (installed CUDA toolkit)
+        try:
+            result = subprocess.run(
+                ["nvcc", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                # Extract version from output like "release 12.9, V12.9.41"
+                m = re.search(r"release\s+([0-9.]+)", result.stdout, re.IGNORECASE)
+                if m:
+                    nvcc_version = m.group(1)
+                    nvcc_node = NodeInfo(
+                        label="nvcc CUDA",
+                        desc=f"{nvcc_version} (installed toolkit)",
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(nvcc_node)
+                else:
+                    nvcc_node = NodeInfo(
+                        label="nvcc CUDA",
+                        desc="version not detected",
+                        status=NodeStatus.WARNING,
+                    )
+                    self.add_child(nvcc_node)
+            else:
+                nvcc_node = NodeInfo(
+                    label="nvcc CUDA",
+                    desc="nvcc not found",
+                    status=NodeStatus.INFO,
+                )
+                self.add_child(nvcc_node)
+        except Exception:
+            # nvcc not available (not an error, just info)
+            pass
 
     def _add_power_memory_info(self, nvidia_smi: str, gpu_index: int = 0):
         """Add power and memory metadata for a specific GPU."""
@@ -715,13 +1067,130 @@ class GPUInfo(NodeInfo):
             pass
         return None
 
+    def _collect_cuda_info(self) -> NodeInfo:
+        """
+        Collect and display CUDA/NVIDIA environment and package information.
+
+        This function gathers diagnostic information from multiple sources:
+        - nvidia-smi: Driver version and maximum supported CUDA version
+        - nvcc: Installed CUDA toolkit version
+        - Environment variables: CUDA_VERSION, NV_CUDA_*, NVIDIA_REQUIRE_CUDA
+        - dpkg: Installed CUDA packages (cuda-*, libcublas*, libnccl*)
+        - pip: CUDA-related Python packages (torch, nvidia-*, etc.)
+
+        Returns:
+            NodeInfo with collected CUDA/NVIDIA information (INFO status, no validation)
+        """
+        import re
+
+        def sh(cmd: str) -> str:
+            """Run command and return stdout only."""
+            try:
+                p = subprocess.run(
+                    ["bash", "-c", f"{cmd} 2>/dev/null"],
+                    stdout=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                return (p.stdout or "").strip()
+            except Exception:
+                return ""
+
+        # Define signals to collect
+        signals = [
+            ("nvidia-smi", "nvidia-smi | grep 'CUDA Version'"),
+            ("nvcc", "nvcc --version | grep -i 'release' || nvcc --version"),
+            ("CUDA_VERSION", "env | grep -i '^CUDA_VERSION='"),
+            ("NV_CUDA_CUDART_VERSION", "env | grep -i '^NV_CUDA_CUDART_VERSION='"),
+            ("NV_CUDA_LIB_VERSION", "env | grep -i '^NV_CUDA_LIB_VERSION='"),
+            ("NV_LIBNCCL_PACKAGE", "env | grep -i '^NV_LIBNCCL_PACKAGE='"),
+            ("NVIDIA_REQUIRE_CUDA", "env | grep -i '^NVIDIA_REQUIRE_CUDA='"),
+            ("dpkg:cuda-*", "dpkg -l | grep -E '^(ii|hi)\\s+cuda-.*-[1-9][0-9]-'"),
+            (
+                "dpkg:libcublas/libnccl",
+                "dpkg -l | grep -E '^(ii|hi)\\s+lib(cublas|nccl).*-[1-9][0-9]-'",
+            ),
+            (
+                "pip:cuda-related",
+                "python -m pip list --format=freeze | grep -Ei '(cuda|cudnn|nccl|nvshmem|\\+cu[1-9][0-9]|-cu[1-9][0-9]|^(torch|torchaudio|torchvision)==)'",
+            ),
+        ]
+
+        node = NodeInfo(
+            label="CUDA/NVIDIA Information",
+            desc="",
+            status=NodeStatus.INFO,
+        )
+
+        has_any_output = False
+        for label, cmd in signals:
+            out = sh(cmd)
+            lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+            if not lines:
+                continue
+
+            has_any_output = True
+
+            # Special handling for nvidia-smi: extract key info
+            if label == "nvidia-smi":
+                ln = lines[0]
+                parts = []
+                if m := re.search(r"NVIDIA-SMI\s+([\d.]+)", ln):
+                    parts.append(f"NVIDIA-SMI {m.group(1)}")
+                if m := re.search(r"Driver Version:\s+([\d.]+)", ln):
+                    parts.append(f"Driver {m.group(1)}")
+                if m := re.search(r"CUDA Version:\s+([\d.]+)", ln):
+                    parts.append(f"CUDA {m.group(1)}")
+                desc = ", ".join(parts) if parts else ln.strip("|").strip()
+                signal_node = NodeInfo(label=label, desc=desc, status=NodeStatus.INFO)
+                node.add_child(signal_node)
+            # Single-line outputs (nvcc and env vars)
+            elif label in (
+                "nvcc",
+                "CUDA_VERSION",
+                "NV_CUDA_CUDART_VERSION",
+                "NV_CUDA_LIB_VERSION",
+                "NV_LIBNCCL_PACKAGE",
+            ):
+                signal_node = NodeInfo(
+                    label=label, desc=lines[0], status=NodeStatus.INFO
+                )
+                node.add_child(signal_node)
+            # Multi-line outputs with truncation
+            elif label == "NVIDIA_REQUIRE_CUDA":
+                ln = lines[0]
+                if len(ln) > 200 and "cuda>=" in ln.lower():
+                    m = re.search(r"(cuda>=[\d.]+)", ln, re.IGNORECASE)
+                    if m:
+                        ln = f"{ln.split('=')[0]}={m.group(1)} ..."
+                    else:
+                        ln = ln[:200] + "..."
+                signal_node = NodeInfo(label=label, desc=ln, status=NodeStatus.INFO)
+                node.add_child(signal_node)
+            # Multi-line outputs (dpkg, pip)
+            else:
+                signal_node = NodeInfo(label=label, desc="", status=NodeStatus.INFO)
+                for ln in lines:
+                    line_node = NodeInfo(
+                        label=ln, status=NodeStatus.NONE, show_symbol=False
+                    )
+                    signal_node.add_child(line_node)
+                node.add_child(signal_node)
+
+        if not has_any_output:
+            node.desc = "no CUDA/NVIDIA information detected"
+
+        return node
+
 
 class FilePermissionsInfo(NodeInfo):
     """File system check for development environment directories
 
     Checks writability of critical directories needed for:
     - Dynamo development (top-level dynamo directory)
-    - Rust development (Cargo target directory + all files, RUSTUP_HOME, CARGO_HOME)
+    - Rust development (Cargo target directory + all files, RUSTUP_HOME, CARGO_HOME) - skipped in runtime_check mode
     - Python development (site-packages)
 
     In thorough mode, also checks disk space for the dynamo working directory
@@ -729,20 +1198,25 @@ class FilePermissionsInfo(NodeInfo):
 
     In fast mode, skips recursive file checking in Cargo target directory
     for improved performance on large target directories.
+
+    In runtime_check mode, skips Rust/Cargo toolchain checks.
     """
 
-    def __init__(self, thorough_check: bool = False):
+    def __init__(self, thorough_check: bool = False, runtime_check: bool = False):
         super().__init__(label="File System", status=NodeStatus.INFO)
         self.thorough_check = thorough_check
+        self.runtime_check = runtime_check
 
         # Check top-level dynamo directory
         self._check_dynamo_directory_permissions()
 
-        # Check Rust toolchain directories (RUSTUP_HOME and CARGO_HOME)
-        self._check_rust_toolchain_permissions()
+        # Skip Rust toolchain checks in runtime-check mode
+        if not self.runtime_check:
+            # Check Rust toolchain directories (RUSTUP_HOME and CARGO_HOME)
+            self._check_rust_toolchain_permissions()
 
-        # Check Cargo target directory (with optional recursive file checking)
-        self._check_cargo_target_permissions()
+            # Check Cargo target directory (with optional recursive file checking)
+            self._check_cargo_target_permissions()
 
         # Check Python site-packages directory
         self._check_site_packages_permissions()
@@ -1068,16 +1542,35 @@ class FilePermissionsInfo(NodeInfo):
         dynamo_root = DynamoInfo.find_workspace()
 
         if not dynamo_root:
-            self.add_child(
-                NodeInfo(
-                    label="Dynamo workspace",
-                    desc="workspace not found",
-                    status=NodeStatus.ERROR,
+            # In runtime check mode, workspace not being found is expected
+            if self.runtime_check:
+                self.add_child(
+                    NodeInfo(
+                        label="Dynamo workspace",
+                        desc="workspace not found (runtime check does not require a checkout)",
+                        status=NodeStatus.WARNING,
+                    )
                 )
-            )
+            else:
+                self.add_child(
+                    NodeInfo(
+                        label="Dynamo workspace",
+                        desc="workspace not found",
+                        status=NodeStatus.ERROR,
+                    )
+                )
             return
 
         if not DynamoInfo.is_dynamo_workspace(dynamo_root):
+            if self.runtime_check:
+                self.add_child(
+                    NodeInfo(
+                        label="Dynamo workspace",
+                        desc="not a valid dynamo workspace (runtime check does not require a checkout)",
+                        status=NodeStatus.WARNING,
+                    )
+                )
+                return
             self.add_child(
                 NodeInfo(
                     label="Dynamo workspace",
@@ -1096,6 +1589,8 @@ class FilePermissionsInfo(NodeInfo):
             exclude_files=[".git"],
         )
         for result in results:
+            if self.runtime_check and result.status == NodeStatus.ERROR:
+                result.status = NodeStatus.WARNING
             self.add_child(result)
 
         # Check .git directory separately
@@ -1105,6 +1600,8 @@ class FilePermissionsInfo(NodeInfo):
                 [git_dir], "Dynamo .git directory", recursive=recursive
             )
             for result in git_results:
+                if self.runtime_check and result.status == NodeStatus.ERROR:
+                    result.status = NodeStatus.WARNING
                 self.add_child(result)
         else:
             self.add_child(
@@ -1157,16 +1654,19 @@ class FilePermissionsInfo(NodeInfo):
                 for result in results:
                     # If we have at least one writable site-packages,
                     # downgrade ERROR to WARNING for non-writable ones
-                    if has_writable_site_packages and result.status == NodeStatus.ERROR:
+                    if (
+                        has_writable_site_packages or self.runtime_check
+                    ) and result.status == NodeStatus.ERROR:
                         result.status = NodeStatus.WARNING
                     self.add_child(result)
 
         except Exception as e:
+            status = NodeStatus.WARNING if self.runtime_check else NodeStatus.ERROR
             self.add_child(
                 NodeInfo(
                     label="Python site-packages",
                     desc=f"Permission check failed: {str(e)}",
-                    status=NodeStatus.ERROR,
+                    status=status,
                 )
             )
 
@@ -1305,9 +1805,17 @@ class HuggingFaceInfo(NodeInfo):
         """Initialize when models are found in cache."""
         model_count = len(models)
         display_path = self._replace_home_with_var(hf_cache_path)
+
+        # Check if cache is on NFS or host mount
+        mount_type = self._get_mount_type(hf_cache_path)
+
+        desc = f"{model_count} models in {display_path}"
+        if mount_type:
+            desc += f" ({mount_type})"
+
         super().__init__(
             label="Hugging Face Cache",
-            desc=f"{model_count} models in {display_path}",
+            desc=desc,
             status=NodeStatus.OK,
         )
 
@@ -1353,6 +1861,61 @@ class HuggingFaceInfo(NodeInfo):
                 status=NodeStatus.INFO,
             )
             self.add_child(token_node)
+
+    def _get_mount_type(self, path: str) -> Optional[str]:
+        """Determine if path is on NFS or a host mount (bind mount).
+
+        Returns:
+            String describing mount type (e.g., "NFS", "host mount") or None if local
+        """
+        try:
+            # Read /proc/mounts to find mount info
+            with open("/proc/mounts", "r") as f:
+                mounts = f.readlines()
+
+            # Find the longest matching mount point (most specific)
+            abs_path = os.path.abspath(path)
+            best_match = None
+            best_match_len = 0
+
+            for line in mounts:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point = parts[1]
+                fs_type = parts[2]
+
+                # Check if our path is under this mount point
+                if (
+                    abs_path.startswith(mount_point)
+                    and len(mount_point) > best_match_len
+                ):
+                    best_match = (mount_point, fs_type)
+                    best_match_len = len(mount_point)
+
+            if best_match:
+                mount_point, fs_type = best_match
+
+                # Check for NFS
+                if fs_type in ("nfs", "nfs4"):
+                    return "NFS"
+
+                # Check for bind mount (host mount in Docker)
+                # In Docker, bind mounts typically show up with device paths or overlay
+                if fs_type in ("ext4", "xfs", "btrfs") and mount_point != "/":
+                    # This could be a bind mount from host
+                    # Additional heuristic: check if device is different from root
+                    try:
+                        root_stat = os.stat("/")
+                        path_stat = os.stat(abs_path)
+                        if root_stat.st_dev != path_stat.st_dev:
+                            return "host mount"
+                    except Exception:
+                        pass
+
+            return None
+        except Exception:
+            return None
 
     def _get_cached_models(self, cache_path: str, compute_sizes: bool) -> List[tuple]:
         """Get list of cached Hugging Face models with metadata.
@@ -1737,17 +2300,27 @@ class MaturinInfo(NodeInfo):
 
 
 class PythonInfo(NodeInfo):
-    """Python installation information"""
+    """Python installation information.
 
-    def __init__(self):
+    In `--runtime-check-only` mode, Python is still useful to report, but failures should not
+    block the container sanity check, so missing/broken Python is downgraded to WARNING.
+    """
+
+    def __init__(self, runtime_check: bool = False):
+        self.runtime_check = runtime_check
         py_version = platform.python_version()
         py_exec = sys.executable or "python"
         display_py_exec = self._replace_home_with_var(py_exec)
 
+        if os.path.exists(py_exec):
+            status = NodeStatus.OK
+        else:
+            status = NodeStatus.WARNING if self.runtime_check else NodeStatus.ERROR
+
         super().__init__(
             label="Python",
             desc=f"{py_version}, {display_py_exec}",
-            status=NodeStatus.OK if os.path.exists(py_exec) else NodeStatus.ERROR,
+            status=status,
         )
 
         # Check for PyTorch (optional)
@@ -1803,8 +2376,15 @@ class PythonInfo(NodeInfo):
 class FrameworkInfo(NodeInfo):
     """LLM Framework information"""
 
-    def __init__(self):
+    def __init__(self, no_framework_check: bool = False):
         super().__init__(label="🤖Framework", status=NodeStatus.INFO)
+
+        if no_framework_check:
+            # Why: In some environments (CI, minimal runtime containers) we may want to
+            # validate the Dynamo install without requiring a framework/engine package
+            # (vllm/sglang/tensorrt_llm) to be present.
+            self.desc = "skipped (--no-framework-check)"
+            return
 
         # Check for framework packages (mandatory to show)
         frameworks_to_check = [
@@ -1814,24 +2394,77 @@ class FrameworkInfo(NodeInfo):
         ]
 
         frameworks_found = 0
+        gpu_dependent_found = 0
 
         for module_name, display_name in frameworks_to_check:
-            # Regular import for all frameworks
+            # First check if module exists without importing (for GPU-dependent modules)
+            import importlib.metadata
+            import importlib.util
+
+            spec = importlib.util.find_spec(module_name)
+            if not spec:
+                # Module not installed at all
+                continue
+
+            # Module exists, try to get version from metadata (doesn't require import)
+            version = None
             try:
-                module = __import__(module_name)
-                version = getattr(module, "__version__", "installed")
-                frameworks_found += 1
+                version = importlib.metadata.version(module_name)
+            except Exception:
+                # Try alternative package names
+                alt_names = {
+                    "tensorrt_llm": "tensorrt-llm",
+                    "sglang": "sglang",
+                    "vllm": "vllm",
+                }
+                if module_name in alt_names:
+                    try:
+                        version = importlib.metadata.version(alt_names[module_name])
+                    except Exception:
+                        pass
 
-                # Get module path
-                module_path = None
-                if hasattr(module, "__file__") and module.__file__:
-                    module_path = self._replace_home_with_var(module.__file__)
+            # Get module path from spec
+            module_path = None
+            if spec.origin:
+                module_path = self._replace_home_with_var(spec.origin)
 
-                # Get executable path
-                exec_path = None
-                exec_path_raw = shutil.which(module_name)
+            # Get executable path (special handling for each framework)
+            exec_path = None
+            exec_names = {
+                "vllm": "vllm",
+                "sglang": "sglang",
+                "tensorrt_llm": "trtllm-build",
+            }
+            if module_name in exec_names:
+                exec_path_raw = shutil.which(exec_names[module_name])
                 if exec_path_raw:
                     exec_path = self._replace_home_with_var(exec_path_raw)
+
+            # Now try to import to get runtime version if needed
+            gpu_required = False
+            try:
+                module = __import__(module_name)
+                # Get version from module if not already found
+                if not version:
+                    version = getattr(module, "__version__", "installed")
+            except ImportError as e:
+                # Check if it's a GPU-related error
+                error_msg = str(e).lower()
+                if "libcuda" in error_msg or "cuda" in error_msg:
+                    gpu_required = True
+                    gpu_dependent_found += 1
+            except Exception:
+                pass
+
+            # If we found the module (either importable or just installed)
+            if spec:
+                frameworks_found += 1
+                if not version:
+                    version = "installed"
+
+                # Add status indicator to version for GPU-dependent modules
+                if gpu_required:
+                    version = f"{version} (requires GPU)"
 
                 package_info = PythonPackageInfo(
                     package_name=display_name,
@@ -1842,9 +2475,6 @@ class FrameworkInfo(NodeInfo):
                     is_installed=True,
                 )
                 self.add_child(package_info)
-            except (ImportError, Exception):
-                # Framework not installed - don't add it
-                pass
 
         # If no frameworks found, set status to ERROR (X) and show what's missing
         if frameworks_found == 0:
@@ -1855,6 +2485,9 @@ class FrameworkInfo(NodeInfo):
                 missing_frameworks.append(f"no {module_name}")
             missing_text = ", ".join(missing_frameworks)
             self.desc = missing_text
+        elif gpu_dependent_found > 0:
+            # At least one framework needs GPU
+            self.status = NodeStatus.WARNING
 
 
 class PythonPackageInfo(NodeInfo):
@@ -1936,8 +2569,14 @@ class PythonPathInfo(NodeInfo):
 class DynamoRuntimeInfo(NodeInfo):
     """Dynamo runtime components information"""
 
-    def __init__(self, workspace_dir: str, thorough_check: bool = False):
+    def __init__(
+        self,
+        workspace_dir: Optional[str],
+        thorough_check: bool = False,
+        runtime_check: bool = False,
+    ):
         self.thorough_check = thorough_check
+        self.runtime_check = runtime_check
         # Try to get package version
         import importlib.metadata
 
@@ -1967,13 +2606,22 @@ class DynamoRuntimeInfo(NodeInfo):
             if pth_file:
                 self.add_child(pth_file)
 
-        # Check for multiple _core*.so files
-        multiple_so_warning = self._check_multiple_core_so(workspace_dir)
-        if multiple_so_warning:
-            self.add_child(multiple_so_warning)
+        # Check for multiple _core*.so files (only if workspace exists)
+        if workspace_dir:
+            multiple_so_warning = self._check_multiple_core_so(workspace_dir)
+            if multiple_so_warning:
+                self.add_child(multiple_so_warning)
 
         # Discover runtime components from source
         components = self._discover_runtime_components(workspace_dir)
+
+        # For runtime check, always try to import the core modules
+        if self.runtime_check:
+            # Force check of essential runtime modules
+            essential_components = ["dynamo._core", "dynamo.runtime"]
+            for comp in essential_components:
+                if comp not in components:
+                    components.append(comp)
 
         # Find where each component actually is and add them
         if components:
@@ -1981,6 +2629,7 @@ class DynamoRuntimeInfo(NodeInfo):
             max_len = max(len(comp) for comp in components)
 
             components_found = False
+            import_failures = []
             for component in components:
                 try:
                     # Try to import to find actual location
@@ -2015,16 +2664,31 @@ class DynamoRuntimeInfo(NodeInfo):
                         label=padded_name, desc=error_msg, status=NodeStatus.ERROR
                     )
                     self.add_child(module_node)
+                    import_failures.append(component)
                     # Don't set components_found to True for failed imports
 
             # Update status and value based on whether we found components
             if components_found:
-                self.status = NodeStatus.OK
+                # For runtime check, fail if any essential component failed to import
+                if self.runtime_check and import_failures:
+                    essential_failed = any(
+                        comp in import_failures
+                        for comp in ["dynamo._core", "dynamo.runtime"]
+                    )
+                    if essential_failed:
+                        self.status = NodeStatus.ERROR
+                        self.desc = "ai-dynamo-runtime - FAILED (essential modules not importable)"
+                    else:
+                        self.status = NodeStatus.OK
+                else:
+                    self.status = NodeStatus.OK
                 # If not installed but components work via PYTHONPATH, update the message
-                if not is_installed:
+                if not is_installed and self.status == NodeStatus.OK:
                     self.desc = "ai-dynamo-runtime (via PYTHONPATH)"
             else:
                 self.status = NodeStatus.ERROR
+                if self.runtime_check:
+                    self.desc = "ai-dynamo-runtime - FAILED (no components found)"
         else:
             # No components discovered at all
             self.status = NodeStatus.ERROR
@@ -2076,7 +2740,7 @@ class DynamoRuntimeInfo(NodeInfo):
 
         return None
 
-    def _discover_runtime_components(self, workspace_dir: str) -> list:
+    def _discover_runtime_components(self, workspace_dir: Optional[str]) -> list:
         """Discover ai-dynamo-runtime components from filesystem.
 
         Returns:
@@ -2169,8 +2833,14 @@ class DynamoRuntimeInfo(NodeInfo):
 class DynamoFrameworkInfo(NodeInfo):
     """Dynamo framework components information"""
 
-    def __init__(self, workspace_dir: str, thorough_check: bool = False):
+    def __init__(
+        self,
+        workspace_dir: Optional[str],
+        thorough_check: bool = False,
+        runtime_check: bool = False,
+    ):
         self.thorough_check = thorough_check
+        self.runtime_check = runtime_check
         # Try to get package version
         import importlib.metadata
 
@@ -2222,6 +2892,16 @@ class DynamoFrameworkInfo(NodeInfo):
         # Discover framework components from source
         components = self._discover_framework_components(workspace_dir)
 
+        # For runtime check, always try to import at least one framework component
+        if self.runtime_check and not components:
+            # Try common framework components even if not discovered
+            components = [
+                "dynamo.frontend",
+                "dynamo.vllm",
+                "dynamo.sglang",
+                "dynamo.trtllm",
+            ]
+
         # Find where each component actually is and add them
         if components:
             # Sort components for consistent output
@@ -2231,6 +2911,7 @@ class DynamoFrameworkInfo(NodeInfo):
             max_len = max(len(comp) for comp in components)
 
             components_found = False
+            import_failures = []
             for component in components:
                 try:
                     # Try to import to find actual location
@@ -2255,21 +2936,29 @@ class DynamoFrameworkInfo(NodeInfo):
                         label=padded_name, desc=error_msg, status=NodeStatus.ERROR
                     )
                     self.add_child(component_node)
+                    import_failures.append(component)
                     # Don't set components_found to True for failed imports
 
             # Update status and value based on whether we found components
             if components_found:
-                self.status = NodeStatus.OK
+                # For runtime check, we need at least one component to work
+                if self.runtime_check and len(import_failures) == len(components):
+                    self.status = NodeStatus.ERROR
+                    self.desc = "ai-dynamo - FAILED (no components importable)"
+                else:
+                    self.status = NodeStatus.OK
                 # If not installed but components work via PYTHONPATH, update the message
-                if not is_installed:
+                if not is_installed and self.status == NodeStatus.OK:
                     self.desc = "ai-dynamo (via PYTHONPATH)"
             else:
                 self.status = NodeStatus.ERROR
+                if self.runtime_check:
+                    self.desc = "ai-dynamo - FAILED (no components found)"
         else:
             # No components discovered at all
             self.status = NodeStatus.ERROR
 
-    def _discover_framework_components(self, workspace_dir: str) -> list:
+    def _discover_framework_components(self, workspace_dir: Optional[str]) -> list:
         """Discover ai-dynamo framework components from filesystem.
 
         Returns:
@@ -2300,11 +2989,36 @@ class DynamoFrameworkInfo(NodeInfo):
 class DynamoInfo(NodeInfo):
     """Dynamo workspace information"""
 
-    def __init__(self, thorough_check: bool = False):
+    def __init__(self, thorough_check: bool = False, runtime_check: bool = False):
         self.thorough_check = thorough_check
+        self.runtime_check = runtime_check
 
         # Find workspace directory
         workspace_dir = DynamoInfo.find_workspace()
+
+        # For runtime check, we don't need a workspace - just check packages
+        if self.runtime_check and not workspace_dir:
+            super().__init__(
+                label="Dynamo",
+                desc="workspace not found (runtime container) - checking installed packages",
+                status=NodeStatus.WARNING,
+            )
+            # Check runtime components even without workspace
+            runtime_info = DynamoRuntimeInfo(
+                None,
+                thorough_check=self.thorough_check,
+                runtime_check=self.runtime_check,
+            )
+            self.add_child(runtime_info)
+
+            # Check framework components even without workspace
+            framework_info = DynamoFrameworkInfo(
+                None,
+                thorough_check=self.thorough_check,
+                runtime_check=self.runtime_check,
+            )
+            self.add_child(framework_info)
+            return
 
         if not workspace_dir:
             # Show error when workspace is not found
@@ -2328,36 +3042,65 @@ class DynamoInfo(NodeInfo):
             self.add_child(hint)
             return
 
-        # Get git info
-        sha, date = self._get_git_info(workspace_dir)
-
         # Build main label
         display_workspace = self._replace_home_with_var(workspace_dir)
-        if sha and date:
-            value = f"{display_workspace}, SHA: {sha}, Date: {date}"
-        else:
-            value = display_workspace
+        super().__init__(label="Dynamo", desc=display_workspace, status=NodeStatus.INFO)
 
-        super().__init__(label="Dynamo", desc=value, status=NodeStatus.INFO)
+        # Add explicit git info as a child so it's always visible and can clearly say
+        # "not a git directory" when unavailable.
+        git_sha, git_date, git_branch, git_msg = self._get_git_info(workspace_dir)
+        if git_sha:
+            parts = [git_sha]
+            if git_branch:
+                parts.append(f"branch={git_branch}")
+            if git_date:
+                parts.append(f"Date: {git_date}")
+            git_desc = ", ".join(parts)
+        else:
+            git_desc = git_msg
+        self.add_child(
+            NodeInfo(label="Git HEAD", desc=git_desc, status=NodeStatus.INFO)
+        )
 
         # Always add runtime components
         runtime_info = DynamoRuntimeInfo(
-            workspace_dir, thorough_check=self.thorough_check
+            workspace_dir,
+            thorough_check=self.thorough_check,
+            runtime_check=self.runtime_check,
         )
         self.add_child(runtime_info)
 
         # Always add framework components
         framework_info = DynamoFrameworkInfo(
-            workspace_dir, thorough_check=self.thorough_check
+            workspace_dir,
+            thorough_check=self.thorough_check,
+            runtime_check=self.runtime_check,
         )
         self.add_child(framework_info)
 
-    def _get_git_info(self, workspace_dir: str) -> Tuple[Optional[str], Optional[str]]:
-        """Get git SHA and date for the workspace."""
+    def _get_git_info(
+        self, workspace_dir: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+        """Get git SHA, date, and branch for the workspace (or a clear message when unavailable)."""
+        git_bin = shutil.which("git")
+        if not git_bin:
+            return None, None, None, "git not found"
+
         try:
+            # First, detect whether we're inside a git work tree.
+            result = subprocess.run(
+                [git_bin, "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                cwd=workspace_dir,
+                timeout=5,
+            )
+            if result.returncode != 0 or result.stdout.strip().lower() != "true":
+                return None, None, None, "not in a git directory"
+
             # Get short SHA
             result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
+                [git_bin, "rev-parse", "--short", "HEAD"],
                 capture_output=True,
                 text=True,
                 cwd=workspace_dir,
@@ -2365,9 +3108,28 @@ class DynamoInfo(NodeInfo):
             )
             sha = result.stdout.strip() if result.returncode == 0 else None
 
+            # Get branch name (best-effort). In detached HEAD this returns "HEAD".
+            branch: Optional[str] = None
+            try:
+                result = subprocess.run(
+                    [git_bin, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    cwd=workspace_dir,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    candidate = result.stdout.strip()
+                    if candidate and candidate != "HEAD":
+                        branch = candidate
+                    elif candidate == "HEAD":
+                        branch = "detached"
+            except Exception:
+                branch = None
+
             # Get commit date
             result = subprocess.run(
-                ["git", "show", "-s", "--format=%ci", "HEAD"],
+                [git_bin, "show", "-s", "--format=%ci", "HEAD"],
                 capture_output=True,
                 text=True,
                 cwd=workspace_dir,
@@ -2392,9 +3154,11 @@ class DynamoInfo(NodeInfo):
             else:
                 date = None
 
-            return sha, date
+            if sha:
+                return sha, date, branch, ""
+            return None, None, None, "not in a git directory"
         except Exception:
-            return None, None
+            return None, None, None, "not in a git directory"
 
     @staticmethod
     def find_workspace() -> Optional[str]:
@@ -2466,6 +3230,21 @@ def show_installation_recommendation():
     print("             or export PYTHONPATH=$DYNAMO_HOME/components/src\n")
 
 
+def get_installation_recommendation_lines() -> List[str]:
+    """
+    Get installation recommendations for missing components.
+
+    Why: `--json-output` must keep stdout JSON-only. We return structured lines that
+    can be embedded in JSON instead of printing free-form text.
+    """
+    return [
+        "To install missing components for development (not production):",
+        "  Runtime:   (cd lib/bindings/python && maturin develop)",
+        "  Framework: uv pip install -e .",
+        "             or export PYTHONPATH=$DYNAMO_HOME/components/src",
+    ]
+
+
 def main():
     """Main function - collect and display system information"""
     import argparse
@@ -2478,25 +3257,80 @@ def main():
     parser.add_argument(
         "--thorough-check",
         action="store_true",
-        help="Enable thorough checking (file permissions, directory sizes, disk space, etc.)",
+        help="Enable thorough checking (file permissions, directory sizes, disk space, CUDA/NVIDIA info, etc.)",
     )
     parser.add_argument(
         "--terse",
         action="store_true",
         help="Show only essential information (OS, User, GPU, Framework, Dynamo) and errors",
     )
+    parser.add_argument(
+        "--json",
+        "--json-output",
+        dest="json_output",
+        action="store_true",
+        help="Output a JSON representation (terse subset) suitable for copy/paste",
+    )
+    parser.add_argument(
+        "--runtime-check-only",
+        "--runtime-check",
+        "--runtime",
+        dest="runtime_check",
+        action="store_true",
+        help="Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers and validate ai-dynamo packages",
+    )
+    parser.add_argument(
+        "--no-gpu-check",
+        action="store_true",
+        help="Skip GPU detection and information collection (useful for CI environments without GPU access)",
+    )
+    parser.add_argument(
+        "--no-framework-check",
+        dest="no_framework_check",
+        action="store_true",
+        help="Skip LLM framework package checks (vllm, sglang, tensorrt_llm)",
+    )
     args = parser.parse_args()
 
     # Validate mutual exclusion
     if args.thorough_check and args.terse:
         parser.error("--thorough-check and --terse cannot be used together")
+    if args.json_output and args.thorough_check:
+        parser.error("--json-output and --thorough-check cannot be used together")
+    if args.json_output and args.terse:
+        parser.error(
+            "--json-output and --terse cannot be used together (json-output is already terse)"
+        )
+
+    # Keep `--json-output` output JSON-only for copy/paste (no Python warnings noise).
+    if args.json_output:
+        import warnings
+
+        warnings.filterwarnings("ignore")
 
     # Simply create a SystemInfo instance - it collects everything in its constructor
-    tree = SystemInfo(thorough_check=args.thorough_check, terse=args.terse)
-    tree.print_tree()
+    tree = SystemInfo(
+        thorough_check=args.thorough_check,
+        terse=args.terse or args.json_output,
+        runtime_check=args.runtime_check,
+        no_gpu_check=args.no_gpu_check,
+        no_framework_check=args.no_framework_check,
+    )
+
+    framework_errors = has_framework_errors(tree)
+
+    if args.json_output:
+        out = tree.to_json_obj()
+        if framework_errors:
+            out["install_recommendation"] = get_installation_recommendation_lines()
+        print(
+            json.dumps(out, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        )
+    else:
+        tree.print_tree()
 
     # Check if there are framework component errors and show installation recommendation
-    if has_framework_errors(tree):
+    if framework_errors and not args.json_output:
         show_installation_recommendation()
 
     # Exit with non-zero status if there are any errors

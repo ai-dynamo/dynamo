@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
@@ -17,6 +17,7 @@ pub mod embeddings;
 pub mod models;
 pub mod nvext;
 pub mod responses;
+pub mod tools;
 pub mod validate;
 
 use validate::{
@@ -131,7 +132,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
 
         let guided_decoding = match common::GuidedDecodingOptions::from_optional(
-            guided_json.cloned(),
+            guided_json,
             guided_regex,
             guided_choice,
             guided_grammar,
@@ -224,6 +225,12 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
 
     /// Check if usage tracking is enabled.
     fn is_usage_enabled(&self) -> bool;
+
+    /// Check if continuous usage tracking is enabled.
+    fn is_continuous_usage_enabled(&self) -> bool;
+
+    /// Get the current usage statistics with properly calculated total_tokens.
+    fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

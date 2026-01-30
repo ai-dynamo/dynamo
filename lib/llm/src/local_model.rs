@@ -1,19 +1,23 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::discovery::DiscoveryInstance;
+use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
-use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::utils::get_http_rpc_host_from_env;
 
 use crate::entrypoint::RouterConfig;
-use crate::mocker::protocols::MockEngineArgs;
-use crate::model_card::{self, ModelDeploymentCard};
+use crate::mocker::protocols::{MockEngineArgs, WorkerType};
+use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
+use crate::preprocessor::media::{ImageDecoder, MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -33,6 +37,7 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
+    source_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
     context_length: Option<u32>,
@@ -41,6 +46,7 @@ pub struct LocalModelBuilder {
     kv_cache_block_size: u32,
     http_host: Option<String>,
     http_port: u16,
+    http_metrics_port: Option<u16>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -52,6 +58,8 @@ pub struct LocalModelBuilder {
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
+    media_decoder: Option<MediaDecoder>,
+    media_fetcher: Option<MediaFetcher>,
 }
 
 impl Default for LocalModelBuilder {
@@ -60,9 +68,11 @@ impl Default for LocalModelBuilder {
             kv_cache_block_size: DEFAULT_KV_CACHE_BLOCK_SIZE,
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
+            http_metrics_port: None,
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
+            source_path: Default::default(),
             model_name: Default::default(),
             endpoint_id: Default::default(),
             context_length: Default::default(),
@@ -77,14 +87,24 @@ impl Default for LocalModelBuilder {
             namespace: Default::default(),
             custom_backend_metrics_endpoint: Default::default(),
             custom_backend_metrics_polling_interval: Default::default(),
+            media_decoder: Default::default(),
+            media_fetcher: Default::default(),
         }
     }
 }
 
 impl LocalModelBuilder {
-    /// The path must exist
+    /// The path must exist, the model is already downloaded
     pub fn model_path(&mut self, model_path: PathBuf) -> &mut Self {
         self.model_path = Some(model_path);
+        self
+    }
+
+    /// The HF name of the model before we downloaded it, or a local path if
+    /// that was given on the cmd line. We need this because `model_path` is always
+    /// a local path.
+    pub fn source_path(&mut self, source_path: PathBuf) -> &mut Self {
+        self.source_path = Some(source_path);
         self
     }
 
@@ -116,6 +136,11 @@ impl LocalModelBuilder {
 
     pub fn http_port(&mut self, port: u16) -> &mut Self {
         self.http_port = port;
+        self
+    }
+
+    pub fn http_metrics_port(&mut self, port: Option<u16>) -> &mut Self {
+        self.http_metrics_port = port;
         self
     }
 
@@ -184,6 +209,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn media_decoder(&mut self, media_decoder: Option<MediaDecoder>) -> &mut Self {
+        self.media_decoder = media_decoder;
+        self
+    }
+
+    pub fn media_fetcher(&mut self, media_fetcher: Option<MediaFetcher>) -> &mut Self {
+        self.media_fetcher = media_fetcher;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -218,7 +253,30 @@ impl LocalModelBuilder {
             self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
             self.runtime_config.max_num_batched_tokens =
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
+            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer;
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
+            self.media_decoder = Some(MediaDecoder {
+                image: Some(ImageDecoder::default()),
+                #[cfg(feature = "media-ffmpeg")]
+                video: None,
+            });
+            self.media_fetcher = Some(MediaFetcher::default());
+
+            // Set bootstrap endpoint for prefill workers with bootstrap_port configured
+            if mocker_engine_args.worker_type == WorkerType::Prefill
+                && let Some(port) = mocker_engine_args.bootstrap_port
+            {
+                let host = get_http_rpc_host_from_env();
+                self.runtime_config.disaggregated_endpoint =
+                    Some(runtime_config::DisaggregatedEndpoint {
+                        bootstrap_host: Some(host),
+                        bootstrap_port: Some(port),
+                    });
+                tracing::info!(
+                    bootstrap_port = port,
+                    "Mocker prefill worker: publishing bootstrap endpoint to discovery"
+                );
+            }
         }
 
         // frontend and echo engine don't need a path.
@@ -230,6 +288,8 @@ impl LocalModelBuilder {
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
             card.runtime_config = self.runtime_config.clone();
+            card.media_decoder = self.media_decoder.clone();
+            card.media_fetcher = self.media_fetcher.clone();
 
             return Ok(LocalModel {
                 card,
@@ -238,6 +298,7 @@ impl LocalModelBuilder {
                 template,
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
+                http_metrics_port: self.http_metrics_port,
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -261,14 +322,15 @@ impl LocalModelBuilder {
 
         let mut card =
             ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
+        // Source path is the `--model-path` the user passed. By now our `model_path` is the local
+        // path of the downloaded model.
+        if let Some(source_path) = self.source_path.take() {
+            card.set_source_path(source_path);
+        }
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
-        card.set_name(
-            &self
-                .model_name
-                .clone()
-                .unwrap_or_else(|| model_path.display().to_string()),
-        );
+        let alt = card.source_path().to_string();
+        card.set_name(self.model_name.as_deref().unwrap_or(&alt));
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
@@ -280,6 +342,8 @@ impl LocalModelBuilder {
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
+        card.media_decoder = self.media_decoder.clone();
+        card.media_fetcher = self.media_fetcher.clone();
 
         Ok(LocalModel {
             card,
@@ -288,6 +352,7 @@ impl LocalModelBuilder {
             template,
             http_host: self.http_host.take(),
             http_port: self.http_port,
+            http_metrics_port: self.http_metrics_port,
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -307,6 +372,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_host: Option<String>,
     http_port: u16,
+    http_metrics_port: Option<u16>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -357,6 +423,10 @@ impl LocalModel {
         self.http_port
     }
 
+    pub fn http_metrics_port(&self) -> Option<u16> {
+        self.http_metrics_port
+    }
+
     pub fn tls_cert_path(&self) -> Option<&Path> {
         self.tls_cert_path.as_deref()
     }
@@ -385,12 +455,6 @@ impl LocalModel {
         self.custom_backend_metrics_polling_interval
     }
 
-    pub fn is_gguf(&self) -> bool {
-        // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
-        // We will error when we come to parse it
-        self.full_path.is_file()
-    }
-
     /// An endpoint to identify this model by.
     pub fn endpoint_id(&self) -> &EndpointId {
         &self.endpoint_id
@@ -402,24 +466,105 @@ impl LocalModel {
         self.card
     }
 
-    /// Attach this model the endpoint. This registers it on the network
+    /// Attach this model to the endpoint. This registers it on the network
     /// allowing ingress to discover it.
+    ///
+    /// For base models, pass `lora_name = None`.
+    /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
     pub async fn attach(
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
+        lora_name: Option<&str>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
-        // Publish the Model Deployment Card to KV store
-        let card_store = endpoint.drt().store();
-        let key = Key::from_raw(endpoint.unique_path(card_store.connection_id()));
+        // Compute model_suffix from lora_name if present
+        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
 
-        let _outcome = card_store
-            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
-            .await?;
+        let suffix_for_log = model_suffix
+            .as_ref()
+            .map(|s| format!("/{}", s))
+            .unwrap_or_default();
+        tracing::debug!(
+            "Registering MDC at path: {}/{}/{}/{:x}{}",
+            endpoint.component().namespace().name(),
+            endpoint.component().name(),
+            endpoint.name(),
+            endpoint.drt().connection_id(),
+            suffix_for_log
+        );
+
+        let source_path = PathBuf::from(self.card.source_path());
+        if !source_path.exists() {
+            // The consumers of MDC (frontend) might not have the same local path as us, so
+            // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
+            //
+            // We can't do this if the model came from disk, as it might not be the same version
+            // as on Hugging Face (if it exists there at all).
+            //
+            // The URL is not used by anything. Frontend will download the repo and edit these
+            // paths to be local, so only the filename part matters currently.
+            // Possibly we should just use the filenames here. The URL feels nicer to me, it makes
+            // each field fully identified and fetchable independently.
+            self.card
+                .move_to_url(&format!("hf://{}/", self.card.source_path()))
+                .context("move_to_url")?;
+        }
+
+        // Register the Model Deployment Card via discovery interface
+        // The model_suffix (for LoRA) will be appended AFTER the instance_id
+        let discovery = endpoint.drt().discovery();
+        let spec = DiscoverySpec::from_model_with_suffix(
+            endpoint.component().namespace().name().to_string(),
+            endpoint.component().name().to_string(),
+            endpoint.name().to_string(),
+            &self.card,
+            model_suffix,
+        )?;
+        let _instance = discovery.register(spec).await?;
+
+        Ok(())
+    }
+
+    /// Helper associated function to detach a model from an endpoint
+    ///
+    /// For base models, pass `lora_name = None`.
+    /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
+    pub async fn detach_from_endpoint(
+        endpoint: &Endpoint,
+        lora_name: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let drt = endpoint.drt();
+        let instance_id = drt.connection_id();
+        let endpoint_id = endpoint.id();
+
+        // Compute model_suffix from lora_name if present
+        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+
+        let instance = DiscoveryInstance::Model {
+            namespace: endpoint_id.namespace,
+            component: endpoint_id.component,
+            endpoint: endpoint_id.name,
+            instance_id,
+            card_json: serde_json::Value::Null,
+            model_suffix,
+        };
+
+        let discovery = drt.discovery();
+        discovery.unregister(instance).await?;
+
+        if let Some(lora_name) = lora_name {
+            tracing::info!(
+                "Successfully unregistered LoRA '{}' from discovery",
+                lora_name
+            );
+        } else {
+            tracing::info!("Successfully unregistered model from discovery");
+        }
+
         Ok(())
     }
 }

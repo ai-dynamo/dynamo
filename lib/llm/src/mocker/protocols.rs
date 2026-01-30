@@ -1,14 +1,16 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::tokens::blocks::UniqueBlock;
-use crate::tokens::{BlockHash, SequenceHash, Token};
+use crate::mocker::perf_model::PerfModel;
+use dynamo_tokens::blocks::UniqueBlock;
+use dynamo_tokens::{BlockHash, SequenceHash, Token};
 
 pub type NumBlocks = usize;
 
@@ -44,9 +46,13 @@ pub struct PrefillCost {
 }
 
 impl PrefillCost {
-    pub fn predict_prefill_compute(&self, new_tokens: Option<usize>) -> f64 {
+    pub fn predict_prefill_compute(
+        &self,
+        new_tokens: Option<usize>,
+        perf_model: &PerfModel,
+    ) -> f64 {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
-        4.209989e-07 * (tokens as f64).powi(2) + 1.518344e-02 * (tokens as f64) + 1.650142e+01
+        perf_model.predict_prefill_time(tokens)
     }
 }
 
@@ -109,6 +115,21 @@ pub struct MockEngineArgs {
     /// Worker type for disaggregated serving (Aggregated, Prefill, or Decode)
     #[builder(default = "WorkerType::Aggregated")]
     pub worker_type: WorkerType,
+
+    /// Performance model for timing predictions (not serialized, loaded from planner_profile_data)
+    #[serde(skip)]
+    #[builder(default = "Arc::new(PerfModel::default())")]
+    pub perf_model: Arc<PerfModel>,
+
+    /// Enable worker-local KV indexer for tracking this worker's own KV cache state
+    #[builder(default = "false")]
+    pub enable_local_indexer: bool,
+
+    /// Bootstrap port for disaggregated serving rendezvous.
+    /// Prefill workers listen on this port; decode workers connect to it.
+    /// If None, bootstrap rendezvous is disabled.
+    #[builder(default = "None")]
+    pub bootstrap_port: Option<u16>,
 }
 
 impl Default for MockEngineArgs {
@@ -146,6 +167,9 @@ impl MockEngineArgs {
             "startup_time",
             "is_prefill",
             "is_decode",
+            "planner_profile_data",
+            "enable_local_indexer",
+            "bootstrap_port",
         ]
         .iter()
         .cloned()
@@ -227,6 +251,18 @@ impl MockEngineArgs {
             builder = builder.startup_time(Some(num));
         }
 
+        if let Some(value) = extra_args.get("enable_local_indexer")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.enable_local_indexer(enabled);
+        }
+
+        if let Some(value) = extra_args.get("bootstrap_port")
+            && let Some(port) = value.as_u64()
+        {
+            builder = builder.bootstrap_port(Some(port as u16));
+        }
+
         // Parse worker type from is_prefill and is_decode flags
         let is_prefill = extra_args
             .get("is_prefill")
@@ -248,6 +284,30 @@ impl MockEngineArgs {
             ),
         };
         builder = builder.worker_type(worker_type);
+
+        // Load performance model from NPZ file if provided
+        let perf_model = if let Some(path_str) = extra_args.get("planner_profile_data")
+            && let Some(path_str) = path_str.as_str()
+        {
+            let npz_path = PathBuf::from(path_str);
+            match PerfModel::from_npz(&npz_path) {
+                Ok(model) => {
+                    tracing::info!("Successfully loaded performance model from: {:?}", npz_path);
+                    Arc::new(model)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load performance model from {:?}: {}. Falling back to polynomial model.",
+                        npz_path,
+                        e
+                    );
+                    Arc::new(PerfModel::default())
+                }
+            }
+        } else {
+            Arc::new(PerfModel::default())
+        };
+        builder = builder.perf_model(perf_model);
 
         // Build the MockEngineArgs with either defaults or overridden values
         builder

@@ -1,5 +1,5 @@
 #/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -236,7 +236,6 @@ for concurrency in "${concurrency_array[@]}"; do
     --random-seed 100 \
     --artifact-dir ${artifact_dir} \
     --ui simple \
-    -v \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 

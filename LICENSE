@@ -1,4 +1,13 @@
-                                 Apache License
+   NOTICE: The test data files under ./lib/llm/tests/data/deepseek-v3.2 are
+   derived from the DeepSeek-V3.2 model repository (originally developed by
+   DeepSeek). The original files were obtained from:
+   https://huggingface.co/deepseek-ai/DeepSeek-V3.2 (commit c69397ecfd1fd142e90e3fbad51f4c7e40b9f3d3)
+   These files are licensed under the MIT License. The full text of the MIT
+   License can be found in ./lib/llm/tests/data/deepseek-v3.2/LICENSE.
+   The rest of this codebase is licensed under the Apache License 2.0 as
+   described below.
+
+                                Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
 

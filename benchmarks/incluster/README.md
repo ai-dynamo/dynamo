@@ -1,1 +1,1 @@
-../../docs/benchmarks/benchmarking.md#server-side-benchmarking-in-cluster
+../../docs/benchmarks/benchmarking.md

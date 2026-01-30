@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -220,7 +220,7 @@ impl ZmqActiveMessageLeader {
                     "Timed out waiting for ping readiness after handshake."
                 ));
             }
-            tracing::info!("Handshake: final readiness ping...");
+            tracing::debug!("Handshake: final readiness ping...");
             let ping = this.broadcast(ZMQ_PING_MESSAGE, vec![]).await?;
             tokio::select! {
                 _ = ping => break,

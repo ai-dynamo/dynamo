@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-moe-agg
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -16,7 +15,6 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-moe-agg
       componentType: worker
       replicas: 1
       resources:
@@ -27,6 +25,8 @@ spec:
           memory: "100Gi"
           gpu: "2"
       envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
         # MoE-specific environment variables
         - name: VLLM_ALL2ALL_BACKEND
           value: "pplx"
@@ -49,7 +49,7 @@ spec:
         - name: nvcr-imagepullsecret
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
@@ -58,7 +58,6 @@ spec:
             - --model
             - deepseek-ai/DeepSeek-V2-Lite
             - --trust-remote-code
-            - --disable-log-requests
             - --tensor-parallel-size
             - "1"
             - --data-parallel-size

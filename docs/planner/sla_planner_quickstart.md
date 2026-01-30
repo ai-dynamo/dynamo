@@ -58,7 +58,6 @@ The Dynamo Operator watches for DGDRs and automatically:
 Before creating a DGDR, ensure:
 - **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation_guide.md))
 - **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running** (required for SLA planner)
-- **Profiling PVC created** (see [Benchmarking Resource Setup](/deploy/utils/README.md#benchmarking-resource-setup#BenchmarkingResourceSetup))
 - **Image pull secrets configured** if using private registries (typically `nvcr-imagepullsecret` for NVIDIA images)
 - **Sufficient GPU resources** available in your cluster for profiling
 - **Runtime images available** that contain both profiler and runtime components
@@ -93,38 +92,12 @@ Dynamo provides sample DGDR configurations in `benchmarks/profiler/deploy/`. You
 
 **Available Sample DGDRs:**
 - **`profile_sla_dgdr.yaml`**: Standard online profiling for dense models
-- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator (TensorRT-LLM)
+- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator
 - **`profile_sla_moe_dgdr.yaml`**: Online profiling for MoE models (SGLang)
 
-Or, you can create your own DGDR for your own needs:
+Or, you can create your own DGDR for your own needs.
 
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: my-model-deployment  # Change the name
-  namespace: default         # Change the namespace
-spec:
-  model: "Qwen/Qwen3-0.6B"     # Update to your model
-  backend: vllm                # Backend: vllm, sglang, or trtllm
-
-  profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Required
-    config:
-      sla:
-        isl: 3000    # Adjust to your workload
-        osl: 150     # Adjust to your workload
-        ttft: 200    # Your target (ms)
-        itl: 20      # Your target (ms)
-
-      sweep:
-        use_ai_configurator: false  # Set to true for fast profiling (TensorRT-LLM only)
-
-  deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
-
-  autoApply: true  # Auto-deploy after profiling
-```
+> **Important - Profiling Config Cases**: Prior to 0.8.1, any fields under `profilingConfig.config` are represented in snake_case. Starting 0.8.1, fields under `profilingConfig.config` are represented in camelCase for uniformity. There is backwards compatibility to snake_case, but as all example DGDRs are using camelCase, anyone using a release prior to 0.8.1 must manually update the configs under the examples to have snake_case config fields.
 
 > [!TIP]
 > For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference).
@@ -180,6 +153,25 @@ kubectl port-forward svc/trtllm-disagg-frontend 8000:8000 -n $NAMESPACE
 curl http://localhost:8000/v1/models
 ```
 
+### Step 5 (Optional): Access the Planner Grafana Dashboard
+
+If you want to monitor the SLA Planner's decision-making in real-time, you can deploy the Planner Grafana dashboard.
+
+```bash
+kubectl apply -n monitoring -f deploy/observability/k8s/grafana-planner-dashboard-configmap.yaml
+```
+
+Follow the instructions in [Dynamo Metrics Collection on Kubernetes](../kubernetes/observability/metrics.md) to access the Grafana UI and select the **Dynamo Planner Dashboard**.
+
+The dashboard displays:
+- **Worker Counts & GPU Usage**: Current prefill/decode worker counts and cumulative GPU hours
+- **Observed Metrics**: Real-time TTFT, ITL, request rate, and sequence lengths from Prometheus
+- **Predicted Metrics**: Planner's load predictions and recommended replica counts
+- **Correction Factors**: How the planner adjusts predictions based on observed vs expected performance
+
+> [!TIP]
+> Use the **Namespace** dropdown at the top of the dashboard to filter metrics for your specific deployment namespace.
+
 ## DGDR Configuration Details
 
 ### Required Fields
@@ -224,14 +216,14 @@ Choose between **online profiling** (real measurements, 2-4 hours) or **offline 
 ```yaml
 # Online Profiling (Default)
 sweep:
-  use_ai_configurator: false
+  useAiConfigurator: false
 
-# Offline Profiling (AI Configurator - TensorRT-LLM only)
+# Offline Profiling (AI Configurator)
 sweep:
-  use_ai_configurator: true
-  aic_system: h200_sxm
-  aic_model_name: QWEN3_32B
-  aic_backend_version: "0.20.0"
+  useAiConfigurator: true
+  aicSystem: h200_sxm
+  aicHfId: Qwen/Qwen3-32B
+  aicBackendVersion: "0.20.0"
 ```
 
 > [!NOTE]
@@ -245,7 +237,7 @@ For details on hardware configuration and GPU discovery options, see [Hardware C
 
 #### Using Existing DGD Configs (Recommended for Custom Setups)
 
-If you have an existing DynamoGraphDeployment config (e.g., from `components/backends/*/deploy/disagg.yaml` or custom recipes), you can reference it via ConfigMap:
+If you have an existing DynamoGraphDeployment config (e.g., from `examples/backends/*/deploy/disagg.yaml` or custom recipes), you can reference it via ConfigMap:
 
 **Step 1: Create ConfigMap from your DGD config file:**
 
@@ -279,11 +271,10 @@ spec:
         ttft: 300
         itl: 10
       sweep:
-        use_ai_configurator: true
-      aic:
-        system: h200_sxm
-        model_name: DEEPSEEK_V3
-        backend_version: "0.20.0"
+        useAiConfigurator: true
+        aicSystem: h200_sxm
+        aicHfId: deepseek-ai/DeepSeek-V3
+        aicBackendVersion: "0.20.0"
 
   deploymentOverrides:
     workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
@@ -309,25 +300,26 @@ profilingConfig:
 
     # Hardware constraints (optional)
     hardware:
-      min_num_gpus_per_engine: 2
-      max_num_gpus_per_engine: 8
-      gpu_type: h200_sxm
+      minNumGpusPerEngine: 2
+      maxNumGpusPerEngine: 8
+      gpuType: h200_sxm
 
     # Profiling sweep settings (optional)
     sweep:
-      force_rerun: false
+      prefillInterpolationGranularity: 16  # Number of samples for prefill ISL sweep
+      decodeInterpolationGranularity: 6    # Number of samples for decode sweep
 ```
 
 > **Note**: `engine.config` is a **file path** to a DGD YAML file, not inline configuration. Use ConfigMapRef (recommended) or leave it unset to auto-generate.
 
 #### Planner Configuration Passthrough
-Add planner-specific settings. Planner arguments use a `planner_` prefix:
+Add planner-specific settings:
 
 ```yaml
 profilingConfig:
   config:
     planner:
-      planner_min_endpoint: 2
+      plannerMinEndpoint: 2
 ```
 
 ## Understanding Profiling Results
@@ -335,6 +327,33 @@ profilingConfig:
 For details about the profiling process, performance plots, and interpolation data, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-process-details).
 
 ## Advanced Topics
+
+### Mocker Deployment
+
+Instead of a real DGD that uses GPU resources, you can deploy a mocker deployment that uses simulated engines rather than GPUs. Mocker is available in all backend images and uses profiling data to simulate realistic GPU timing behavior. It is useful for:
+- Large-scale experiments without GPU resources
+- Testing Planner behavior and infrastructure
+- Validating deployment configurations
+
+To deploy mocker instead of the real backend, set `useMocker: true`:
+
+```yaml
+spec:
+  model: <model-name>
+  backend: trtllm  # Real backend for profiling (vllm, sglang, or trtllm)
+  useMocker: true  # Deploy mocker instead of real backend
+
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/dynamo/trtllm-runtime:<image-tag>"
+    ...
+  autoApply: true
+```
+
+Profiling still runs against the real backend (via GPUs or AIC) to collect performance data. The mocker deployment then uses this data to simulate realistic timing behavior.
+
+### Using a Model Cache PVC (0.8.1 or later)
+
+Starting in Dynamo 0.8.1, for large models, you can use a pre-populated PVC containing model weights instead of downloading from HuggingFace. See [Model Cache PVC](/docs/benchmarks/sla_driven_profiling.md#model-cache-pvc-advanced) for configuration details.
 
 ### DGDR Immutability
 
@@ -345,25 +364,56 @@ DGDRs are **immutable** - if you need to update SLAs or configuration:
 
 ### Manual Deployment Control
 
-Disable auto-deployment to review configurations before deploying:
+There are two ways to manually control deployment after profiling:
+
+#### Option 1: Use DGDR-Generated Configuration (Recommended)
+
+Disable auto-deployment to review the generated DGD before applying:
 
 ```yaml
 spec:
   autoApply: false
 ```
 
-Then manually apply the generated DGD:
+Then manually extract and apply the generated DGD:
 
 ```bash
-# Extract generated config
-kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedConfig}' > my-dgd.yaml
+# Extract generated DGD from DGDR status
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedDeployment}' | kubectl apply -f -
 
-# Review and modify if needed
+# Or save to file first for review/modification
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedDeployment}' > my-dgd.yaml
+
 vi my-dgd.yaml
-
-# Deploy manually
 kubectl apply -f my-dgd.yaml -n $NAMESPACE
 ```
+
+The generated DGD includes optimized configurations and the SLA planner component. The required `planner-profile-data` ConfigMap is automatically created when profiling completes, so the DGD will deploy successfully.
+
+#### Option 2: Use Standalone Planner Templates (Advanced)
+
+For advanced use cases, you can manually deploy using the standalone planner templates in `examples/backends/*/deploy/disagg_planner.yaml`:
+
+```bash
+# After profiling completes, profiling data is automatically stored in ConfigMaps
+
+# OPTIONAL: Inspect profiling results stored in ConfigMaps
+# View the generated DGD configuration
+kubectl get configmap dgdr-output-<dgdr-name> -n $NAMESPACE -o yaml
+
+# View the planner profiling data (JSON format)
+kubectl get configmap planner-profile-data -n $NAMESPACE -o yaml
+
+# Update the PROMETHEUS_ENDPOINT environment variable in the planner template
+# to match your cluster's Prometheus service location (see comments in the template)
+
+# Update backend planner manifest as needed, then deploy
+kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
+```
+
+> **Note**: The standalone templates are provided as examples and may need customization for your model and requirements. The DGDR-generated configuration (Option 1) is recommended as it's automatically tuned to your profiling results and SLA targets.
+>
+> **Important - Prometheus Configuration**: The planner queries Prometheus to get frontend request metrics for scaling decisions. If you see errors like "Failed to resolve prometheus service", ensure the `PROMETHEUS_ENDPOINT` environment variable in your planner configuration correctly points to your Prometheus service. See the comments in the example templates for details.
 
 ### Relationship to DynamoGraphDeployment (DGD)
 
@@ -381,6 +431,46 @@ metadata:
   labels:
     dgdr.nvidia.com/name: sla-aic
     dgdr.nvidia.com/namespace: your-namespace
+```
+
+### Accessing Detailed Profiling Artifacts
+
+By default, profiling jobs save essential data to ConfigMaps for planner integration. For advanced users who need access to detailed artifacts (logs, performance plots, AIPerf results, etc), configure the DGDR to use `dynamo-pvc`. This is optional and will not affect the functionality of profiler or Planner.
+
+**What's available in ConfigMaps (always created):**
+- Generated DGD configuration
+- Profiling data for Planner (`.json` files)
+
+**What's available in PVC if attached to DGDR (optional):**
+- Performance plots (PNGs)
+- DGD configuration and logs of all services for each profiled deployment
+- AIPerf profiling artifacts for each AIPerf run
+- Raw profiling data (`.npz` files)
+- Profiler log
+
+**Setup:**
+
+1. Set up the benchmarking PVC:
+```bash
+export NAMESPACE=your-namespace
+deploy/utils/setup_benchmarking_resources.sh
+```
+
+2. Add `outputPVC` to your DGDR's `profilingConfig`:
+```yaml
+spec:
+  profilingConfig:
+    outputPVC: "dynamo-pvc"
+    config:
+      # ... rest of config
+```
+
+3. After profiling completes, access results:
+```bash
+kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
+kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
+kubectl cp $NAMESPACE/pvc-access-pod:/data ./profiling-results
+kubectl delete pod pvc-access-pod -n $NAMESPACE
 ```
 
 ## Troubleshooting

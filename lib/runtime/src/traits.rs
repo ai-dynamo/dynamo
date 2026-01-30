@@ -1,7 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-
-pub mod events;
 
 use super::{DistributedRuntime, Runtime};
 /// A trait for objects that proivde access to the [Runtime]
@@ -16,7 +14,7 @@ pub trait DistributedRuntimeProvider {
 
 impl RuntimeProvider for DistributedRuntime {
     fn rt(&self) -> &Runtime {
-        &self.runtime
+        self.runtime()
     }
 }
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: v1
 kind: ConfigMap
@@ -44,7 +44,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: qwen3-32b-fp8-agg
       extraPodSpec:
         affinity:
           podAntiAffinity:
@@ -62,15 +61,14 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
       replicas: 1
     TrtllmWorker:
       componentType: main
-      dynamoNamespace: qwen3-32b-fp8-agg
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/models
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -96,7 +94,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
@@ -106,11 +104,13 @@ spec:
             value: "/opt/dynamo/configs/config.yaml"
           - name: MODEL_PATH
             value: "Qwen/Qwen3-32B-FP8"
+          - name: HF_HOME
+            value: "/opt/models"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config
             readOnly: true
-          workingDir: /workspace/components/backends/trtllm
+          workingDir: /workspace/examples/backends/trtllm
         volumes:
         - configMap:
             name: llm-config

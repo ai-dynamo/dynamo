@@ -19,7 +19,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
 ```
 3. Model hosting with vLLM backend
-This `agg_router.yaml` is adpated from vLLM deployment [example](https://github.com/ai-dynamo/dynamo/blob/main/components/backends/vllm/deploy/agg_router.yaml). It has following customizations
+This `agg_router.yaml` is adpated from vLLM deployment [example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router.yaml). It has following customizations
 - Deployed `Qwen/Qwen2.5-1.5B-Instruct` model
 - Use KV cache based routing in frontend deployment via the `DYN_ROUTER_MODE=kv` environment variable
 - Mounted a local cache folder `/YOUR/LOCAL/CACHE/FOLDER` for model artifacts reuse

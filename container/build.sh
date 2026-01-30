@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,16 +26,31 @@ RUN_PREFIX=
 PLATFORM=linux/amd64
 
 # Get short commit hash
-commit_id=$(git rev-parse --short HEAD)
+commit_id=${commit_id:-$(git rev-parse --short HEAD)}
 
 # if COMMIT_ID matches a TAG use that
-current_tag=$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true
+current_tag=${current_tag:-$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//' || true)}
 
-# Get latest TAG and add COMMIT_ID for dev
-latest_tag=$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1 main)" | sed 's/^v//') || true
+# Get latest version from release branches or tags
+# Strategy:
+# 1. Check for release/X.Y.Z branches (most reliable for development)
+# 2. Fall back to git tags, excluding test-rc tags
+# 3. Default to 0.0.1 if nothing found
+
+# Try to find the latest release branch first
+latest_release_branch=$(git branch -r 2>/dev/null | grep -E 'origin/release/[0-9]+\.[0-9]+\.[0-9]+$' | sed 's|.*/||' | sort -V | tail -1 || true)
+
+if [[ -n ${latest_release_branch} ]]; then
+    latest_tag=${latest_tag:-$latest_release_branch}
+    echo "INFO: Using version from latest release branch: ${latest_tag}"
+else
+    # Fall back to tags, excluding test-rc tags
+    latest_tag=${latest_tag:-$(git tag -l 'v*' --sort=-version:refname | grep -v 'test-rc' | head -1 | sed 's/^v//' || true)}
+fi
+
 if [[ -z ${latest_tag} ]]; then
     latest_tag="0.0.1"
-    echo "No git release tag found, setting to unknown version: ${latest_tag}"
+    echo "No git release tag or branch found, setting to unknown version: ${latest_tag}"
 fi
 
 # Use tag if available, otherwise use latest_tag.dev.commit_id
@@ -59,7 +74,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.06-py3
+TRTLLM_BASE_IMAGE_TAG=25.12-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -84,42 +99,71 @@ TRTLLM_BASE_IMAGE_TAG=25.06-py3
 # By default, we will use option 1. If you want to use option 2, you can set
 # TENSORRTLLM_PIP_WHEEL to the TensorRT-LLM wheel on artifactory.
 #
-# DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
+DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="0c9430e5a530ba958fc9dca561a3ad865ad9f492"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="45d7022cc33903509fd8045bbc577d77dd1d3e2f" # 1.3.0rc1
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
-DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.1.0rc5"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.3.0rc1"
+# TensorRT-LLM wheels on PyPI might not be compatible with the NGC PyTorch.
+# For incompatible versions, we install the wheel from the NGC image during the Docker build.
+# The following versions are not ABI compatible with the NGC PyTorch.
+TRTLLM_ABI_INCOMPATIBLE_VERSIONS=("1.3.0rc1")
 TENSORRTLLM_PIP_WHEEL=""
-
+TRTLLM_WHEEL_IMAGE=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
+VLLM_RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
+VLLM_RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
+VLLM_RUNTIME_IMAGE_TAG_CU13="13.0.2-runtime-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_REF=0.7.0
-NIXL_UCX_REF=v1.19.0
-NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
+SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
+SGLANG_CUDA_VERSION="12.9.1"
+SGLANG_CUDA_VERSION_CU13="13.0.1"
+SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.8-cu130-runtime"
+
+PYTHON_VERSION="3.12"
+
+NIXL_REF=0.9.0
+NIXL_UCX_REF=1.20.0
+NIXL_GDRCOPY_REF=v2.5.1
+NIXL_LIBFABRIC_REF=v2.3.0
+
+# AWS EFA installer version
+EFA_VERSION=1.45.1
 
 NO_CACHE=""
+NO_LOAD=""
+PUSH=""
+
+# KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
+# or can be explicitly enabled via --enable-kvbm flag
+ENABLE_KVBM=false
+
+# GPU Memory Service - default disabled, enabled automatically for VLLM/SGLANG
+# or can be explicitly enabled via --enable-gpu-memory-service flag
+ENABLE_GPU_MEMORY_SERVICE=false
 
 # sccache configuration for S3
 USE_SCCACHE=""
@@ -144,6 +188,24 @@ get_options() {
         --framework)
             if [ "$2" ]; then
                 FRAMEWORK=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --cuda-version)
+            if [ "$2" ]; then
+                echo "INFO: Setting CUDA_VERSION to $2"
+                CUDA_VERSION=$2
+                BUILD_ARGS+=" --build-arg CUDA_VERSION=$2 "
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixl-ref)
+            if [ "$2" ]; then
+                NIXL_REF=$2
                 shift
             else
                 missing_requirement "$1"
@@ -190,7 +252,6 @@ get_options() {
             fi
             ;;
         --base-image)
-            # Note: --base-image cannot be used with --dev-image
             if [ "$2" ]; then
                 BASE_IMAGE=$2
                 shift
@@ -209,14 +270,6 @@ get_options() {
         --target)
             if [ "$2" ]; then
                 TARGET=$2
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --dev-image)
-            if [ "$2" ]; then
-                DEV_IMAGE_INPUT=$2
                 shift
             else
                 missing_requirement "$1"
@@ -266,9 +319,15 @@ get_options() {
         --no-cache)
             NO_CACHE=" --no-cache"
             ;;
+        --no-load)
+            NO_LOAD=true
+            ;;
+        --push)
+            PUSH=" --push"
+            ;;
         --cache-from)
             if [ "$2" ]; then
-                CACHE_FROM="--cache-from $2"
+                CACHE_FROM+="--cache-from $2 "
                 shift
             else
                 missing_requirement "$1"
@@ -276,7 +335,7 @@ get_options() {
             ;;
         --cache-to)
             if [ "$2" ]; then
-                CACHE_TO="--cache-to $2"
+                CACHE_TO+="--cache-to $2 "
                 shift
             else
                 missing_requirement "$1"
@@ -293,8 +352,17 @@ get_options() {
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
+        --enable-gpu-memory-service)
+            ENABLE_GPU_MEMORY_SERVICE=true
+            ;;
+        --enable-media-nixl)
+            ENABLE_MEDIA_NIXL=true
+            ;;
+        --enable-media-ffmpeg)
+            ENABLE_MEDIA_FFMPEG=true
+            ;;
         --make-efa)
-            NIXL_UCX_REF=$NIXL_UCX_EFA_REF
+            MAKE_EFA=true
             ;;
         --use-sccache)
             USE_SCCACHE=true
@@ -307,7 +375,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-
         --sccache-region)
             if [ "$2" ]; then
                 SCCACHE_REGION=$2
@@ -325,6 +392,17 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --efa-version)
+            if [ "$2" ]; then
+                EFA_VERSION=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --no-tag-latest)
+            NO_TAG_LATEST=true
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -338,20 +416,10 @@ get_options() {
         shift
     done
 
-    # Validate argument combinations
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${BASE_IMAGE:-}" ]]; then
-        error "ERROR: --dev-image cannot be used with --base-image. Use --dev-image to build from existing images or --base-image to build new images."
-    fi
-
-    # Validate that --target and --dev-image cannot be used together
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${TARGET:-}" ]]; then
-        error "ERROR: --target cannot be used with --dev-image. Use --target to build from scratch or --dev-image to build from existing images."
-    fi
-
-    # Validate that --uid and --gid are only used with local-dev related options
+    # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
-        if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" ]]; then
-            error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev"
+        if [[ "${TARGET:-}" != "local-dev" && "${TARGET:-}" != "local-dev-aws" ]]; then
+            error "ERROR: --uid and --gid can only be used with --target local-dev or --target local-dev-aws"
         fi
     fi
 
@@ -369,12 +437,32 @@ get_options() {
         if [ -z "$BASE_IMAGE_TAG" ]; then
             BASE_IMAGE_TAG=${FRAMEWORK}_BASE_IMAGE_TAG
             BASE_IMAGE_TAG=${!BASE_IMAGE_TAG}
+            echo "INFO: Using default base image tag for $FRAMEWORK: $BASE_IMAGE_TAG"
         fi
 
         if [ -z "$BASE_IMAGE" ]; then
             BASE_IMAGE=${FRAMEWORK}_BASE_IMAGE
             BASE_IMAGE=${!BASE_IMAGE}
         fi
+
+        if [[ $FRAMEWORK == "VLLM" ]] && [[ $CUDA_VERSION == "13."* ]]; then
+            BASE_IMAGE_TAG=$VLLM_BASE_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${VLLM_BASE_IMAGE_TAG_CU13} "
+            RUNTIME_IMAGE_TAG=$VLLM_RUNTIME_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${VLLM_RUNTIME_IMAGE_TAG_CU13} "
+            echo "INFO: Overriding base image tag for vLLM with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
+        fi
+
+
+        if [[ $FRAMEWORK == "SGLANG" ]] && [[ $CUDA_VERSION == "13."* ]]; then
+            BASE_IMAGE_TAG=$SGLANG_BASE_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${SGLANG_BASE_IMAGE_TAG_CU13} "
+            SGLANG_CUDA_VERSION="${SGLANG_CUDA_VERSION_CU13}"
+            RUNTIME_IMAGE_TAG="${SGLANG_RUNTIME_IMAGE_TAG_CU13}"
+            BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${RUNTIME_IMAGE_TAG} "
+            echo "INFO: Overriding base image tag for SGLang with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
+        fi
+
 
         if [ -z "$BASE_IMAGE" ]; then
             error "ERROR: Framework $FRAMEWORK without BASE_IMAGE"
@@ -453,19 +541,25 @@ show_help() {
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
     echo "  [--tag tag for image]"
-    echo "  [--dev-image dev image to build local-dev from]"
-    echo "  [--uid user ID for local-dev images (only with --dev-image or --target local-dev)]"
-    echo "  [--gid group ID for local-dev images (only with --dev-image or --target local-dev)]"
+    echo "  [--uid user ID for local-dev images (only with --target local-dev)]"
+    echo "  [--gid group ID for local-dev images (only with --target local-dev)]"
     echo "  [--no-cache disable docker build cache]"
+    echo "  [--no-load do not load the image into docker (disables default --load)]"
+    echo "  [--push push the image to the registry]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
-    echo "  [--make-efa Enables EFA support for NIXL]"
+    echo "  [--make-efa Adds AWS EFA layer on top of the built image (works with any target)]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
+    echo "  [--enable-gpu-memory-service Enables GPU Memory Service support]"
+    echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
+    echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
+    echo "  [--efa-version AWS EFA installer version (default: 1.45.1)]"
+    echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -491,31 +585,9 @@ if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
 
-# Special handling for vLLM on ARM64 - set required defaults if not already specified by user
-if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
-    # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
-    if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
-        BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
-        echo "INFO: Automatically setting base-image-tag to $BASE_IMAGE_TAG for vLLM ARM64"
-    fi
-
-    # Add required build args if not already present
-    if [[ "$BUILD_ARGS" != *"RUNTIME_IMAGE_TAG"* ]]; then
-        BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 "
-        echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 for vLLM ARM64"
-    fi
-
-    if [[ "$BUILD_ARGS" != *"CUDA_VERSION"* ]]; then
-        BUILD_ARGS+=" --build-arg CUDA_VERSION=129 "
-        echo "INFO: Automatically setting CUDA_VERSION=129 for vLLM ARM64"
-    fi
-
-    if [[ "$BUILD_ARGS" != *"TORCH_BACKEND"* ]]; then
-        BUILD_ARGS+=" --build-arg TORCH_BACKEND=cu129 "
-        echo "INFO: Automatically setting TORCH_BACKEND=cu129 for vLLM ARM64"
-    fi
-
-fi
+# Set the commit sha in the container so we can inspect what build this relates to
+DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
+BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
@@ -530,77 +602,51 @@ fi
 
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
+# Add NIXL_LIBFABRIC_REF as a build argument
+BUILD_ARGS+=" --build-arg NIXL_LIBFABRIC_REF=${NIXL_LIBFABRIC_REF} "
+# Add EFA_VERSION as a build argument
+BUILD_ARGS+=" --build-arg EFA_VERSION=${EFA_VERSION} "
 
-# Function to build local-dev image with header
-build_local_dev_with_header() {
-    local dev_base_image="$1"
+# Function to build AWS EFA images from base runtime or dev images
+build_aws_with_header() {
+    local base_image="$1"
     local tags="$2"
-    local success_msg="$3"
-    local header_title="$4"
+    local aws_target="$3"  # runtime-aws or dev-aws
+    local success_msg="$4"
 
-    echo "======================================"
-    echo "$header_title"
-    echo "======================================"
+    DOCKERFILE_AWS="${SOURCE_DIR}/Dockerfile.aws"
 
-    # Get user info right before using it
-    USER_UID=${CUSTOM_UID:-$(id -u)}
-    USER_GID=${CUSTOM_GID:-$(id -g)}
-
-    # Set up dockerfile path
-    DOCKERFILE_LOCAL_DEV="${SOURCE_DIR}/Dockerfile.local_dev"
-
-    if [[ ! -f "$DOCKERFILE_LOCAL_DEV" ]]; then
-        echo "ERROR: Dockerfile.local_dev not found at: $DOCKERFILE_LOCAL_DEV"
+    if [[ ! -f "$DOCKERFILE_AWS" ]]; then
+        echo "ERROR: Dockerfile.aws not found at: $DOCKERFILE_AWS"
         exit 1
     fi
 
-    echo "Building new local-dev image from: $dev_base_image"
-    echo "User 'ubuntu' will have UID: $USER_UID, GID: $USER_GID"
+    echo ""
+    echo "Building AWS EFA image from base: $base_image"
+    echo "Target stage: $aws_target"
 
     # Show the docker command being executed if not in dry-run mode
     if [ -z "$RUN_PREFIX" ]; then
         set -x
     fi
 
-    $RUN_PREFIX docker build \
-        --build-arg DEV_BASE="$dev_base_image" \
-        --build-arg USER_UID="$USER_UID" \
-        --build-arg USER_GID="$USER_GID" \
-        --build-arg ARCH="$ARCH" \
-        --file "$DOCKERFILE_LOCAL_DEV" \
+    $RUN_PREFIX docker build --progress=plain \
+        --build-arg BASE_IMAGE="$base_image" \
+        --build-arg EFA_VERSION="${EFA_VERSION}" \
+        --target "$aws_target" \
+        --file "$DOCKERFILE_AWS" \
+        $PLATFORM \
         $tags \
         "$SOURCE_DIR" || {
         { set +x; } 2>/dev/null
-        echo "ERROR: Failed to build local_dev image"
+        echo "ERROR: Failed to build AWS EFA image"
         exit 1
     }
 
     { set +x; } 2>/dev/null
     echo "$success_msg"
-
-    # Show usage instructions
-    echo ""
-    echo "To run the local-dev image as the local user ($USER_UID/$USER_GID):"
-    # Extract the last tag from the tags string
-    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | tail -1 | cut -d' ' -f2)
-    # Calculate relative path to run.sh from current working directory
-    # Get the directory where build.sh is located
-    build_dir="$(dirname "${BASH_SOURCE[0]}")"
-    # Get the absolute path to run.sh (in the same directory as build.sh)
-    run_abs_path="$(realpath "$build_dir/run.sh")"
-    # Calculate relative path from current PWD to run.sh
-    run_path="$(python3 -c "import os; print(os.path.relpath('$run_abs_path', '$PWD'))")"
-    echo "  $run_path --image $last_tag --mount-workspace ..."
 }
 
-
-# Handle local-dev target
-if [[ $TARGET == "local-dev" ]]; then
-    LOCAL_DEV_BUILD=true
-    TARGET_STR="--target dev"
-fi
-
-# BUILD DEV IMAGE
 
 BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG"
 
@@ -636,23 +682,74 @@ check_wheel_file() {
     return 0
 }
 
+get_trtllm_version_from_pip_wheel() {
+    local wheel_spec="$1"
+    if [[ "$wheel_spec" =~ == ]]; then
+        local version
+        version=$(echo "$wheel_spec" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+        if _is_semver_ref "$version"; then
+            echo "${version#v}"
+            return 0
+        fi
+    fi
+    echo ""
+    return 0
+}
+
+trtllm_version_incompatible() {
+    local version="$1"
+    for incompatible_version in "${TRTLLM_ABI_INCOMPATIBLE_VERSIONS[@]}"; do
+        if [[ "$version" == "$incompatible_version" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_is_semver_ref() {
+    local ref="$1"
+    local semver_regex='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+|[A-Za-z][0-9A-Za-z.-]+)?$'
+    [[ "$ref" =~ $semver_regex ]]
+}
+
+get_github_trtllm_ref() {
+    local commit="$1"
+    if _is_semver_ref "$commit"; then
+        if [[ "$commit" =~ ^v ]]; then
+            echo "$commit"
+        else
+            echo "v${commit}"
+        fi
+        return 0
+    fi
+    echo "$commit"
+    return 0
+}
+
 function determine_user_intention_trtllm() {
-    # The following options are grouped to be mutually exclusive.
-    # This function determines if the flags set are can be interpreted
-    # without ambiguity.
+    # The tensorrt llm installation flags are not quite mutually exclusive
+    # since the user should be able to point at a directory of their choosing
+    # for storing a trtllm wheel built from source.
+    #
+    # This function attempts to discern the intention of the user by
+    # applying checks, or rules, for each of the scenarios.
     #
     # /return: Calculated intention. One of "download", "install", "build".
     #
     # The three different methods of installing TRTLLM with build.sh are:
     # 1. Download
-    # --tensorrtllm-index-url
-    # --tensorrtllm-pip-wheel
+    # required: --tensorrtllm-pip-wheel
+    # optional: --tensorrtllm-index-url
+    # optional: --tensorrtllm-commit
     #
     # 2. Install from pre-built
-    # --tensorrtllm-pip-wheel-dir
+    # required: --tensorrtllm-pip-wheel-dir
+    # optional: --tensorrtllm-commit
     #
     # 3. Build from source
-    # --tensorrtllm-git-url
+    # required: --tensorrtllm-git-url
+    # optional: --tensorrtllm-commit
+    # optional: --tensorrtllm-pip-wheel-dir
     local intention_download="false"
     local intention_install="false"
     local intention_build="false"
@@ -660,7 +757,7 @@ function determine_user_intention_trtllm() {
     TRTLLM_INTENTION=${TRTLLM_INTENTION}
 
     # Install from pre-built
-    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
+    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR"  && ! -n "$TRTLLM_GIT_URL" ]]; then
         intention_install="true";
         intention_count=$((intention_count+1))
         TRTLLM_INTENTION="install"
@@ -716,15 +813,22 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [[ "$TRTLLM_INTENTION" == "download" ]]; then
         TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL:-$DEFAULT_TENSORRTLLM_INDEX_URL}
         TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
-        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
-        BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
-        BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
-
+        TRTLLM_WHEEL_VERSION=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
+        if trtllm_version_incompatible "${TRTLLM_WHEEL_VERSION}"; then
+            TRTLLM_WHEEL_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:${TRTLLM_WHEEL_VERSION}"
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
+            BUILD_ARGS+=" --build-arg TRTLLM_WHEEL_IMAGE=${TRTLLM_WHEEL_IMAGE}"
+            PRINT_TRTLLM_WHEEL_FILE=${TRTLLM_WHEEL_IMAGE}
+        else
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
+            BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
+            BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
+            PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
+        fi
         # Create a dummy directory to satisfy the build context requirement
         # There is no way to conditionally copy the build context in dockerfile.
-        mkdir -p /tmp/dummy_dir
-        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
-        PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
+        mkdir -p /tmp/trtllm_wheel_context
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/trtllm_wheel_context"
     elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}"; then
@@ -739,6 +843,8 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
         PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
     elif [[ "$TRTLLM_INTENTION" == "build" ]]; then
+        TENSORRTLLM_PIP_WHEEL_DIR=${TENSORRTLLM_PIP_WHEEL_DIR:=$DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR}
+        echo "TRTLLM pip wheel output directory is: ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if [ "$DRY_RUN" != "true" ]; then
             GIT_URL_ARG=""
             if [ -n "${TRTLLM_GIT_URL}" ]; then
@@ -747,6 +853,9 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
             if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
+            BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
+            PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
         fi
     else
         echo 'No intention was set. This error should have been detected in "determine_user_intention_trtllm()". Exiting...'
@@ -758,7 +867,11 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [[ -z "$TRTLLM_COMMIT" ]]; then
         # Attempt to default since the commit will work with a hash or a tag/branch
         if [[ ! -z "$TENSORRTLLM_PIP_WHEEL" ]]; then
-            TRTLLM_COMMIT=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+            TRTLLM_COMMIT=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
+            if [[ -z "$TRTLLM_COMMIT" ]]; then
+                echo -e "[ERROR] Could not parse a semver version from TENSORRTLLM_PIP_WHEEL: ${TENSORRTLLM_PIP_WHEEL}"
+                exit 1
+            fi
             echo "Attempting to default TRTLLM_COMMIT to \"$TRTLLM_COMMIT\" for installation of TensorRT."
         else
             echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set."
@@ -767,37 +880,87 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
             exit 1
         fi
     fi
-    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
+    GITHUB_TRTLLM_REF=$(get_github_trtllm_ref "${TRTLLM_COMMIT}")
+    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${GITHUB_TRTLLM_REF}"
 
 
 fi
 
 # ENABLE_KVBM: Used in base Dockerfile for block-manager feature.
 #              Declared but not currently used in Dockerfile.{vllm,trtllm}.
+# Force KVBM to be enabled for VLLM and TRTLLM frameworks
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
 fi
+# For other frameworks, ENABLE_KVBM defaults to false unless --enable-kvbm flag was provided
 
-if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the ai-dynamo-runtime"
+if [[ ${ENABLE_KVBM} == "true" ]]; then
+    echo "Enabling KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
+# ENABLE_GPU_MEMORY_SERVICE: Used in Dockerfiles for gpu_memory_service wheel.
+#                            Declared but not currently used in Dockerfile.trtllm.
+# Force GPU Memory Service to be enabled for VLLM and SGLANG frameworks
+if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+    echo "Forcing enable_gpu_memory_service to true in ${FRAMEWORK} image build"
+    ENABLE_GPU_MEMORY_SERVICE=true
+fi
+# For other frameworks, ENABLE_GPU_MEMORY_SERVICE defaults to false unless --enable-gpu-memory-service flag was provided
+
+if [[ ${ENABLE_GPU_MEMORY_SERVICE} == "true" ]]; then
+    echo "Enabling GPU Memory Service in the dynamo image"
+    BUILD_ARGS+=" --build-arg ENABLE_GPU_MEMORY_SERVICE=${ENABLE_GPU_MEMORY_SERVICE} "
+fi
+
+# ENABLE_MEDIA_NIXL: Enable media processing with NIXL support
+# Used in base Dockerfile for maturin build feature flag.
+# Can be explicitly overridden with --enable-media-nixl flag
+if [ -z "${ENABLE_MEDIA_NIXL}" ]; then
+    if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+        ENABLE_MEDIA_NIXL=true
+    else
+        ENABLE_MEDIA_NIXL=false
+    fi
+fi
+BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
+
+# ENABLE_MEDIA_FFMPEG: Enable media processing with FFMPEG support
+# Used in base Dockerfile for maturin build feature flag.
+# Can be explicitly overridden with --enable-media-ffmpeg flag
+if [ -z "${ENABLE_MEDIA_FFMPEG}" ]; then
+    if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+        ENABLE_MEDIA_FFMPEG=true
+    else
+        ENABLE_MEDIA_FFMPEG=false
+    fi
+fi
+BUILD_ARGS+=" --build-arg ENABLE_MEDIA_FFMPEG=${ENABLE_MEDIA_FFMPEG} "
+
 # NIXL_UCX_REF: Used in base Dockerfile only.
-#               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+# NIXL_GDRCOPY_REF: Used in dynamo base stages.
+if [ -n "${NIXL_GDRCOPY_REF}" ]; then
+    BUILD_ARGS+=" --build-arg NIXL_GDRCOPY_REF=${NIXL_GDRCOPY_REF} "
+
 fi
 
 # MAX_JOBS is only used by Dockerfile.vllm
 if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
+
 if [[ $FRAMEWORK == "SGLANG" ]]; then
-    echo "Forcing Python version to 3.10 for sglang image build"
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+    echo "Customizing Python, CUDA, and framework images for sglang images"
+    BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
 fi
+
+BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
+
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
@@ -810,81 +973,167 @@ if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
     # Add arguments required for sglang blackwell build
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
-LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
-    LATEST_TAG="${LATEST_TAG}-${TARGET}"
+
+# Dev/local-dev targets: build from a concatenated Dockerfile:
+#   <framework Dockerfile> + container/dev/Dockerfile.dev
+if [[ -z "${TARGET:-}" || "${TARGET:-}" == "dev" || "${TARGET:-}" == "local-dev" ]]; then
+    _gen_dev_dockerfile_temp() {
+        local fw_df dev_df out
+        fw_df="$1"
+        dev_df="${SOURCE_DIR}/dev/Dockerfile.dev"
+        if [[ ! -f "${fw_df}" ]]; then
+            error "ERROR:" "Framework Dockerfile not found: ${fw_df}"
+        fi
+        if [[ ! -f "${dev_df}" ]]; then
+            error "ERROR:" "Dev Dockerfile not found: ${dev_df}"
+        fi
+
+        out="$(mktemp -t dynamo-dev-combined.XXXXXX.Dockerfile)"
+        cat "${fw_df}" "${dev_df}" > "${out}"
+        printf '\n' >> "${out}"
+
+        if [[ ! -s "${out}" ]]; then
+            rm -f "${out}"
+            error "ERROR:" "Temp Dockerfile was generated but is empty"
+        fi
+        printf '%s\n' "${out}"
+    }
+
+    DOCKERFILE="$(_gen_dev_dockerfile_temp "${DOCKERFILE}")"
+
+    # Ensure we clean up the temp Dockerfile (opt-out with KEEP_DEV_DOCKERFILE_TEMP=1 for debugging).
+    if [[ "${KEEP_DEV_DOCKERFILE_TEMP:-}" != "1" ]]; then
+        trap 'rm -f "${DOCKERFILE}" 2>/dev/null || true' EXIT
+    fi
+
+    # Dockerfile.dev expects a lowercase framework string.
+    BUILD_ARGS+=" --build-arg FRAMEWORK=${FRAMEWORK,,} "
+
+    # Preserve historical tagging behavior for dev/local-dev (build.sh used to delegate out).
+    base="${TAG#--tag }"
+    base="${base%-runtime}"
+    base="${base%-local-dev}"
+    base="${base%-dev}"
+    if [[ -z "${TARGET:-}" || "${TARGET}" == "dev" ]]; then
+        TAG="--tag ${base}-dev"
+    else
+        TAG="--tag ${base}-local-dev"
+        # Default UID/GID behavior: current user if not specified.
+        if [[ -z "${CUSTOM_UID:-}" ]]; then
+            CUSTOM_UID="$(id -u)"
+        fi
+        if [[ -z "${CUSTOM_GID:-}" ]]; then
+            CUSTOM_GID="$(id -g)"
+        fi
+        BUILD_ARGS+=" --build-arg USER_UID=${CUSTOM_UID} --build-arg USER_GID=${CUSTOM_GID} "
+    fi
+fi
+
+LATEST_TAG=""
+if [ -z "${NO_TAG_LATEST}" ]; then
+    if [[ -z "${TARGET:-}" || "${TARGET}" == "dev" ]]; then
+        LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+    elif [[ "${TARGET}" == "local-dev" ]]; then
+        LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}-local-dev"
+    else
+        LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+        if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+            LATEST_TAG="${LATEST_TAG}-${TARGET}"
+        fi
+    fi
 fi
 
 show_image_options
 
-if [ -z "$RUN_PREFIX" ]; then
-    set -x
+# Handle FRONTEND target: build EPP image first
+if [[ ${TARGET^^} == "FRONTEND" ]]; then
+    echo "Building FRONTEND image - requires EPP image"
+    echo ""
+    echo "Building EPP image for Frontend using Makefile..."
+
+    # EPP directory with the new self-contained build
+    EPP_DIR="${BUILD_CONTEXT}/deploy/inference-gateway/epp"
+
+    # Set DOCKER_PROXY from ECR_HOSTNAME if available (for pulling base images through proxy)
+    # This prevents rate-limiting when building in CI across multiple PRs
+    DOCKER_PROXY_ARG=""
+    if [[ -n "${ECR_HOSTNAME}" ]]; then
+        DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        DOCKER_PROXY_ARG="DOCKER_PROXY=${DOCKER_PROXY}"
+        echo "Using DOCKER_PROXY: ${DOCKER_PROXY}"
+    fi
+
+    # Build EPP image using the Makefile
+    # The Makefile handles: building Dynamo library, building Docker image, loading it locally
+    $RUN_PREFIX make -C "${EPP_DIR}" all DYNAMO_DIR="${BUILD_CONTEXT}" ${DOCKER_PROXY_ARG}
+
+    # Compute EPP image tag (must match Makefile's IMAGE_TAG)
+    # IMAGE_TAG = $(IMAGE_REPO):$(GIT_TAG)
+    # IMAGE_REPO = $(DOCKER_SERVER)/$(IMAGE_NAME)
+    # Image lives in local cache only, not pushed to any registry
+    EPP_DOCKER_SERVER="dynamo"
+    EPP_IMAGE_NAME="dynamo-epp"
+    EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
+    EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
+
+    echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
+
+    # Add build args for frontend image
+    BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
 fi
 
+# Always build the main image first
+# Create build log directory for BuildKit reports
+BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+mkdir -p "${BUILD_LOG_DIR}"
+SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
-# Skip Build 1 and Build 2 if DEV_IMAGE_INPUT is set (we'll handle it at the bottom)
-if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Follow 2-step build process for all frameworks
-    if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag before using it
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
-        # Start base image build
-        echo "======================================"
-        echo "Starting Build 1: Base Image"
-        echo "======================================"
-        $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-        # Start framework build
-        echo "======================================"
-        echo "Starting Build 2: Framework Image"
-        echo "======================================"
-        BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-    else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-    fi
+# Determine --load flag (default on unless --no-load or --push specified)
+LOAD_FLAG=""
+if [ "$NO_LOAD" != "true" ] && [ -z "$PUSH" ]; then
+    LOAD_FLAG=" --load"
 fi
 
-# Handle --dev-image option (build local-dev from existing dev image)
-if [[ -n "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Validate that the dev image is not already a local-dev image
-    if [[ "$DEV_IMAGE_INPUT" == *"-local-dev" ]]; then
-        echo "ERROR: Cannot use local-dev image as dev image input: '$DEV_IMAGE_INPUT'"
-        exit 1
-    fi
+# Use BuildKit for enhanced metadata
+if docker buildx version &>/dev/null; then
+    $RUN_PREFIX docker buildx build --progress=plain${LOAD_FLAG}${PUSH} -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
+else
+    $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
+fi
 
-    # Build tag arguments - always add -local-dev suffix for --dev-image
-    # Generate local-dev tag from input image
-    if [[ "$DEV_IMAGE_INPUT" == *:* ]]; then
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}-local-dev"
+if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+    exit ${BUILD_EXIT_CODE}
+fi
+
+# Handle --make-efa flag: add AWS EFA layer on top of the built image
+# This runs BEFORE local-dev so the flow is: dev -> dev-aws -> local-dev-aws
+if [[ "${MAKE_EFA:-}" == "true" ]]; then
+    # Get the base image that was just built (dev or runtime)
+    BASE_IMAGE_FOR_EFA=$(echo "$TAG" | sed 's/--tag //')
+
+    # Determine the EFA stage based on the target
+    # runtime target -> runtime-aws stage
+    # dev/local-dev target -> dev-aws stage
+    if [[ "${TARGET:-dev}" == "runtime" ]]; then
+        EFA_STAGE="runtime-aws"
     else
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}:latest-local-dev"
+        EFA_STAGE="dev-aws"
     fi
 
-    build_local_dev_with_header "$DEV_IMAGE_INPUT" "$LOCAL_DEV_TAG" "Successfully built local-dev image: ${LOCAL_DEV_TAG#--tag }" "Building Local-Dev Image"
-elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
-    # Use the first tag name (TAG) if available, otherwise use latest
+    # Build AWS tags by appending -aws to existing tags
+    AWS_TAGS=""
     if [[ -n "$TAG" ]]; then
-        DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-    else
-        DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
+        AWS_TAG=$(echo "$TAG" | sed 's/--tag //')
+        AWS_TAGS+=" --tag ${AWS_TAG}-aws"
     fi
-
-    # Build local-dev tags from existing tags
-    LOCAL_DEV_TAGS=""
-    if [[ -n "$TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
-        TAG_NAME=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-        LOCAL_DEV_TAGS+=" --tag ${TAG_NAME}-local-dev"
-    fi
-
     if [[ -n "$LATEST_TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
-        LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-        LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
+        AWS_LATEST_TAG=$(echo "$LATEST_TAG" | sed 's/--tag //')
+        AWS_TAGS+=" --tag ${AWS_LATEST_TAG}-aws"
     fi
 
-    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built local-dev images" "Starting Build 3: Local-Dev Image"
+    build_aws_with_header "$BASE_IMAGE_FOR_EFA" "$AWS_TAGS" "$EFA_STAGE" "Successfully built ${EFA_STAGE} image"
 fi
-
 
 { set +x; } 2>/dev/null

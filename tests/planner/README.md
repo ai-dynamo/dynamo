@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
@@ -10,7 +10,7 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./components/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.txt`
+To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./examples/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.txt`
 
 ## Pre-Requisite: Pre-Deployment Profiling Data
 
@@ -170,12 +170,12 @@ Test complete scaling behavior including Kubernetes deployment and load generati
 
 **Prepare the test deployment manifest:**
 
-The test requires modifying `components/backends/vllm/deploy/disagg_planner.yaml` with test-specific planner arguments:
+The test requires modifying `examples/backends/vllm/deploy/disagg_planner.yaml` with test-specific planner arguments:
 
 1. Copy the base deployment:
 
 ```bash
-cp components/backends/vllm/deploy/disagg_planner.yaml tests/planner/scaling/disagg_planner.yaml
+cp examples/backends/vllm/deploy/disagg_planner.yaml tests/planner/scaling/disagg_planner.yaml
 ```
 
 2. Edit `tests/planner/scaling/disagg_planner.yaml`. Ensure all services use the correct image. Modify the Planner service args:
@@ -195,6 +195,22 @@ spec:
             - --itl=10
             - --load-predictor=constant
             - --no-correction
+```
+
+Remove `volumes` and `volumeMounts`:
+
+```
+# Remove these lines or any similar lines
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
+              name: planner-profile-data
 ```
 
 3. Update the model in VllmPrefillWorker and VllmDecodeWorker services:
@@ -270,8 +286,7 @@ aiperf profile \
   --streaming \
   --input-file /workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
   --custom-dataset-type mooncake_trace \
-  --goodput "time_to_first_token:200 inter_token_latency:10" \
-  -v
+  --goodput "time_to_first_token:200 inter_token_latency:10"
 ```
 
 > [!NOTE]

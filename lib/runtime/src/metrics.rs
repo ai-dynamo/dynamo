@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Metrics registry trait and implementation for Prometheus metrics
@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 // Import commonly used items to avoid verbose prefixes
 use prometheus_names::{
-    COMPONENT_NATS_METRICS, DRT_NATS_METRICS, build_component_metric_name, labels, name_prefix,
-    nats_client, nats_service, sanitize_prometheus_label, sanitize_prometheus_name, work_handler,
+    build_component_metric_name, labels, name_prefix, sanitize_prometheus_label,
+    sanitize_prometheus_name, work_handler,
 };
 
 // Pipeline imports for endpoint creation
@@ -369,14 +369,6 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
         T::with_opts(opts)?
     };
 
-    // Register the metric at all hierarchy levels (parents + self)
-    // First register at all parent levels
-    for parent in parent_hierarchies {
-        let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
-        parent.get_metrics_registry().add_metric(collector)?;
-    }
-
-    // Then register at this level
     let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
     hierarchy.get_metrics_registry().add_metric(collector)?;
 
@@ -540,45 +532,9 @@ impl<H: MetricsHierarchy> Metrics<H> {
 
     /// Get metrics in Prometheus text format
     pub fn prometheus_expfmt(&self) -> anyhow::Result<String> {
-        // Execute callbacks first to ensure any new metrics are added to the registry
-        let callback_results = self
-            .hierarchy
+        self.hierarchy
             .get_metrics_registry()
-            .execute_update_callbacks();
-
-        // Log any callback errors but continue
-        for result in callback_results {
-            if let Err(e) = result {
-                tracing::error!("Error executing metrics callback: {}", e);
-            }
-        }
-
-        // Get the Prometheus registry for this hierarchy
-        let prometheus_registry = self
-            .hierarchy
-            .get_metrics_registry()
-            .get_prometheus_registry();
-
-        // Encode metrics from the registry
-        let metric_families = prometheus_registry.gather();
-        let encoder = prometheus::TextEncoder::new();
-        let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer)?;
-        let mut result = String::from_utf8(buffer)?;
-
-        // Execute and append exposition text callback results
-        let expfmt = self
-            .hierarchy
-            .get_metrics_registry()
-            .execute_expfmt_callbacks();
-        if !expfmt.is_empty() {
-            if !result.ends_with('\n') {
-                result.push('\n');
-            }
-            result.push_str(&expfmt);
-        }
-
-        Ok(result)
+            .prometheus_expfmt_combined()
     }
 }
 
@@ -646,10 +602,30 @@ pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + 
 pub type PrometheusExpositionFormatCallback =
     Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
-/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
+/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
+///
+/// All fields are Arc-wrapped, so cloning shares state. This ensures metrics registered
+/// on cloned instances (e.g., cloned Client/Endpoint) are visible to the original.
+#[derive(Clone)]
 pub struct MetricsRegistry {
-    /// The Prometheus registry for this hierarchy (with interior mutability for thread-safe access)
-    pub prometheus_registry: std::sync::RwLock<prometheus::Registry>,
+    /// The Prometheus registry for this hierarchy.
+    /// Arc-wrapped so clones share the same registry (metrics registered on clones are visible everywhere).
+    pub prometheus_registry: Arc<std::sync::RwLock<prometheus::Registry>>,
+
+    /// Child registries included when emitting combined `/metrics` output.
+    ///
+    /// Why this exists:
+    /// - Previously, `create_metric()` registered every collector into *all* parent registries
+    ///   (Endpoint → Component → Namespace → DRT) so scraping the root registry included everything.
+    /// - That fan-out caused Prometheus collisions when different endpoints tried to register the
+    ///   same metric name with different const-labels (descriptor mismatch).
+    ///
+    /// We now register metrics only into the local hierarchy registry to avoid collisions.
+    /// `child_registries` rebuilds “what to scrape” as a tree of registries so `/metrics` can:
+    /// - traverse registries recursively,
+    /// - merge metric families into one exposition payload,
+    /// - warn/drop exact duplicate series, while allowing same metric name with different labels.
+    child_registries: Arc<std::sync::RwLock<Vec<MetricsRegistry>>>,
 
     /// Update callbacks invoked before metrics are scraped.
     /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
@@ -683,28 +659,174 @@ impl std::fmt::Debug for MetricsRegistry {
     }
 }
 
-impl Clone for MetricsRegistry {
-    fn clone(&self) -> Self {
-        Self {
-            prometheus_registry: std::sync::RwLock::new(
-                self.prometheus_registry.read().unwrap().clone(),
-            ),
-            // Clone the Arc to share callbacks across all clones (prevents callback loss).
-            // Previously used Vec::new() here, which caused vllm: metrics to disappear.
-            prometheus_update_callbacks: Arc::clone(&self.prometheus_update_callbacks),
-            prometheus_expfmt_callbacks: Arc::clone(&self.prometheus_expfmt_callbacks),
-        }
-    }
-}
-
 impl MetricsRegistry {
     /// Create a new metrics registry with an empty Prometheus registry and callback lists
     pub fn new() -> Self {
         Self {
-            prometheus_registry: std::sync::RwLock::new(prometheus::Registry::new()),
+            prometheus_registry: Arc::new(std::sync::RwLock::new(prometheus::Registry::new())),
+            child_registries: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
+    }
+
+    /// Add a child registry to be included in combined /metrics output.
+    ///
+    /// Dedup is by underlying Prometheus registry pointer, so repeated registration via clones is safe.
+    pub fn add_child_registry(&self, child: &MetricsRegistry) {
+        let child_ptr = Arc::as_ptr(&child.prometheus_registry);
+        let mut guard = self.child_registries.write().unwrap();
+        if guard
+            .iter()
+            .any(|r| Arc::as_ptr(&r.prometheus_registry) == child_ptr)
+        {
+            return;
+        }
+        guard.push(child.clone());
+    }
+
+    fn registries_for_combined_scrape(&self) -> Vec<MetricsRegistry> {
+        // Traverse child registries recursively so `prometheus_expfmt()` on any hierarchy
+        // (DRT/namespace/component/endpoint) includes metrics from its descendants.
+        //
+        // Dedup by underlying Prometheus registry pointer so multiple paths (e.g. also registering
+        // directly on the root) won't duplicate output.
+        fn visit(
+            registry: &MetricsRegistry,
+            out: &mut Vec<MetricsRegistry>,
+            seen: &mut HashSet<*const std::sync::RwLock<prometheus::Registry>>,
+        ) {
+            let ptr = Arc::as_ptr(&registry.prometheus_registry);
+            if !seen.insert(ptr) {
+                return;
+            }
+
+            out.push(registry.clone());
+
+            let children: Vec<MetricsRegistry> = registry
+                .child_registries
+                .read()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect();
+            for child in children {
+                visit(&child, out, seen);
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut seen: HashSet<*const std::sync::RwLock<prometheus::Registry>> = HashSet::new();
+        visit(self, &mut out, &mut seen);
+        out
+    }
+
+    /// Combine metrics across this registry and all registered children into one Prometheus exposition output.
+    ///
+    /// - Families are merged by name; HELP and TYPE must match.
+    /// - Multiple series for the same name are allowed if labels differ.
+    /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
+    pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
+        let registries = self.registries_for_combined_scrape();
+
+        // Run per-registry update callbacks first.
+        for registry in &registries {
+            for result in registry.execute_update_callbacks() {
+                if let Err(e) = result {
+                    tracing::error!("Error executing metrics callback: {}", e);
+                }
+            }
+        }
+
+        // Merge metric families.
+        let mut by_name: HashMap<String, prometheus::proto::MetricFamily> = HashMap::new();
+        let mut seen_series: HashSet<String> = HashSet::new();
+
+        for (registry_idx, registry) in registries.iter().enumerate() {
+            let families = registry.get_prometheus_registry().gather();
+            for mut family in families {
+                let name = family.name().to_string();
+
+                let entry = by_name.entry(name.clone()).or_insert_with(|| {
+                    let mut out = prometheus::proto::MetricFamily::new();
+                    out.set_name(name.clone());
+                    out.set_help(family.help().to_string());
+                    out.set_field_type(family.get_field_type());
+                    out
+                });
+
+                if entry.help() != family.help()
+                    || entry.get_field_type() != family.get_field_type()
+                {
+                    return Err(anyhow::anyhow!(
+                        "Metric family '{}' has inconsistent help/type across registries (idx={})",
+                        name,
+                        registry_idx
+                    ));
+                }
+
+                let mut metrics = family.take_metric();
+                for metric in metrics.drain(..) {
+                    let mut labels: Vec<(String, String)> = metric
+                        .get_label()
+                        .iter()
+                        .map(|lp| (lp.name().to_string(), lp.value().to_string()))
+                        .collect();
+                    labels.sort_by(|(ka, va), (kb, vb)| (ka, va).cmp(&(kb, vb)));
+
+                    let key = format!(
+                        "{}|{}",
+                        name,
+                        labels
+                            .iter()
+                            .map(|(k, v)| format!("{}={}", k, v))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+
+                    if !seen_series.insert(key) {
+                        tracing::warn!(
+                            metric_name = %name,
+                            labels = ?labels,
+                            registry_idx,
+                            "Duplicate Prometheus series while merging registries; dropping later sample"
+                        );
+                        continue;
+                    }
+
+                    entry.mut_metric().push(metric);
+                }
+            }
+        }
+
+        let mut merged: Vec<prometheus::proto::MetricFamily> = by_name.into_values().collect();
+        merged.sort_by(|a, b| a.name().cmp(b.name()));
+
+        let encoder = prometheus::TextEncoder::new();
+        let mut buffer = Vec::new();
+        encoder.encode(&merged, &mut buffer)?;
+        let mut result = String::from_utf8(buffer)?;
+
+        // Append expfmt callbacks deterministically in registry order.
+        let mut expfmt = String::new();
+        for registry in registries {
+            let text = registry.execute_expfmt_callbacks();
+            if !text.is_empty() {
+                if !expfmt.is_empty() && !expfmt.ends_with('\n') {
+                    expfmt.push('\n');
+                }
+                expfmt.push_str(&text);
+            }
+        }
+
+        if !expfmt.is_empty() {
+            if !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str(&expfmt);
+        }
+
+        Ok(result)
     }
 
     /// Add a callback function that receives a reference to any MetricsHierarchy
@@ -792,7 +914,6 @@ impl Default for MetricsRegistry {
 #[cfg(test)]
 mod test_helpers {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::{nats_client, nats_service};
     use super::*;
 
     /// Base function to filter Prometheus output lines based on a predicate.
@@ -806,36 +927,6 @@ mod test_helpers {
             .filter(|line| predicate(line))
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
-    }
-
-    /// Filters out all NATS metrics from Prometheus output for test comparisons.
-    pub fn remove_nats_lines(input: &str) -> Vec<String> {
-        filter_prometheus_lines(input, |line| {
-            !line.contains(&format!(
-                "{}_{}",
-                name_prefix::COMPONENT,
-                nats_client::PREFIX
-            )) && !line.contains(&format!(
-                "{}_{}",
-                name_prefix::COMPONENT,
-                nats_service::PREFIX
-            )) && !line.trim().is_empty()
-        })
-    }
-
-    /// Filters to only include NATS metrics from Prometheus output for test comparisons.
-    pub fn extract_nats_lines(input: &str) -> Vec<String> {
-        filter_prometheus_lines(input, |line| {
-            line.contains(&format!(
-                "{}_{}",
-                name_prefix::COMPONENT,
-                nats_client::PREFIX
-            )) || line.contains(&format!(
-                "{}_{}",
-                name_prefix::COMPONENT,
-                nats_service::PREFIX
-            ))
-        })
     }
 
     /// Extracts all component metrics (excluding help text and type definitions).
@@ -1161,6 +1252,37 @@ mod test_metricsregistry_prefixes {
     }
 
     #[tokio::test]
+    async fn test_expfmt_callback_only_registered_on_endpoint_is_included_once() {
+        // Sanity test: if an expfmt callback is registered only on the endpoint registry,
+        // scraping from the root (DRT) should still include it exactly once via the
+        // child-registry traversal.
+        let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns_expfmt_ep_only").unwrap();
+        let component = namespace.component("comp_expfmt_ep_only").unwrap();
+        let endpoint = component.endpoint("ep_expfmt_ep_only");
+
+        let metric_line = "dynamo_component_active_decode_blocks{dp_rank=\"0\"} 0\n";
+        let callback: PrometheusExpositionFormatCallback =
+            Arc::new(move || Ok(metric_line.to_string()));
+
+        endpoint
+            .get_metrics_registry()
+            .add_expfmt_callback(callback);
+
+        let output = drt.metrics().prometheus_expfmt().unwrap();
+        let occurrences = output
+            .lines()
+            .filter(|line| line == &metric_line.trim_end_matches('\n'))
+            .count();
+
+        assert_eq!(
+            occurrences, 1,
+            "endpoint-registered exposition callback should appear once, got {} occurrences\n\n{}",
+            occurrences, output
+        );
+    }
+
+    #[tokio::test]
     async fn test_recursive_namespace() {
         // Create a distributed runtime for testing
         let drt = create_test_drt_async().await;
@@ -1208,8 +1330,6 @@ mod test_metricsregistry_prefixes {
 #[cfg(test)]
 mod test_metricsregistry_prometheus_fmt_outputs {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
-    use super::prometheus_names::{nats_client, nats_service};
     use super::*;
     use crate::distributed::distributed_test_utils::create_test_drt_async;
     use prometheus::Counter;
@@ -1240,21 +1360,19 @@ mod test_metricsregistry_prometheus_fmt_outputs {
         println!("Endpoint output:");
         println!("{}", endpoint_output_raw);
 
-        // Filter out NATS service metrics for test comparison
-        let endpoint_output =
-            super::test_helpers::remove_nats_lines(&endpoint_output_raw).join("\n");
-
         let expected_endpoint_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789"#.to_string();
 
         assert_eq!(
-            endpoint_output, expected_endpoint_output,
+            endpoint_output_raw.trim_end_matches('\n'),
+            expected_endpoint_output.trim_end_matches('\n'),
             "\n=== ENDPOINT COMPARISON FAILED ===\n\
-             Expected:\n{}\n\
              Actual:\n{}\n\
+             Expected:\n{}\n\
              ==============================",
-            expected_endpoint_output, endpoint_output
+            endpoint_output_raw,
+            expected_endpoint_output
         );
 
         // Test Gauge creation
@@ -1270,10 +1388,6 @@ dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",
         println!("Component output:");
         println!("{}", component_output_raw);
 
-        // Filter out NATS service metrics for test comparison
-        let component_output =
-            super::test_helpers::remove_nats_lines(&component_output_raw).join("\n");
-
         let expected_component_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
@@ -1282,12 +1396,14 @@ dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",
 dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000"#.to_string();
 
         assert_eq!(
-            component_output, expected_component_output,
+            component_output_raw.trim_end_matches('\n'),
+            expected_component_output.trim_end_matches('\n'),
             "\n=== COMPONENT COMPARISON FAILED ===\n\
-             Expected:\n{}\n\
              Actual:\n{}\n\
+             Expected:\n{}\n\
              ==============================",
-            expected_component_output, component_output
+            component_output_raw,
+            expected_component_output
         );
 
         let intcounter = namespace
@@ -1302,10 +1418,6 @@ dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 
         println!("Namespace output:");
         println!("{}", namespace_output_raw);
 
-        // Filter out NATS service metrics for test comparison
-        let namespace_output =
-            super::test_helpers::remove_nats_lines(&namespace_output_raw).join("\n");
-
         let expected_namespace_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
@@ -1317,12 +1429,14 @@ dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 
 dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
 
         assert_eq!(
-            namespace_output, expected_namespace_output,
+            namespace_output_raw.trim_end_matches('\n'),
+            expected_namespace_output.trim_end_matches('\n'),
             "\n=== NAMESPACE COMPARISON FAILED ===\n\
-             Expected:\n{}\n\
              Actual:\n{}\n\
+             Expected:\n{}\n\
              ==============================",
-            expected_namespace_output, namespace_output
+            namespace_output_raw,
+            expected_namespace_output
         );
 
         // Test IntGauge creation
@@ -1377,10 +1491,6 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
         println!("DRT output:");
         println!("{}", drt_output_raw);
 
-        // Filter out all NATS metrics for comparison
-        let filtered_drt_output =
-            super::test_helpers::remove_nats_lines(&drt_output_raw).join("\n");
-
         let expected_drt_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
@@ -1422,12 +1532,14 @@ dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",ser
 dynamo_component_uptime_seconds 0"#.to_string();
 
         assert_eq!(
-            filtered_drt_output, expected_drt_output,
+            drt_output_raw.trim_end_matches('\n'),
+            expected_drt_output.trim_end_matches('\n'),
             "\n=== DRT COMPARISON FAILED ===\n\
              Expected:\n{}\n\
              Actual (filtered):\n{}\n\
              ==============================",
-            expected_drt_output, filtered_drt_output
+            expected_drt_output,
+            drt_output_raw
         );
 
         println!("✓ All Prometheus format outputs verified successfully!");
@@ -1435,33 +1547,19 @@ dynamo_component_uptime_seconds 0"#.to_string();
 
     #[test]
     fn test_refactored_filter_functions() {
-        // Test data with mixed content
+        // Test data with component metrics
         let test_input = r#"# HELP dynamo_component_requests Total requests
 # TYPE dynamo_component_requests counter
 dynamo_component_requests 42
-# HELP dynamo_component_nats_client_connection_state Connection state
-# TYPE dynamo_component_nats_client_connection_state gauge
-dynamo_component_nats_client_connection_state 1
 # HELP dynamo_component_latency Response latency
 # TYPE dynamo_component_latency histogram
 dynamo_component_latency_bucket{le="0.1"} 10
 dynamo_component_latency_bucket{le="0.5"} 25
-dynamo_component_nats_service_requests_total 100
-dynamo_component_nats_service_errors_total 5"#;
-
-        // Test remove_nats_lines (excludes NATS lines but keeps help/type)
-        let filtered_out = super::test_helpers::remove_nats_lines(test_input);
-        assert_eq!(filtered_out.len(), 7); // 7 non-NATS lines
-        assert!(!filtered_out.iter().any(|line| line.contains("nats")));
-
-        // Test extract_nats_lines (includes all NATS lines including help/type)
-        let filtered_only = super::test_helpers::extract_nats_lines(test_input);
-        assert_eq!(filtered_only.len(), 5); // 5 NATS lines
-        assert!(filtered_only.iter().all(|line| line.contains("nats")));
+dynamo_component_errors_total 5"#;
 
         // Test extract_metrics (only actual metric lines, excluding help/type)
         let metrics_only = super::test_helpers::extract_metrics(test_input);
-        assert_eq!(metrics_only.len(), 6); // 6 actual metric lines (excluding help/type)
+        assert_eq!(metrics_only.len(), 4); // 4 actual metric lines (excluding help/type)
         assert!(
             metrics_only
                 .iter()
@@ -1470,492 +1568,96 @@ dynamo_component_nats_service_errors_total 5"#;
 
         println!("✓ All refactored filter functions work correctly!");
     }
-}
 
-#[cfg(feature = "integration")]
-#[cfg(test)]
-mod test_metricsregistry_nats {
-    use super::prometheus_names::name_prefix;
-    use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
-    use super::prometheus_names::{nats_client, nats_service};
-    use super::*;
-    use crate::distributed::distributed_test_utils::create_test_drt_async;
-    use crate::pipeline::PushRouter;
-    use crate::{DistributedRuntime, Runtime};
-    use tokio::time::{Duration, sleep};
     #[tokio::test]
-    async fn test_drt_nats_metrics() {
-        // Setup real DRT and registry using the test-friendly constructor
+    async fn test_same_metric_name_different_endpoints() {
+        // Test that the same metric name can exist in different endpoints without collision.
+        // This validates the multi-registry approach: each endpoint has its own registry,
+        // and metrics are merged at scrape time with distinct labels.
         let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns_test").unwrap();
+        let component = namespace.component("comp_test").unwrap();
 
-        // Get DRT output which should include NATS client metrics
-        let drt_output = drt.metrics().prometheus_expfmt().unwrap();
-        println!("DRT output with NATS metrics:");
-        println!("{}", drt_output);
+        // Create two endpoints with the same metric name
+        let ep1 = component.endpoint("ep1");
+        let ep2 = component.endpoint("ep2");
 
-        // Additional checks for NATS client metrics (without checking specific values)
-        let drt_nats_metrics = super::test_helpers::extract_nats_lines(&drt_output);
+        let counter1 = ep1
+            .metrics()
+            .create_counter("requests_total", "Total requests", &[])
+            .unwrap();
+        counter1.inc_by(100.0);
 
-        // Check that NATS client metrics are present
-        assert!(
-            !drt_nats_metrics.is_empty(),
-            "NATS client metrics should be present"
-        );
+        let counter2 = ep2
+            .metrics()
+            .create_counter("requests_total", "Total requests", &[])
+            .unwrap();
+        counter2.inc_by(200.0);
 
-        // Check for specific NATS client metric names (without values)
-        // Extract only the metric lines from the already-filtered NATS metrics
-        let drt_nats_metric_lines =
-            super::test_helpers::extract_metrics(&drt_nats_metrics.join("\n"));
-        let actual_drt_nats_metrics_sorted: Vec<&str> = drt_nats_metric_lines
-            .iter()
-            .map(|line| {
-                let without_labels = line.split('{').next().unwrap_or(line);
-                // Remove the value part (everything after the last space)
-                without_labels.split(' ').next().unwrap_or(without_labels)
-            })
-            .collect();
+        // Get merged Prometheus output from component level
+        let output = component.metrics().prometheus_expfmt().unwrap();
 
-        let expect_drt_nats_metrics_sorted = {
-            let mut temp = DRT_NATS_METRICS
-                .iter()
-                .map(|metric| build_component_metric_name(metric))
-                .collect::<Vec<_>>();
-            temp.sort();
-            temp
-        };
+        let expected_output = r#"# HELP dynamo_component_requests_total Total requests
+# TYPE dynamo_component_requests_total counter
+dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep1",dynamo_namespace="ns_test"} 100
+dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep2",dynamo_namespace="ns_test"} 200"#;
 
-        // Print both lists for comparison
-        println!(
-            "actual_drt_nats_metrics_sorted: {:?}",
-            actual_drt_nats_metrics_sorted
-        );
-        println!(
-            "expect_drt_nats_metrics_sorted: {:?}",
-            expect_drt_nats_metrics_sorted
-        );
-
-        // Compare the sorted lists
         assert_eq!(
-            actual_drt_nats_metrics_sorted, expect_drt_nats_metrics_sorted,
-            "DRT_NATS_METRICS with prefix and expected_nats_metrics should be identical when sorted"
+            output.trim_end_matches('\n'),
+            expected_output.trim_end_matches('\n'),
+            "\n=== MULTI-REGISTRY COMPARISON FAILED ===\n\
+             Actual:\n{}\n\
+             Expected:\n{}\n\
+             ==============================",
+            output,
+            expected_output
         );
 
-        println!("✓ DistributedRuntime NATS metrics integration test passed!");
+        println!("✓ Multi-registry prevents Prometheus collisions!");
     }
 
     #[tokio::test]
-    async fn test_nats_metric_names() {
-        // This test only tests the existence of the NATS metrics. It does not check
-        // the values of the metrics.
-
-        // Setup real DRT and registry using the test-friendly constructor
+    async fn test_duplicate_series_warning() {
+        // Test that duplicate series (same metric name + same labels) are detected and deduplicated.
+        // This should log a warning and keep only one of the duplicate series.
         let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns_dup").unwrap();
+        let component = namespace.component("comp_dup").unwrap();
 
-        // Create a namespace and component from the DRT
-        let namespace = drt.namespace("ns789").unwrap();
-        let mut component = namespace.component("comp789").unwrap();
+        // Create two endpoints with counters that will have identical labels when scraped
+        let ep1 = component.endpoint("ep_same");
+        let ep2 = component.endpoint("ep_same"); // Same endpoint name = duplicate labels
 
-        // Create a service to trigger metrics callback registration
-        component.add_stats_service().await.unwrap();
+        let counter1 = ep1
+            .metrics()
+            .create_counter("dup_metric", "Duplicate metric test", &[])
+            .unwrap();
+        counter1.inc_by(50.0);
 
-        // Get component output which should include NATS client metrics
-        // Additional checks for NATS client metrics (without checking specific values)
-        let component_nats_metrics = super::test_helpers::extract_nats_lines(
-            &component.metrics().prometheus_expfmt().unwrap(),
-        );
-        println!(
-            "Component NATS metrics count: {}",
-            component_nats_metrics.len()
-        );
+        let counter2 = ep2
+            .metrics()
+            .create_counter("dup_metric", "Duplicate metric test", &[])
+            .unwrap();
+        counter2.inc_by(75.0);
 
-        // Check that NATS client metrics are present
-        assert!(
-            !component_nats_metrics.is_empty(),
-            "NATS client metrics should be present"
-        );
+        // Get merged output - duplicates should be deduplicated
+        let output = component.metrics().prometheus_expfmt().unwrap();
 
-        // Check for specific NATS client metric names (without values)
-        let component_metrics =
-            super::test_helpers::extract_metrics(&component.metrics().prometheus_expfmt().unwrap());
-        let actual_component_nats_metrics_sorted: Vec<&str> = component_metrics
-            .iter()
-            .map(|line| {
-                let without_labels = line.split('{').next().unwrap_or(line);
-                // Remove the value part (everything after the last space)
-                without_labels.split(' ').next().unwrap_or(without_labels)
-            })
-            .collect();
+        let expected_output = r#"# HELP dynamo_component_dup_metric Duplicate metric test
+# TYPE dynamo_component_dup_metric counter
+dynamo_component_dup_metric{dynamo_component="comp_dup",dynamo_endpoint="ep_same",dynamo_namespace="ns_dup"} 50"#;
 
-        let expect_component_nats_metrics_sorted = {
-            let mut temp = COMPONENT_NATS_METRICS
-                .iter()
-                .map(|metric| build_component_metric_name(metric))
-                .collect::<Vec<_>>();
-            temp.sort();
-            temp
-        };
-
-        // Print both lists for comparison
-        println!(
-            "actual_component_nats_metrics_sorted: {:?}",
-            actual_component_nats_metrics_sorted
-        );
-        println!(
-            "expect_component_nats_metrics_sorted: {:?}",
-            expect_component_nats_metrics_sorted
-        );
-
-        // Compare the sorted lists
         assert_eq!(
-            actual_component_nats_metrics_sorted, expect_component_nats_metrics_sorted,
-            "COMPONENT_NATS_METRICS with prefix and expected_nats_metrics should be identical when sorted"
+            output.trim_end_matches('\n'),
+            expected_output.trim_end_matches('\n'),
+            "\n=== DEDUPLICATION COMPARISON FAILED ===\n\
+             Actual:\n{}\n\
+             Expected:\n{}\n\
+             ==============================",
+            output,
+            expected_output
         );
 
-        // Get both DRT and component output and filter for NATS metrics only
-        let drt_output = drt.metrics().prometheus_expfmt().unwrap();
-        let drt_nats_lines = super::test_helpers::extract_nats_lines(&drt_output);
-        let drt_and_component_nats_metrics =
-            super::test_helpers::extract_metrics(&drt_nats_lines.join("\n"));
-        println!(
-            "DRT and component NATS metrics count: {}",
-            drt_and_component_nats_metrics.len()
-        );
-
-        // Check that the NATS metrics are present in the component output
-        assert_eq!(
-            drt_and_component_nats_metrics.len(),
-            DRT_NATS_METRICS.len() + COMPONENT_NATS_METRICS.len(),
-            "DRT at this point should have both the DRT and component NATS metrics"
-        );
-
-        // Check that the NATS metrics are present in the component output
-        println!("✓ Component NATS metrics integration test passed!");
-    }
-
-    /// Tests NATS metrics values before and after endpoint activity with large message processing.
-    /// Creates endpoint, sends test messages + 10k byte message, validates metrics (NATS + work handler)
-    /// at initial state and post-activity state. Ensures byte thresholds, message counts, and processing
-    /// times are within expected ranges. Tests end-to-end client-server communication and metrics collection.
-    #[tokio::test]
-    async fn test_nats_metrics_values() -> anyhow::Result<()> {
-        struct MessageHandler {}
-        impl MessageHandler {
-            fn new() -> std::sync::Arc<Self> {
-                std::sync::Arc::new(Self {})
-            }
-        }
-
-        #[async_trait]
-        impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for MessageHandler {
-            async fn generate(
-                &self,
-                input: SingleIn<String>,
-            ) -> Result<ManyOut<Annotated<String>>, Error> {
-                let (data, ctx) = input.into_parts();
-                let response = data.to_string();
-                let stream = stream::iter(vec![Annotated::from_data(response)]);
-                Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
-            }
-        }
-
-        println!("\n=== Initializing DistributedRuntime ===");
-        let runtime = Runtime::from_current()?;
-        let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
-        let namespace = drt.namespace("ns123").unwrap();
-        let mut component = namespace.component("comp123").unwrap();
-        let ingress = Ingress::for_engine(MessageHandler::new()).unwrap();
-
-        let _backend_handle = tokio::spawn(async move {
-            component.add_stats_service().await.unwrap();
-            let endpoint = component
-                .endpoint("echo")
-                .endpoint_builder()
-                .handler(ingress);
-            endpoint.start().await.unwrap();
-        });
-
-        sleep(Duration::from_millis(500)).await;
-        println!("✓ Launched endpoint service in background successfully");
-
-        let drt_output = drt.metrics().prometheus_expfmt().unwrap();
-        let parsed_metrics: Vec<_> = drt_output
-            .lines()
-            .filter_map(super::test_helpers::parse_prometheus_metric)
-            .collect();
-
-        println!("=== Initial DRT metrics output ===");
-        println!("{}", drt_output);
-
-        println!("\n=== Checking Initial Metric Values ===");
-
-        let initial_expected_metric_values = [
-            // DRT NATS metrics (ordered to match DRT_NATS_METRICS)
-            (
-                build_component_metric_name(nats_client::CONNECTION_STATE),
-                1.0,
-                1.0,
-            ), // Should be connected
-            (
-                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
-                1.0,
-                1.0,
-            ), // Should have 1 connection
-            (
-                build_component_metric_name(nats_client::IN_TOTAL_BYTES),
-                800.0,
-                4000.0,
-            ), // Wide range around observed value of 1888
-            (
-                build_component_metric_name(nats_client::IN_MESSAGES),
-                0.0,
-                5.0,
-            ), // Wide range around 2
-            (
-                build_component_metric_name(nats_client::OUT_OVERHEAD_BYTES),
-                1500.0,
-                5000.0,
-            ), // Wide range around observed value of 2752
-            (
-                build_component_metric_name(nats_client::OUT_MESSAGES),
-                0.0,
-                5.0,
-            ), // Wide range around 2
-            // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
-            (
-                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
-                0.0,
-                0.0,
-            ), // No processing yet
-            (
-                build_component_metric_name(nats_service::ERRORS_TOTAL),
-                0.0,
-                0.0,
-            ), // No errors yet
-            (
-                build_component_metric_name(nats_service::REQUESTS_TOTAL),
-                0.0,
-                0.0,
-            ), // No requests yet
-            (
-                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
-                0.0,
-                0.0,
-            ), // No processing yet
-            (
-                build_component_metric_name(nats_service::ACTIVE_SERVICES),
-                0.0,
-                2.0,
-            ), // Service may not be fully active yet
-            (
-                build_component_metric_name(nats_service::ACTIVE_ENDPOINTS),
-                0.0,
-                2.0,
-            ), // Endpoint may not be fully active yet
-        ];
-
-        for (metric_name, min_value, max_value) in &initial_expected_metric_values {
-            let actual_value = parsed_metrics
-                .iter()
-                .find(|(name, _, _)| name == metric_name)
-                .map(|(_, _, value)| *value)
-                .unwrap_or_else(|| panic!("Could not find expected metric: {}", metric_name));
-
-            assert!(
-                actual_value >= *min_value && actual_value <= *max_value,
-                "Initial metric {} should be between {} and {}, but got {}",
-                metric_name,
-                min_value,
-                max_value,
-                actual_value
-            );
-        }
-
-        println!("\n=== Client Runtime to hit the endpoint ===");
-        let client_runtime = Runtime::from_current()?;
-        let client_distributed = DistributedRuntime::from_settings(client_runtime.clone()).await?;
-        let namespace = client_distributed.namespace("ns123")?;
-        let component = namespace.component("comp123")?;
-        let client = component.endpoint("echo").client().await?;
-
-        client.wait_for_instances().await?;
-        println!("✓ Connected to endpoint, waiting for instances...");
-
-        let router =
-            PushRouter::<String, Annotated<String>>::from_client(client, Default::default())
-                .await?;
-
-        for i in 0..10 {
-            let msg = i.to_string().repeat(2000); // 2k bytes message
-            let mut stream = router.random(msg.clone().into()).await?;
-            while let Some(resp) = stream.next().await {
-                // Check if response matches the original message
-                if let Some(data) = &resp.data {
-                    let is_same = data == &msg;
-                    println!(
-                        "Response {}: {} bytes, matches original: {}",
-                        i,
-                        data.len(),
-                        is_same
-                    );
-                }
-            }
-        }
-        println!("✓ Sent messages and received responses successfully");
-
-        println!("\n=== Waiting 500ms for metrics to update ===");
-        sleep(Duration::from_millis(500)).await;
-        println!("✓ Wait complete, getting final metrics...");
-
-        let final_drt_output = drt.metrics().prometheus_expfmt().unwrap();
-        println!("\n=== Final Prometheus DRT output ===");
-        println!("{}", final_drt_output);
-
-        let final_drt_nats_output = super::test_helpers::extract_nats_lines(&final_drt_output);
-        println!("\n=== Filtered NATS metrics from final DRT output ===");
-        for line in &final_drt_nats_output {
-            println!("{}", line);
-        }
-
-        let final_parsed_metrics: Vec<_> = super::test_helpers::extract_metrics(&final_drt_output)
-            .iter()
-            .filter_map(|line| super::test_helpers::parse_prometheus_metric(line.as_str()))
-            .collect();
-
-        let post_expected_metric_values = [
-            // DRT NATS metrics
-            (
-                build_component_metric_name(nats_client::CONNECTION_STATE),
-                1.0,
-                1.0,
-            ), // Connected
-            (
-                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
-                1.0,
-                1.0,
-            ), // 1 connection
-            (
-                build_component_metric_name(nats_client::IN_TOTAL_BYTES),
-                20000.0,
-                32000.0,
-            ), // Wide range around 26117
-            (
-                build_component_metric_name(nats_client::IN_MESSAGES),
-                8.0,
-                20.0,
-            ), // Wide range around 16
-            (
-                build_component_metric_name(nats_client::OUT_OVERHEAD_BYTES),
-                2500.0,
-                8000.0,
-            ), // Wide range around 5524
-            (
-                build_component_metric_name(nats_client::OUT_MESSAGES),
-                8.0,
-                20.0,
-            ), // Wide range around 16
-            // Component NATS metrics
-            (
-                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
-                0.0,
-                1.0,
-            ), // Low processing time
-            (
-                build_component_metric_name(nats_service::ERRORS_TOTAL),
-                0.0,
-                0.0,
-            ), // No errors
-            (
-                build_component_metric_name(nats_service::REQUESTS_TOTAL),
-                0.0,
-                10.0,
-            ), // NATS service stats requests (may differ from work handler count)
-            (
-                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
-                0.0,
-                5.0,
-            ), // Low total processing time
-            (
-                build_component_metric_name(nats_service::ACTIVE_SERVICES),
-                0.0,
-                2.0,
-            ), // Service may not be fully active
-            (
-                build_component_metric_name(nats_service::ACTIVE_ENDPOINTS),
-                0.0,
-                2.0,
-            ), // Endpoint may not be fully active
-            // Work handler metrics
-            (
-                build_component_metric_name(work_handler::REQUESTS_TOTAL),
-                10.0,
-                10.0,
-            ), // 10 messages
-            (
-                build_component_metric_name(work_handler::REQUEST_BYTES_TOTAL),
-                21000.0,
-                26000.0,
-            ), // ~75-125% of 23520
-            (
-                build_component_metric_name(work_handler::RESPONSE_BYTES_TOTAL),
-                18000.0,
-                23000.0,
-            ), // ~75-125% of 20660
-            (
-                build_component_metric_name(work_handler::INFLIGHT_REQUESTS),
-                0.0,
-                1.0,
-            ), // 0 or very low
-            // Histograms have _{count,sum} suffixes
-            (
-                format!(
-                    "{}_count",
-                    build_component_metric_name(work_handler::REQUEST_DURATION_SECONDS)
-                ),
-                10.0,
-                10.0,
-            ), // 10 messages
-            (
-                format!(
-                    "{}_sum",
-                    build_component_metric_name(work_handler::REQUEST_DURATION_SECONDS)
-                ),
-                0.0001,
-                1.0,
-            ), // Processing time sum (wide range)
-        ];
-
-        println!("\n=== Checking Post-Activity All Metrics (NATS + Work Handler) ===");
-        for (metric_name, min_value, max_value) in &post_expected_metric_values {
-            let actual_value = final_parsed_metrics
-                .iter()
-                .find(|(name, _, _)| name == metric_name)
-                .map(|(_, _, value)| *value)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Could not find expected post-activity metric: {}",
-                        metric_name
-                    )
-                });
-
-            assert!(
-                actual_value >= *min_value && actual_value <= *max_value,
-                "Post-activity metric {} should be between {} and {}, but got {}",
-                metric_name,
-                min_value,
-                max_value,
-                actual_value
-            );
-            println!(
-                "✓ {}: {} (range: {} to {})",
-                metric_name, actual_value, min_value, max_value
-            );
-        }
-
-        println!("✓ All NATS and component metrics parsed successfully!");
-        println!("✓ Byte metrics verified to be >= 100 bytes!");
-        println!("✓ Post-activity metrics verified with higher thresholds!");
-        println!("✓ Work handler metrics reflect increased activity!");
-
-        Ok(())
+        println!("✓ Duplicate series detection and deduplication works!");
     }
 }

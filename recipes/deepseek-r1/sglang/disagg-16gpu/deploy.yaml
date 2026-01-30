@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -6,27 +6,25 @@ kind: DynamoGraphDeployment
 metadata:
   name: sgl-dsr1-16gpu
 spec:
+  envs:
+    - name: HF_HOME
+      value: /opt/model
   pvcs:
     - name: model-cache
       create: false
   services:
     Frontend:
-      dynamoNamespace: sgl-dsr1-16gpu
       componentType: frontend
       replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/model
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 10
-            timeoutSeconds: 1800
-            failureThreshold: 60
-          image: my-registry/sglang-wideep-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
     decode:
-      dynamoNamespace: sgl-dsr1-16gpu
       componentType: worker
+      subComponentType: decode
       replicas: 1
       multinode:
         nodeCount: 2
@@ -35,20 +33,13 @@ spec:
           gpu: "8"
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/model
       sharedMemory:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 600
-          image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
@@ -69,17 +60,16 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - decode
-            - --disaggregation-transfer-backend
-            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --mem-fraction-static
             - "0.75"
             - --host
             - 0.0.0.0
+            - --prefill-round-robin-balance
     prefill:
-      dynamoNamespace: sgl-dsr1-16gpu
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       multinode:
         nodeCount: 2
@@ -88,20 +78,13 @@ spec:
           gpu: "8"
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/model
       sharedMemory:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 600
-          image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
@@ -119,11 +102,11 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - prefill
-            - --disaggregation-transfer-backend
-            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --mem-fraction-static
             - "0.75"
             - --host
             - 0.0.0.0
+            - --load-balance-method
+            - round_robin

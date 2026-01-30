@@ -1,27 +1,32 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
-use tokio::sync::{Notify, mpsc::Receiver};
+use futures::StreamExt;
 
 use dynamo_runtime::{
     DistributedRuntime,
+    discovery::{
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoveryStream,
+        ModelCardInstanceId,
+    },
     pipeline::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
     },
     protocols::{EndpointId, annotated::Annotated},
-    storage::key_value_store::WatchEvent,
 };
 
 use crate::{
     backend::Backend,
-    entrypoint,
-    kv_router::{KvRouterConfig, PrefillRouter},
-    model_card::{self, ModelDeploymentCard},
+    entrypoint::{self, EngineFactoryCallback, RouterConfig},
+    http::service::metrics::Metrics,
+    kv_router::PrefillRouter,
+    model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
@@ -49,11 +54,11 @@ pub enum ModelUpdate {
 pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
-    router_mode: RouterMode,
+    router_config: RouterConfig,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
-    kv_router_config: Option<KvRouterConfig>,
-    busy_threshold: Option<f64>,
+    engine_factory: Option<EngineFactoryCallback>,
+    metrics: Arc<Metrics>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -68,18 +73,18 @@ impl ModelWatcher {
     pub fn new(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
-        router_mode: RouterMode,
-        kv_router_config: Option<KvRouterConfig>,
-        busy_threshold: Option<f64>,
+        router_config: RouterConfig,
+        engine_factory: Option<EngineFactoryCallback>,
+        metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
             drt: runtime,
-            router_mode,
+            router_config,
             notify_on_model: Notify::new(),
             model_update_tx: None,
-            kv_router_config,
-            busy_threshold,
+            engine_factory,
+            metrics,
         }
     }
 
@@ -99,17 +104,54 @@ impl ModelWatcher {
     }
 
     /// Common watch logic with optional namespace filtering
-    pub async fn watch(&self, mut events_rx: Receiver<WatchEvent>, target_namespace: Option<&str>) {
+    pub async fn watch(
+        &self,
+        mut discovery_stream: DiscoveryStream,
+        target_namespace: Option<&str>,
+    ) {
         let global_namespace = target_namespace.is_none_or(is_global_namespace);
 
-        while let Some(event) = events_rx.recv().await {
+        while let Some(result) = discovery_stream.next().await {
+            let event = match result {
+                Ok(event) => event,
+                Err(err) => {
+                    tracing::error!(%err, "Error in discovery stream");
+                    continue;
+                }
+            };
+
             match event {
-                WatchEvent::Put(kv) => {
-                    let key = kv.key_str();
-                    let endpoint_id = match key_extract(key) {
-                        Ok((eid, _)) => eid,
-                        Err(err) => {
-                            tracing::error!(%key, %err, "Failed extracting EndpointId from key. Ignoring instance.");
+                DiscoveryEvent::Added(instance) => {
+                    // Extract ModelCardInstanceId and card from the discovery instance
+                    let (mcid, mut card) = match &instance {
+                        DiscoveryInstance::Model {
+                            namespace,
+                            component,
+                            endpoint,
+                            instance_id,
+                            model_suffix,
+                            ..
+                        } => {
+                            let mcid = ModelCardInstanceId {
+                                namespace: namespace.clone(),
+                                component: component.clone(),
+                                endpoint: endpoint.clone(),
+                                instance_id: *instance_id,
+                                model_suffix: model_suffix.clone(),
+                            };
+
+                            match instance.deserialize_model::<ModelDeploymentCard>() {
+                                Ok(card) => (mcid, card),
+                                Err(err) => {
+                                    tracing::error!(%err, instance_id, "Failed to deserialize model card");
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::error!(
+                                "Unexpected discovery instance type (expected ModelCard)"
+                            );
                             continue;
                         }
                     };
@@ -117,30 +159,15 @@ impl ModelWatcher {
                     // Filter by namespace if target_namespace is specified
                     if !global_namespace
                         && let Some(target_ns) = target_namespace
-                        && endpoint_id.namespace != target_ns
+                        && mcid.namespace != target_ns
                     {
                         tracing::debug!(
-                            model_namespace = endpoint_id.namespace,
+                            model_namespace = mcid.namespace,
                             target_namespace = target_ns,
                             "Skipping model from different namespace"
                         );
                         continue;
                     }
-
-                    let mut card = match serde_json::from_slice::<ModelDeploymentCard>(kv.value()) {
-                        Ok(card) => card,
-                        Err(err) => {
-                            match kv.value_str() {
-                                Ok(value) => {
-                                    tracing::error!(%err, value, "Invalid JSON in model card")
-                                }
-                                Err(value_str_err) => {
-                                    tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model card, expected JSON")
-                                }
-                            }
-                            continue;
-                        }
-                    };
 
                     // If we already have a worker for this model, and the ModelDeploymentCard
                     // cards don't match, alert, and don't add the new instance
@@ -164,11 +191,11 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    match self.handle_put(key, &endpoint_id, &mut card).await {
+                    match self.handle_put(&mcid, &mut card).await {
                         Ok(()) => {
                             tracing::info!(
                                 model_name = card.name(),
-                                namespace = endpoint_id.namespace,
+                                namespace = mcid.namespace,
                                 "added model"
                             );
                             self.notify_on_model.notify_waiters();
@@ -176,17 +203,27 @@ impl ModelWatcher {
                         Err(err) => {
                             tracing::error!(
                                 model_name = card.name(),
-                                namespace = endpoint_id.namespace,
+                                namespace = mcid.namespace,
                                 error = format!("{err:#}"),
                                 "Error adding model from discovery",
                             );
                         }
                     }
                 }
-                WatchEvent::Delete(kv) => {
-                    let deleted_key = kv.key_str();
+                DiscoveryEvent::Removed(id) => {
+                    // Extract ModelCardInstanceId from the removal event
+                    let model_card_instance_id = match &id {
+                        DiscoveryInstanceId::Model(mcid) => mcid,
+                        DiscoveryInstanceId::Endpoint(_) | DiscoveryInstanceId::EventChannel(_) => {
+                            tracing::error!(
+                                "Unexpected discovery instance type in removal (expected Model)"
+                            );
+                            continue;
+                        }
+                    };
+
                     match self
-                        .handle_delete(deleted_key, target_namespace, global_namespace)
+                        .handle_delete(model_card_instance_id, target_namespace, global_namespace)
                         .await
                     {
                         Ok(Some(model_name)) => {
@@ -208,14 +245,15 @@ impl ModelWatcher {
     /// Returns the name of the model we just deleted, if any.
     async fn handle_delete(
         &self,
-        key: &str,
+        mcid: &ModelCardInstanceId,
         target_namespace: Option<&str>,
         is_global_namespace: bool,
     ) -> anyhow::Result<Option<String>> {
-        let card = match self.manager.remove_model_card(key) {
+        let key = mcid.to_path();
+        let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
-                anyhow::bail!("Missing ModelDeploymentCard for {key}");
+                anyhow::bail!("Missing ModelDeploymentCard for {}", key);
             }
         };
         let model_name = card.name().to_string();
@@ -299,36 +337,36 @@ impl ModelWatcher {
     // models.
     async fn handle_put(
         &self,
-        key: &str,
-        endpoint_id: &EndpointId,
+        mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
         card.download_config().await?;
 
         let component = self
             .drt
-            .namespace(&endpoint_id.namespace)?
-            .component(&endpoint_id.component)?;
-        let endpoint = component.endpoint(&endpoint_id.name);
+            .namespace(&mcid.namespace)?
+            .component(&mcid.component)?;
+        let endpoint = component.endpoint(&mcid.endpoint);
         let client = endpoint.client().await?;
         tracing::debug!(model_name = card.name(), "adding model");
-        self.manager.save_model_card(key, card.clone())?;
+        self.manager
+            .save_model_card(&mcid.to_path(), card.clone())?;
 
-        // Check if we should skip registration:
-        // - Skip if a model with this name already exists
-        // - UNLESS this is a prefill model and no prefill model exists yet for this name
-        let is_new_prefill = card.model_type.supports_prefill()
-            && !self
-                .manager
-                .list_prefill_models()
-                .contains(&card.name().to_string());
+        // Skip duplicate registrations based on model type.
+        // Prefill and decode models are tracked separately, so registering one
+        // doesn't block the other (they can arrive in any order).
+        let already_registered = if card.model_type.supports_prefill() {
+            self.manager.has_prefill_model(card.name())
+        } else {
+            self.manager.has_decode_model(card.name())
+        };
 
-        if self.manager.has_model_any(card.name()) && !is_new_prefill {
+        if already_registered {
             tracing::debug!(
                 model_name = card.name(),
-                namespace = endpoint_id.namespace,
+                namespace = mcid.namespace,
                 model_type = %card.model_type,
-                "New endpoint for existing model, skipping"
+                "Model already registered, skipping"
             );
             return Ok(());
         }
@@ -336,6 +374,7 @@ impl ModelWatcher {
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
         }
+
         let checksum = card.mdcsum();
 
         if card.model_input == ModelInput::Tokens
@@ -345,10 +384,15 @@ impl ModelWatcher {
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
-            let kv_chooser = if self.router_mode == RouterMode::KV {
+            let endpoint = component.endpoint(&mcid.endpoint);
+            let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
                 Some(
                     self.manager
-                        .kv_chooser_for(&component, card.kv_cache_block_size, self.kv_router_config)
+                        .kv_chooser_for(
+                            &endpoint,
+                            card.kv_cache_block_size,
+                            Some(self.router_config.kv_router_config),
+                        )
                         .await?,
                 )
             } else {
@@ -365,34 +409,70 @@ impl ModelWatcher {
                 .register_prefill_router(card.name().to_string())
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = self.kv_router_config.unwrap_or_default();
+                    let mut prefill_config = self.router_config.kv_router_config;
                     prefill_config.router_track_active_blocks = false;
 
                     PrefillRouter::new(
                         rx,
                         self.manager.clone(),
-                        self.router_mode,
+                        self.router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
+                        self.router_config.enforce_disagg,
                     )
                 });
 
+            // Get or create the worker monitor for this model
+            // This allows dynamic threshold updates via the ModelManager
+            // Create monitor if either threshold is configured
+            let worker_monitor = if self.router_config.active_decode_blocks_threshold.is_some()
+                || self.router_config.active_prefill_tokens_threshold.is_some()
+            {
+                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
+                let active_decode_blocks = self
+                    .router_config
+                    .active_decode_blocks_threshold
+                    .unwrap_or(1.0);
+                let active_prefill_tokens = self
+                    .router_config
+                    .active_prefill_tokens_threshold
+                    .unwrap_or(1000000);
+                Some(self.manager.get_or_create_worker_monitor(
+                    card.name(),
+                    client.clone(),
+                    active_decode_blocks,
+                    active_prefill_tokens,
+                ))
+            } else {
+                None
+            };
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
-                let chat_engine = entrypoint::build_routed_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(
-                    card,
-                    &client,
-                    self.router_mode,
-                    self.busy_threshold,
-                    kv_chooser.clone(),
-                    tokenizer_hf.clone(),
-                    prefill_chooser.clone(),
-                )
-                .await
-                .context("build_routed_pipeline")?;
+                // Work in progress. This will allow creating  a chat_engine from Python.
+                let chat_engine = if let Some(ref factory) = self.engine_factory {
+                    factory(card.clone())
+                        .await
+                        .context("python engine_factory")?
+                } else {
+                    entrypoint::build_routed_pipeline::<
+                        NvCreateChatCompletionRequest,
+                        NvCreateChatCompletionStreamResponse,
+                    >(
+                        card,
+                        &client,
+                        self.manager.clone(),
+                        self.router_config.router_mode,
+                        worker_monitor.clone(),
+                        kv_chooser.clone(),
+                        tokenizer_hf.clone(),
+                        prefill_chooser.clone(),
+                        self.router_config.enforce_disagg,
+                        self.metrics.clone(),
+                    )
+                    .await
+                    .context("build_routed_pipeline")?
+                };
                 self.manager
                     .add_chat_completions_model(card.name(), checksum, chat_engine)
                     .context("add_chat_completions_model")?;
@@ -415,12 +495,15 @@ impl ModelWatcher {
                 >(
                     card,
                     &client,
-                    self.router_mode,
-                    self.busy_threshold,
+                    self.manager.clone(),
+                    self.router_config.router_mode,
+                    worker_monitor,
                     kv_chooser,
                     preprocessor,
                     tokenizer_hf,
                     prefill_chooser,
+                    self.router_config.enforce_disagg,
+                    self.metrics.clone(),
                 )
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;
@@ -435,7 +518,7 @@ impl ModelWatcher {
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -443,12 +526,13 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
-            let push_router =
-                PushRouter::<
-                    NvCreateChatCompletionRequest,
-                    Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_threshold(client, self.router_mode, None, None)
-                .await?;
+            let push_router = PushRouter::<
+                NvCreateChatCompletionRequest,
+                Annotated<NvCreateChatCompletionStreamResponse>,
+            >::from_client_with_threshold(
+                client, self.router_config.router_mode, None, None
+            )
+            .await?;
             let engine = Arc::new(push_router);
             self.manager
                 .add_chat_completions_model(card.name(), checksum, engine)?;
@@ -458,7 +542,7 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -480,7 +564,7 @@ impl ModelWatcher {
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
 
@@ -505,7 +589,7 @@ impl ModelWatcher {
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -559,35 +643,39 @@ impl ModelWatcher {
 
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
     async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
-        let store = self.drt.store();
-        let Some(card_bucket) = store.get_bucket(model_card::ROOT_PATH).await? else {
-            // no cards
-            return Ok(vec![]);
-        };
-        let entries = card_bucket.entries().await?;
+        let discovery = self.drt.discovery();
+        let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-        let mut results = Vec::with_capacity(entries.len());
-        for (key, card_bytes) in entries {
-            let r = match serde_json::from_slice::<ModelDeploymentCard>(&card_bytes) {
+        let mut results = Vec::with_capacity(instances.len());
+        for instance in instances {
+            match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    let maybe_endpoint_id =
-                        key_extract(&key).map(|(endpoint_id, _instance_id)| endpoint_id);
-                    let endpoint_id = match maybe_endpoint_id {
-                        Ok(eid) => eid,
-                        Err(err) => {
-                            tracing::error!(%err, "Skipping invalid key, not string or not EndpointId");
+                    // Extract EndpointId from the instance
+                    let endpoint_id = match &instance {
+                        dynamo_runtime::discovery::DiscoveryInstance::Model {
+                            namespace,
+                            component,
+                            endpoint,
+                            ..
+                        } => EndpointId {
+                            namespace: namespace.clone(),
+                            component: component.clone(),
+                            name: endpoint.clone(),
+                        },
+                        _ => {
+                            tracing::error!(
+                                "Unexpected discovery instance type (expected ModelCard)"
+                            );
                             continue;
                         }
                     };
-                    (endpoint_id, card)
+                    results.push((endpoint_id, card));
                 }
                 Err(err) => {
-                    let value = String::from_utf8_lossy(&card_bytes);
-                    tracing::error!(%err, %value, "Invalid JSON in model card");
+                    tracing::error!(%err, "Failed to deserialize model card");
                     continue;
                 }
-            };
-            results.push(r);
+            }
         }
         Ok(results)
     }
@@ -609,43 +697,5 @@ impl ModelWatcher {
             matches_name && matches_namespace
         });
         Ok(all.into_iter().map(|(_eid, card)| card).collect())
-    }
-}
-
-/// The ModelDeploymentCard is published in store with a key like "v1/mdc/dynamo/backend/generate/694d9981145a61ad".
-/// Extract the EndpointId and instance_id from that.
-fn key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
-    if !s.starts_with(model_card::ROOT_PATH) {
-        anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
-    }
-    let parts: Vec<&str> = s.split('/').collect();
-
-    // Need at least prefix model_card::ROOT_PATH (2 parts) + namespace, component, name (3 parts)
-    if parts.len() <= 5 {
-        anyhow::bail!("Invalid format: not enough path segments in {s}");
-    }
-
-    let endpoint_id = EndpointId {
-        namespace: parts[2].to_string(),
-        component: parts[3].to_string(),
-        name: parts[4].to_string(),
-    };
-    Ok((endpoint_id, parts[parts.len() - 1].to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_key_extract() {
-        let input = format!(
-            "{}/dynamo/backend/generate/694d9981145a61ad",
-            model_card::ROOT_PATH
-        );
-        let (endpoint_id, _) = key_extract(&input).unwrap();
-        assert_eq!(endpoint_id.namespace, "dynamo");
-        assert_eq!(endpoint_id.component, "backend");
-        assert_eq!(endpoint_id.name, "generate");
     }
 }

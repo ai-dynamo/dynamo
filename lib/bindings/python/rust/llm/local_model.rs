@@ -1,7 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 
 #[pyclass]
@@ -47,6 +48,11 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_data_parallel_size(&mut self, data_parallel_size: u32) {
         self.inner.data_parallel_size = data_parallel_size;
+    }
+
+    #[setter]
+    fn set_enable_local_indexer(&mut self, enable_local_indexer: bool) {
+        self.inner.enable_local_indexer = enable_local_indexer;
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -104,6 +110,11 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn enable_local_indexer(&self) -> bool {
+        self.inner.enable_local_indexer
+    }
+
+    #[getter]
     fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
         let dict = PyDict::new(py);
         for (key, value) in self.inner.runtime_data.clone() {
@@ -114,5 +125,33 @@ impl ModelRuntimeConfig {
 
     fn get_engine_specific(&self, key: &str) -> PyResult<Option<String>> {
         self.inner.get_engine_specific(key).map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (bootstrap_host=None, bootstrap_port=None))]
+    fn set_disaggregated_endpoint(
+        &mut self,
+        bootstrap_host: Option<String>,
+        bootstrap_port: Option<u16>,
+    ) {
+        self.inner.disaggregated_endpoint = Some(RsDisaggregatedEndpoint {
+            bootstrap_host,
+            bootstrap_port,
+        });
+    }
+
+    #[getter]
+    fn bootstrap_host(&self) -> Option<String> {
+        self.inner
+            .disaggregated_endpoint
+            .as_ref()
+            .and_then(|e| e.bootstrap_host.clone())
+    }
+
+    #[getter]
+    fn bootstrap_port(&self) -> Option<u16> {
+        self.inner
+            .disaggregated_endpoint
+            .as_ref()
+            .and_then(|e| e.bootstrap_port)
     }
 }

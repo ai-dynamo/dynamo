@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use core::panic;
@@ -15,25 +15,6 @@ use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
 use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
-
-// Trait for IP address resolution - allows dependency injection for testing
-pub trait IpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
-}
-
-// Default implementation using the real local_ip_address crate
-pub struct DefaultIpResolver;
-
-impl IpResolver for DefaultIpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-        local_ip()
-    }
-
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-        local_ipv6()
-    }
-}
 
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -56,7 +37,26 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
-use crate::{ErrorContext, Result, error};
+use anyhow::{Context, Result, anyhow as error};
+
+// Trait for IP address resolution - allows dependency injection for testing
+pub trait IpResolver {
+    fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
+    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
+}
+
+// Default implementation using the real local_ip_address crate
+pub struct DefaultIpResolver;
+
+impl IpResolver for DefaultIpResolver {
+    fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
+        local_ip()
+    }
+
+    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
+        local_ipv6()
+    }
+}
 
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;

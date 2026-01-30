@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -102,7 +102,7 @@ tokens/s/gpu                         tokens/s/user
 ```bash
 # Use with Dynamo's SLA planner (20-30 seconds vs hours)
 python3 -m benchmarks.profiler.profile_sla \
-   --config ./components/backends/trtllm/deploy/disagg.yaml \
+   --config ./examples/backends/trtllm/deploy/disagg.yaml \
    --backend trtllm \
    --use-ai-configurator \
    --aic-system h200_sxm \

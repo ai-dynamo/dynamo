@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -42,6 +42,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
 | [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ |  |
 | [**LMCache**](./LMCache_Integration.md) | ✅ |  |
+| [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
 
@@ -55,13 +56,18 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
-### Start NATS and ETCD in the background
+### Start Infrastructure Services (Local Development Only)
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Pull or build container
 
@@ -84,29 +90,11 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 > [!IMPORTANT]
 > Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
 
-This figure shows an overview of the major components to deploy:
-
-```
-+------+      +-----------+      +------------------+             +---------------+
-| HTTP |----->| dynamo    |----->|   vLLM Worker    |------------>|  vLLM Prefill |
-|      |<-----| ingress   |<-----|                  |<------------|    Worker     |
-+------+      +-----------+      +------------------+             +---------------+
-                  |    ^                  |
-       query best |    | return           | publish kv events
-           worker |    | worker_id        v
-                  |    |         +------------------+
-                  |    +---------|     kv-router    |
-                  +------------->|                  |
-                                 +------------------+
-```
-
-Note: The above architecture illustrates all the components. The final components that get spawned depend upon the chosen deployment pattern.
-
 ### Aggregated Serving
 
 ```bash
 # requires one gpu
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/agg.sh
 ```
 
@@ -114,7 +102,7 @@ bash launch/agg.sh
 
 ```bash
 # requires two gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/agg_router.sh
 ```
 
@@ -122,7 +110,7 @@ bash launch/agg_router.sh
 
 ```bash
 # requires two gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/disagg.sh
 ```
 
@@ -130,7 +118,7 @@ bash launch/disagg.sh
 
 ```bash
 # requires three gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/disagg_router.sh
 ```
 
@@ -140,7 +128,7 @@ This example is not meant to be performant but showcases Dynamo routing to data 
 
 ```bash
 # requires four gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/dep.sh
 ```
 
@@ -151,9 +139,16 @@ bash launch/dep.sh
 
 Below we provide a selected list of advanced deployments. Please open up an issue if you'd like to see a specific example!
 
+### Speculative Decoding with Aggregated Serving (Meta-Llama-3.1-8B-Instruct + Eagle3)
+
+Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
+This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
+
+**Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
+
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../components/backends/vllm/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md)
 
 ## Configuration
 
@@ -163,6 +158,10 @@ vLLM workers are configured through command-line arguments. Key parameters inclu
 - `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 - `--connector`: Specify which kv_transfer_config you want vllm to use `[nixl, lmcache, kvbm, none]`. This is a helper flag which overwrites the engines KVTransferConfig.
+- `--enable-prompt-embeds`: **Enable prompt embeddings feature** (opt-in, default: disabled)
+  - **Required for:** Accepting pre-computed prompt embeddings via API
+  - **Default behavior:** Prompt embeddings DISABLED - requests with `prompt_embeds` will fail
+  - **Error without flag:** `ValueError: You must set --enable-prompt-embeds to input prompt_embeds`
 
 See `args.py` for the full list of configuration options and their defaults.
 

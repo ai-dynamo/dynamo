@@ -1,10 +1,11 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -37,18 +38,29 @@ class DistributedRuntime:
     The runtime object for dynamo applications
     """
 
-    ...
+    def __new__(
+        cls,
+        event_loop: Any,
+        store_kv: str,
+        request_plane: str,
+        enable_nats: Optional[bool] = None,
+    ) -> "DistributedRuntime":
+        """
+        Create a new DistributedRuntime.
+
+        Args:
+            event_loop: The asyncio event loop
+            store_kv: Key-value store backend ("etcd", "file", or "mem")
+            request_plane: Request plane transport ("tcp", "http", or "nats")
+            enable_nats: Whether to enable NATS for KV events. Defaults to True.
+                        If request_plane is "nats", NATS is always enabled.
+                        Pass False to disable NATS initialization (e.g., for approximate routing).
+        """
+        ...
 
     def namespace(self, name: str) -> Namespace:
         """
         Create a `Namespace` object
-        """
-        ...
-
-    def allocate_port_block(self, namespace, port_min, port_max, block_size, context=None) -> List[int]:
-        """
-        Allocate a contiguous block of ports from the specified range and atomically reserve them.
-        Returns a list of all allocated ports in order.
         """
         ...
 
@@ -61,6 +73,32 @@ class DistributedRuntime:
     def child_token(self) -> CancellationToken:
         """
         Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+    def register_engine_route(
+        self,
+        route_name: str,
+        callback: Callable[[dict], Awaitable[dict]],
+    ) -> None:
+        """
+        Register an async callback for /engine/{route_name} on the system status server.
+
+        Args:
+            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            callback: Async function with signature: async def(body: dict) -> dict
+
+        Example:
+            async def start_profile(body: dict) -> dict:
+                await engine.start_profile(**body)
+                return {"status": "ok", "message": "Profiling started"}
+
+            runtime.register_engine_route("start_profile", start_profile)
+
+        The callback receives the JSON request body as a dict and should return
+        a dict that will be serialized as the JSON response.
+
+        For GET requests or empty bodies, an empty dict {} is passed.
         """
         ...
 
@@ -91,16 +129,6 @@ class Namespace:
         """
         ...
 
-    @property
-    def metrics(self) -> PyRuntimeMetrics:
-        """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
-
-        Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
-        """
-        ...
-
 class Component:
     """
     A component is a collection of endpoints
@@ -108,27 +136,12 @@ class Component:
 
     ...
 
-    async def create_service(self) -> None:
-        """
-        Create a service
-        """
-        ...
-
     def endpoint(self, name: str) -> Endpoint:
         """
         Create an endpoint
         """
         ...
 
-    @property
-    def metrics(self) -> PyRuntimeMetrics:
-        """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
-
-        Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
-        """
-        ...
 
 class Endpoint:
     """
@@ -166,10 +179,30 @@ class Endpoint:
     @property
     def metrics(self) -> PyRuntimeMetrics:
         """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
+        Get a PyRuntimeMetrics helper for registering Prometheus metrics callbacks.
 
         Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
+            A PyRuntimeMetrics object for callback registration
+        """
+        ...
+
+    async def unregister_endpoint_instance(self) -> None:
+        """
+        Unregister this endpoint instance from discovery.
+
+        This removes the endpoint from the instances bucket, preventing the router
+        from sending requests to this worker. Use this when a worker is sleeping
+        and should not receive any requests.
+        """
+        ...
+
+    async def register_endpoint_instance(self) -> None:
+        """
+        Re-register this endpoint instance to discovery.
+
+        This adds the endpoint back to the instances bucket, allowing the router
+        to send requests to this worker again. Use this when a worker wakes up
+        and should start receiving requests.
         """
         ...
 
@@ -217,69 +250,43 @@ class Client:
         """
         ...
 
-class DisaggregatedRouter:
+
+def compute_block_hash_for_seq_py(
+    tokens: List[int],
+    kv_block_size: int,
+    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
+) -> List[int]:
     """
-    A router that determines whether to perform prefill locally or remotely based on
-    sequence length thresholds.
-    """
+    Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
 
-    def __init__(
-        self,
-        drt: DistributedRuntime,
-        model_name: str,
-        default_max_local_prefill_length: int,
-    ) -> None:
-        """
-        Create a `DisaggregatedRouter` object.
-
-        Args:
-            drt: The distributed runtime instance
-            model_name: Name of the model
-            default_max_local_prefill_length: Default maximum sequence length that can be processed locally
-        """
-        ...
-
-    def prefill_remote(self, prefill_length: int, prefix_hit_length: int) -> bool:
-        """
-        Determine if prefill should be performed remotely based on sequence lengths.
-
-        Args:
-            prefill_length: Total length of the sequence to prefill
-            prefix_hit_length: Length of the prefix that was already processed
-
-        Returns:
-            True if prefill should be performed remotely, False otherwise
-        """
-        ...
-
-    def update_value(self, max_local_prefill_length: int) -> None:
-        """
-        Update the maximum local prefill length threshold.
-
-        Args:
-            max_local_prefill_length: New maximum sequence length that can be processed locally
-        """
-        ...
-
-    def get_model_name(self) -> str:
-        """
-        Get the name of the model associated with this router.
-
-        Returns:
-            The model name as a string
-        """
-        ...
-
-def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List[int]:
-    """
-    Compute block hashes for a sequence of tokens
+    When block_mm_infos is provided, the mm_hashes are included in the hash computation
+    to ensure that blocks with identical tokens but different multimodal objects produce
+    different hashes.
 
     Args:
         tokens: List of token IDs
-        kv_block_size: Size of each KV cache block
+        kv_block_size: Size of each block in tokens
+        block_mm_infos: Optional per-block multimodal metadata. Each element corresponds to a block
+                       and should be None or a dict with structure:
+                       {
+                           "mm_objects": [
+                               {
+                                   "mm_hash": int,  # Hash of the MM object
+                               }
+                           ]
+                       }
 
     Returns:
-        List of block hashes as integers
+        List of block hashes (one per block)
+
+    Example:
+        >>> tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
+        >>> mm_info = {
+        ...     "mm_objects": [{
+        ...         "mm_hash": 0xDEADBEEF,
+        ...     }]
+        ... }
+        >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])
     """
 
     ...
@@ -371,86 +378,9 @@ class Context:
         """
         ...
 
-class WorkerStats:
-    """
-    Worker stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        request_active_slots: int,
-        request_total_slots: int,
-        num_requests_waiting: int,
-        data_parallel_rank: Optional[int] = None,
-    ) -> None:
-        """
-        Create a `WorkerStats` object.
-        """
-        ...
-
-class KvStats:
-    """
-    KV stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        kv_active_blocks: int,
-        kv_total_blocks: int,
-        gpu_cache_usage_perc: float,
-        gpu_prefix_cache_hit_rate: float,
-    ) -> None:
-        """
-        Create a `KvStats` object.
-        """
-        ...
-
-class SpecDecodeStats:
-    """
-    Speculative decoding stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        num_spec_tokens: int,
-        num_drafts: int,
-        num_draft_tokens: int,
-        num_accepted_tokens: int,
-        num_accepted_tokens_per_pos: List[int],
-    ) -> None:
-        """
-        Create a `SpecDecodeStats` object when running with speculative decoding.
-        """
-        ...
-
-class ForwardPassMetrics:
-    """
-    A collection of metrics for a forward pass.
-    Includes worker stats, KV stats, and speculative decoding stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        worker_stats: WorkerStats,
-        kv_stats: KvStats,
-        spec_decode_stats: Optional[SpecDecodeStats] = None,
-    ) -> None:
-        """
-        Create a `ForwardPassMetrics` object
-        """
-        ...
-
 class WorkerMetricsPublisher:
     """
-    A metrics publisher will provide metrics to the router.
+    A metrics publisher will provide metrics to the router for load monitoring.
     """
 
     ...
@@ -460,25 +390,27 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
+    async def create_endpoint(self, component: Component) -> None:
         """
-        Similar to Component.create_service, but only service created through
-        this method will interact with KV router of the same component.
+        Create the NATS endpoint for metrics publishing. Must be awaited.
+
+        Only service created through this method will interact with KV router of the same component.
 
         Args:
             component: The component to create the endpoint for
-            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
-
-        .. deprecated::
-            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
         self,
-        metrics: ForwardPassMetrics
+        dp_rank: Optional[int],
+        active_decode_blocks: int,
     ) -> None:
         """
-        Update the metrics being reported.
+        Publish worker metrics for load monitoring.
+
+        Args:
+            dp_rank: Data parallel rank of the worker (None defaults to 0)
+            active_decode_blocks: Number of active KV cache blocks
         """
         ...
 
@@ -499,6 +431,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
 
@@ -510,33 +443,6 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
-        ...
-
-class OAIChatPreprocessor:
-    """
-    A preprocessor for OpenAI chat completions
-    """
-
-    ...
-
-    async def start(self) -> None:
-        """
-        Start the preprocessor
-        """
-        ...
-
-class Backend:
-    """
-    LLM Backend engine manages resources and concurrency for executing inference
-    requests in LLM engines (trtllm, vllm, sglang etc)
-    """
-
-    ...
-
-    async def start(self, handler: RequestHandler) -> None:
-        """
-        Start the backend engine and requests to the downstream LLM engine
-        """
         ...
 
 class OverlapScores:
@@ -679,32 +585,77 @@ class KvIndexer:
 
 class ApproxKvIndexer:
     """
-    A KV Indexer that doesn't use KV cache events. It instead relies solely on the input tokens.
+    An approximate KV Indexer that doesn't receive KV cache events from workers.
+    Instead, it relies on routing decisions with TTL-based expiration and pruning
+    to estimate which blocks are cached on which workers.
+
+    This is useful when:
+    - Backend engines don't emit KV events
+    - You want to reduce event processing overhead
+    - Lower routing accuracy is acceptable
     """
 
-    def __init__(self, component: Component, kv_block_size: int, ttl_secs: float) -> None:
+    ...
+
+    def __init__(
+        self,
+        component: Component,
+        kv_block_size: int,
+        router_ttl_secs: float = 120.0,
+        router_max_tree_size: int = 1048576,
+        router_prune_target_ratio: float = 0.8,
+    ) -> None:
         """
-        Create a `ApproxKvIndexer` object
+        Create an `ApproxKvIndexer` object
+
+        Args:
+            component: The component to associate with this indexer
+            kv_block_size: The KV cache block size
+            router_ttl_secs: TTL for blocks in seconds (default: 120.0)
+            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
+            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
         """
         ...
 
-    def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
+    def find_matches_for_request(
+        self, token_ids: List[int]
+    ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
+
+        Args:
+            token_ids: List of token IDs to find matches for
+
+        Returns:
+            OverlapScores containing worker matching scores and frequencies
         """
         ...
 
     def block_size(self) -> int:
         """
         Return the block size of the ApproxKvIndexer.
+
+        Returns:
+            The KV cache block size
         """
         ...
 
-    def process_routing_decision_for_request(self, tokens: List[int], lora_id: int, worker_id: int) -> None:
+    async def process_routing_decision_for_request(
+        self, tokens: List[int], worker_id: int, dp_rank: int = 0
+    ) -> None:
         """
-        Notify the indexer that a token sequence has been sent to a specific worker.
+        Notify the indexer that a token sequence has been routed to a specific worker.
+
+        This updates the indexer's internal state to track which blocks are likely
+        cached on which workers based on routing decisions.
+
+        Args:
+            tokens: List of token IDs that were routed
+            worker_id: The worker ID the request was routed to
+            dp_rank: The data parallel rank (default: 0)
         """
         ...
+
 
 class KvRecorder:
     """
@@ -787,7 +738,7 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0
+        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
     ) -> None:
         """
         Create a `KvEventPublisher` object
@@ -797,6 +748,7 @@ class KvEventPublisher:
             worker_id: The worker ID
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
+            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
         """
 
     def publish_stored(
@@ -837,7 +789,8 @@ class ZmqKvEventPublisherConfig:
         worker_id: int,
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
-        zmq_topic: str = ""
+        zmq_topic: str = "",
+        enable_local_indexer: bool = False
     ) -> None:
         """
         Configuration for the ZmqKvEventPublisher.
@@ -846,6 +799,7 @@ class ZmqKvEventPublisherConfig:
         :param kv_block_size: The block size for the key-value store.
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
+        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
         """
         ...
 
@@ -946,6 +900,7 @@ class KserveGrpcService:
         model: str,
         checksum: str,
         engine: PythonAsyncEngine,
+        runtime_config: Optional[ModelRuntimeConfig],
     ) -> None:
         """
         Register a tensor-based model with the service.
@@ -1043,7 +998,43 @@ class RouterConfig:
 
 class KvRouterConfig:
     """Values for KV router"""
-    ...
+
+    def __init__(
+        self,
+        overlap_score_weight: float = 1.0,
+        router_temperature: float = 0.0,
+        use_kv_events: bool = True,
+        router_replica_sync: bool = False,
+        router_track_active_blocks: bool = True,
+        router_track_output_blocks: bool = False,
+        router_assume_kv_reuse: bool = True,
+        router_snapshot_threshold: Optional[int] = 1000000,
+        router_reset_states: bool = False,
+        router_ttl_secs: float = 120.0,
+        router_max_tree_size: int = 1048576,
+        router_prune_target_ratio: float = 0.8,
+    ) -> None:
+        """
+        Create a KV router configuration.
+
+        Args:
+            overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
+            router_temperature: Temperature for worker sampling via softmax (default: 0.0)
+            use_kv_events: Whether to use KV events from workers (default: True)
+            router_replica_sync: Enable replica synchronization (default: False)
+            router_track_active_blocks: Track active blocks for load balancing (default: True)
+            router_track_output_blocks: Track output blocks during generation (default: False).
+                When enabled, the router adds placeholder blocks as tokens are generated
+                and applies fractional decay based on progress toward expected_output_tokens.
+            router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
+                When True, computes actual block hashes. When False, generates random hashes.
+            router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
+            router_reset_states: Reset router state on startup (default: False)
+            router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
+            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
+            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+        """
+        ...
 
 async def register_llm(
     model_input: ModelInput,
@@ -1058,8 +1049,36 @@ async def register_llm(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    lora_name: Optional[str] = None,
+    base_model_path: Optional[str] = None,
 ) -> None:
-    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    """
+    Attach the model at path to the given endpoint, and advertise it as model_type.
+    LoRA Registration:
+        The `lora_name` and `base_model_path` parameters must be provided together or not at all.
+        Providing only one of these parameters will raise a ValueError.
+        - `lora_name`: The served model name for the LoRA model
+        - `base_model_path`: Path to the base model that the LoRA extends
+
+    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+    and a minimal model card is registered directly. Use model_path as the display name
+    for these models.
+    """
+    ...
+
+async def unregister_llm(
+    endpoint: Endpoint,
+    lora_name: Optional[str] = None,
+) -> None:
+    """
+    Unregister a model from the discovery system.
+
+    If lora_name is provided, unregisters a LoRA adapter instead of a base model.
+    """
+    ...
+
+def lora_name_to_id(lora_name: str) -> int:
+    """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
 async def fetch_llm(remote_name: str) -> str:
@@ -1291,15 +1310,6 @@ class BlockManager:
         """
         ...
 
-class KvbmCacheManager:
-    """
-    A KV cache manager for VLLM
-    """
-
-    def __init__(self, block_manager: BlockManager) -> None:
-        ...
-
-
 class KvbmRequest:
     """
     A request for KV cache
@@ -1425,34 +1435,6 @@ class KvPushRouter:
         """
         ...
 
-    async def best_worker_id(
-        self,
-        token_ids: List[int],
-        router_config_override: Optional[JsonLike] = None,
-        request_id: Optional[str] = None,
-    ) -> Tuple[int, int]:
-        """
-        [DEPRECATED] Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks).
-
-        Find the best matching worker for the given tokens.
-
-        Args:
-            token_ids: List of token IDs to find matches for
-            router_config_override: Optional router configuration override
-            request_id: Optional request ID. If provided, router states will be updated
-                       to track this request (active blocks, lifecycle events). If not
-                       provided, this is a query-only operation that doesn't affect state.
-
-        Returns:
-            A tuple of (worker_id, overlap_blocks) where:
-                - worker_id: The ID of the best matching worker
-                - overlap_blocks: The number of overlapping blocks found
-
-        .. deprecated::
-            Use :meth:`best_worker` instead which also returns dp_rank.
-        """
-        ...
-
     async def get_potential_loads(
         self,
         token_ids: List[int],
@@ -1572,13 +1554,11 @@ class VirtualConnectorClient:
         ...
 
 __all__ = [
-    "Backend",
     "Client",
     "Component",
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",
-    "OAIChatPreprocessor",
     "PythonAsyncEngine",
     "prometheus_names",
 ]

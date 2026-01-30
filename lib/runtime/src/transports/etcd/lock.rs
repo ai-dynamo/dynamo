@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Distributed read-write lock implementation using etcd atomic transactions
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use etcd_client::{Compare, CompareOp, PutOptions, Txn, TxnOp};
 
-use crate::Result;
+use anyhow::Result;
 
 use super::Client;
 

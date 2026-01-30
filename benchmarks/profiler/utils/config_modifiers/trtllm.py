@@ -1,10 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import json
 import logging
 import re
-from typing import Literal
 
 import yaml
 
@@ -16,14 +15,15 @@ from benchmarks.profiler.utils.config import (
     get_worker_service_from_config,
     parse_override_engine_args,
     remove_valued_arguments,
-    set_argument_value,
     setup_worker_service_resources,
     update_image,
     validate_and_get_worker_args,
 )
+from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
+    EngineType,
 )
 from dynamo.planner.defaults import SubComponentType
 
@@ -38,42 +38,16 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-DEFAULT_TRTLLM_CONFIG_PATH = "components/backends/trtllm/deploy/disagg.yaml"
+DEFAULT_TRTLLM_CONFIG_PATH = "examples/backends/trtllm/deploy/disagg.yaml"
 
 
-class TrtllmConfigModifier:
+class TrtllmConfigModifier(BaseConfigModifier):
+    BACKEND = "trtllm"
+
     @classmethod
     def load_default_config(cls) -> dict:
         with open(DEFAULT_TRTLLM_CONFIG_PATH, "r") as f:
             return yaml.safe_load(f)
-
-    @classmethod
-    def update_model(cls, config, model_name: str) -> dict:
-        # change the model to serve
-        cfg = Config.model_validate(config)
-
-        # Update model for both prefill and decode workers
-        for sub_component_type in [SubComponentType.PREFILL, SubComponentType.DECODE]:
-            try:
-                worker_service = get_worker_service_from_config(
-                    cfg, backend="trtllm", sub_component_type=sub_component_type
-                )
-                args = validate_and_get_worker_args(worker_service, backend="trtllm")
-                args = break_arguments(args)
-
-                # Update both --model-path and --served-model-name
-                args = set_argument_value(args, "--model-path", model_name)
-                args = set_argument_value(args, "--served-model-name", model_name)
-
-                worker_service.extraPodSpec.mainContainer.args = args
-            except (ValueError, KeyError):
-                # Service might not exist (e.g., in aggregated mode)
-                logger.debug(
-                    f"Skipping {sub_component_type} service as it doesn't exist"
-                )
-                continue
-
-        return cfg.model_dump()
 
     @classmethod
     def update_image(cls, config, image: str) -> dict:
@@ -84,7 +58,7 @@ class TrtllmConfigModifier:
     def convert_config(
         cls,
         config: dict,
-        target: Literal["prefill", "decode"],
+        target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
         if is_moe_model:
@@ -101,7 +75,7 @@ class TrtllmConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
-        if target == "prefill":
+        if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "trtllm", SubComponentType.PREFILL
@@ -157,7 +131,7 @@ class TrtllmConfigModifier:
 
             worker_service.extraPodSpec.mainContainer.args = args
 
-        elif target == "decode":
+        elif target == EngineType.DECODE:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "trtllm", SubComponentType.PREFILL
@@ -347,3 +321,34 @@ class TrtllmConfigModifier:
             "Could not find KV cache size in TRT-LLM logs, using default value of 100000"
         )
         return 100000  # Default fallback value for TRT-LLM
+
+    @classmethod
+    def set_prefill_config(
+        cls,
+        config: dict,
+        max_batch_size: int,
+        max_num_tokens: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """
+        Configure prefill-related limits for aggregated prefill runs.
+        For TRT-LLM we set these via --override-engine-args JSON:
+        - max_batch_size
+        - max_num_tokens
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        # Parse existing override-engine-args (if any) and update
+        override_dict, args = parse_override_engine_args(args)
+        override_dict["max_batch_size"] = int(max_batch_size)
+        override_dict["max_num_tokens"] = int(max_num_tokens)
+        override_str = json.dumps(override_dict)
+        args = append_argument(args, ["--override-engine-args", override_str])
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()

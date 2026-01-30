@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::mocker::protocols::MoveBlock;
-use crate::tokens::blocks::UniqueBlock;
-use crate::tokens::{TokenBlockSequence, Tokens};
 use derive_getters::Getters;
+use dynamo_tokens::blocks::UniqueBlock;
+use dynamo_tokens::{TokenBlockSequence, Tokens};
 use rand::random;
 
 /// Create unique blocks from a TokenBlockSequence

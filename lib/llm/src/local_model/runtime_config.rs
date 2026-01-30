@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
@@ -6,6 +6,15 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::protocols::tensor;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DisaggregatedEndpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_host: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_port: Option<u16>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelRuntimeConfig {
@@ -23,6 +32,10 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_data_parallel_size")]
     pub data_parallel_size: u32,
 
+    /// Enable worker-local KV indexer for tracking this worker's own KV cache state
+    #[serde(default)]
+    pub enable_local_indexer: bool,
+
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
@@ -36,6 +49,10 @@ pub struct ModelRuntimeConfig {
     // doesn't provide JSON parsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tensor_model_config: Option<tensor::TensorModelConfig>,
+
+    /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
 }
 
 const fn default_data_parallel_size() -> u32 {
@@ -51,8 +68,10 @@ impl Default for ModelRuntimeConfig {
             tool_call_parser: None,
             reasoning_parser: None,
             data_parallel_size: default_data_parallel_size(),
+            enable_local_indexer: false,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
+            disaggregated_endpoint: None,
         }
     }
 }

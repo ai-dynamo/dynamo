@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: batch/v1
 kind: Job
@@ -29,7 +29,7 @@ spec:
         - -c
         - |
           apt-get update && apt-get install -y curl jq procps git && apt-get clean
-          pip install git+https://github.com/ai-dynamo/aiperf.git@70af59489df24a601dba57604a7341966150b366;
+          pip install git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75;
           echo "aiperf installation completed";
           sysctl -w net.ipv4.ip_local_port_range="1024 65000"
           cat /proc/sys/net/ipv4/ip_local_port_range
@@ -74,7 +74,7 @@ spec:
                 --concurrency $concurrency \
                 --request-count $((10*concurrency)) \
                 --warmup-request-count $concurrency \
-                --conversation-num 12800 \
+                --num-dataset-entries 12800 \
                 --random-seed 100 \
                 --workers-max 252 \
                 -H 'Authorization: Bearer NOT USED' \
