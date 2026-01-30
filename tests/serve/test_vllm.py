@@ -576,8 +576,8 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "guided_decoding_json": VLLMConfig(
-        name="guided_decoding_json",
+    "guided_decoding": VLLMConfig(
+        name="guided_decoding",
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
@@ -599,16 +599,7 @@ vllm_configs = {
                         "required": ["name", "age"],
                     }
                 },
-            )
-        ],
-    ),
-    "guided_decoding_regex": VLLMConfig(
-        name="guided_decoding_regex",
-        directory=vllm_dir,
-        script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-        model="Qwen/Qwen3-0.6B",
-        request_payloads=[
+            ),
             chat_payload(
                 "Generate a color name (red, blue, or green)",
                 repeat_count=1,
@@ -616,16 +607,7 @@ vllm_configs = {
                 temperature=0.0,
                 max_tokens=20,
                 extra_body={"guided_regex": r"(red|blue|green)"},
-            )
-        ],
-    ),
-    "guided_decoding_choice": VLLMConfig(
-        name="guided_decoding_choice",
-        directory=vllm_dir,
-        script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-        model="Qwen/Qwen3-0.6B",
-        request_payloads=[
+            ),
             chat_payload(
                 "Generate a color name (red, blue, or green)",
                 repeat_count=1,
@@ -633,7 +615,7 @@ vllm_configs = {
                 temperature=0.0,
                 max_tokens=20,
                 extra_body={"guided_choice": ["red", "blue", "green"]},
-            )
+            ),
         ],
     ),
 }

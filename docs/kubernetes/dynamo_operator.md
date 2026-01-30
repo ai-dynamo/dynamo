@@ -86,6 +86,7 @@ helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
   --create-namespace \
   --set dynamo-operator.namespaceRestriction.enabled=true \
   --set dynamo-operator.controllerManager.manager.image.tag=v2.0.0-beta
+```
 
 **Observability:**
 
