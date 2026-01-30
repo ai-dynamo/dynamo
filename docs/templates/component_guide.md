@@ -28,19 +28,18 @@ This guide covers deployment, configuration, and integration for the <Component>
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--arg1` | string | `""` | Description |
-| `--arg2` | int | `0` | Description |
+| <!-- arg --> | <!-- type --> | <!-- default --> | <!-- description --> |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DYNAMO_<VAR>` | `value` | Description |
+| <!-- var --> | <!-- default --> | <!-- description --> |
 
 ### Configuration File
 
 ```yaml
-# config.yaml example
+# Add config file example if applicable
 ```
 
 ## Integration
@@ -68,7 +67,7 @@ This guide covers deployment, configuration, and integration for the <Component>
 ### Debug Mode
 
 ```bash
-python -m dynamo.<component> --log-level DEBUG
+# Add debug command from existing docs
 ```
 
 ## See Also

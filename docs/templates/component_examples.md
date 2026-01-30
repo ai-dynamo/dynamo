@@ -8,16 +8,16 @@ Usage examples for the <Component>.
 
 ## Basic Examples
 
-### Example 1: Minimal Setup
-
-```python
-# Python example
-```
-
-### Example 2: CLI Usage
+### Example 1: <!-- Title -->
 
 ```bash
-# CLI example
+# Add example from existing docs
+```
+
+### Example 2: <!-- Title -->
+
+```python
+# Add example from existing docs
 ```
 
 ## Kubernetes Examples
@@ -25,41 +25,29 @@ Usage examples for the <Component>.
 ### Minimal Deployment
 
 ```yaml
-apiVersion: dynamo.nvidia.com/v1alpha1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: <component>-minimal
-spec:
-  # Minimal configuration
+# Add minimal DGDR from existing docs
 ```
 
 ### Production Deployment
 
 ```yaml
-apiVersion: dynamo.nvidia.com/v1alpha1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: <component>-production
-spec:
-  # Full configuration with all options
+# Add production DGDR from existing docs
 ```
 
 ## Advanced Examples
 
-### Example: <!-- Advanced Use Case -->
+### <!-- Advanced Use Case Title -->
 
-<!-- Description and code -->
+<!-- Description -->
+
+```bash
+# Add example
+```
 
 ## Sample Configurations
 
 ### config-minimal.yaml
 
 ```yaml
-# Minimal configuration
-```
-
-### config-production.yaml
-
-```yaml
-# Production configuration with tuning
+# Add from existing docs
 ```

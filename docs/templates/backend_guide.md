@@ -28,14 +28,13 @@ Advanced deployment and configuration for the <Backend> backend.
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--model` | string | required | Model path or HuggingFace ID |
-| `--tensor-parallel-size` | int | `1` | Number of GPUs for TP |
+| <!-- arg --> | <!-- type --> | <!-- default --> | <!-- description --> |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DYNAMO_<BACKEND>_VAR` | `value` | Description |
+| <!-- var --> | <!-- default --> | <!-- description --> |
 
 ### Model Configuration
 
@@ -57,15 +56,19 @@ Advanced deployment and configuration for the <Backend> backend.
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| OOM error | KV cache too large | Reduce `--max-model-len` |
+| <!-- issue --> | <!-- cause --> | <!-- solution --> |
 
 ### Debug Mode
 
 ```bash
-python -m dynamo.<backend> --log-level DEBUG
+# Add debug command from existing docs
 ```
 
 ## See Also
 
-- [<Backend> Overview](./README.md)
-- [Backend Comparison](../README.md)
+| Document | Path |
+|----------|------|
+| `<Backend> Overview` | `./README.md` |
+| Backend Comparison | `../README.md` |
+
+<!-- Convert to links when using template -->

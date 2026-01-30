@@ -17,38 +17,37 @@ Using <Feature> with the <Backend> backend.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--<feature>-arg` | `value` | Description |
+| <!-- arg --> | <!-- default --> | <!-- description --> |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DYNAMO_<FEATURE>_VAR` | `value` | Description |
+| <!-- var --> | <!-- default --> | <!-- description --> |
 
 ## Examples
 
 ### Basic Usage
 
 ```python
-# Code example
+# Add example from existing docs
 ```
 
 ### Kubernetes Deployment
 
 ```yaml
-# DGDR example
+# Add DGDR example from existing docs
 ```
 
 ## Limitations
 
-- <!-- Backend-specific limitation 1 -->
-- <!-- Backend-specific limitation 2 -->
+- <!-- Backend-specific limitations -->
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| Error | Fix |
+| <!-- issue --> | <!-- solution --> |
 
 ## See Also
 

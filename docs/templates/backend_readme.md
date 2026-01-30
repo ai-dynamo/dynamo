@@ -8,44 +8,54 @@ orphan: true
 
 ## Feature Matrix
 
+<!-- Copy actual feature matrix from existing backend docs -->
+<!-- Example pattern (from vLLM README): -->
+
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Prefill/Decode Disagg | ✅ | |
-| KV Cache Routing | ✅ | |
+| Disaggregated Serving | ✅ | |
+| KV-Aware Routing | ✅ | |
+| SLA-Based Planner | ✅ | |
 | Multimodal | ✅ | Vision models |
 | LoRA | 🚧 | Experimental |
-| Speculative Decoding | ❌ | |
 
 ## Quick Start
 
 ### Prerequisites
 
-- <Backend> installed (`pip install <backend>`)
-- Model downloaded
+- <!-- List prerequisites -->
 
-### Python
+### Usage
 
 ```bash
-python -m dynamo.<backend> --model <model-path>
+# Add minimal usage example from existing backend docs
+# Example pattern (vLLM):
+# python -m dynamo.vllm --model <model-name>
+# Example pattern (SGLang):
+# python -m dynamo.sglang --model <model-name>
 ```
 
 ### Kubernetes
 
 ```yaml
-apiVersion: dynamo.nvidia.com/v1alpha1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: <backend>-example
-spec:
-  # Minimal configuration
+# Add DGDR example - use apiVersion: nvidia.com/v1alpha1
+# See recipes/ folder for production examples
 ```
 
 ## Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| <!-- param --> | <!-- default --> | <!-- description --> |
+
+<!-- EXAMPLE: Filled-in Configuration for vLLM would look like:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
 | `--model` | required | Model path or HuggingFace ID |
-| `--tensor-parallel-size` | `1` | GPUs for tensor parallelism |
+| `--tensor-parallel-size` | `1` | Number of GPUs for tensor parallelism |
+| `--max-model-len` | auto | Maximum sequence length |
+-->
 
 ## Next Steps
 

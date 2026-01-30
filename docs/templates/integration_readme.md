@@ -24,18 +24,16 @@ orphan: true
 ## Quick Start
 
 ```bash
-# Installation
-pip install <integration>
-
-# Usage with Dynamo
-python -m dynamo.<backend> --<integration>-enabled
+# Add installation and usage from existing integration docs
+# Example pattern (LMCache):
+# python -m dynamo.vllm --model <model> --connector lmcache
 ```
 
 ## Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--<integration>-arg` | `value` | Description |
+| <!-- param --> | <!-- default --> | <!-- description --> |
 
 ## Guides
 

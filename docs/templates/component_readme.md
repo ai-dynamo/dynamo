@@ -18,32 +18,62 @@ orphan: true
 
 ### Prerequisites
 
-- Dynamo installed (`pip install ai-dynamo`)
-- <!-- Other prerequisites -->
+- <!-- List prerequisites -->
 
-### Python
+### Usage
 
 ```bash
-python -m dynamo.<component> --model <model-path>
+# Add minimal usage example from existing docs
+# Example pattern (from Router):
+# python -m dynamo.frontend --router-mode kv --http-port 8000
 ```
 
 ### Kubernetes
 
 ```yaml
-apiVersion: dynamo.nvidia.com/v1alpha1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: <component>-example
-spec:
-  # Minimal configuration
+# Add DGDR example - use apiVersion: nvidia.com/v1alpha1
+# Example pattern (from Router):
+# apiVersion: nvidia.com/v1alpha1
+# kind: DynamoGraphDeployment
+# metadata:
+#   name: <component>-deployment
+# spec:
+#   services:
+#     ...
 ```
+
+<!-- EXAMPLE: Filled-in Quick Start for Router would look like:
+
+### Prerequisites
+
+- Dynamo platform installed
+- At least one backend worker running
+
+### Usage
+
+```bash
+python -m dynamo.frontend --router-mode kv --http-port 8000
+```
+
+### Kubernetes
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: router-example
+spec:
+  graphs:
+    - name: frontend
+      replicas: 1
+```
+-->
 
 ## Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--param1` | `value` | Description |
-| `--param2` | `value` | Description |
+| <!-- param --> | <!-- default --> | <!-- description --> |
 
 ## Next Steps
 

@@ -8,13 +8,16 @@ orphan: true
 
 ## Backend Support
 
+<!-- Copy actual backend support from existing feature docs -->
+<!-- Example pattern (from Multimodal index.md): -->
+
 | Backend | Status | Notes |
 |---------|--------|-------|
-| vLLM | ✅ | |
-| SGLang | 🚧 | |
-| TensorRT-LLM | ❌ | |
+| vLLM | ✅ | Full support |
+| SGLang | ✅ | |
+| TensorRT-LLM | 🚧 | Limited support |
 
-See Feature Matrix at `/docs/reference/feature-matrix.md` for full compatibility.
+See the Feature Matrix for full compatibility.
 
 ## Overview
 
@@ -22,9 +25,7 @@ See Feature Matrix at `/docs/reference/feature-matrix.md` for full compatibility
 
 ## Quick Start
 
-```bash
-# Minimal example showing the feature
-```
+<!-- Add minimal example from existing feature docs -->
 
 ## Backend-Specific Guides
 
