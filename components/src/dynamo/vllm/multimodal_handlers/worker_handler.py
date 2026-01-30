@@ -37,6 +37,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine_client,
         config,
+        shutdown_event=None,
     ):
         # Get default_sampling_params from config
         default_sampling_params = (
@@ -50,6 +51,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
+            shutdown_event=shutdown_event,
         )
 
         self.config = config
@@ -117,6 +119,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         engine_client: AsyncLLM,
         config,
         decode_worker_client: Client = None,
+        shutdown_event=None,
     ):
         # Get default_sampling_params from config
         default_sampling_params = (
@@ -130,6 +133,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
+            shutdown_event=shutdown_event,
         )
 
         self.config = config

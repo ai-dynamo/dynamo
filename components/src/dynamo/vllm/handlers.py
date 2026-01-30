@@ -243,6 +243,7 @@ class BaseWorkerHandler(ABC):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
     ):
         self.runtime = runtime
         self.component = component
@@ -271,6 +272,9 @@ class BaseWorkerHandler(ABC):
         if use_vllm_tokenizer and hasattr(engine, "tokenizer"):
             tokenizer = engine.tokenizer
         self.input_param_manager = InputParamManager(tokenizer)
+
+        # Store shutdown event for graceful shutdown monitoring
+        self.shutdown_event = shutdown_event
 
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
@@ -339,14 +343,44 @@ class BaseWorkerHandler(ABC):
         raise NotImplementedError
 
     async def _monitor_abort(self, context, request_id, is_prefill):
-        """Background task that monitors for context cancellation and aborts the request."""
+        """
+        Background task that monitors for context cancellation and shutdown.
+        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        """
         try:
-            await context.async_killed_or_stopped()
-            # If we reach here, the context was stopped or killed
+            # Build list of futures/tasks to wait for
+            wait_for = [context.async_killed_or_stopped()]
+            shutdown_task = None
+
+            if self.shutdown_event:
+                # Create task for shutdown monitoring and add to wait list
+                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+                wait_for.append(shutdown_task)
+
+            # Wait for whichever happens first
+            done, pending = await asyncio.wait(
+                wait_for,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel the pending task/future
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # Abort the request
             await self.engine_client.abort(request_id)
             logger.debug(
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
+
+            # Check which event triggered and raise GeneratorExit if shutdown
+            if shutdown_task and shutdown_task in done:
+                raise GeneratorExit("Engine was shut down during generation.")
+
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
@@ -355,18 +389,28 @@ class BaseWorkerHandler(ABC):
 
     @asynccontextmanager
     async def _abort_monitor(self, context, request_id, is_prefill=False):
-        """Context manager that creates and automatically cleans up an abort monitoring task."""
+        """
+        Context manager that creates and automatically cleans up an abort monitoring task.
+        If shutdown event was triggered, raises GeneratorExit on exit.
+        """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
             yield task
         finally:
-            # Cancel the abort monitoring task when exiting the context
+            # Clean up the abort monitoring task
             if not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+            else:
+                # If the task completed, check if it raised GeneratorExit
+                try:
+                    task.result()
+                except GeneratorExit:
+                    # Re-raise GeneratorExit to propagate shutdown signal
+                    raise
 
     async def clear_kv_blocks(self, request=None):
         try:
@@ -1189,6 +1233,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
     ):
         super().__init__(
             runtime,
@@ -1200,6 +1245,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            shutdown_event,
         )
 
     async def generate(self, request, context):
@@ -1398,6 +1444,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
     ):
         super().__init__(
             runtime,
@@ -1409,6 +1456,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            shutdown_event,
         )
 
     async def generate(self, request, context):
