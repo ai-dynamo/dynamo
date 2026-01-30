@@ -252,7 +252,7 @@ class BaseWorkerHandler(ABC):
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
-        self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
