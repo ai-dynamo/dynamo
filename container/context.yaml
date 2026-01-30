@@ -68,7 +68,7 @@ trtllm:
   index_url: https://pypi.nvidia.com/
   pip_wheel_dir: /tmp/trtllm_wheel/
   pip_wheel: tensorrt-llm==1.3.0rc1
-  trtllm_wheel_image: nvcr.io/nvidia/tensorrt-llm/release:${TENSORRTLLM_PIP_WHEEL}
+  trtllm_wheel_image: nvcr.io/nvidia/tensorrt-llm/release:${TENSORRTLLM_PIP_WHEEL#*==}
 
   github_trtllm_commit: 1.2.0rc6
   torch_version: 2.10.0a0+b4e4ee81d3.nv25.12
