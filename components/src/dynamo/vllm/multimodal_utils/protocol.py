@@ -104,8 +104,14 @@ class vLLMGenerateRequest(BaseModel):
 
     @field_serializer("sampling_params")
     def serialize_sampling_params(self, value: SamplingParams) -> dict[str, Any]:
-        """Serialize SamplingParams using msgspec and return as dict."""
-        return json.loads(msgspec.json.encode(value))
+        """Serialize SamplingParams, filtering out private fields.
+
+        This is the primary fix for the set→list serialization issue.
+        Private fields like _all_stop_token_ids are filtered out here
+        so they never get sent over the wire.
+        """
+        serialized = json.loads(msgspec.json.encode(value))
+        return {k: v for k, v in serialized.items() if not k.startswith("_")}
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
