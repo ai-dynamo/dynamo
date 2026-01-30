@@ -71,16 +71,25 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		PeriodSeconds:       10,
 	}
 
+	// Startup probe allows long initialization while waiting for workers to register.
+	// EPP waits indefinitely for discovery to find workers, so this probe is the
+	// only timeout mechanism. Default: 30 minutes (10s × 180 = 1800s).
+	container.StartupProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			GRPC: &corev1.GRPCAction{
+				Port:    9003,
+				Service: ptr.To("inference-extension"),
+			},
+		},
+		PeriodSeconds:    10,
+		FailureThreshold: 180,
+	}
+
 	// EPP-specific environment variables
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  "DYN_KV_BLOCK_SIZE",
 			Value: "16",
-		},
-		{
-			// DYN_DISCOVERY_TIMEOUT_SEC is how long to wait for workers to register (in seconds)
-			Name:  "DYN_DISCOVERY_TIMEOUT_SEC",
-			Value: "300",
 		},
 		{
 			Name:  "USE_STREAMING",
