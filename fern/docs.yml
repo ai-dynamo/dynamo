@@ -14,7 +14,7 @@
 # limitations under the License.
 
 instances:
-  - url: ai-dynamo.docs.buildwithfern.com
+  - url: dynamo.docs.buildwithfern.com
 
 title: NVIDIA Dynamo Documentation
 
