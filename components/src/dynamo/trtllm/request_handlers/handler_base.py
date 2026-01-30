@@ -198,11 +198,12 @@ class HandlerBase:
             )
 
             # Abort the generation
-            # Temporary: Disabled on DECODE workers to prevent engine hangs in
-            # disaggregated setups where abort() may cause the engine to get stuck
-            if self.disaggregation_mode != DisaggregationMode.DECODE:
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
+            # Temporary:
+            #   Disable calling abort() on the engine, which may get stuck if a
+            #   sufficiently large number of concurrent requests is cancelled.
+            # Note to restore:
+            #   call `generation_result.abort()`; and then
+            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
 
             # Clean up any remaining background task
             for task in pending:
