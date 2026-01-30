@@ -274,7 +274,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 )
 
         # Remove the image features from the request as they are not required
-        request.multimodal_inputs = None
+        # Use empty list instead of None to satisfy Pydantic validation on decode worker after vllm upgrade
+        request.multimodal_inputs = []
 
         logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
         logger.info(f"{multi_modal_data}")

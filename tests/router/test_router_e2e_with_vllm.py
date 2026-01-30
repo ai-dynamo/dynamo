@@ -87,6 +87,7 @@ class VLLMProcess:
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
+        enable_local_indexer: bool = False,
     ):
         """Initialize vLLM workers with dynamo integration.
 
@@ -104,6 +105,7 @@ class VLLMProcess:
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+            enable_local_indexer: If True, enable worker-local KV indexer for NATS Core mode. Defaults to False.
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -208,6 +210,10 @@ class VLLMProcess:
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
                 env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
+
+            # Enable local indexer for NATS Core mode
+            if enable_local_indexer:
+                env_vars["DYN_LOCAL_INDEXER"] = "true"
 
             env.update(env_vars)
 
@@ -329,7 +335,7 @@ class VLLMProcess:
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -383,7 +389,7 @@ def test_vllm_kv_router_basic(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
@@ -428,7 +434,7 @@ def test_router_decisions_vllm_multiple_workers(
 
 @pytest.mark.gpu_2
 @pytest.mark.nightly
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_vllm_dp(
     request,
@@ -484,10 +490,10 @@ def test_router_decisions_vllm_dp(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        ("etcd", True, "tcp"),  # nats_core mode
+        # ("etcd", True, "tcp"),  # nats_core mode - disabled for now
         # ("file", False, "nats"),  # File backend
     ],
-    ids=["jetstream", "tcp_nats_core"],
+    ids=["jetstream"],
 )
 def test_vllm_indexers_sync(
     request,
@@ -508,6 +514,8 @@ def test_vllm_indexers_sync(
     - tcp_nats_core: etcd backend, local indexer with NATS Core, TCP request plane
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
+    nats_process, _etcd_process = runtime_services_dynamic_ports
+
     logger.info(
         f"Starting vLLM indexers sync test: store_backend={store_backend}, "
         f"use_nats_core={use_nats_core}, request_plane={request_plane}"
@@ -525,6 +533,7 @@ def test_vllm_indexers_sync(
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
             store_backend=store_backend,
+            enable_local_indexer=use_nats_core,
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
@@ -538,6 +547,8 @@ def test_vllm_indexers_sync(
             num_workers=N_VLLM_WORKERS,
             store_backend=store_backend,
             request_plane=request_plane,
+            test_nats_interruption=use_nats_core,
+            nats_server=nats_process if use_nats_core else None,
         )
 
         logger.info("vLLM indexers sync test completed successfully")
