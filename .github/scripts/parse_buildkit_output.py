@@ -5,6 +5,8 @@
 Parse BuildKit output to extract detailed step-by-step metadata.
 BuildKit provides rich information about each build step including timing,
 cache status, sizes, and layer IDs.
+
+Also parses sccache statistics from the build log output.
 """
 
 import json
@@ -12,6 +14,113 @@ import re
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+
+
+def parse_sccache_from_log(log_content: str, debug: bool = False) -> Dict[str, Any]:
+    """
+    Parse sccache statistics from build log output.
+
+    In BuildKit logs, lines are prefixed with step numbers like:
+    #43 103.6 === sccache statistics AFTER Dynamo ===
+    #43 103.6 Compile requests                    2097
+    #43 103.6 Cache hits                          1670
+    #43 103.6 Cache hits rate                   100.00 %
+    """
+    sccache_data = {}
+
+    # Find sccache statistics section(s) - get the last one
+    # The section ends at the next DONE/CACHED marker or end of content
+    sections = re.findall(
+        r"=== sccache statistics AFTER ([^=]+) ===(.*?)(?=#\d+\s+DONE|#\d+\s+CACHED|#\d+\s+\[|$)",
+        log_content,
+        re.DOTALL,
+    )
+
+    if not sections:
+        if debug:
+            print("DEBUG: No sccache sections found in log", file=sys.stderr)
+        return {}
+
+    # Use the last sccache section (final stats)
+    build_name, stats_block = sections[-1]
+    sccache_data["build_name"] = build_name.strip()
+
+    if debug:
+        print(
+            f"DEBUG: Found sccache section for '{build_name.strip()}'", file=sys.stderr
+        )
+        print(
+            f"DEBUG: Stats block (first 1000 chars):\n{stats_block[:1000]}",
+            file=sys.stderr,
+        )
+
+    # Parse each statistic line
+    for line in stats_block.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Remove BuildKit prefix if present: "#43 103.6 " or "#43 "
+        line = re.sub(r"^#\d+\s+[\d.]+\s+", "", line)
+        line = re.sub(r"^#\d+\s+", "", line)
+        line = line.strip()
+
+        if not line:
+            continue
+
+        # Skip section headers like "Non-cacheable reasons:"
+        if line.endswith(":"):
+            if debug:
+                print(f"DEBUG: Skipping section header: '{line}'", file=sys.stderr)
+            continue
+
+        # Match pattern: "Key Name    Value" or "Key Name    Value unit"
+        # Examples:
+        #   Compile requests                    2097
+        #   Cache hits (C/C++)                   890
+        #   Non-cacheable calls                  411
+        #   Cache hits rate                   100.00 %
+        #   Average cache read hit             0.050 s
+        #
+        # Note: there may be a space before the unit: "100.00 %" or "0.050 s"
+        # Key can contain: letters, numbers, (), /, space, hyphen, plus
+        match = re.match(
+            r"^([A-Za-z][A-Za-z0-9() /+\-]+?)\s{2,}([\d.]+)\s*(%|s)?\s*$", line
+        )
+        if match:
+            key_raw = match.group(1).strip()
+            value_str = match.group(2)
+            unit = match.group(3)
+
+            # Convert key to snake_case
+            key = key_raw.lower()
+            key = re.sub(r"[+()]", "", key)  # Remove plus and parentheses
+            key = re.sub(r"[/\-\s]+", "_", key)  # Replace /, -, spaces with _
+            key = re.sub(r"_+", "_", key)  # Collapse multiple underscores
+            key = key.strip("_")  # Remove leading/trailing underscores
+
+            # Add unit suffix
+            if unit == "%":
+                key = key + "_percent"
+            elif unit == "s":
+                key = key + "_seconds"
+
+            # Convert value to number
+            try:
+                if "." in value_str:
+                    sccache_data[key] = float(value_str)
+                else:
+                    sccache_data[key] = int(value_str)
+            except ValueError:
+                sccache_data[key] = value_str
+
+            if debug:
+                print(f"DEBUG: Parsed: {key} = {sccache_data[key]}", file=sys.stderr)
+        elif debug and line and any(c.isalpha() for c in line):
+            # Print non-matching lines in debug mode for troubleshooting
+            print(f"DEBUG: No match for line: '{line}'", file=sys.stderr)
+
+    return sccache_data
 
 
 class BuildKitParser:
@@ -187,9 +296,12 @@ def main():
     # Parse arguments to find stage logs and metadata
     stage_logs = []  # List of (stage_name, log_file) tuples
     container_metadata_file = None
+    debug_mode = "--debug" in sys.argv
 
     for arg in sys.argv[2:]:
-        if arg.startswith("--metadata="):
+        if arg == "--debug":
+            continue
+        elif arg.startswith("--metadata="):
             container_metadata_file = arg.split("=", 1)[1]
         elif ":" in arg:
             stage_name, log_file = arg.split(":", 1)
@@ -209,6 +321,7 @@ def main():
     total_steps = 0
     total_cached = 0
     total_size = 0
+    sccache_data = {}
 
     # Parse each stage log
     for stage_name, log_file in stage_logs:
@@ -234,6 +347,15 @@ def main():
             total_steps += stage_data["container"]["total_steps"]
             total_cached += stage_data["container"]["cached_steps"]
             total_size += stage_data["container"]["total_size_transferred_bytes"]
+
+            # Extract sccache stats from the log (last one wins)
+            log_sccache = parse_sccache_from_log(log_content, debug=debug_mode)
+            if log_sccache:
+                sccache_data = log_sccache
+                print(
+                    f"✅ Found sccache stats in {stage_name} log: {len(log_sccache)} metrics",
+                    file=sys.stderr,
+                )
 
             print(
                 f"✅ Parsed {stage_name} stage: {stage_data['container']['total_steps']} steps",
@@ -274,11 +396,31 @@ def main():
         except Exception as e:
             print(f"Warning: Could not read container metadata: {e}", file=sys.stderr)
 
+    # Add sccache statistics (parsed from build logs)
+    if sccache_data:
+        build_data["container"]["sccache"] = sccache_data
+        build_data["container"]["sccache_available"] = True
+        print(
+            f"✅ sccache metrics added to container: {len(sccache_data)} metrics",
+            file=sys.stderr,
+        )
+    else:
+        build_data["container"]["sccache_available"] = False
+        print("ℹ️  No sccache stats found in build logs", file=sys.stderr)
+
     # Output JSON
     try:
         with open(output_json, "w") as f:
             json.dump(build_data, f, indent=2)
         print(f"✅ Build data written to: {output_json}", file=sys.stderr)
+        
+        # Print complete JSON to workflow logs for debugging
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("📄 COMPLETE BUILD METRICS JSON:", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(json.dumps(build_data, indent=2), file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
     except Exception as e:
         print(f"Error writing JSON file: {e}", file=sys.stderr)
         sys.exit(1)
@@ -297,6 +439,30 @@ def main():
         f"   Cache Hit Rate: {container['overall_cache_hit_rate']:.1f}%",
         file=sys.stderr,
     )
+
+    # Print sccache summary
+    print("", file=sys.stderr)
+    print("🔨 sccache Summary:", file=sys.stderr)
+    print(
+        f"   Available: {container.get('sccache_available', False)}",
+        file=sys.stderr,
+    )
+    
+    if "sccache" in container:
+        sccache = container["sccache"]
+        if "compile_requests" in sccache:
+            print(
+                f"   Compile Requests: {sccache['compile_requests']}", file=sys.stderr
+            )
+        if "cache_hits" in sccache:
+            print(f"   Cache Hits: {sccache['cache_hits']}", file=sys.stderr)
+        if "cache_misses" in sccache:
+            print(f"   Cache Misses: {sccache['cache_misses']}", file=sys.stderr)
+        if "cache_hits_rate_percent" in sccache:
+            print(
+                f"   Cache Hit Rate: {sccache['cache_hits_rate_percent']:.2f}%",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
