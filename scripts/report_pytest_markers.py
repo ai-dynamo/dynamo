@@ -112,6 +112,7 @@ STUB_MODULES = [
     "gpu_memory_service",
     "gpu_memory_service.common",
     "gpu_memory_service.common.utils",
+    "torch",
 ]
 
 # Project paths for local imports
@@ -350,12 +351,15 @@ def parse_args():
         help="Enable strict validation (undeclared markers, missing config, naming)",
     )
     parser.add_argument(
-        "--tests", default="tests", help="Path to test directory (default: tests)"
+        "--tests",
+        nargs="+",
+        default=["tests"],
+        help="Path(s) to test directory (default: tests)",
     )
     return parser.parse_args()
 
 
-def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
+def run_collection(test_paths: List[str], use_stubbing: bool) -> tuple[int, Report]:
     """Run pytest collection and return exit code and report."""
     if use_stubbing:
         stubber = DependencyStubber()
@@ -384,7 +388,7 @@ def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
             "addopts=",
             "-o",
             "filterwarnings=",
-            test_path,
+            *test_paths,
         ],
         plugins=[plugin],
     )
