@@ -19,8 +19,8 @@ use dynamo_kv_router::{
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId,
     },
 };
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -227,7 +227,7 @@ fn generate_sequences(
     num_prefix_groups: usize,
     seed: u64,
 ) -> Vec<SequenceData> {
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     let mut sequences = Vec::with_capacity(num_sequences);
     let prefix_length: usize = (depth as f64 * prefix_ratio).round() as usize;
@@ -639,9 +639,7 @@ async fn run_microbenchmarks<I: BenchableIndexer>(
     };
 
     let find_matches_hit_stats = if run_all || args.benchmark_type == "find_matches" {
-        Some(
-            bench_find_matches_hit(indexer, sequences, args.iterations, args.common.verbose).await,
-        )
+        Some(bench_find_matches_hit(indexer, sequences, args.iterations, args.common.verbose).await)
     } else {
         None
     };
@@ -712,7 +710,10 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
         let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Store p50", s1_us, s2_us, s1_us / s2_us
+            "Store p50",
+            s1_us,
+            s2_us,
+            s1_us / s2_us
         );
     }
 
@@ -725,7 +726,10 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
         let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (hit) p50", s1_us, s2_us, s1_us / s2_us
+            "Find matches (hit) p50",
+            s1_us,
+            s2_us,
+            s1_us / s2_us
         );
     }
 
@@ -738,7 +742,10 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
         let s2_us = s2.p99.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (hit) p99", s1_us, s2_us, s1_us / s2_us
+            "Find matches (hit) p99",
+            s1_us,
+            s2_us,
+            s1_us / s2_us
         );
     }
 
@@ -751,7 +758,10 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
         let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (miss) p50", s1_us, s2_us, s1_us / s2_us
+            "Find matches (miss) p50",
+            s1_us,
+            s2_us,
+            s1_us / s2_us
         );
     }
 
@@ -761,7 +771,10 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
         let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Remove p50", s1_us, s2_us, s1_us / s2_us
+            "Remove p50",
+            s1_us,
+            s2_us,
+            s1_us / s2_us
         );
     }
 
@@ -799,10 +812,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
     println!("KvIndexer Microbenchmark");
     println!("========================\n");
     println!("Configuration:");
-    println!(
-        "  Target size: {} (worker, block) pairs",
-        args.common.size
-    );
+    println!("  Target size: {} (worker, block) pairs", args.common.size);
     println!(
         "  Depth: {} blocks/sequence (= {} tokens with block_size={})",
         args.common.depth,
@@ -1325,7 +1335,10 @@ async fn run_stress_mode(args: StressArgs) {
         let token = CancellationToken::new();
         let mut indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
 
-        println!("\n  Applying {} store events to KvIndexer...", sequences.len());
+        println!(
+            "\n  Applying {} store events to KvIndexer...",
+            sequences.len()
+        );
         let construction_start = Instant::now();
 
         for (event_id, seq) in sequences.iter().enumerate() {

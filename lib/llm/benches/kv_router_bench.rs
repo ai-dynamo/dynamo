@@ -18,19 +18,19 @@ use clap::Parser;
 use dynamo_runtime::transports::event_plane::EventEnvelope;
 use hf_hub;
 use indicatif::{ProgressBar, ProgressStyle};
-use minijinja::{context, value::Value, Environment};
+use minijinja::{Environment, context, value::Value};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, Semaphore};
 use tokenizers::Tokenizer;
+use tokio::sync::{Mutex, Semaphore};
 
 use dynamo_llm::kv_router::protocols::{
-    compute_hash, compute_seq_hash_for_block, ExternalSequenceBlockHash, KvCacheEvent,
-    KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
-    WorkerId,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_hash,
+    compute_seq_hash_for_block,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::prompt::{
@@ -237,7 +237,9 @@ impl TokenizerConfig {
             if let Some(s) = v.as_str() {
                 Some(s.to_string())
             } else if let Some(obj) = v.as_object() {
-                obj.get("content").and_then(|c| c.as_str()).map(|s| s.to_string())
+                obj.get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
             } else {
                 None
             }
@@ -250,7 +252,9 @@ impl TokenizerConfig {
             if let Some(s) = v.as_str() {
                 Some(s.to_string())
             } else if let Some(obj) = v.as_object() {
-                obj.get("content").and_then(|c| c.as_str()).map(|s| s.to_string())
+                obj.get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
             } else {
                 None
             }
@@ -270,8 +274,8 @@ fn load_tokenizer_config(model_or_path: &str) -> Result<Option<TokenizerConfig>>
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)
                 .context("Failed to read tokenizer_config.json")?;
-            let config: TokenizerConfig = serde_json::from_str(&content)
-                .context("Failed to parse tokenizer_config.json")?;
+            let config: TokenizerConfig =
+                serde_json::from_str(&content).context("Failed to parse tokenizer_config.json")?;
             return Ok(Some(config));
         }
         return Ok(None);
@@ -289,8 +293,8 @@ fn load_tokenizer_config(model_or_path: &str) -> Result<Option<TokenizerConfig>>
         Ok(config_path) => {
             let content = std::fs::read_to_string(&config_path)
                 .context("Failed to read tokenizer_config.json")?;
-            let config: TokenizerConfig = serde_json::from_str(&content)
-                .context("Failed to parse tokenizer_config.json")?;
+            let config: TokenizerConfig =
+                serde_json::from_str(&content).context("Failed to parse tokenizer_config.json")?;
             Ok(Some(config))
         }
         Err(_) => Ok(None),
@@ -418,16 +422,26 @@ fn load_tokenizer(model_or_path: &str) -> Result<Tokenizer> {
 
     // If it's a file, load directly
     if path.is_file() {
-        return Tokenizer::from_file(path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer from file '{}': {}", model_or_path, e));
+        return Tokenizer::from_file(path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load tokenizer from file '{}': {}",
+                model_or_path,
+                e
+            )
+        });
     }
 
     // If it's a directory, look for tokenizer.json inside
     if path.is_dir() {
         let tokenizer_path = path.join("tokenizer.json");
         if tokenizer_path.exists() {
-            return Tokenizer::from_file(&tokenizer_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load tokenizer from '{}': {}", tokenizer_path.display(), e));
+            return Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load tokenizer from '{}': {}",
+                    tokenizer_path.display(),
+                    e
+                )
+            });
         }
         return Err(anyhow::anyhow!(
             "Directory '{}' does not contain tokenizer.json",
@@ -436,7 +450,10 @@ fn load_tokenizer(model_or_path: &str) -> Result<Tokenizer> {
     }
 
     // Try to download from HuggingFace
-    println!("  Downloading tokenizer from HuggingFace: {}...", model_or_path);
+    println!(
+        "  Downloading tokenizer from HuggingFace: {}...",
+        model_or_path
+    );
 
     let cache = hf_hub::Cache::default();
     let api = hf_hub::api::sync::ApiBuilder::from_cache(cache)
@@ -445,9 +462,13 @@ fn load_tokenizer(model_or_path: &str) -> Result<Tokenizer> {
         .map_err(|e| anyhow::anyhow!("Failed to create HuggingFace API client: {}", e))?;
 
     let repo = api.model(model_or_path.to_string());
-    let tokenizer_path = repo
-        .get("tokenizer.json")
-        .map_err(|e| anyhow::anyhow!("Failed to download tokenizer.json from '{}': {}", model_or_path, e))?;
+    let tokenizer_path = repo.get("tokenizer.json").map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to download tokenizer.json from '{}': {}",
+            model_or_path,
+            e
+        )
+    })?;
 
     Tokenizer::from_file(&tokenizer_path)
         .map_err(|e| anyhow::anyhow!("Failed to load downloaded tokenizer: {}", e))
@@ -506,7 +527,6 @@ impl PrefixData {
     }
 }
 
-
 /// Pre-generated sequence data for benchmarking
 #[derive(Clone)]
 struct SequenceData {
@@ -528,12 +548,8 @@ impl SequenceData {
         tokenizer: &Tokenizer,
         prompt_renderer: Option<&PromptRenderer>,
     ) -> Result<Self> {
-        let (local_hashes, external_hashes) = compute_hashes_for_content(
-            content,
-            tokenizer,
-            kv_block_size,
-            prompt_renderer,
-        )?;
+        let (local_hashes, external_hashes) =
+            compute_hashes_for_content(content, tokenizer, kv_block_size, prompt_renderer)?;
 
         Ok(Self {
             worker_id,
@@ -630,9 +646,7 @@ async fn fetch_model_name(frontend_url: &str) -> Result<String> {
             for m in &models.data {
                 println!("    - {}", m.id);
             }
-            anyhow::bail!(
-                "Multiple models available. Please specify --model explicitly."
-            )
+            anyhow::bail!("Multiple models available. Please specify --model explicitly.")
         }
     }
 }
@@ -661,18 +675,18 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
         .await
         .context("Failed to parse health response")?;
 
-    let worker_ids: Vec<WorkerId> = health
-        .instances
-        .iter()
-        .map(|i| i.instance_id)
-        .collect();
+    let worker_ids: Vec<WorkerId> = health.instances.iter().map(|i| i.instance_id).collect();
 
     // Deduplicate (in case of multiple endpoints per worker)
     let mut unique_ids: Vec<WorkerId> = worker_ids.clone();
     unique_ids.sort_unstable();
     unique_ids.dedup();
 
-    println!("  Discovered {} workers: {:?}", unique_ids.len(), unique_ids);
+    println!(
+        "  Discovered {} workers: {:?}",
+        unique_ids.len(),
+        unique_ids
+    );
 
     if unique_ids.is_empty() {
         anyhow::bail!("No workers discovered from frontend. Are kv_stress_workers running?");
@@ -769,9 +783,16 @@ async fn build_tree_via_nats(
 ) -> Result<Duration> {
     // Subject format must match Component.subject() from lib/runtime/src/component/component.rs
     // which returns: namespace.{namespace_name}.component.{component_name}
-    let subject = format!("namespace.{}.component.{}.{}", namespace, component, KV_EVENT_SUBJECT);
+    let subject = format!(
+        "namespace.{}.component.{}.{}",
+        namespace, component, KV_EVENT_SUBJECT
+    );
 
-    println!("Building tree: {} sequences to subject {}...", sequences.len(), subject);
+    println!(
+        "Building tree: {} sequences to subject {}...",
+        sequences.len(),
+        subject
+    );
     let start = Instant::now();
 
     let progress = if !verbose {
@@ -864,19 +885,15 @@ fn generate_prefix_text(prefix_id: usize, target_tokens: usize) -> String {
     for i in 0..words_per_prefix {
         let word_idx = (prefix_id * 1000 + i) % 100;
         let words = [
-            "the", "and", "for", "are", "but", "not", "you", "all",
-            "can", "had", "her", "was", "one", "our", "out", "day",
-            "get", "has", "him", "his", "how", "its", "may", "new",
-            "now", "old", "see", "two", "way", "who", "boy", "did",
-            "oil", "sit", "set", "run", "top", "got", "let", "put",
-            "say", "she", "too", "use", "dad", "mom", "end", "big",
-            "ask", "own", "why", "men", "read", "need", "land", "same",
-            "here", "must", "home", "hand", "high", "year", "come", "made",
-            "find", "long", "down", "look", "write", "go", "word", "call",
-            "first", "water", "been", "number", "people", "over", "such", "make",
-            "time", "very", "when", "would", "more", "some", "into", "them",
-            "than", "only", "have", "from", "this", "that", "with", "they",
-            "will", "each", "about", "which",
+            "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was",
+            "one", "our", "out", "day", "get", "has", "him", "his", "how", "its", "may", "new",
+            "now", "old", "see", "two", "way", "who", "boy", "did", "oil", "sit", "set", "run",
+            "top", "got", "let", "put", "say", "she", "too", "use", "dad", "mom", "end", "big",
+            "ask", "own", "why", "men", "read", "need", "land", "same", "here", "must", "home",
+            "hand", "high", "year", "come", "made", "find", "long", "down", "look", "write", "go",
+            "word", "call", "first", "water", "been", "number", "people", "over", "such", "make",
+            "time", "very", "when", "would", "more", "some", "into", "them", "than", "only",
+            "have", "from", "this", "that", "with", "they", "will", "each", "about", "which",
         ];
         content.push_str(words[word_idx]);
         content.push(' ');
@@ -936,7 +953,12 @@ fn generate_prefix_data(
     let results: Result<Vec<PrefixData>> = texts
         .into_par_iter()
         .map(|text| {
-            let result = PrefixData::from_text(text, &tokenizer, kv_block_size, prompt_renderer_clone.as_ref());
+            let result = PrefixData::from_text(
+                text,
+                &tokenizer,
+                kv_block_size,
+                prompt_renderer_clone.as_ref(),
+            );
             if let Some(ref pb) = progress_clone {
                 pb.inc(1);
             }
@@ -1086,7 +1108,11 @@ async fn send_requests_at_rate(
         loop {
             interval.tick().await;
             let count = in_flight_monitor.load(Ordering::Relaxed);
-            eprintln!("  [t={:>3}s] in-flight: {}", monitor_start.elapsed().as_secs(), count);
+            eprintln!(
+                "  [t={:>3}s] in-flight: {}",
+                monitor_start.elapsed().as_secs(),
+                count
+            );
         }
     });
 
@@ -1182,9 +1208,7 @@ async fn send_requests_at_rate(
     // Wait for in-flight requests
     println!("  Waiting for in-flight requests...");
     let drain_start = Instant::now();
-    while in_flight.load(Ordering::Relaxed) > 0
-        && drain_start.elapsed() < Duration::from_secs(30)
-    {
+    while in_flight.load(Ordering::Relaxed) > 0 && drain_start.elapsed() < Duration::from_secs(30) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1209,7 +1233,10 @@ async fn publish_events_at_rate(
     duration_secs: u64,
 ) {
     // Subject format must match Component.subject() from lib/runtime/src/component/component.rs
-    let subject = format!("namespace.{}.component.{}.{}", namespace, component, KV_EVENT_SUBJECT);
+    let subject = format!(
+        "namespace.{}.component.{}.{}",
+        namespace, component, KV_EVENT_SUBJECT
+    );
     let interval = Duration::from_secs_f64(1.0 / rate);
     let start = Instant::now();
     let duration = Duration::from_secs(duration_secs);
@@ -1392,10 +1419,7 @@ impl StressResults {
 
         println!("Tree Construction:");
         println!("  Sequences: {}", self.num_sequences);
-        println!(
-            "  Blocks: {}",
-            self.num_sequences * self.depth
-        );
+        println!("  Blocks: {}", self.num_sequences * self.depth);
         println!("  Time: {}ms", self.tree_construction_time_ms);
         println!();
 
@@ -1489,8 +1513,8 @@ async fn main() -> Result<()> {
     let tokenizer = load_tokenizer(tokenizer_path)?;
     println!("  Tokenizer loaded successfully");
 
-    let mut prompt_renderer = try_load_prompt_renderer(&model)
-        .or_else(|| try_load_prompt_renderer(tokenizer_path));
+    let mut prompt_renderer =
+        try_load_prompt_renderer(&model).or_else(|| try_load_prompt_renderer(tokenizer_path));
 
     if prompt_renderer.is_some() {
         println!("  Prompt formatter loaded from ModelDeploymentCard");
@@ -1503,7 +1527,10 @@ async fn main() -> Result<()> {
                 std::fs::read_to_string(&config_path).ok()
             } else if !std::path::Path::new(tokenizer_path).exists() {
                 // Might be a HuggingFace model ID - try to download tokenizer_config.json
-                println!("  Downloading tokenizer_config.json from HuggingFace: {}...", tokenizer_path);
+                println!(
+                    "  Downloading tokenizer_config.json from HuggingFace: {}...",
+                    tokenizer_path
+                );
                 if let Ok(api) = hf_hub::api::sync::Api::new() {
                     let repo = api.model(tokenizer_path.to_string());
                     repo.get("tokenizer_config.json")
@@ -1522,43 +1549,52 @@ async fn main() -> Result<()> {
                 Ok(chat_template) => {
                     match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[])) {
                         Ok(formatter) => {
-                            println!("  Prompt formatter loaded from tokenizer_config.json (using frontend-compatible renderer)");
+                            println!(
+                                "  Prompt formatter loaded from tokenizer_config.json (using frontend-compatible renderer)"
+                            );
                             prompt_renderer = Some(PromptRenderer::Formatter(formatter));
                         }
                         Err(e) => {
                             println!("  WARNING: Failed to create prompt formatter: {}", e);
-                            println!("           Using fallback Simple renderer (may not match frontend)");
+                            println!(
+                                "           Using fallback Simple renderer (may not match frontend)"
+                            );
                             // Fallback to simple renderer
                             if let Ok(Some(config)) = load_tokenizer_config(tokenizer_path) {
                                 let bos = config.bos_token_str();
                                 let eos = config.eos_token_str();
                                 if let Some(template) = config.chat_template {
-                                    prompt_renderer = Some(PromptRenderer::Simple(ChatTemplateRenderer::new(
-                                        template, bos, eos,
-                                    )));
+                                    prompt_renderer = Some(PromptRenderer::Simple(
+                                        ChatTemplateRenderer::new(template, bos, eos),
+                                    ));
                                 }
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    println!("  WARNING: Failed to parse tokenizer_config.json as ChatTemplate: {}", e);
+                    println!(
+                        "  WARNING: Failed to parse tokenizer_config.json as ChatTemplate: {}",
+                        e
+                    );
                     println!("           Using fallback Simple renderer (may not match frontend)");
                     // Fallback to simple renderer
                     if let Ok(Some(config)) = load_tokenizer_config(tokenizer_path) {
                         let bos = config.bos_token_str();
                         let eos = config.eos_token_str();
                         if let Some(template) = config.chat_template {
-                            prompt_renderer = Some(PromptRenderer::Simple(ChatTemplateRenderer::new(
-                                template, bos, eos,
-                            )));
+                            prompt_renderer = Some(PromptRenderer::Simple(
+                                ChatTemplateRenderer::new(template, bos, eos),
+                            ));
                         }
                     }
                 }
             }
         } else {
             println!("  WARNING: No tokenizer_config.json found. Hashes may not match frontend!");
-            println!("           The frontend applies chat templates to /v1/chat/completions requests.");
+            println!(
+                "           The frontend applies chat templates to /v1/chat/completions requests."
+            );
         }
     }
 
@@ -1610,11 +1646,7 @@ async fn main() -> Result<()> {
 
     // Show first prefix's formatted text sample if chat template was applied
     if prompt_renderer.is_some() && !prefix_data.is_empty() {
-        let sample: String = prefix_data[0]
-            .formatted_text
-            .chars()
-            .take(200)
-            .collect();
+        let sample: String = prefix_data[0].formatted_text.chars().take(200).collect();
         println!("  Sample formatted prefix (first 200 chars):");
         for line in sample.lines().take(5) {
             println!("    | {}", line);
@@ -1641,7 +1673,10 @@ async fn main() -> Result<()> {
         );
     }
 
-    println!("  Generating {} sequences with shared prefixes...", num_sequences);
+    println!(
+        "  Generating {} sequences with shared prefixes...",
+        num_sequences
+    );
 
     let sequences = generate_sequences_for_requests(
         num_sequences,
@@ -1674,7 +1709,14 @@ async fn main() -> Result<()> {
             .context("Failed to connect to NATS")?;
         println!("  Connected to NATS");
 
-        build_tree_via_nats(&nats_client, &args.namespace, &args.component, &sequences, args.verbose).await?
+        build_tree_via_nats(
+            &nats_client,
+            &args.namespace,
+            &args.component,
+            &sequences,
+            args.verbose,
+        )
+        .await?
     };
 
     // return Ok(());
@@ -1734,7 +1776,10 @@ async fn main() -> Result<()> {
     // Print the timestamp again at the end for easy copy-paste
     println!();
     println!("To filter FE logs for post-warmup only:");
-    println!("  python analyze_frontend_log.py frontend.log --after-warmup {:.6}", warmup_end_ts);
+    println!(
+        "  python analyze_frontend_log.py frontend.log --after-warmup {:.6}",
+        warmup_end_ts
+    );
 
     // Wait for event publisher
     if let Some(h) = event_handle {
@@ -1765,11 +1810,26 @@ async fn main() -> Result<()> {
         requests_submitted: results.len() as u64,
         requests_completed: successful_results.len() as u64,
         requests_failed: failed_count as u64,
-        latency_min_us: stats.as_ref().map(|s| s.min.as_micros() as u64).unwrap_or(0),
-        latency_p50_us: stats.as_ref().map(|s| s.p50.as_micros() as u64).unwrap_or(0),
-        latency_p95_us: stats.as_ref().map(|s| s.p95.as_micros() as u64).unwrap_or(0),
-        latency_p99_us: stats.as_ref().map(|s| s.p99.as_micros() as u64).unwrap_or(0),
-        latency_max_us: stats.as_ref().map(|s| s.max.as_micros() as u64).unwrap_or(0),
+        latency_min_us: stats
+            .as_ref()
+            .map(|s| s.min.as_micros() as u64)
+            .unwrap_or(0),
+        latency_p50_us: stats
+            .as_ref()
+            .map(|s| s.p50.as_micros() as u64)
+            .unwrap_or(0),
+        latency_p95_us: stats
+            .as_ref()
+            .map(|s| s.p95.as_micros() as u64)
+            .unwrap_or(0),
+        latency_p99_us: stats
+            .as_ref()
+            .map(|s| s.p99.as_micros() as u64)
+            .unwrap_or(0),
+        latency_max_us: stats
+            .as_ref()
+            .map(|s| s.max.as_micros() as u64)
+            .unwrap_or(0),
         achieved_request_rate: results.len() as f64 / args.duration as f64,
         max_in_flight: max_in_flight.load(Ordering::Relaxed),
         time_buckets,
