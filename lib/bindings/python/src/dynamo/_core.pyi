@@ -980,12 +980,14 @@ class ModelInput:
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
     Prefill: ModelType
+    Images: ModelType
+    Videos: ModelType
     ...
 
 class RouterMode:

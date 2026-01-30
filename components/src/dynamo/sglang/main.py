@@ -17,20 +17,28 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
+    ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
+    VideoGenerationHealthCheckPayload,
 )
 from dynamo.sglang.publisher import setup_prometheus_registry, setup_sgl_metrics
-from dynamo.sglang.register import register_llm_with_readiness_gate
+from dynamo.sglang.register import (
+    register_image_diffusion_model,
+    register_llm_with_readiness_gate,
+    register_video_generation_model,
+)
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
     DiffusionWorkerHandler,
     EmbeddingWorkerHandler,
+    ImageDiffusionWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
     MultimodalProcessorHandler,
     MultimodalWorkerHandler,
     PrefillWorkerHandler,
+    VideoGenerationWorkerHandler,
 )
 
 configure_dynamo_logging()
@@ -103,7 +111,11 @@ async def worker():
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    if config.dynamo_args.embedding_worker:
+    if config.dynamo_args.image_diffusion_worker:
+        await init_image_diffusion(runtime, config)
+    elif config.dynamo_args.video_generation_worker:
+        await init_video_generation(runtime, config)
+    elif config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
     elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
@@ -118,6 +130,7 @@ async def worker():
         await init_diffusion(runtime, config)
     elif config.serving_mode != DisaggregationMode.PREFILL:
         await init(runtime, config)
+
     else:
         await init_prefill(runtime, config)
 
@@ -430,6 +443,196 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
         except asyncio.CancelledError:
             logging.info("Metrics task successfully cancelled")
             pass
+        handler.cleanup()
+
+
+async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
+    """Initialize image diffusion worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    print(f"Server args: {server_args}")
+    print(f"Dynamo args: {dynamo_args}")
+
+    # Initialize DiffGenerator (not sgl.Engine)
+    from sglang.multimodal_gen import DiffGenerator
+
+    if not server_args.model_path:
+        raise ValueError("--model is required for diffusion workers")
+
+    generator = DiffGenerator.from_pretrained(model_path=server_args.model_path)
+
+    # Initialize fsspec filesystems for image storage
+    fs = None
+    fs_url = dynamo_args.image_diffusion_fs_url
+
+    # Initialize primary filesystem
+    if not fs_url:
+        raise ValueError("--diffusion-fs-url is required for diffusion workers")
+
+    try:
+        import fsspec
+
+        # Extract protocol from URL (s3://, gs://, az://, file://)
+        fs_url_parts = fs_url.split("://")
+        protocol = fs_url_parts[0] if "://" in fs_url else "file"
+
+        # Initialize filesystem, configure fsspec using json configuration file
+        #  - json configuration file: ~/.config/fsspec/s3.json
+        #  - environment variables i.e. FSSPEC_S3_SECRET
+        fs = fsspec.filesystem(protocol, auto_mkdir=True)
+        logging.info(
+            f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})"
+        )
+    except ImportError:
+        logging.warning(
+            "fsspec not available. Filesystem uploads will fail. "
+            "Install with: pip install fsspec"
+        )
+    except Exception as e:
+        logging.warning(
+            f"Failed to initialize fsspec filesystem for {fs_url}: {e}. "
+            "Filesystem uploads may fail."
+        )
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # Image diffusion doesn't have metrics publisher like LLM
+    # Could add custom metrics for images/sec, steps/sec later
+
+    handler = ImageDiffusionWorkerHandler(
+        component,
+        generator,
+        config,
+        publisher=None,
+        fs=fs,
+    )
+
+    # Create proper health check payload that sends a minimal diffusion request
+    health_check_payload = ImageDiffusionHealthCheckPayload(
+        model_path=server_args.model_path
+    ).to_dict()
+
+    ready_event = asyncio.Event()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[],  # No LLM metrics labels
+                health_check_payload=health_check_payload,
+            ),
+            register_image_diffusion_model(
+                generator,
+                generate_endpoint,
+                server_args,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve image diffusion endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_video_generation(runtime: DistributedRuntime, config: Config):
+    """Initialize video generation worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    logging.info(f"Server args: {server_args}")
+    logging.info(f"Dynamo args: {dynamo_args}")
+
+    # Initialize DiffGenerator (not sgl.Engine) - same as image diffusion
+    from sglang.multimodal_gen import DiffGenerator
+
+    if not server_args.model_path:
+        raise ValueError("--model is required for video generation workers")
+
+    generator = DiffGenerator.from_pretrained(model_path=server_args.model_path)
+
+    # Initialize fsspec filesystems for video storage
+    fs = None
+    fs_url = dynamo_args.video_generation_fs_url
+
+    # Initialize primary filesystem
+    if not fs_url:
+        raise ValueError(
+            "--video-generation-fs-url is required for video generation workers"
+        )
+
+    try:
+        import fsspec
+
+        # Extract protocol from URL (s3://, gs://, az://, file://)
+        fs_url_parts = fs_url.split("://")
+        protocol = fs_url_parts[0] if "://" in fs_url else "file"
+
+        # Initialize filesystem, configure fsspec using json configuration file
+        #  - json configuration file: ~/.config/fsspec/s3.json
+        #  - environment variables i.e. FSSPEC_S3_SECRET
+        fs = fsspec.filesystem(protocol, auto_mkdir=True)
+        logging.info(
+            f"fsspec filesystem initialized for video storage: {fs_url} (protocol: {protocol})"
+        )
+    except ImportError:
+        logging.warning(
+            "fsspec not available. Filesystem uploads will fail. "
+            "Install with: pip install fsspec"
+        )
+    except Exception as e:
+        logging.warning(
+            f"Failed to initialize fsspec filesystem for {fs_url}: {e}. "
+            "Filesystem uploads may fail."
+        )
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # Video generation doesn't have metrics publisher like LLM
+    # Could add custom metrics for frames/sec, videos/sec later
+
+    handler = VideoGenerationWorkerHandler(
+        component,
+        generator,
+        config,
+        publisher=None,
+        fs=fs,
+    )
+
+    # Create proper health check payload that sends a minimal video request
+    health_check_payload = VideoGenerationHealthCheckPayload(
+        model_path=server_args.model_path
+    ).to_dict()
+
+    ready_event = asyncio.Event()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[],  # No LLM metrics labels
+                health_check_payload=health_check_payload,
+            ),
+            register_video_generation_model(
+                generator,
+                generate_endpoint,
+                server_args,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve video generation endpoints: {e}")
+        raise
+    finally:
         handler.cleanup()
 
 

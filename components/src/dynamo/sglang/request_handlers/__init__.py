@@ -5,7 +5,13 @@
 from .embedding import EmbeddingWorkerHandler
 
 # Base handlers
-from .handler_base import BaseWorkerHandler
+from .handler_base import BaseGenerativeHandler, BaseWorkerHandler
+
+# Image diffusion handlers
+from .image_diffusion import ImageDiffusionWorkerHandler
+
+# Video generation handlers
+from .video_generation import VideoGenerationWorkerHandler
 
 # LLM handlers
 from .llm import DecodeWorkerHandler, DiffusionWorkerHandler, PrefillWorkerHandler
@@ -19,6 +25,8 @@ from .multimodal import (
 )
 
 __all__ = [
+    # Base handlers
+    "BaseGenerativeHandler",
     "BaseWorkerHandler",
     # LLM handlers
     "DecodeWorkerHandler",
@@ -26,6 +34,10 @@ __all__ = [
     "PrefillWorkerHandler",
     # Embedding handlers
     "EmbeddingWorkerHandler",
+    # Image diffusion handlers
+    "ImageDiffusionWorkerHandler",
+    # Video generation handlers
+    "VideoGenerationWorkerHandler",
     # Multimodal handlers
     "MultimodalEncodeWorkerHandler",
     "MultimodalPrefillWorkerHandler",

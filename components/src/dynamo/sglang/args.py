@@ -131,6 +131,30 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
         "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
+    "image-diffusion-worker": {
+        "flags": ["--image-diffusion-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as image diffusion worker for image generation",
+    },
+    "image-diffusion-fs-url": {
+        "flags": ["--image-diffusion-fs-url"],
+        "type": str,
+        "default": None,
+        "help": "Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
+    },
+    "video-generation-worker": {
+        "flags": ["--video-generation-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as video generation worker for video generation (T2V/I2V)",
+    },
+    "video-generation-fs-url": {
+        "flags": ["--video-generation-fs-url"],
+        "type": str,
+        "default": None,
+        "help": "Filesystem URL for storing generated videos using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
+    },
 }
 
 
@@ -172,6 +196,14 @@ class DynamoArgs:
     enable_local_indexer: bool = False
     # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
     use_kv_events: bool = False
+
+    # image diffusion options
+    image_diffusion_worker: bool = False
+    image_diffusion_fs_url: Optional[str] = None
+
+    # video generation options
+    video_generation_worker: bool = False
+    video_generation_fs_url: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -443,6 +475,10 @@ async def parse_args(args: list[str]) -> Config:
     if endpoint is None:
         if parsed_args.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
+        elif getattr(parsed_args, "image_diffusion_worker", False):
+            endpoint = f"dyn://{namespace}.backend.generate"
+        elif getattr(parsed_args, "video_generation_worker", False):
+            endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
             and parsed_args.disaggregation_mode == "prefill"
@@ -521,7 +557,37 @@ async def parse_args(args: list[str]) -> Config:
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
     # contain code to download a model, it should only parse the args.
-    server_args = ServerArgs.from_cli_args(parsed_args)
+
+    # For diffusion/video workers, create a minimal dummy ServerArgs since diffusion
+    # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
+    image_diffusion_worker = getattr(parsed_args, "image_diffusion_worker", False)
+    video_generation_worker = getattr(parsed_args, "video_generation_worker", False)
+
+    if image_diffusion_worker or video_generation_worker:
+        worker_type = "image diffusion" if image_diffusion_worker else "video generation"
+        logging.info(
+            f"{worker_type.title()} worker detected with model: {model_path}, creating minimal ServerArgs stub"
+        )
+        # Create a minimal ServerArgs-like object that bypasses model config loading
+        # Diffusion/video workers don't actually use ServerArgs - they use DiffGenerator
+        import types
+
+        server_args = types.SimpleNamespace()
+        # Copy over any attrs that might be needed, but avoid triggering __post_init__
+        server_args.model_path = model_path
+        server_args.served_model_name = parsed_args.served_model_name
+        server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
+        server_args.log_level = getattr(parsed_args, "log_level", "info")
+        server_args.skip_tokenizer_init = True
+        server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
+        server_args.speculative_algorithm = None
+        server_args.disaggregation_mode = None
+        server_args.dllm_algorithm = False
+        logging.info(
+            f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
+        )
+    else:
+        server_args = ServerArgs.from_cli_args(parsed_args)
 
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
     # tokens since last output), not cumulative tokens. When stream_output=True,
@@ -576,6 +642,10 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
         diffusion_worker=diffusion_worker,
+        image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
+        image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
+        video_generation_worker=getattr(parsed_args, "video_generation_worker", False),
+        video_generation_fs_url=getattr(parsed_args, "video_generation_fs_url", None),
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
         use_kv_events=use_kv_events,
