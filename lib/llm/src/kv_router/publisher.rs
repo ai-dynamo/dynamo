@@ -59,7 +59,11 @@ const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent 
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
 pub enum KvEventSourceConfig {
-    Zmq { endpoint: String, topic: String },
+    Zmq {
+        endpoint: String,
+        topic: String,
+        bind: bool,
+    },
 }
 
 /// The source of KV events.
@@ -79,7 +83,11 @@ impl KvEventSource {
         tx: mpsc::UnboundedSender<KvCacheEvent>,
     ) -> Result<Self> {
         match source_config {
-            KvEventSourceConfig::Zmq { endpoint, topic } => {
+            KvEventSourceConfig::Zmq {
+                endpoint,
+                topic,
+                bind,
+            } => {
                 let zmq_handle = component
                     .drt()
                     .runtime()
@@ -90,6 +98,7 @@ impl KvEventSource {
                         tx,
                         cancellation_token.clone(),
                         kv_block_size,
+                        bind,
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
@@ -406,6 +415,7 @@ pub async fn start_zmq_listener(
     tx: mpsc::UnboundedSender<KvCacheEvent>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
+    bind: bool,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -423,7 +433,12 @@ pub async fn start_zmq_listener(
         return;
     }
 
-    if let Err(e) = socket.connect(&zmq_endpoint).await {
+    if bind {
+        if let Err(e) = socket.bind(&zmq_endpoint).await {
+            tracing::error!("Failed to bind ZMQ SUB socket: {}", e);
+            return;
+        }
+    } else if let Err(e) = socket.connect(&zmq_endpoint).await {
         tracing::error!("Failed to connect ZMQ SUB socket: {}", e);
         return;
     }
@@ -1559,7 +1574,7 @@ mod tests_startup_helpers {
         // Spawn async listener
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4)
+            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4, false)
         });
 
         // Give time for the connection to establish
