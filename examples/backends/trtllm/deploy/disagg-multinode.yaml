@@ -124,11 +124,11 @@ spec:
             configMap:
               name: nvidia-config
         mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
           volumeMounts:
             - name: nvidia-config
               mountPath: /workspace/
               readOnly: true
-            image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
           workingDir: /workspace/
           command:
           - python3
