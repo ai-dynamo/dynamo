@@ -10,7 +10,7 @@
 //! The key feature is that tree construction uses the same hash computation as the frontend,
 //! ensuring that HTTP requests will match the pre-populated tree entries.
 //!
-//! Run with: cargo bench --package dynamo-llm --bench kv_router_full_stress --features kv-router-stress -- --help
+//! Run with: cargo bench --package dynamo-llm --bench kv_router_bench --features kv-router-stress -- --help
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -75,7 +75,7 @@ fn encode_event_with_envelope<T: Serialize>(event: &T, topic: &str) -> Result<Ve
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "kv_router_full_stress")]
+#[command(name = "kv_router_bench")]
 #[command(about = "Full stress test for the KV Router via NATS events and HTTP requests")]
 struct Args {
     // Tree construction parameters
@@ -357,7 +357,7 @@ struct SimpleChatRequest {
 
 impl OAIChatLikeRequest for SimpleChatRequest {
     fn model(&self) -> String {
-        "kv_router_full_stress".to_string()
+        "kv_router_bench".to_string()
     }
 
     fn messages(&self) -> Value {

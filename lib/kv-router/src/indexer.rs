@@ -1236,7 +1236,7 @@ impl KvIndexerSharded {
 
         let (request_broadcast_tx, _) = broadcast::channel::<ShardedMatchRequest>(1048576);
 
-        for shard_id in 0..num_shards {
+        for _ in 0..num_shards {
             let (shard_event_tx, mut shard_event_rx) = mpsc::channel::<RouterEvent>(2048);
             let (shard_remove_worker_tx, mut shard_remove_worker_rx) =
                 mpsc::channel::<WorkerId>(16);

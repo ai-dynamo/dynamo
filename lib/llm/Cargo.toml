@@ -39,7 +39,7 @@ harness = false
 required-features = ["block-manager", "testing-cuda"]
 
 [[bench]]
-name = "kv_router_full_stress"
+name = "kv_router_bench"
 harness = false
 required-features = ["kv-router-stress"]
 
