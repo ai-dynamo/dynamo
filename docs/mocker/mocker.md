@@ -72,7 +72,7 @@ python -m dynamo.mocker \
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model-path` | Required | Path to model directory for tokenizer |
+| `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
 | `--endpoint` | `dyn://dynamo.backend.generate` | Dynamo endpoint string |
 | `--model-name` | Derived from model-path | Model name for API responses |
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
@@ -120,29 +120,20 @@ When a sequence needs blocks, the manager first checks if they already exist (ca
 The following diagram illustrates the block lifecycle, based on vLLM's block manager design:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│   [New Block]                                               │
-│       │                                                     │
-│       ▼                                                     │
-│   ┌───────────┐   ref_count > 0   ┌───────────┐            │
-│   │  Active   │◄─────────────────►│  Active   │            │
-│   │  Pool     │   Use/Deref       │  Pool     │            │
-│   └───────────┘                   └───────────┘            │
-│       │                               │                     │
-│       │ ref_count == 0                │ Destroy             │
-│       ▼                               ▼                     │
-│   ┌───────────┐                   ┌───────────┐            │
-│   │ Inactive  │                   │  Freed    │            │
-│   │  Pool     │                   │  (gone)   │            │
-│   └───────────┘                   └───────────┘            │
-│       │                                                     │
-│       │ LRU eviction (when full)                            │
-│       ▼                                                     │
-│   ┌───────────┐                                             │
-│   │  Freed    │                                             │
-│   └───────────┘                                             │
-└─────────────────────────────────────────────────────────────┘
+                        ┌───── Cache hit (Use) ────┐
+                        │                          │
+                        ▼                          │
+┌───────────┐       ┌───────────┐       ┌──────────┴──────┐       ┌───────────┐
+│ New Block │──────►│  Active   │──────►│    Inactive     │──────►│   Freed   │
+└───────────┘ alloc │   Pool    │ deref │      Pool       │ evict └───────────┘
+                    │(ref_count)│       │   (LRU order)   │
+                    └─────┬─────┘       └─────────────────┘
+                          │
+                          │ destroy (preemption)
+                          ▼
+                    ┌───────────┐
+                    │   Freed   │
+                    └───────────┘
 ```
 
 ### Evictor
