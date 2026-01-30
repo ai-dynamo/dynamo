@@ -331,12 +331,12 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 	}
 
 	if pcs.Status.ObservedGeneration == nil {
-		logger.Info("PodCliqueSet %s observedGeneration is nil", dgd.Name)
+		logger.Info("PodCliqueSet observedGeneration is nil", "name", dgd.Name)
 		return inProgress
 	}
 
 	if *pcs.Status.ObservedGeneration < pcs.Generation {
-		logger.Info("PodCliqueSet %s not yet reconciled: generation=%d, observedGeneration=%d", dgd.Name, pcs.Generation, *pcs.Status.ObservedGeneration)
+		logger.Info("PodCliqueSet not yet reconciled", "name", dgd.Name, "generation", pcs.Generation, "observedGeneration", *pcs.Status.ObservedGeneration)
 		return inProgress
 	}
 
