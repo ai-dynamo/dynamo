@@ -17,12 +17,11 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 
 | Workflow | File | Purpose |
 |----------|------|---------|
-| Pre-commit | `pre-merge.yml` | Python formatting (black, isort), YAML validation |
+| Pre-Merge | `pre-merge.yml` | Required check: pre-commit + Rust checks (fmt, clippy, tests) |
 | Copyright | `copyright-checks.yml` | SPDX copyright header validation |
 | Core Build | `container-validation-dynamo.yml` | Builds `dynamo:latest`, runs Rust + pytest |
 | PR Title Lint | `lint-pr-title.yaml` | Validates conventional commit format |
 | DCO Comment | `dco_comment.yml` | Posts DCO fix instructions |
-| Rust Checks | `pre-merge-rust.yml` | cargo fmt, clippy, tests (on `*.rs` changes) |
 | Docs Links | `docs-link-check.yml` | Validates documentation links |
 | CodeQL | `codeql.yml` | Security analysis on Python |
 | Label PR | `label-pr.yml` | Auto-labels PRs by changed files |

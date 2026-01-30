@@ -20,7 +20,7 @@ If you see checks stuck at "Waiting for status to be reported" or no CI runs at 
 
 **Understanding which checks run when**:
 
-- **4 checks run immediately**: pre-commit, copyright-checks, DCO, dynamo-status-check
+- **4 checks run immediately**: pre-merge-status-check, copyright-checks, DCO, dynamo-status-check
 - **1 check needs copy-pr-bot**: backend-status-check
 
 If only `backend-status-check` is stuck at "Waiting", this is expected - it requires a maintainer to trigger via copy-pr-bot.
@@ -62,11 +62,13 @@ See [DCO.md](../DCO.md) for detailed instructions.
 
 ---
 
-### Pre-commit Check Failed
+### Pre-Merge Check Failed
 
-**Symptom**: `pre-commit` check fails with formatting or linting errors.
+**Symptom**: `pre-merge-status-check` fails with formatting, linting, or Rust errors.
 
-**Solution**: Run pre-commit locally and push the fixes.
+**Solution**: Run checks locally and push the fixes.
+
+#### For Python formatting/linting issues:
 
 ```bash
 # Install pre-commit (one time)
@@ -82,12 +84,32 @@ git commit -s -m "fix: apply pre-commit formatting"
 git push
 ```
 
-**Common Issues**:
+**Common Pre-commit Issues**:
 - **Black formatting**: Python code style
 - **isort**: Import ordering
 - **Trailing whitespace**: Extra spaces at end of lines
 - **End of file**: Missing newline at end of file
 - **YAML/JSON**: Syntax validation
+
+#### For Rust check failures:
+
+```bash
+# Run Rust formatting
+cargo fmt --all
+
+# Run clippy (Rust linter)
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Run Rust tests
+cargo test
+
+# Commit the fixes
+git add -A
+git commit -s -m "fix: apply Rust formatting and fixes"
+git push
+```
+
+**Note**: Rust checks only run if you've modified `.rs` files or `Cargo.toml`/`Cargo.lock`.
 
 ---
 

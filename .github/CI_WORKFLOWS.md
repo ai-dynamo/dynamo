@@ -19,7 +19,7 @@ Quick reference for Dynamo's CI/CD pipelines.
 
 | Check | When It Runs | What It Does |
 |-------|--------------|--------------|
-| `pre-commit` | Every PR | Python formatting (black, isort), YAML validation |
+| `pre-merge-status-check` | Every PR | Runs pre-commit, Rust checks (fmt, clippy, tests) |
 | `copyright-checks` | Every PR | Validates SPDX headers |
 | `DCO` | Every PR | Checks Developer Certificate of Origin signature |
 | `dynamo-status-check` | Every PR | Builds core container, runs Rust (kvbm specific) + pytest |
@@ -110,7 +110,7 @@ Some checks only run when relevant files change:
 
 | Check | Runs When | Files Watched |
 |-------|-----------|---------------|
-| **Rust checks** | `*.rs`, `Cargo.*` changed (PRs)<br/>Always (main) | All `.rs` files, `Cargo.toml`, `Cargo.lock` |
+| **Rust checks** | `*.rs`, `Cargo.*` changed (PRs)<br/>Always (main/release) | All `.rs` files, `Cargo.toml`, `Cargo.lock` |
 | **Backend builds** | Core/framework code changed | `components/`, `lib/`, `tests/`, `container/`, `*.py`, `*.rs` |
 | **Frontend build** | Frontend code changed | `components/src/dynamo/frontend/`, `lib/llm/` |
 | **Operator build** | Operator code changed | `deploy/operator/`, `deploy/helm/` |
