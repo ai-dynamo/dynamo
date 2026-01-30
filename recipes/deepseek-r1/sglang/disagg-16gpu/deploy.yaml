@@ -21,7 +21,7 @@ spec:
           mountPoint: /opt/model
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.2
     decode:
       componentType: worker
       subComponentType: decode
@@ -38,7 +38,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.2
           workingDir: /sgl-workspace/dynamo
           command:
             - python3
@@ -83,7 +83,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.2
           workingDir: /sgl-workspace/dynamo
           command:
             - python3

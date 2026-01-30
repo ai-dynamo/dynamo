@@ -12,7 +12,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
@@ -25,7 +25,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
           workingDir: /workspace/
           command:
           - python3
@@ -50,7 +50,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
           workingDir: /workspace/
           command:
           - python3
