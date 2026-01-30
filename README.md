@@ -44,42 +44,35 @@ Dynamo is inference engine agnostic (supports TRT-LLM, vLLM, SGLang) and provide
 - **Accelerated Data Transfer** – Reduces inference response time using NIXL
 - **KV Cache Offloading** – Leverages multiple memory hierarchies for higher throughput
 
+Built in Rust for performance and Python for extensibility, Dynamo is fully open-source with an OSS-first development approach.
+
+## Backend Feature Support
+
+| | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) | [vLLM](docs/backends/vllm/README.md) |
+|---|:----:|:----------:|:--:|
+| **Best For** | High-throughput serving | Maximum performance | Broadest feature coverage |
+| [**Disaggregated Serving**](docs/design_docs/disagg_serving.md) | ✅ | ✅ | ✅ |
+| [**KV-Aware Routing**](docs/router/kv_cache_routing.md) | ✅ | ✅ | ✅ |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md) | ✅ | ✅ | ✅ |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md) | 🚧 | ✅ | ✅ |
+| [**Multimodal**](docs/multimodal/index.md) | ✅ | ✅ | ✅ |
+| [**Tool Calling**](docs/agents/tool-calling.md) | ✅ | ✅ | ✅ |
+
+> **[Full Feature Matrix →](docs/reference/feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
+
+## Dynamo Architecture
+
 <p align="center">
   <img src="./docs/images/frontpage-architecture.png" alt="Dynamo architecture" width="600" />
 </p>
 
-Built in Rust for performance and Python for extensibility, Dynamo is fully open-source with an OSS-first development approach.
-
-## Supported Engines
-
-| Engine | Docs | Best For |
-|--------|------|----------|
-| SGLang | [Guide](docs/backends/sglang/) | High-throughput serving |
-| TensorRT-LLM | [Guide](docs/backends/trtllm/) | Maximum performance |
-| vLLM | [Guide](docs/backends/vllm/) | Broadest feature coverage |
-
-## Framework Support Matrix
-
-| Feature                                                              | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
-| -------------------------------------------------------------------- | :--: | :----: | :----------: |
-| [**Disaggregated Serving**](docs/design_docs/disagg_serving.md)      | ✅   | ✅     | ✅           |
-| [**KV-Aware Routing**](docs/router/kv_cache_routing.md)              | ✅   | ✅     | ✅           |
-| [**SLA-Based Planner**](docs/planner/sla_planner.md)                 | ✅   | ✅     | ✅           |
-| [**KVBM**](docs/kvbm/kvbm_architecture.md)                           | ✅   | 🚧     | ✅           |
-| [**Multimodal**](docs/multimodal/index.md)                           | ✅   | ✅     | ✅           |
-| [**Tool Calling**](docs/agents/tool-calling.md)                      | ✅   | ✅     | ✅           |
-
-> **[Full Feature Matrix →](docs/reference/feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
+> **[Architecture Deep Dive →](docs/design_docs/architecture.md)**
 
 ## Latest News
 
 - [12/05] [Moonshot AI's Kimi K2 achieves 10x inference speedup with Dynamo on GB200](https://quantumzeitgeist.com/kimi-k2-nvidia-ai-ai-breakthrough/)
 - [12/02] [Mistral AI runs Mistral Large 3 with 10x faster inference using Dynamo](https://www.marktechpost.com/2025/12/02/nvidia-and-mistral-ai-bring-10x-faster-inference-for-the-mistral-3-family-on-gb200-nvl72-gpu-systems/)
 - [12/01] [InfoQ: NVIDIA Dynamo simplifies Kubernetes deployment for LLM inference](https://www.infoq.com/news/2025/12/nvidia-dynamo-kubernetes/)
-- [11/20] [Dell integrates PowerScale with Dynamo's NIXL for 19x faster TTFT](https://www.dell.com/en-us/dt/corporate/newsroom/announcements/detailpage.press-releases~usa~2025~11~dell-technologies-and-nvidia-advance-enterprise-ai-innovation.htm)
-- [11/20] [WEKA partners with NVIDIA on KV cache storage for Dynamo](https://siliconangle.com/2025/11/20/nvidia-weka-kv-cache-solution-ai-inferencing-sc25/)
-- [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
-- [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)
 
 ## Get Started
 
@@ -89,13 +82,7 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 | [**Kubernetes Deployment**](#kubernetes-deployment) | Production multi-node clusters | ~30 min | K8s cluster with GPUs |
 | [**Building from Source**](#building-from-source) | Contributors and development | ~15 min | Ubuntu, Rust, Python |
 
-## Contributing
-
-Want to help shape the future of distributed LLM inference? We welcome contributors at all levels—from doc fixes to new features.
-
-- **[Contributing Guide](CONTRIBUTING.md)** – How to get started
-- **[Report a Bug](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)** – Found an issue?
-- **[Feature Request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)** – Have an idea?
+Want to help shape the future of distributed LLM inference? See the **[Contributing Guide](CONTRIBUTING.md)**.
 
 # Local Quick Start
 
@@ -241,13 +228,6 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 Rerun with `curl -N` and change `stream` in the request to `true` to get the responses as soon as the engine issues them.
 
-### What's Next?
-
-- **Scale up**: Deploy on Kubernetes with [Recipes](recipes/)
-- **Add features**: Enable [KV-aware routing](docs/router/kv_cache_routing.md), [disaggregated serving](docs/design_docs/disagg_serving.md)
-- **Benchmark**: Use [AIPerf](docs/benchmarks/benchmarking.md) to measure performance
-- **Try other engines**: [vLLM](docs/backends/vllm/), [SGLang](docs/backends/sglang/), [TensorRT-LLM](docs/backends/trtllm/)
-
 # Kubernetes Deployment
 
 For production deployments on Kubernetes clusters with multiple GPUs.
@@ -274,44 +254,6 @@ See [recipes/README.md](recipes/README.md) for the full list and deployment inst
 
 - [Amazon EKS](examples/deployments/EKS/)
 - [Google GKE](examples/deployments/GKE/)
-
-## Service Discovery and Messaging
-
-Dynamo uses TCP for inter-component communication. External services are optional for most deployments:
-
-| Deployment | etcd | NATS | Notes |
-|------------|------|------|-------|
-| **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
-| **Local Development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
-| **KV-Aware Routing** | — | ✅ Required | Prefix caching enabled by default requires NATS |
-
-For local development without external dependencies, pass `--store-kv file` (avoids etcd) to both the frontend and workers. vLLM users should also pass `--kv-events-config '{"enable_kv_cache_events": false}'` to disable KV event publishing (avoids NATS) while keeping local prefix caching enabled; SGLang and TRT-LLM don't require this flag.
-
-For distributed non-Kubernetes deployments or KV-aware routing:
-
-- [etcd](https://etcd.io/) can be run directly as `./etcd`.
-- [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
-
-To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
-
-# Advanced Topics
-
-## Benchmarking
-
-Dynamo provides comprehensive benchmarking tools:
-
-- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
-- **[SLA-Driven Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize deployments to meet SLA requirements
-
-## Frontend OpenAPI Specification
-
-The OpenAI-compatible frontend exposes an OpenAPI 3 spec at `/openapi.json`. To generate without running the server:
-
-```bash
-cargo run -p dynamo-llm --bin generate-frontend-openapi
-```
-
-This writes to `docs/frontends/openapi.json`.
 
 # Building from Source
 
@@ -400,13 +342,64 @@ cd $PROJECT_ROOT
 uv pip install -e .
 ```
 
-You should now be able to run `python3 -m dynamo.frontend`.
+## 8. Run the Frontend
 
-For local development, pass `--store-kv file` to avoid external dependencies (see Service Discovery and Messaging section).
+```bash
+python3 -m dynamo.frontend
+```
 
-Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
+## 9. Configure for Local Development
 
-If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+- Pass `--store-kv file` to avoid external dependencies (see [Service Discovery and Messaging](#service-discovery-and-messaging))
+- Set `DYN_LOG` to adjust the logging level (e.g., `export DYN_LOG=debug`). Uses the same syntax as `RUST_LOG`
+
+> **Note:** VSCode and Cursor users can use the `.devcontainer` folder for a pre-configured dev environment. See the [devcontainer README](.devcontainer/README.md) for details.
+
+# Advanced Topics
+
+## Benchmarking
+
+Dynamo provides comprehensive benchmarking tools:
+
+- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
+- **[SLA-Driven Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize deployments to meet SLA requirements
+
+## Frontend OpenAPI Specification
+
+The OpenAI-compatible frontend exposes an OpenAPI 3 spec at `/openapi.json`. To generate without running the server:
+
+```bash
+cargo run -p dynamo-llm --bin generate-frontend-openapi
+```
+
+This writes to `docs/frontends/openapi.json`.
+
+## Service Discovery and Messaging
+
+Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/kubernetes/service_discovery.md)) handle service discovery. External services are optional for most deployments:
+
+| Deployment | etcd | NATS | Notes |
+|------------|------|------|-------|
+| **Local Development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
+| **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
+
+> **Note:** KV-Aware Routing requires NATS for prefix caching coordination.
+
+For Slurm or other distributed deployments (and KV-aware routing):
+
+- [etcd](https://etcd.io/) can be run directly as `./etcd`.
+- [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
+
+To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
+
+See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
+
+## More News
+
+- [11/20] [Dell integrates PowerScale with Dynamo's NIXL for 19x faster TTFT](https://www.dell.com/en-us/dt/corporate/newsroom/announcements/detailpage.press-releases~usa~2025~11~dell-technologies-and-nvidia-advance-enterprise-ai-innovation.htm)
+- [11/20] [WEKA partners with NVIDIA on KV cache storage for Dynamo](https://siliconangle.com/2025/11/20/nvidia-weka-kv-cache-solution-ai-inferencing-sc25/)
+- [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
+- [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)
 
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design_docs/disagg_serving.md

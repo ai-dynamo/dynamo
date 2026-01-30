@@ -23,6 +23,34 @@ This guide covers running Dynamo **using the CLI on your local machine or VM**.
    source venv/bin/activate
    uv pip install pip
 
+**Option A: Containers (Recommended)**
+
+Containers have all dependencies pre-installed. No setup required.
+
+.. code-block:: bash
+
+   # SGLang
+   docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+
+   # TensorRT-LLM
+   docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+
+   # vLLM
+   docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+
+.. tip::
+
+   To run frontend and worker in the same container, either:
+
+   - Run processes in background with ``&`` (see Run Dynamo section below), or
+   - Open a second terminal and use ``docker exec -it <container_id> bash``
+
+See `Release Artifacts <../reference/release-artifacts.html#container-images>`_ for available
+versions and backend guides for run instructions: `SGLang <../backends/sglang/README.html>`_ |
+`TensorRT-LLM <../backends/trtllm/README.html>`_ | `vLLM <../backends/vllm/README.html>`_
+
+**Option B: Install from PyPI**
+
 Install system dependencies and the Dynamo wheel for your chosen backend:
 
 **SGLang**
@@ -58,36 +86,6 @@ Install system dependencies and the Dynamo wheel for your chosen backend:
 
    sudo apt install python3-dev libxcb1
    uv pip install --prerelease=allow "ai-dynamo[vllm]"
-
-**Containers**
-
-Pull and run prebuilt images from NVIDIA NGC. Container names follow the pattern
-``nvcr.io/nvidia/ai-dynamo/{backend}-runtime:{version}``:
-
-.. code-block:: bash
-
-   # SGLang
-   docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
-   docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
-
-   # TensorRT-LLM
-   docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
-   docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
-
-   # vLLM
-   docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
-   docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
-
-.. tip::
-
-   To run frontend and worker in the same container, either:
-
-   - Run processes in background with ``&`` (see Run Dynamo section below), or
-   - Open a second terminal and use ``docker exec -it <container_id> bash``
-
-See `Release Artifacts <../reference/release-artifacts.html#container-images>`_ for available
-versions and backend guides for run instructions: `SGLang <../backends/sglang/README.html>`_ |
-`TensorRT-LLM <../backends/trtllm/README.html>`_ | `vLLM <../backends/vllm/README.html>`_
 
 **2. Sanity Check (Optional)**
 
