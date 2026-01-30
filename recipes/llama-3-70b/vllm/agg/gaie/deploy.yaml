@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: gnvcr.io/nvidia/ai-dynamo/frontend:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/frontend:0.8.0
           env:
             - name: DYN_KV_BLOCK_SIZE
               value: "128"
