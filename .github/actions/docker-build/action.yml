@@ -79,7 +79,7 @@ runs:
             --show-result
         echo "::endgroup::"
     - name: Build EPP image
-      if: ${{ inputs.target == "frontend" }}
+      if: ${{ inputs.target == 'frontend' }}
       shell: bash
       env:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
