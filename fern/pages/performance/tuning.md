@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Disaggregation and Performance Tuning"
 ---
+
+# Disaggregation and Performance Tuning
 
 Disaggregation gains performance by separating the prefill and decode into different engines to reduce interferences between the two.
 However, performant disaggregation requires careful tuning of the inference parameters.
@@ -32,10 +33,9 @@ Typically, the number of GPUs vs the performance follows the following pattern:
 | Maximum number limited by communication scalability | Worst overall throughput/GPU, best latency/user                                           |
 | More than maximum                                   | Communication overhead dominates, poor performance                                        |
 
-<Note>
-for decode-only engines, sometimes larger number of GPUs has to larger KV cache per GPU and more decoding requests running in parallel, which leads to both better throughput/GPU and better latency/user.
-For example, for Llama-3.3-70b NVFP4 quantization on B200 in vLLM with 0.9 free GPU memory fraction:
-</Note>
+> [!NOTE]
+> for decode-only engines, sometimes larger number of GPUs has to larger KV cache per GPU and more decoding requests running in parallel, which leads to both better throughput/GPU and better latency/user.
+> For example, for Llama-3.3-70b NVFP4 quantization on B200 in vLLM with 0.9 free GPU memory fraction:
 
 | TP Size | KV Cache Size (GB) | KV Cache per GPU (GB) | Per GPU Improvement over TP1 |
 | ------: | -----------------: | --------------------: | ---------------------------: |
@@ -46,9 +46,8 @@ For example, for Llama-3.3-70b NVFP4 quantization on B200 in vLLM with 0.9 free 
 The best number of GPUs to use in the prefill and decode engines can be determined by running a few fixed ISL/OSL/concurrency test using [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main) and compare with the SLA.
 AIPerf is pre-installed in the dynamo container.
 
-<Tip>
-If you are unfamiliar with AIPerf, please see this helpful [tutorial](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorial.md) to get you started.
-</Tip>
+> [!TIP]
+> If you are unfamiliar with AIPerf, please see this helpful [tutorial](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorial.md) to get you started.
 
 Besides the parallelization mapping, other common knobs to tune are maximum batch size, maximum number of tokens, and block size.
 For prefill engines, usually a small batch size and large `max_num_token` is preferred.
