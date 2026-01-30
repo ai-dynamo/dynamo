@@ -3,6 +3,9 @@
 
 """Shared utilities for GPU Memory Service."""
 
+import os
+import tempfile
+
 import pynvml
 
 
@@ -16,7 +19,7 @@ def get_socket_path(device: int) -> str:
         device: CUDA device index.
 
     Returns:
-        Socket path (e.g., "/tmp/gms_GPU-12345678-1234-1234-1234-123456789abc.sock").
+        Socket path (e.g., "<tempdir>/gms_GPU-12345678-1234-1234-1234-123456789abc.sock").
     """
     pynvml.nvmlInit()
     try:
@@ -24,4 +27,4 @@ def get_socket_path(device: int) -> str:
         uuid = pynvml.nvmlDeviceGetUUID(handle)
     finally:
         pynvml.nvmlShutdown()
-    return f"/tmp/gms_{uuid}.sock"
+    return os.path.join(tempfile.gettempdir(), f"gms_{uuid}.sock")
