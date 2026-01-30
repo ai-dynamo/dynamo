@@ -293,6 +293,13 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 
 For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
+
+## Dynamo KV Block Manager Integration
+
+Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
+
+Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/kvbm/trtllm-setup.md) .
+
 ## Known Issues and Mitigations
 
 ### KV Cache Exhaustion Causing Worker Deadlock (Disaggregated Serving)
@@ -320,9 +327,3 @@ For example, see `examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.y
 **Related Issue:** [#4327](https://github.com/ai-dynamo/dynamo/issues/4327)
 
 ---
-
-## Dynamo KV Block Manager Integration
-
-Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
-
-Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/kvbm/trtllm-setup.md) .
