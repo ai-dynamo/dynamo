@@ -536,7 +536,7 @@ python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf
 
 ```python
 import asyncio
-from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamollm import DistributedRuntime, KvPushRouter, KvRouterConfig
 
 async def main():
     # Get runtime and create endpoint
@@ -647,7 +647,7 @@ Here's an example of using `get_potential_loads()` to implement custom routing t
 
 ```python
 import asyncio
-from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamo.llm import DistributedRuntime, KvPushRouter, KvRouterConfig
 
 async def minimize_ttft_routing():
     # Setup router

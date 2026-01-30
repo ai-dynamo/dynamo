@@ -32,6 +32,15 @@ use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
 
+/// Parts of a received ZMQ multipart message.
+struct ZmqMessage {
+    #[allow(dead_code)]
+    topic: Vec<u8>,
+    publisher_id: u64,
+    sequence: u64,
+    data: Vec<u8>,
+}
+
 /// ZMQ PUB transport for publishing events.
 ///
 /// Uses raw zmq::Socket with configured HWM for better scalability.
@@ -360,48 +369,55 @@ impl ZmqSubTransport {
             loop {
                 // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
                 let socket_clone = Arc::clone(&socket);
-                let result = tokio::task::spawn_blocking(
-                    move || -> Result<Option<(Vec<u8>, u64, u64, Vec<u8>)>> {
-                        let socket = socket_clone.lock().unwrap();
+                let result = tokio::task::spawn_blocking(move || -> Result<Option<ZmqMessage>> {
+                    let socket = socket_clone.lock().unwrap();
 
-                        // Receive topic frame (may timeout with EAGAIN)
-                        let topic = match socket.recv_bytes(0) {
-                            Ok(data) => data,
-                            Err(zmq::Error::EAGAIN) => return Ok(None), // Timeout, retry
-                            Err(e) => return Err(e.into()),
-                        };
+                    // Receive topic frame (may timeout with EAGAIN)
+                    let topic = match socket.recv_bytes(0) {
+                        Ok(data) => data,
+                        Err(zmq::Error::EAGAIN) => return Ok(None), // Timeout, retry
+                        Err(e) => return Err(e.into()),
+                    };
 
-                        // Receive publisher_id frame (8 bytes, u64 big-endian)
-                        let publisher_id_bytes = socket.recv_bytes(0)?;
-                        if publisher_id_bytes.len() != 8 {
-                            anyhow::bail!(
-                                "Invalid publisher_id frame: expected 8 bytes, got {}",
-                                publisher_id_bytes.len()
-                            );
-                        }
-                        let publisher_id =
-                            u64::from_be_bytes(publisher_id_bytes.try_into().unwrap());
+                    // Receive publisher_id frame (8 bytes, u64 big-endian)
+                    let publisher_id_bytes = socket.recv_bytes(0)?;
+                    if publisher_id_bytes.len() != 8 {
+                        anyhow::bail!(
+                            "Invalid publisher_id frame: expected 8 bytes, got {}",
+                            publisher_id_bytes.len()
+                        );
+                    }
+                    let publisher_id = u64::from_be_bytes(publisher_id_bytes.try_into().unwrap());
 
-                        // Receive sequence frame (8 bytes, u64 big-endian)
-                        let sequence_bytes = socket.recv_bytes(0)?;
-                        if sequence_bytes.len() != 8 {
-                            anyhow::bail!(
-                                "Invalid sequence frame: expected 8 bytes, got {}",
-                                sequence_bytes.len()
-                            );
-                        }
-                        let sequence = u64::from_be_bytes(sequence_bytes.try_into().unwrap());
+                    // Receive sequence frame (8 bytes, u64 big-endian)
+                    let sequence_bytes = socket.recv_bytes(0)?;
+                    if sequence_bytes.len() != 8 {
+                        anyhow::bail!(
+                            "Invalid sequence frame: expected 8 bytes, got {}",
+                            sequence_bytes.len()
+                        );
+                    }
+                    let sequence = u64::from_be_bytes(sequence_bytes.try_into().unwrap());
 
-                        // Receive data frame
-                        let data = socket.recv_bytes(0)?;
+                    // Receive data frame
+                    let data = socket.recv_bytes(0)?;
 
-                        Ok(Some((topic, publisher_id, sequence, data)))
-                    },
-                )
+                    Ok(Some(ZmqMessage {
+                        topic,
+                        publisher_id,
+                        sequence,
+                        data,
+                    }))
+                })
                 .await;
 
                 match result {
-                    Ok(Ok(Some((_topic, publisher_id, sequence, frame_bytes)))) => {
+                    Ok(Ok(Some(ZmqMessage {
+                        publisher_id,
+                        sequence,
+                        data: frame_bytes,
+                        ..
+                    }))) => {
                         // Log dedup metadata for debugging
                         tracing::trace!(
                             publisher_id = publisher_id,
