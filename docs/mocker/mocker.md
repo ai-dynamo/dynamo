@@ -29,18 +29,18 @@ The mocker simulates:
 
 ```bash
 # Launch a single mocker worker
-python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B
+python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B
 
 # Launch with custom KV cache configuration
 python -m dynamo.mocker \
-    --model-path /data/models/Qwen3-0.6B \
+    --model-path Qwen/Qwen3-0.6B \
     --num-gpu-blocks-override 8192 \
     --block-size 64 \
     --max-num-seqs 256
 
 # Launch with timing speedup for faster testing
 python -m dynamo.mocker \
-    --model-path /data/models/Qwen3-0.6B \
+    --model-path Qwen/Qwen3-0.6B \
     --speedup-ratio 10.0
 ```
 
@@ -49,13 +49,13 @@ python -m dynamo.mocker \
 ```bash
 # Launch prefill worker
 python -m dynamo.mocker \
-    --model-path /data/models/Qwen3-0.6B \
+    --model-path Qwen/Qwen3-0.6B \
     --is-prefill-worker \
     --bootstrap-ports 50100
 
 # Launch decode worker (in another terminal)
 python -m dynamo.mocker \
-    --model-path /data/models/Qwen3-0.6B \
+    --model-path Qwen/Qwen3-0.6B \
     --is-decode-worker
 ```
 
@@ -64,7 +64,7 @@ python -m dynamo.mocker \
 ```bash
 # Launch 4 mocker workers sharing the same tokio runtime
 python -m dynamo.mocker \
-    --model-path /data/models/Qwen3-0.6B \
+    --model-path Qwen/Qwen3-0.6B \
     --num-workers 4
 ```
 
