@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Service Discovery"
 ---
+
+# Service Discovery
 
 Dynamo components (frontends, workers, planner) need to be able to discover each other and their capabilities at runtime. We refer to this as service discovery. There are 2 kinds of service discovery backends supported on Kubernetes.
 

@@ -109,3 +109,24 @@ def release_handle(handle: int) -> None:
     """
     (result,) = cuda.cuMemRelease(handle)
     check_cuda_result(result, "cuMemRelease")
+
+
+def synchronize() -> None:
+    """Synchronize the current CUDA context.
+
+    Blocks until all preceding commands in the current context have completed.
+    """
+    (result,) = cuda.cuCtxSynchronize()
+    check_cuda_result(result, "cuCtxSynchronize")
+
+
+def set_current_device(device: int) -> None:
+    """Set the current CUDA device by activating its primary context.
+
+    Args:
+        device: CUDA device index.
+    """
+    result, ctx = cuda.cuDevicePrimaryCtxRetain(device)
+    check_cuda_result(result, "cuDevicePrimaryCtxRetain")
+    (result,) = cuda.cuCtxSetCurrent(ctx)
+    check_cuda_result(result, "cuCtxSetCurrent")
