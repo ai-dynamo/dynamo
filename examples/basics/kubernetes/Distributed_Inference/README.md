@@ -65,7 +65,7 @@ pip3 install aiconfigurator
 ```
 2. Assume we have 2 GPU nodes with 16 H200 in total, and we want to deploy Llama 3.1-70B-Instruct model with an optimal disaggregated serving configuration. Run AI configurator for this model
 ```sh
-aiconfigurator cli --model LLAMA3.1_70B --total_gpus 16 --system h200_sxm
+aiconfigurator cli default --model LLAMA3.1_70B --total_gpus 16 --system h200_sxm
 ```
 and from the output, you can see the Pareto curve with suggest P/D settings
 ![text](images/pareto.png)
