@@ -20,6 +20,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -212,8 +213,12 @@ class DynamoDeploymentClient:
     def get_service_url(self) -> str:
         """
         Get the service URL using Kubernetes service DNS.
+
+        The protocol is configurable via SERVICE_PROTOCOL environment variable
+        to support TLS-enabled clusters.
         """
-        service_url = f"http://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
+        protocol = os.environ.get("SERVICE_PROTOCOL", "http")
+        service_url = f"{protocol}://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
         print(f"Using service URL: {service_url}")
         return service_url
 
@@ -546,8 +551,8 @@ async def main():
     parser.add_argument(
         "--log-dir",
         "-l",
-        default="/tmp/dynamo_logs",
-        help="Base directory for logs (default: /tmp/dynamo_logs)",
+        default=os.path.join(tempfile.gettempdir(), "dynamo_logs"),
+        help="Base directory for logs (default: <tempdir>/dynamo_logs)",
     )
     parser.add_argument(
         "--service-name",

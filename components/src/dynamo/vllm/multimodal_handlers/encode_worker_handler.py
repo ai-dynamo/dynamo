@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import shutil
+import tempfile
 import time
 from typing import AsyncGenerator, AsyncIterator
 
@@ -76,6 +77,10 @@ class EncodeWorkerHandler:
         self.readables = []
         self.cached_embeddings = {}
 
+        # Use system temp directory for encoder cache files
+        self._cache_dir = os.path.join(tempfile.gettempdir(), "encoder_cache")
+        os.makedirs(self._cache_dir, exist_ok=True)
+
     def cleanup(self):
         pass
 
@@ -125,10 +130,8 @@ class EncodeWorkerHandler:
                         embeddings_shape,
                     ) = self.cached_embeddings[image_url]
                     # [gluo FIXME] need mechanism to clean up local files
-                    request.multimodal_inputs[
-                        idx
-                    ].serialized_request = (
-                        f"/tmp/encoder_cache.{embedding_key}.safetensors"
+                    request.multimodal_inputs[idx].serialized_request = os.path.join(
+                        self._cache_dir, f"{embedding_key}.safetensors"
                     )
                     request.multimodal_inputs[idx].multimodal_input.image_url = None
                     request.multimodal_inputs[idx].image_grid_thw = image_grid_thw
@@ -174,15 +177,12 @@ class EncodeWorkerHandler:
                         f"ENCODER: saving local safetensors file with key {embedding_key}, {embeddings_cpu.numel()} * {embeddings_cpu.element_size()} bytes"
                     )
                     tensors = {"ec_cache": embeddings_cpu}
-                    safetensors.torch.save_file(
-                        tensors, f"/tmp/encoder_cache.{embedding_key}.safetensors"
+                    cache_path = os.path.join(
+                        self._cache_dir, f"{embedding_key}.safetensors"
                     )
+                    safetensors.torch.save_file(tensors, cache_path)
                     # [gluo FIXME] need mechanism to clean up local files
-                    request.multimodal_inputs[
-                        idx
-                    ].serialized_request = (
-                        f"/tmp/encoder_cache.{embedding_key}.safetensors"
-                    )
+                    request.multimodal_inputs[idx].serialized_request = cache_path
                     self.cached_embeddings[image_url] = (
                         embedding_key,
                         request.multimodal_inputs[idx].image_grid_thw,
