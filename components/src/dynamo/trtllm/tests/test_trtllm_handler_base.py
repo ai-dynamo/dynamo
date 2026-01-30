@@ -6,12 +6,23 @@ from unittest import mock
 
 import pytest
 
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+# Try to import HandlerBase, but allow collection to proceed if tensorrt_llm is missing
+try:
+    from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+
+    _HANDLER_BASE_AVAILABLE = True
+except ImportError:
+    HandlerBase = None  # type: ignore[misc, assignment]
+    _HANDLER_BASE_AVAILABLE = False
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.skipif(
+        not _HANDLER_BASE_AVAILABLE, reason="tensorrt_llm not installed"
+    ),
 ]
 
 
