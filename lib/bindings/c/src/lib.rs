@@ -57,30 +57,11 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
-/// Default timeout for discovery sync (seconds).
-const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 10;
-
-/// Get discovery timeout from environment variable or use default.
-/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
-fn get_discovery_timeout_secs() -> u64 {
-    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SEC)
-}
-
-/// Wait for the discovery daemon to sync and return at least one instance.
-/// This ensures list() calls will have data available.
-///
-/// This function waits indefinitely until workers are discovered.
-// EPP needs to wait for the discovery daemon to sync and return at least one instance in the `wait_for_discovery_sync`
+// Wait for the discovery daemon to sync indefinitely and return at least one instance.
 // This is because the Model info is registered by workers and it may take up to 30 min for the model weights to load and for the worker to register itself.
-
 // The waiting timeout is implemented in the Kubernetes StartupProbe. The EPP waiting loops runs indefinitely, the Probe is a single source of truth with when to kill the EPP if discovery fails.
-// If workers are found within the probe's failureThreshold × periodSeconds, the pod will be killed and restarted.
+// If workers are not found within the probe's failureThreshold × periodSeconds, the pod will be killed and restarted.
 // Users can adjust the StartupProbe waiting timed in the DGD for large models.
-///
-/// Returns the number of instances found.
 async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
     tracing::info!(
         "Waiting for discovery to sync (no timeout - controlled by K8s StartupProbe)..."

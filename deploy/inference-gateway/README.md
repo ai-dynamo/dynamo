@@ -161,7 +161,7 @@ extraPodSpec:
       failureThreshold: 360  # 10s × 360 = 60 minutes
 ```
 
-**Gateway Namespace** This example assumes your gateway is installed into `NAMESPACE=my-model`
+**Gateway Namespace**
 Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
 If you installed it into a different namespace, you need to adjust the HttpRoute entry in http-route.yaml.
 
