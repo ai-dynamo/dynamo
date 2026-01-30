@@ -895,7 +895,7 @@ spec:
                       checkpoint:
                         description: |-
                           Checkpoint configures container checkpointing for this service.
-                          When enabled, pods can be restored from a checkpoint tar file for faster cold start.
+                          When enabled, pods can be restored from a checkpoint files for faster cold start.
                         properties:
                           checkpointRef:
                             description: |-
