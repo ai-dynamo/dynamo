@@ -75,20 +75,20 @@ async fn main() -> Result<()> {
     );
 
     // Start the proxy in a blocking thread
-    let proxy_xsub_bind = xsub_bind.clone();
-    let proxy_xpub_bind = xpub_bind.clone();
+    let proxy_xsub_endpoint = xsub_endpoint.clone();
+    let proxy_xpub_endpoint = xpub_endpoint.clone();
     let proxy_handle = tokio::task::spawn_blocking(move || -> Result<()> {
         let ctx = zmq::Context::new();
 
         // XSUB socket for publishers to connect
         let xsub = ctx.socket(zmq::XSUB)?;
-        xsub.bind(&proxy_xsub_bind)?;
-        tracing::info!(endpoint = %proxy_xsub_bind, "XSUB socket bound");
+        xsub.bind(&proxy_xsub_endpoint)?;
+        tracing::info!(endpoint = %proxy_xsub_endpoint, "XSUB socket bound");
 
         // XPUB socket for subscribers to connect
         let xpub = ctx.socket(zmq::XPUB)?;
-        xpub.bind(&proxy_xpub_bind)?;
-        tracing::info!(endpoint = %proxy_xpub_bind, "XPUB socket bound");
+        xpub.bind(&proxy_xpub_endpoint)?;
+        tracing::info!(endpoint = %proxy_xpub_endpoint, "XPUB socket bound");
 
         tracing::info!("Starting ZMQ proxy (XSUB <-> XPUB)");
 
