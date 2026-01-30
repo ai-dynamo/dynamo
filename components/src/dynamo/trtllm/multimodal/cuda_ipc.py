@@ -27,7 +27,7 @@ async def extract_embeddings_from_handles(
     properly.
 
     Args:
-        handles: List of CUDA IPC handle dictionaries from encoder response
+        handles: List of CUDA IPC handle dictionaries from encoder response.
 
     Returns:
         List of embedding tensors on CPU.
