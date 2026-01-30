@@ -119,6 +119,11 @@ class GMSWorker(Worker):
         allocator = CuMemAllocator.get_instance()
         allocator.sleep(offload_tags=tuple())
 
+        # Ensure all CUDA VMM unmap operations complete before returning.
+        # Without this sync, wake_up() may race with pending unmaps, causing OOM
+        # when it tries to allocate new memory while old memory is still mapped.
+        torch.cuda.synchronize()
+
         free_bytes_after, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before
         used_bytes = total - free_bytes_after
@@ -145,6 +150,10 @@ class GMSWorker(Worker):
         if "kv_cache" in tags:
             allocator = CuMemAllocator.get_instance()
             allocator.wake_up(tags=["kv_cache"])
+
+            # Ensure KV cache mappings are complete before returning.
+            # Without this sync, inference may start before mappings are ready.
+            torch.cuda.synchronize()
 
             # Reinitialize FP8 KV scales if needed
             if self.cache_config.cache_dtype.startswith("fp8") and hasattr(
