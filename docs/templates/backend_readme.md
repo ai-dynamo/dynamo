@@ -64,4 +64,4 @@ orphan: true
 | `<Backend> Guide` | `<backend>_guide.md` | Advanced configuration |
 | Backend Comparison | `../README.md` | Compare backends |
 
-<!-- Convert to links: [vLLM Guide](vllm_guide.md) -->
+<!-- Convert table rows to markdown links -->

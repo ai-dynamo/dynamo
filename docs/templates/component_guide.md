@@ -77,4 +77,4 @@ This guide covers deployment, configuration, and integration for the <Component>
 | `<Component> Examples` | `<component>_examples.md` |
 | `<Component> Design` | `/docs/design_docs/<component>_design.md` |
 
-<!-- Convert to links: [Planner Examples](planner_examples.md) -->
+<!-- Convert table rows to markdown links -->

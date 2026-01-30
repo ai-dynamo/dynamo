@@ -83,4 +83,4 @@ spec:
 | `<Component> Examples` | `<component>_examples.md` | Usage examples |
 | `<Component> Design` | `/docs/design_docs/<component>_design.md` | Architecture |
 
-<!-- Convert table rows to links: [Planner Guide](planner_guide.md) -->
+<!-- Convert table rows to markdown links -->

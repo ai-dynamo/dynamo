@@ -35,7 +35,7 @@ See the Feature Matrix for full compatibility.
 | SGLang | `<feature>_sglang.md` |
 | TensorRT-LLM | `<feature>_trtllm.md` |
 
-<!-- Convert to links: [Multimodal with vLLM](multimodal_vllm.md) -->
+<!-- Convert table rows to markdown links -->
 
 ## See Also
 

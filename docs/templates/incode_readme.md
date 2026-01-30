@@ -8,4 +8,4 @@ orphan: true
 
 See `docs/<component>/` for full documentation.
 
-<!-- When using this template, replace with: [Component Documentation](/docs/component/) -->
+<!-- When using this template, replace with actual link to component docs -->

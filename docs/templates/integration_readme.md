@@ -42,7 +42,7 @@ orphan: true
 | `<Integration> Setup` | `<integration>_setup.md` | Installation and configuration |
 | `<Integration> with vLLM` | `<integration>_vllm.md` | vLLM-specific usage |
 
-<!-- Convert to links: [LMCache Setup](lmcache_setup.md) -->
+<!-- Convert table rows to markdown links -->
 
 ## External Resources
 
