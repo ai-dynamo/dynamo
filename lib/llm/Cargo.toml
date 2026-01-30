@@ -38,6 +38,11 @@ name = "transfer_context_v2"
 harness = false
 required-features = ["block-manager", "testing-cuda"]
 
+[[bench]]
+name = "kv_router_full_stress"
+harness = false
+required-features = ["kv-router-stress"]
+
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }

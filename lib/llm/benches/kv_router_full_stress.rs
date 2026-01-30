@@ -10,7 +10,7 @@
 //! The key feature is that tree construction uses the same hash computation as the frontend,
 //! ensuring that HTTP requests will match the pre-populated tree entries.
 //!
-//! Run with: cargo run --package dynamo-llm --bin kv_router_full_stress --features kv-router-stress
+//! Run with: cargo bench --package dynamo-llm --bench kv_router_full_stress --features kv-router-stress -- --help
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -25,10 +25,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use tokenizers::Tokenizer;
 
-use dynamo_llm::kv_router::indexer::RouterEvent;
 use dynamo_llm::kv_router::protocols::{
     compute_hash, compute_seq_hash_for_block, ExternalSequenceBlockHash, KvCacheEvent,
-    KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, WorkerId,
+    KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
+    WorkerId,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::prompt::{
@@ -134,6 +134,10 @@ struct Args {
     /// Path to tokenizer (HuggingFace model ID or local path). Defaults to --model value.
     #[arg(long)]
     tokenizer_path: Option<String>,
+
+    /// Ignored - passed by cargo bench
+    #[arg(long, hide = true)]
+    bench: bool,
 }
 
 /// Compute LocalBlockHash (tokens_hash) from a slice of token IDs.

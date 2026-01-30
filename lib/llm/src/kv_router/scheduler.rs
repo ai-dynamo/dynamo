@@ -310,7 +310,7 @@ impl KvScheduler {
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
 
-        let elapsed = start.elapsed();
+        let send_elapsed = start.elapsed();
 
         let response = resp_rx
             .await

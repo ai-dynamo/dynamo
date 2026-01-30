@@ -48,16 +48,6 @@ harness = false
 required-features = ["bench"]
 
 [[bench]]
-name = "kv_router_stress_test"
-harness = false
-required-features = ["bench"]
-
-[[bench]]
-name = "kv_router_full_stress"
-harness = false
-required-features = ["bench"]
-
-[[bench]]
 name = "kv_indexer_bench"
 harness = false
 required-features = ["bench"]

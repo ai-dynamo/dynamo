@@ -31,6 +31,8 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 #[cfg(feature = "metrics")]
 pub use dynamo_runtime::protocols::maybe_error::MaybeError;
@@ -553,6 +555,8 @@ impl KvIndexer {
 
                         Some(event) = event_rx.recv() => {
                             let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                            let event_id = event.event.event_id;
+                            let worker_id = event.worker_id;
                             // Only clone if we need the event for prune_manager afterward
                             let event_for_prune = prune_manager.is_some().then(|| event.clone());
                             let result = trie.apply_event(event);
@@ -560,8 +564,8 @@ impl KvIndexer {
                             tracing::trace!(
                                 "Applied KV event to global radix tree: event_type={:?}, event_id={}, worker_id={}, success={}, global_radix_tree_size={}",
                                 event_type,
-                                event.event.event_id,
-                                event.worker_id,
+                                event_id,
+                                worker_id,
                                 result_is_ok,
                                 trie.current_size()
                             );

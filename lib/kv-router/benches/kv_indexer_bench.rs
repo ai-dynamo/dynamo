@@ -1,26 +1,53 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Benchmark for KvIndexer and KvIndexerSharded.
+//! Combined benchmark for KvIndexer and KvIndexerSharded.
 //!
-//! Tests the full async indexer interface (not just RadixTree in isolation),
-//! allowing comparison between sharded and non-sharded implementations.
+//! Provides two modes:
+//! - `microbench`: Per-operation latency benchmarks comparing single vs sharded indexer
+//! - `stress`: Queue saturation stress test under load
 //!
-//! Run with: cargo run --package dynamo-llm --bin kv_indexer_bench --features kv-router-stress -- --help
+//! Run with:
+//!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- microbench --help
+//!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- stress --help
 
-use clap::{Parser, ValueEnum};
-use dynamo_llm::kv_router::{
-    indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, RouterEvent,
-    },
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use dynamo_kv_router::{
+    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded},
     protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, WorkerId,
+        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId,
     },
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+// ============================================================================
+// CLI Definitions
+// ============================================================================
+
+#[derive(Parser)]
+#[command(name = "kv_indexer_bench")]
+#[command(about = "Combined benchmark for KvIndexer and KvIndexerSharded")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+
+    /// Ignored - passed by cargo bench harness
+    #[arg(long, hide = true, global = true)]
+    bench: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Per-operation latency benchmarks comparing single vs sharded indexer
+    Microbench(MicrobenchArgs),
+    /// Queue saturation stress test under load
+    Stress(StressArgs),
+}
 
 /// Indexer type to benchmark
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -33,10 +60,9 @@ enum IndexerType {
     Both,
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "kv_indexer_bench")]
-#[command(about = "Benchmark for KvIndexer vs KvIndexerSharded")]
-struct Args {
+/// Common arguments shared between subcommands
+#[derive(Args, Debug, Clone)]
+struct CommonArgs {
     /// Target tree size in total (worker, block) pairs
     #[arg(long, default_value = "100000")]
     size: usize,
@@ -48,6 +74,24 @@ struct Args {
     /// Number of workers to distribute blocks across
     #[arg(long, default_value = "4")]
     num_workers: usize,
+
+    /// KV block size in tokens
+    #[arg(long, default_value = "16")]
+    block_size: u32,
+
+    /// Random seed for reproducibility
+    #[arg(long, default_value = "42")]
+    seed: u64,
+
+    /// Verbose output
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+#[derive(Args, Debug)]
+struct MicrobenchArgs {
+    #[command(flatten)]
+    common: CommonArgs,
 
     /// Number of iterations per operation for timing
     #[arg(long, default_value = "1000")]
@@ -61,10 +105,6 @@ struct Args {
     #[arg(long, default_value = "4")]
     num_prefix_prompts: usize,
 
-    /// KV block size in tokens (for hash computation)
-    #[arg(long, default_value = "16")]
-    block_size: u32,
-
     /// Indexer type to benchmark
     #[arg(long, value_enum, default_value = "both")]
     indexer_type: IndexerType,
@@ -72,14 +112,6 @@ struct Args {
     /// Number of shards for sharded indexer
     #[arg(long, default_value = "4")]
     num_shards: usize,
-
-    /// Random seed for reproducibility
-    #[arg(long, default_value = "42")]
-    seed: u64,
-
-    /// Verbose output
-    #[arg(short, long)]
-    verbose: bool,
 
     /// Run only specific benchmark (store, find_matches, remove, or all)
     #[arg(long, default_value = "all")]
@@ -89,6 +121,40 @@ struct Args {
     #[arg(long, default_value = "table")]
     format: String,
 }
+
+#[derive(Args, Debug)]
+struct StressArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Prefix sharing ratio (0.0 to 1.0) - fraction of sequences sharing a common prefix
+    #[arg(long, default_value = "0.5")]
+    prefix_share_ratio: f64,
+
+    /// Requests per second to submit
+    #[arg(long, default_value = "20.0")]
+    arrival_rate: f64,
+
+    /// Test duration in seconds
+    #[arg(long, default_value = "10")]
+    duration: u64,
+
+    /// Seconds to wait for in-flight requests after test
+    #[arg(long, default_value = "5")]
+    in_flight_timeout: u64,
+
+    /// Indexer type to stress test
+    #[arg(long, value_enum, default_value = "single")]
+    indexer_type: IndexerType,
+
+    /// Number of shards for sharded indexer
+    #[arg(long, default_value = "4")]
+    num_shards: usize,
+}
+
+// ============================================================================
+// Shared Data Structures
+// ============================================================================
 
 /// Pre-generated sequence data for benchmarking
 #[derive(Clone)]
@@ -157,22 +223,22 @@ fn generate_sequences(
     num_sequences: usize,
     depth: usize,
     num_workers: usize,
-    prefix_prompt_ratio: f64,
-    num_prefix_prompts: usize,
+    prefix_ratio: f64,
+    num_prefix_groups: usize,
     seed: u64,
 ) -> Vec<SequenceData> {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     let mut sequences = Vec::with_capacity(num_sequences);
-    let prefix_length: usize = (depth as f64 * prefix_prompt_ratio).round() as usize;
+    let prefix_length: usize = (depth as f64 * prefix_ratio).round() as usize;
     let mut rng: StdRng = StdRng::seed_from_u64(seed);
 
     for seq_id in 0..num_sequences {
         let worker_id = (seq_id % num_workers) as WorkerId;
         let mut seq = SequenceData::new(seq_id as u64, worker_id, depth);
 
-        if num_prefix_prompts > 0 && prefix_length > 0 {
-            let group_id = rng.random_range(0..num_prefix_prompts);
+        if num_prefix_groups > 0 && prefix_length > 0 {
+            let group_id = rng.random_range(0..num_prefix_groups);
             for i in 0..prefix_length {
                 seq.local_hashes[i] =
                     LocalBlockHash(0xDEAD_BEEF_0000_0000 | ((group_id as u64) << 32) | (i as u64));
@@ -185,7 +251,7 @@ fn generate_sequences(
     sequences
 }
 
-/// Statistics for timing measurements
+/// Statistics for latency measurements
 #[derive(Debug, Clone)]
 struct LatencyStats {
     min: Duration,
@@ -198,13 +264,17 @@ struct LatencyStats {
 }
 
 impl LatencyStats {
-    fn from_durations(mut durations: Vec<Duration>) -> Self {
+    fn from_durations(mut durations: Vec<Duration>) -> Option<Self> {
+        if durations.is_empty() {
+            return None;
+        }
+
         durations.sort();
         let n = durations.len();
         let total: Duration = durations.iter().sum();
         let avg = total / n as u32;
 
-        Self {
+        Some(Self {
             min: durations[0],
             max: durations[n - 1],
             avg,
@@ -212,7 +282,7 @@ impl LatencyStats {
             p95: durations[n * 95 / 100],
             p99: durations[n * 99 / 100],
             throughput_ops_sec: n as f64 / total.as_secs_f64(),
-        }
+        })
     }
 
     fn print(&self, operation: &str, blocks_per_op: usize) {
@@ -231,23 +301,76 @@ impl LatencyStats {
     }
 }
 
-/// Format duration for display
-fn format_duration(d: Duration) -> String {
-    let ns = d.as_nanos() as u64;
-    if ns >= 1_000_000_000 {
-        format!("{:.2}s", ns as f64 / 1_000_000_000.0)
-    } else if ns >= 1_000_000 {
-        format!("{:.2}ms", ns as f64 / 1_000_000.0)
-    } else if ns >= 1_000 {
-        format!("{:.2}us", ns as f64 / 1_000.0)
-    } else {
-        format!("{}ns", ns)
+/// Compute median of durations
+fn median(durations: &[Duration]) -> Duration {
+    if durations.is_empty() {
+        return Duration::ZERO;
+    }
+    let mut sorted = durations.to_vec();
+    sorted.sort();
+    sorted[sorted.len() / 2]
+}
+
+// ============================================================================
+// Benchable Indexer Trait
+// ============================================================================
+
+/// Trait for abstracting over KvIndexer and KvIndexerSharded
+#[async_trait::async_trait]
+trait BenchableIndexer: Send + Sync {
+    async fn apply_event(&mut self, event: RouterEvent);
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError>;
+    fn name(&self) -> &str;
+}
+
+#[async_trait::async_trait]
+impl BenchableIndexer for KvIndexer {
+    async fn apply_event(&mut self, event: RouterEvent) {
+        KvIndexerInterface::apply_event(self, event).await;
+    }
+
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
+        KvIndexerInterface::find_matches(self, sequence).await?;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "KvIndexer (single)"
     }
 }
 
+#[async_trait::async_trait]
+impl BenchableIndexer for KvIndexerSharded {
+    async fn apply_event(&mut self, event: RouterEvent) {
+        KvIndexerInterface::apply_event(self, event).await;
+    }
+
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
+        KvIndexerInterface::find_matches(self, sequence).await?;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "KvIndexerSharded"
+    }
+}
+
+// ============================================================================
+// Microbench Mode
+// ============================================================================
+
 /// Results for a single indexer benchmark
 #[derive(Debug)]
-struct BenchmarkResults {
+struct MicrobenchResults {
     indexer_name: String,
     construction_time: Duration,
     construction_events: usize,
@@ -257,7 +380,7 @@ struct BenchmarkResults {
     remove_stats: Option<LatencyStats>,
 }
 
-impl BenchmarkResults {
+impl MicrobenchResults {
     fn print(&self, depth: usize) {
         println!("\n========================================");
         println!("Results for: {}", self.indexer_name);
@@ -330,55 +453,6 @@ impl BenchmarkResults {
     }
 }
 
-/// Trait for abstracting over KvIndexer and KvIndexerSharded
-#[async_trait::async_trait]
-trait BenchableIndexer: Send + Sync {
-    async fn apply_event(&mut self, event: RouterEvent);
-    async fn find_matches(
-        &self,
-        sequence: Vec<LocalBlockHash>,
-    ) -> Result<(), dynamo_llm::kv_router::indexer::KvRouterError>;
-    fn name(&self) -> &str;
-}
-
-#[async_trait::async_trait]
-impl BenchableIndexer for KvIndexer {
-    async fn apply_event(&mut self, event: RouterEvent) {
-        KvIndexerInterface::apply_event(self, event).await;
-    }
-
-    async fn find_matches(
-        &self,
-        sequence: Vec<LocalBlockHash>,
-    ) -> Result<(), dynamo_llm::kv_router::indexer::KvRouterError> {
-        KvIndexerInterface::find_matches(self, sequence).await?;
-        Ok(())
-    }
-
-    fn name(&self) -> &str {
-        "KvIndexer (single)"
-    }
-}
-
-#[async_trait::async_trait]
-impl BenchableIndexer for KvIndexerSharded {
-    async fn apply_event(&mut self, event: RouterEvent) {
-        KvIndexerInterface::apply_event(self, event).await;
-    }
-
-    async fn find_matches(
-        &self,
-        sequence: Vec<LocalBlockHash>,
-    ) -> Result<(), dynamo_llm::kv_router::indexer::KvRouterError> {
-        KvIndexerInterface::find_matches(self, sequence).await?;
-        Ok(())
-    }
-
-    fn name(&self) -> &str {
-        "KvIndexerSharded"
-    }
-}
-
 /// Build a pre-populated indexer
 async fn build_indexer<I: BenchableIndexer>(
     indexer: &mut I,
@@ -445,7 +519,7 @@ async fn bench_store<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations)
+    LatencyStats::from_durations(durations).unwrap()
 }
 
 /// Benchmark find_matches operation (hit case)
@@ -472,7 +546,7 @@ async fn bench_find_matches_hit<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations)
+    LatencyStats::from_durations(durations).unwrap()
 }
 
 /// Benchmark find_matches operation (miss case)
@@ -500,7 +574,7 @@ async fn bench_find_matches_miss<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations)
+    LatencyStats::from_durations(durations).unwrap()
 }
 
 /// Benchmark apply_event (remove) operation
@@ -531,50 +605,68 @@ async fn bench_remove<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations)
+    LatencyStats::from_durations(durations).unwrap()
 }
 
-/// Run all benchmarks for an indexer
-async fn run_benchmarks<I: BenchableIndexer>(
+/// Run all microbenchmarks for an indexer
+async fn run_microbenchmarks<I: BenchableIndexer>(
     indexer: &mut I,
     sequences: &[SequenceData],
     extra_sequences: &[SequenceData],
-    args: &Args,
-) -> BenchmarkResults {
+    args: &MicrobenchArgs,
+) -> MicrobenchResults {
     let indexer_name = indexer.name().to_string();
     println!("\n--- Benchmarking {} ---", indexer_name);
 
     // Build the indexer
-    let construction_time = build_indexer(indexer, sequences, args.verbose).await;
+    let construction_time = build_indexer(indexer, sequences, args.common.verbose).await;
     let construction_events = sequences.len();
 
     let run_all = args.benchmark_type == "all";
 
     let store_stats = if run_all || args.benchmark_type == "store" {
-        Some(bench_store(indexer, extra_sequences, args.iterations, args.verbose).await)
+        Some(
+            bench_store(
+                indexer,
+                extra_sequences,
+                args.iterations,
+                args.common.verbose,
+            )
+            .await,
+        )
     } else {
         None
     };
 
     let find_matches_hit_stats = if run_all || args.benchmark_type == "find_matches" {
-        Some(bench_find_matches_hit(indexer, sequences, args.iterations, args.verbose).await)
+        Some(
+            bench_find_matches_hit(indexer, sequences, args.iterations, args.common.verbose).await,
+        )
     } else {
         None
     };
 
     let find_matches_miss_stats = if run_all || args.benchmark_type == "find_matches" {
-        Some(bench_find_matches_miss(indexer, args.depth, args.iterations, args.verbose).await)
+        Some(
+            bench_find_matches_miss(
+                indexer,
+                args.common.depth,
+                args.iterations,
+                args.common.verbose,
+            )
+            .await,
+        )
     } else {
         None
     };
 
     let remove_stats = if run_all || args.benchmark_type == "remove" {
-        Some(bench_remove(indexer, sequences, args.iterations, args.verbose).await)
+        Some(bench_remove(indexer, sequences, args.iterations, args.common.verbose).await)
     } else {
         None
     };
 
-    BenchmarkResults {
+    MicrobenchResults {
         indexer_name,
         construction_time,
         construction_events,
@@ -585,7 +677,7 @@ async fn run_benchmarks<I: BenchableIndexer>(
     }
 }
 
-fn print_comparison(results: &[BenchmarkResults], depth: usize) {
+fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
     if results.len() < 2 {
         return;
     }
@@ -620,10 +712,7 @@ fn print_comparison(results: &[BenchmarkResults], depth: usize) {
         let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Store p50",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
+            "Store p50", s1_us, s2_us, s1_us / s2_us
         );
     }
 
@@ -636,10 +725,7 @@ fn print_comparison(results: &[BenchmarkResults], depth: usize) {
         let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (hit) p50",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
+            "Find matches (hit) p50", s1_us, s2_us, s1_us / s2_us
         );
     }
 
@@ -652,10 +738,7 @@ fn print_comparison(results: &[BenchmarkResults], depth: usize) {
         let s2_us = s2.p99.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (hit) p99",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
+            "Find matches (hit) p99", s1_us, s2_us, s1_us / s2_us
         );
     }
 
@@ -668,10 +751,7 @@ fn print_comparison(results: &[BenchmarkResults], depth: usize) {
         let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (miss) p50",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
+            "Find matches (miss) p50", s1_us, s2_us, s1_us / s2_us
         );
     }
 
@@ -681,10 +761,7 @@ fn print_comparison(results: &[BenchmarkResults], depth: usize) {
         let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
         println!(
             "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Remove p50",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
+            "Remove p50", s1_us, s2_us, s1_us / s2_us
         );
     }
 
@@ -712,28 +789,28 @@ fn print_comparison(results: &[BenchmarkResults], depth: usize) {
     println!("\nNote: Ratio > 1.0 means sharded is faster for that metric.");
 }
 
-#[tokio::main]
-async fn main() {
-    let args = Args::parse();
-
-    let num_sequences = args.size / args.depth;
+async fn run_microbench_mode(args: MicrobenchArgs) {
+    let num_sequences = args.common.size / args.common.depth;
     if num_sequences == 0 {
         eprintln!("Error: size must be >= depth");
         std::process::exit(1);
     }
 
-    println!("KvIndexer Benchmark");
-    println!("===================\n");
+    println!("KvIndexer Microbenchmark");
+    println!("========================\n");
     println!("Configuration:");
-    println!("  Target size: {} (worker, block) pairs", args.size);
+    println!(
+        "  Target size: {} (worker, block) pairs",
+        args.common.size
+    );
     println!(
         "  Depth: {} blocks/sequence (= {} tokens with block_size={})",
-        args.depth,
-        args.depth * args.block_size as usize,
-        args.block_size
+        args.common.depth,
+        args.common.depth * args.common.block_size as usize,
+        args.common.block_size
     );
-    println!("  Block size: {} tokens", args.block_size);
-    println!("  Workers: {}", args.num_workers);
+    println!("  Block size: {} tokens", args.common.block_size);
+    println!("  Workers: {}", args.common.num_workers);
     println!("  Iterations: {}", args.iterations);
     println!(
         "  Prefix prompt ratio: {:.1}%",
@@ -743,17 +820,20 @@ async fn main() {
     println!("  Num shards (for sharded): {}", args.num_shards);
     println!("  Indexer type: {:?}", args.indexer_type);
     println!("  Benchmark type: {}", args.benchmark_type);
-    println!("\n  Derived: {} sequences to reach target size", num_sequences);
+    println!(
+        "\n  Derived: {} sequences to reach target size",
+        num_sequences
+    );
 
     // Generate sequences
     let extra_count = args.iterations;
     let all_sequences = generate_sequences(
         num_sequences + extra_count,
-        args.depth,
-        args.num_workers,
+        args.common.depth,
+        args.common.num_workers,
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
-        args.seed,
+        args.common.seed,
     );
     let sequences = &all_sequences[..num_sequences];
     let extra_sequences = &all_sequences[num_sequences..];
@@ -764,11 +844,10 @@ async fn main() {
     // Benchmark single indexer
     if matches!(args.indexer_type, IndexerType::Single | IndexerType::Both) {
         let token = CancellationToken::new();
-        let mut indexer = KvIndexer::new(token.clone(), args.block_size, metrics.clone());
-        let result = run_benchmarks(&mut indexer, sequences, extra_sequences, &args).await;
+        let mut indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
+        let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
         results.push(result);
         token.cancel();
-        // Allow cleanup
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -778,10 +857,10 @@ async fn main() {
         let mut indexer = KvIndexerSharded::new(
             token.clone(),
             args.num_shards,
-            args.block_size,
+            args.common.block_size,
             metrics.clone(),
         );
-        let result = run_benchmarks(&mut indexer, sequences, extra_sequences, &args).await;
+        let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
         results.push(result);
         token.cancel();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -789,19 +868,562 @@ async fn main() {
 
     // Print results
     if args.format == "csv" {
-        BenchmarkResults::print_csv_header();
+        MicrobenchResults::print_csv_header();
         for result in &results {
             result.print_csv_row();
         }
     } else {
         for result in &results {
-            result.print(args.depth);
+            result.print(args.common.depth);
         }
 
         if results.len() == 2 {
-            print_comparison(&results, args.depth);
+            print_microbench_comparison(&results, args.common.depth);
         }
     }
 
-    println!("\nBenchmark complete.");
+    println!("\nMicrobenchmark complete.");
+}
+
+// ============================================================================
+// Stress Test Mode
+// ============================================================================
+
+/// Result of a single request during stress test
+#[allow(dead_code)]
+struct RequestResult {
+    request_id: u64,
+    submit_time: Instant,
+    complete_time: Instant,
+    success: bool,
+}
+
+/// Aggregated results from stress test
+struct StressResults {
+    indexer_name: String,
+    submitted: u64,
+    completed: u64,
+    timed_out: u64,
+    latencies: Vec<Duration>,
+    max_in_flight: u64,
+    baseline_service_time: Duration,
+    construction_time: Duration,
+    construction_events: u64,
+}
+
+/// Run the stress test with a generic indexer
+async fn run_stress_test<I: BenchableIndexer + 'static>(
+    indexer: Arc<I>,
+    sequences: &[SequenceData],
+    args: &StressArgs,
+) -> StressResults {
+    let indexer_name = indexer.name().to_string();
+
+    // Phase 2: Baseline Measurement
+    println!("\nPhase 2: Baseline Measurement");
+    println!("  Running 10 sequential find_matches calls...");
+
+    let mut baseline_durations = Vec::new();
+    for seq in sequences.iter().take(10) {
+        let start = Instant::now();
+        let _ = indexer.find_matches(seq.local_hashes.clone()).await;
+        baseline_durations.push(start.elapsed());
+    }
+    let baseline_service_time = median(&baseline_durations);
+    let theoretical_max = 1.0 / baseline_service_time.as_secs_f64();
+
+    println!(
+        "  Baseline find_matches latency: {:?} (median of 10)",
+        baseline_service_time
+    );
+    println!(
+        "  Theoretical max throughput: {:.1} req/sec",
+        theoretical_max
+    );
+
+    // Phase 3: Pre-generate Lookup Sequences
+    println!("\nPhase 3: Pre-generating Lookup Sequences");
+    let expected_requests = (args.arrival_rate * args.duration as f64).ceil() as usize + 100;
+    let lookup_sequences: Vec<Vec<LocalBlockHash>> = (0..expected_requests)
+        .map(|i| {
+            let seq = &sequences[i % sequences.len()];
+            seq.local_hashes.clone()
+        })
+        .collect();
+    println!(
+        "  Pre-generated {} lookup sequences",
+        lookup_sequences.len()
+    );
+
+    // Phase 4: Stress Test
+    println!("\nPhase 4: Stress Test");
+    println!("  Arrival rate: {:.1} req/sec", args.arrival_rate);
+    println!("  Duration: {}s", args.duration);
+
+    let in_flight = Arc::new(AtomicU64::new(0));
+    let max_in_flight = Arc::new(AtomicU64::new(0));
+    let (result_tx, mut result_rx) = mpsc::channel::<RequestResult>(expected_requests);
+
+    let start = Instant::now();
+    let mut request_id = 0u64;
+    let interval = Duration::from_secs_f64(1.0 / args.arrival_rate);
+
+    while start.elapsed() < Duration::from_secs(args.duration) {
+        let submit_time = Instant::now();
+        let seq = lookup_sequences[request_id as usize].clone();
+
+        // Track in-flight
+        let current = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        max_in_flight.fetch_max(current, Ordering::Relaxed);
+
+        let indexer = Arc::clone(&indexer);
+        let result_tx = result_tx.clone();
+        let in_flight_clone = in_flight.clone();
+        let req_id = request_id;
+        let verbose = args.common.verbose;
+
+        tokio::spawn(async move {
+            let result = indexer.find_matches(seq).await;
+            let complete_time = Instant::now();
+            in_flight_clone.fetch_sub(1, Ordering::Relaxed);
+
+            if verbose {
+                let latency = complete_time.duration_since(submit_time);
+                println!("    Request {} completed in {:?}", req_id, latency);
+            }
+
+            let _ = result_tx
+                .send(RequestResult {
+                    request_id: req_id,
+                    submit_time,
+                    complete_time,
+                    success: result.is_ok(),
+                })
+                .await;
+        });
+
+        request_id += 1;
+        tokio::time::sleep(interval).await;
+    }
+
+    let submitted = request_id;
+    println!("  Submitted {} requests", submitted);
+
+    // Wait for in-flight requests with timeout
+    println!("\nPhase 5: Draining In-flight Requests");
+    let drain_start = Instant::now();
+    let mut last_in_flight = in_flight.load(Ordering::Relaxed);
+    println!(
+        "  Waiting for {} in-flight requests (timeout: {}s)...",
+        last_in_flight, args.in_flight_timeout
+    );
+
+    while in_flight.load(Ordering::Relaxed) > 0
+        && drain_start.elapsed() < Duration::from_secs(args.in_flight_timeout)
+    {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let current = in_flight.load(Ordering::Relaxed);
+        if current != last_in_flight && args.common.verbose {
+            println!("    In-flight: {}", current);
+            last_in_flight = current;
+        }
+    }
+    let timed_out = in_flight.load(Ordering::Relaxed);
+    if timed_out > 0 {
+        println!("  {} requests timed out", timed_out);
+    } else {
+        println!("  All requests completed");
+    }
+
+    // Collect results
+    drop(result_tx);
+    let mut results = Vec::new();
+    while let Some(r) = result_rx.recv().await {
+        results.push(r);
+    }
+
+    // Compute latencies
+    let latencies: Vec<Duration> = results
+        .iter()
+        .map(|r| r.complete_time.duration_since(r.submit_time))
+        .collect();
+
+    StressResults {
+        indexer_name,
+        submitted,
+        completed: results.len() as u64,
+        timed_out,
+        latencies,
+        max_in_flight: max_in_flight.load(Ordering::Relaxed),
+        baseline_service_time,
+        construction_time: Duration::ZERO, // Set by caller
+        construction_events: 0,            // Set by caller
+    }
+}
+
+/// Print the final stress test results report
+fn print_stress_results(args: &StressArgs, results: &StressResults) {
+    let num_sequences = args.common.size / args.common.depth;
+
+    println!("\n=====================");
+    println!("Queue Saturation Test Results: {}", results.indexer_name);
+    println!("=====================\n");
+
+    println!("Configuration:");
+    println!(
+        "  Tree size: {} blocks ({} sequences x {} depth)",
+        args.common.size, num_sequences, args.common.depth
+    );
+    println!("  Workers: {}", args.common.num_workers);
+    println!(
+        "  Prefix share ratio: {:.1}%",
+        args.prefix_share_ratio * 100.0
+    );
+    println!("  Arrival rate: {:.1} req/sec", args.arrival_rate);
+    println!("  Duration: {}s", args.duration);
+    println!();
+
+    println!("Tree Construction:");
+    println!("  Time: {:.2?}", results.construction_time);
+    println!("  Events: {}", results.construction_events);
+    let throughput = results.construction_events as f64 / results.construction_time.as_secs_f64();
+    println!("  Throughput: {:.0} events/sec", throughput);
+    println!();
+
+    println!("Baseline:");
+    println!(
+        "  find_matches latency: {:?} (median of 10)",
+        results.baseline_service_time
+    );
+    let theoretical_max = 1.0 / results.baseline_service_time.as_secs_f64();
+    println!(
+        "  Theoretical max throughput: {:.1} req/sec",
+        theoretical_max
+    );
+    println!();
+
+    println!("Saturation Test Results:");
+    println!("  Submitted: {} requests", results.submitted);
+    println!("  Completed: {} requests", results.completed);
+    println!(
+        "  Timed out: {} requests (in-flight at end)",
+        results.timed_out
+    );
+    println!();
+
+    if !results.latencies.is_empty() {
+        let test_duration = args.duration as f64 + args.in_flight_timeout as f64;
+        let achieved_throughput = results.completed as f64 / test_duration;
+
+        println!("  Throughput:");
+        println!("    Requested: {:.1} req/sec", args.arrival_rate);
+        println!("    Achieved: {:.1} req/sec", achieved_throughput);
+        println!();
+
+        if let Some(stats) = LatencyStats::from_durations(results.latencies.clone()) {
+            println!("  Latency (end-to-end, includes queue wait):");
+            println!("    min:  {:>12?}", stats.min);
+            println!("    p50:  {:>12?}", stats.p50);
+            println!("    p95:  {:>12?}", stats.p95);
+            println!("    p99:  {:>12?}", stats.p99);
+            println!("    max:  {:>12?}", stats.max);
+            println!();
+
+            let estimated_queue_wait = if stats.p50 > results.baseline_service_time {
+                stats.p50 - results.baseline_service_time
+            } else {
+                Duration::ZERO
+            };
+
+            println!("  Queue Analysis:");
+            println!(
+                "    Baseline service time: {:?}",
+                results.baseline_service_time
+            );
+            println!("    Estimated queue wait (p50): {:?}", estimated_queue_wait);
+            println!("    Max in-flight observed: {}", results.max_in_flight);
+            println!();
+
+            // Determine saturation status
+            let is_saturated = achieved_throughput < args.arrival_rate * 0.95
+                || results.timed_out > 0
+                || stats.p50 > results.baseline_service_time * 2;
+
+            if is_saturated {
+                println!("  STATUS: SATURATED");
+                if achieved_throughput < args.arrival_rate * 0.95 {
+                    println!(
+                        "    - Throughput ({:.1}) < Arrival rate ({:.1})",
+                        achieved_throughput, args.arrival_rate
+                    );
+                }
+                if results.timed_out > 0 {
+                    println!("    - Requests timed out: {}", results.timed_out);
+                }
+                if stats.p50 > results.baseline_service_time * 2 {
+                    println!(
+                        "    - P50 latency ({:?}) > 2x baseline ({:?})",
+                        stats.p50, results.baseline_service_time
+                    );
+                }
+            } else {
+                println!("  STATUS: NOT SATURATED");
+                println!("    - Throughput matches arrival rate");
+                println!("    - No requests timed out");
+                println!("    - Latency within acceptable bounds");
+            }
+        }
+    }
+}
+
+fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
+    if results.len() < 2 {
+        return;
+    }
+
+    println!("\n========================================");
+    println!("STRESS TEST COMPARISON SUMMARY");
+    println!("========================================\n");
+
+    let single = &results[0];
+    let sharded = &results[1];
+
+    println!(
+        "{:<35} {:>18} {:>18} {:>10}",
+        "Metric", "Single", "Sharded", "Ratio"
+    );
+    println!("{}", "-".repeat(85));
+
+    // Construction time
+    let single_constr = single.construction_time.as_secs_f64() * 1000.0;
+    let sharded_constr = sharded.construction_time.as_secs_f64() * 1000.0;
+    println!(
+        "{:<35} {:>15.2}ms {:>15.2}ms {:>9.2}x",
+        "Construction time",
+        single_constr,
+        sharded_constr,
+        single_constr / sharded_constr
+    );
+
+    // Baseline service time
+    let single_baseline = single.baseline_service_time.as_nanos() as f64 / 1000.0;
+    let sharded_baseline = sharded.baseline_service_time.as_nanos() as f64 / 1000.0;
+    println!(
+        "{:<35} {:>15.2}us {:>15.2}us {:>9.2}x",
+        "Baseline service time",
+        single_baseline,
+        sharded_baseline,
+        single_baseline / sharded_baseline
+    );
+
+    // Completed requests
+    println!(
+        "{:<35} {:>18} {:>18} {:>9.2}x",
+        "Completed requests",
+        single.completed,
+        sharded.completed,
+        sharded.completed as f64 / single.completed as f64
+    );
+
+    // Max in-flight
+    println!(
+        "{:<35} {:>18} {:>18}",
+        "Max in-flight", single.max_in_flight, sharded.max_in_flight
+    );
+
+    // Timed out
+    println!(
+        "{:<35} {:>18} {:>18}",
+        "Timed out", single.timed_out, sharded.timed_out
+    );
+
+    // Latency comparison
+    if let (Some(s1), Some(s2)) = (
+        LatencyStats::from_durations(single.latencies.clone()),
+        LatencyStats::from_durations(sharded.latencies.clone()),
+    ) {
+        let s1_p50 = s1.p50.as_nanos() as f64 / 1000.0;
+        let s2_p50 = s2.p50.as_nanos() as f64 / 1000.0;
+        println!(
+            "{:<35} {:>15.2}us {:>15.2}us {:>9.2}x",
+            "Latency p50",
+            s1_p50,
+            s2_p50,
+            s1_p50 / s2_p50
+        );
+
+        let s1_p99 = s1.p99.as_nanos() as f64 / 1000.0;
+        let s2_p99 = s2.p99.as_nanos() as f64 / 1000.0;
+        println!(
+            "{:<35} {:>15.2}us {:>15.2}us {:>9.2}x",
+            "Latency p99",
+            s1_p99,
+            s2_p99,
+            s1_p99 / s2_p99
+        );
+
+        let test_duration = args.duration as f64 + args.in_flight_timeout as f64;
+        let s1_throughput = single.completed as f64 / test_duration;
+        let s2_throughput = sharded.completed as f64 / test_duration;
+        println!(
+            "{:<35} {:>14.1}/s {:>14.1}/s {:>9.2}x",
+            "Achieved throughput",
+            s1_throughput,
+            s2_throughput,
+            s2_throughput / s1_throughput
+        );
+    }
+
+    println!("\nNote: Ratio > 1.0 means sharded is better for that metric.");
+}
+
+async fn run_stress_mode(args: StressArgs) {
+    let num_sequences = args.common.size / args.common.depth;
+
+    println!("Queue Saturation Stress Test");
+    println!("============================\n");
+
+    println!("Configuration:");
+    println!(
+        "  Tree size: {} blocks ({} sequences x {} depth)",
+        args.common.size, num_sequences, args.common.depth
+    );
+    println!("  Workers: {}", args.common.num_workers);
+    println!("  Block size: {} tokens", args.common.block_size);
+    println!(
+        "  Prefix share ratio: {:.1}%",
+        args.prefix_share_ratio * 100.0
+    );
+    println!("  Seed: {}", args.common.seed);
+    println!("  Arrival rate: {:.1} req/sec", args.arrival_rate);
+    println!("  Duration: {}s", args.duration);
+    println!("  In-flight timeout: {}s", args.in_flight_timeout);
+    println!("  Indexer type: {:?}", args.indexer_type);
+    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::Both) {
+        println!("  Num shards: {}", args.num_shards);
+    }
+
+    // Generate sequences
+    println!("\nPhase 1: Tree Construction");
+    println!("  Generating {} sequences...", num_sequences);
+
+    // Use prefix_share_ratio as prefix_ratio and 1 group for stress test
+    let sequences = generate_sequences(
+        num_sequences,
+        args.common.depth,
+        args.common.num_workers,
+        args.prefix_share_ratio,
+        1, // Single prefix group for stress test
+        args.common.seed,
+    );
+
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let mut all_results = Vec::new();
+
+    // Test single indexer
+    if matches!(args.indexer_type, IndexerType::Single | IndexerType::Both) {
+        let token = CancellationToken::new();
+        let mut indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
+
+        println!("\n  Applying {} store events to KvIndexer...", sequences.len());
+        let construction_start = Instant::now();
+
+        for (event_id, seq) in sequences.iter().enumerate() {
+            let event = seq.to_store_event(event_id as u64);
+            KvIndexerInterface::apply_event(&mut indexer, event).await;
+
+            if args.common.verbose && (event_id + 1) % 100 == 0 {
+                println!("    Applied {}/{} events...", event_id + 1, sequences.len());
+            }
+        }
+
+        let construction_time = construction_start.elapsed();
+        let construction_events = sequences.len() as u64;
+
+        println!("  Tree construction completed in {:?}", construction_time);
+        println!(
+            "  Throughput: {:.0} events/sec",
+            construction_events as f64 / construction_time.as_secs_f64()
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut results = run_stress_test(Arc::new(indexer), &sequences, &args).await;
+        results.construction_time = construction_time;
+        results.construction_events = construction_events;
+
+        print_stress_results(&args, &results);
+        all_results.push(results);
+
+        token.cancel();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Test sharded indexer
+    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::Both) {
+        let token = CancellationToken::new();
+        let mut indexer = KvIndexerSharded::new(
+            token.clone(),
+            args.num_shards,
+            args.common.block_size,
+            metrics.clone(),
+        );
+
+        println!(
+            "\n  Applying {} store events to KvIndexerSharded...",
+            sequences.len()
+        );
+        let construction_start = Instant::now();
+
+        for (event_id, seq) in sequences.iter().enumerate() {
+            let event = seq.to_store_event(event_id as u64);
+            KvIndexerInterface::apply_event(&mut indexer, event).await;
+
+            if args.common.verbose && (event_id + 1) % 100 == 0 {
+                println!("    Applied {}/{} events...", event_id + 1, sequences.len());
+            }
+        }
+
+        let construction_time = construction_start.elapsed();
+        let construction_events = sequences.len() as u64;
+
+        println!("  Tree construction completed in {:?}", construction_time);
+        println!(
+            "  Throughput: {:.0} events/sec",
+            construction_events as f64 / construction_time.as_secs_f64()
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut results = run_stress_test(Arc::new(indexer), &sequences, &args).await;
+        results.construction_time = construction_time;
+        results.construction_events = construction_events;
+
+        print_stress_results(&args, &results);
+        all_results.push(results);
+
+        token.cancel();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Print comparison if both were run
+    if all_results.len() == 2 {
+        print_stress_comparison(&all_results, &args);
+    }
+
+    println!("\nStress test complete.");
+}
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Microbench(args) => run_microbench_mode(args).await,
+        Command::Stress(args) => run_stress_mode(args).await,
+    }
 }
