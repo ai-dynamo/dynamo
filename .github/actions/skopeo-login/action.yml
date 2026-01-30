@@ -48,11 +48,11 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         set -euo pipefail
-        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | sudo skopeo login --username AWS --password-stdin "${ECR_HOSTNAME}"
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | skopeo login --username AWS --password-stdin "${ECR_HOSTNAME}"
 
     - name: ACR Login
       shell: bash
       if: ${{ inputs.azure_acr_hostname != '' && inputs.azure_acr_user != '' && inputs.azure_acr_password != '' }}
       run: |
         set -euo pipefail
-        echo "${{ inputs.azure_acr_password }}" | sudo skopeo login "${{ inputs.azure_acr_hostname }}" --username "${{ inputs.azure_acr_user }}" --password-stdin
+        echo "${{ inputs.azure_acr_password }}" | skopeo login "${{ inputs.azure_acr_hostname }}" --username "${{ inputs.azure_acr_user }}" --password-stdin
