@@ -261,7 +261,7 @@ Thresholds can be updated at runtime via the `/busy_threshold` HTTP endpoint. Se
 For programmatic routing control, use the `KvPushRouter` class directly:
 
 ```python
-from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamo.llm import DistributedRuntime, KvPushRouter, KvRouterConfig
 
 router = KvPushRouter(endpoint=endpoint, block_size=16, kv_router_config=KvRouterConfig())
 stream = await router.generate(token_ids=tokens, model="model-name")
