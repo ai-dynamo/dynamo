@@ -86,6 +86,19 @@ class vLLMGenerateRequest(BaseModel):
         if isinstance(v, str):
             v = json.loads(v)
         if isinstance(v, dict):
+            # Workaround for vLLM SamplingParams serialization/deserialization issue.
+            #
+            # Problem: When SamplingParams is serialized via msgspec.json.encode(),
+            # Python sets are converted to JSON arrays (lists). The serialized dict
+            # includes private fields like _all_stop_token_ids. Upon deserialization,
+            # passing this dict to SamplingParams(**dict) causes __post_init__ to fail
+            # because it expects _all_stop_token_ids to be a set (to call .update()),
+            # but it's now a list.
+            #
+            # Solution: Filter out private fields (starting with '_') which are
+            # internal state that should be computed by __post_init__, not passed
+            # from serialized data. Public fields like stop_token_ids are preserved.
+            v = {k: val for k, val in v.items() if not k.startswith("_")}
             return SamplingParams(**v)
         return v
 
