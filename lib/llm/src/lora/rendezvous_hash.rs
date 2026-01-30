@@ -162,7 +162,10 @@ mod tests {
 
         // Verify all returned workers are in the original list
         for worker in &replica_set {
-            assert!(workers.contains(worker), "Replica should be from worker list");
+            assert!(
+                workers.contains(worker),
+                "Replica should be from worker list"
+            );
         }
     }
 
@@ -200,10 +203,7 @@ mod tests {
         let set_after = compute_replica_set("lora-a", &workers_4, 2);
 
         // Count how many workers remain in the set
-        let overlap = set_before
-            .iter()
-            .filter(|w| set_after.contains(w))
-            .count();
+        let overlap = set_before.iter().filter(|w| set_after.contains(w)).count();
 
         // Expect at least some overlap (ideally 100%, but depends on hash)
         // In practice with Rendezvous hashing, we often see high stability
@@ -217,7 +217,11 @@ mod tests {
     fn test_compute_replica_set_zero_replicas() {
         let workers = vec![WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)];
         let replica_set = compute_replica_set("lora-a", &workers, 0);
-        assert_eq!(replica_set.len(), 0, "Zero replicas should return empty set");
+        assert_eq!(
+            replica_set.len(),
+            0,
+            "Zero replicas should return empty set"
+        );
     }
 
     #[test]

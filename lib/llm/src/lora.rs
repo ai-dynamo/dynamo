@@ -5,4 +5,4 @@
 
 pub mod rendezvous_hash;
 
-pub use rendezvous_hash::{compute_replica_factor, compute_replica_set, RendezvousHasher};
+pub use rendezvous_hash::{RendezvousHasher, compute_replica_factor, compute_replica_set};
