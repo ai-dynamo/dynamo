@@ -115,7 +115,37 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         mappings = self._llm_args.parallel_config.to_mapping()
         self.rank = mappings.rank
 
-        self._connector = RustKvConnectorWorker(self.drt, str(self.rank))
+        # Detect DEP mode from TRT-LLM config
+        enable_attention_dp = getattr(llm_args, "enable_attention_dp", False)
+
+        nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
+        if enable_attention_dp:
+            logger.info(
+                "DEP mode detected, creating NCCL communicator "
+                "for KVBM replicated mode"
+            )
+            nccl_rank, nccl_world_size = _get_mpi_info()
+            if nccl_rank is not None and nccl_world_size is not None:
+                nccl_comm_ptr = _create_kvbm_nccl_comm(
+                    nccl_rank, nccl_world_size
+                )
+                logger.info(
+                    f"KVBM NCCL comm created: rank={nccl_rank}, "
+                    f"world_size={nccl_world_size}"
+                )
+            else:
+                logger.warning(
+                    "DEP mode enabled but MPI not available. "
+                    "KVBM will fall back to sharded mode."
+                )
+
+        self._connector = RustKvConnectorWorker(
+            self.drt,
+            str(self.rank),
+            rank=nccl_rank,
+            world_size=nccl_world_size,
+            nccl_comm_ptr=nccl_comm_ptr,
+        )
         self.event = torch.cuda.Event()
 
         # Default to old way of processing offload
