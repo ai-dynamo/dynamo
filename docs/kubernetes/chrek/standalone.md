@@ -227,7 +227,7 @@ spec:
         nvidia.com/checkpoint-source: "true"  # Required for DaemonSet detection
     spec:
       restartPolicy: Never
-      
+
       # Init container to clean up stale signal files
       initContainers:
       - name: cleanup-signal-file
@@ -245,13 +245,13 @@ spec:
       containers:
       - name: main
         image: my-app:checkpoint-enabled
-        
+
         # Security context required for CRIU
         securityContext:
           privileged: true
           capabilities:
             add: ["SYS_ADMIN", "SYS_PTRACE", "SYS_CHROOT"]
-        
+
         # Readiness probe: Pod becomes Ready when model is loaded
         # This is what triggers the DaemonSet to start checkpointing
         readinessProbe:
@@ -259,12 +259,12 @@ spec:
             command: ["sh", "-c", "cat ${DYN_CHECKPOINT_READY_FILE}"]
           initialDelaySeconds: 15
           periodSeconds: 2
-        
+
         # Remove liveness/startup probes for checkpoint jobs
         # Model loading can take several minutes
         livenessProbe: null
         startupProbe: null
-        
+
         # Checkpoint-related environment variables
         env:
         - name: DYN_CHECKPOINT_SIGNAL_FILE
@@ -277,12 +277,12 @@ spec:
           value: "/checkpoints/abc123def456"
         - name: DYN_CHECKPOINT_STORAGE_TYPE
           value: "pvc"
-        
+
         # GPU request
         resources:
           limits:
             nvidia.com/gpu: 1
-        
+
         # Required volume mounts
         volumeMounts:
         - name: checkpoint-storage
@@ -317,29 +317,29 @@ def main():
     signal_file = os.environ.get("DYN_CHECKPOINT_SIGNAL_FILE")
     ready_file = os.environ.get("DYN_CHECKPOINT_READY_FILE")
     restore_marker = os.environ.get("DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored")
-    
+
     is_checkpoint_mode = signal_file is not None
-    
+
     if is_checkpoint_mode:
         print("Checkpoint mode detected")
-        
+
         # 2. Load your model/application
         model = load_model()
-        
+
         # 3. Optional: Put model to sleep to reduce memory footprint
         # model.sleep()
-        
+
         # 4. Write ready file (for application use, not DaemonSet)
         if ready_file:
             with open(ready_file, "w") as f:
                 f.write("ready")
             print(f"Wrote checkpoint ready file: {ready_file}")
-        
+
         # 5. Log readiness messages (helps debugging)
         print("CHECKPOINT_READY: Model loaded, ready for container checkpoint")
         print(f"CHECKPOINT_READY: Waiting for signal file: {signal_file}")
         print(f"CHECKPOINT_READY: Or restore marker file: {restore_marker}")
-        
+
         # 6. Wait for checkpoint completion OR restore detection
         while True:
             # Check if we've been restored (marker file created by restore entrypoint)
@@ -347,15 +347,15 @@ def main():
                 print(f"Detected restore from checkpoint (marker: {restore_marker})")
                 # Continue with normal application flow
                 break
-            
+
             # Check if checkpoint is complete (signal file created by DaemonSet)
             if os.path.exists(signal_file):
                 print(f"Checkpoint signal file detected: {signal_file}")
                 print("Checkpoint complete, exiting")
                 return  # Exit gracefully
-            
+
             time.sleep(1)
-    
+
     # Normal application flow (or post-restore flow)
     run_application()
 ```
@@ -397,33 +397,33 @@ metadata:
   namespace: my-app
 spec:
   restartPolicy: Never
-  
+
   containers:
   - name: main
     image: my-app:checkpoint-enabled
-    
+
     # Security context required for CRIU restore
     securityContext:
       privileged: true
       capabilities:
         add: ["SYS_ADMIN", "SYS_PTRACE", "SYS_CHROOT"]
-    
+
     # Set checkpoint environment variables
     env:
     - name: DYN_CHECKPOINT_HASH
       value: "abc123def456"  # Must match checkpoint job
     - name: DYN_CHECKPOINT_PATH
       value: "/checkpoints"  # Base path (hash appended automatically)
-    
+
     # Optional: Customize restore marker file path
     # - name: DYN_RESTORE_MARKER_FILE
     #   value: "/tmp/dynamo-restored"
-    
+
     # GPU request
     resources:
       limits:
         nvidia.com/gpu: 1
-    
+
     # Mount checkpoint storage (READ-ONLY is fine for restore)
     volumeMounts:
     - name: checkpoint-storage

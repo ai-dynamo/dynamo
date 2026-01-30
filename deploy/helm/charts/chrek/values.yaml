@@ -36,18 +36,18 @@ storage:
     accessMode: ReadWriteMany
     # Base path for checkpoints (mounted in pods)
     basePath: /checkpoints
-  
+
   # S3 configuration (when type=s3)
   s3:
     # S3 URI (e.g., s3://my-bucket/checkpoints)
     uri: ""
     # Credentials are expected via IRSA or mounted secrets
-  
+
   # OCI configuration (when type=oci)
   oci:
     # OCI URI (e.g., oci://registry.io/repo/checkpoints)
     uri: ""
-  
+
   # Host path for signal files (inter-pod communication)
   signalHostPath: /var/lib/chrek/signals
 
@@ -58,11 +58,11 @@ daemonset:
     repository: nvcr.io/nvidian/dynamo-dev/chrek-agent
     tag: latest
     pullPolicy: Always
-  
+
   # Image pull secrets
   imagePullSecrets:
     - name: ngc-secret
-  
+
   # Resource limits and requests
   resources:
     limits:
@@ -71,11 +71,11 @@ daemonset:
     requests:
       cpu: 500m
       memory: 1Gi
-  
+
   # Node selector - target GPU nodes
   nodeSelector:
     nvidia.com/gpu.present: "true"
-  
+
   # Tolerations for GPU nodes
   tolerations:
     - key: nvidia.com/gpu
@@ -84,19 +84,19 @@ daemonset:
     - key: dedicated
       operator: Exists
       effect: NoSchedule
-  
+
   # Runtime class name for GPU access
   runtimeClassName: nvidia
-  
+
   # Pod labels
   podLabels: {}
-  
+
   # Pod annotations
   podAnnotations: {}
-  
+
   # Affinity rules
   affinity: {}
-  
+
   # CRIU configuration
   criu:
     # CUDA plugin directory
@@ -106,7 +106,7 @@ daemonset:
     # Ghost file size limit in bytes
     # 512MB is recommended for GPU workloads with large memory allocations
     ghostLimit: "536870912"
-  
+
   # Container runtime socket path
   containerRuntimeSocket: /run/containerd/containerd.sock
 
@@ -128,7 +128,7 @@ serviceAccount:
 rbac:
   # Create RBAC resources
   create: true
-  
+
   # Namespace-scoped RBAC (recommended, required for PVC storage)
   # - true (default): Creates Role/RoleBinding, agent watches pods in chart's namespace only
   # - false: Creates ClusterRole/ClusterRoleBinding, agent watches all pods on assigned nodes

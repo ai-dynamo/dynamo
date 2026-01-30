@@ -118,7 +118,6 @@ ChReK is best suited for:
 - [ChReK Helm Chart README](../../../deploy/helm/charts/chrek/README.md) - Helm chart configuration
 
 ### Related Documentation
-- [Checkpointing Architecture](../../checkpointing.md) - Overall checkpoint design
 - [CRIU Documentation](https://criu.org/Main_Page) - Upstream CRIU docs
 
 ## Prerequisites

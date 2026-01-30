@@ -8,7 +8,7 @@ This Helm chart deploys the checkpoint/restore infrastructure for NVIDIA Dynamo,
 - RBAC resources (ServiceAccount, Role, RoleBinding)
 - Seccomp profile for blocking io_uring syscalls
 
-**Note:** 
+**Note:**
 - Each namespace gets its own isolated checkpoint infrastructure with namespace-scoped RBAC
 - **Currently only supports vLLM backend** (SGLang and TensorRT-LLM support planned)
 

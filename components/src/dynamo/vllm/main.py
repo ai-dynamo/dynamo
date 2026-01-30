@@ -137,10 +137,10 @@ async def worker():
     if is_checkpoint_mode:
         storage_type = os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE")
         checkpoint_location = os.environ.get("DYN_CHECKPOINT_LOCATION")
-        
+
         if storage_type == "pvc" and checkpoint_location:
             done_marker = f"{checkpoint_location}/checkpoint.done"
-            
+
             if os.path.exists(done_marker):
                 logger.info("=" * 60)
                 logger.info("CHECKPOINT ALREADY EXISTS")
