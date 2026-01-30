@@ -15,6 +15,15 @@ use dynamo_llm::kv_router::{protocols::*, publisher::KvEventPublisher};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_runtime::discovery::DiscoveryQuery;
 use dynamo_runtime::{DistributedRuntime, Worker};
+
+use dynamo_runtime::Runtime;
+
+use dynamo_llm::discovery::ModelManager;
+use dynamo_llm::kv_router::KvRouterConfig;
+use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
+use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
+use dynamo_runtime::pipeline::RouterMode;
+
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
@@ -55,52 +64,6 @@ fn initialize_tracing() {
 pub enum DynamoLlmResult {
     OK = 0,
     ERR = 1,
-}
-
-/// Default timeout for discovery sync (seconds).
-const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 10;
-
-/// Get discovery timeout from environment variable or use default.
-/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
-fn get_discovery_timeout_secs() -> u64 {
-    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SEC)
-}
-
-/// Wait for the discovery daemon to sync and return at least one instance.
-/// This ensures list() calls will have data available.
-/// Returns the number of instances found, or 0 if timed out.
-async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) -> usize {
-    tracing::info!("Waiting for discovery to sync...");
-    let discovery = drt.discovery();
-    let timeout = std::time::Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
-
-    loop {
-        match discovery.list(DiscoveryQuery::AllModels).await {
-            Ok(instances) if !instances.is_empty() => {
-                tracing::info!(
-                    "Discovery sync complete: found {} instances",
-                    instances.len()
-                );
-                return instances.len();
-            }
-            Ok(_) => {
-                if start.elapsed() > timeout {
-                    tracing::warn!("Discovery sync timed out waiting for instances");
-                    return 0;
-                }
-                tracing::debug!("No instances yet, waiting...");
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-            Err(e) => {
-                tracing::warn!("Discovery list error: {}, continuing...", e);
-                return 0;
-            }
-        }
-    }
 }
 
 /// # Safety
@@ -378,16 +341,57 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
  *  Router Bindings for GAIE EPP
  * ------------------------------------------------------------------------ */
 
-use dynamo_runtime::Runtime;
+// Default timeout for bookkeeping operations (30 seconds)
+const BOOKKEEPING_TIMEOUT_SEC: u64 = 30;
+// Default timeout for discovery sync (seconds).
+const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 10;
+/// Default timeout for waiting for worker discovery (seconds)
+const DISCOVERY_TIMEOUT_SECS: u64 = 30;
+/// Default timeout for waiting for prefill workers (seconds)
+const DEFAULT_PREFILL_TIMEOUT_SEC: u32 = 30;
 
-use dynamo_llm::discovery::ModelManager;
-use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
-use dynamo_runtime::pipeline::RouterMode;
+/// Get discovery timeout from environment variable or use default.
+/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
+fn get_discovery_timeout_secs() -> u64 {
+    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SEC)
+}
 
-/// Default timeout for bookkeeping operations (30 seconds)
-const BOOKKEEPING_TIMEOUT_SECS: u64 = 30;
+/// Wait for the discovery daemon to sync and return at least one instance.
+/// This ensures list() calls will have data available.
+/// Returns the number of instances found, or 0 if timed out.
+async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) -> usize {
+    tracing::info!("Waiting for discovery to sync...");
+    let discovery = drt.discovery();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+
+    loop {
+        match discovery.list(DiscoveryQuery::AllModels).await {
+            Ok(instances) if !instances.is_empty() => {
+                tracing::info!(
+                    "Discovery sync complete: found {} instances",
+                    instances.len()
+                );
+                return instances.len();
+            }
+            Ok(_) => {
+                if start.elapsed() > timeout {
+                    tracing::warn!("Discovery sync timed out waiting for instances");
+                    return 0;
+                }
+                tracing::debug!("No instances yet, waiting...");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                tracing::warn!("Discovery list error: {}, continuing...", e);
+                return 0;
+            }
+        }
+    }
+}
 
 /// C-compatible result of a worker query (worker ID and dp_rank)
 ///
@@ -491,12 +495,6 @@ pub enum QueryRouterResult {
     ErrQueryFailed = 4,
     ErrDisaggEnforced = 5,
 }
-
-/// Default timeout for waiting for worker discovery (seconds)
-const DISCOVERY_TIMEOUT_SECS: u64 = 30;
-
-/// Default timeout for waiting for prefill workers (seconds)
-const DEFAULT_PREFILL_TIMEOUT_SECS: u32 = 30;
 
 /// Create router handles for query-only routing
 ///
@@ -658,7 +656,7 @@ pub unsafe extern "C" fn create_routers(
         // Optionally wait for prefill workers to be discovered
         if wait_for_prefill {
             let timeout_secs = if prefill_timeout_secs == 0 {
-                DEFAULT_PREFILL_TIMEOUT_SECS
+                DEFAULT_PREFILL_TIMEOUT_SEC
             } else {
                 prefill_timeout_secs
             };
@@ -884,7 +882,7 @@ pub unsafe extern "C" fn add_request(
     let request_id_owned = request_id_str.clone();
 
     let result = handles.runtime.secondary().block_on(async {
-        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
 
         tokio::time::timeout(timeout_duration, async {
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
@@ -919,7 +917,7 @@ pub unsafe extern "C" fn add_request(
         Err(_elapsed) => {
             tracing::warn!(
                 request_id = %request_id_str,
-                timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
                 "add_request timed out"
             );
             // Return OK to avoid blocking the caller - the operation may still complete
@@ -954,7 +952,7 @@ pub unsafe extern "C" fn mark_prefill_complete(
     let request_id_owned = request_id_str.clone();
 
     let result = handles.runtime.secondary().block_on(async {
-        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
 
         tokio::time::timeout(timeout_duration, async {
             if let Err(e) = decode_router
@@ -981,7 +979,7 @@ pub unsafe extern "C" fn mark_prefill_complete(
         Err(_elapsed) => {
             tracing::warn!(
                 request_id = %request_id_str,
-                timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
                 "mark_prefill_complete timed out"
             );
             QueryRouterResult::Ok
@@ -1015,7 +1013,7 @@ pub unsafe extern "C" fn free_request(
     let request_id_owned = request_id_str.clone();
 
     let result = handles.runtime.secondary().block_on(async {
-        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
 
         tokio::time::timeout(timeout_duration, async {
             if let Err(e) = decode_router.free(&request_id_owned).await {
@@ -1039,7 +1037,7 @@ pub unsafe extern "C" fn free_request(
         Err(_elapsed) => {
             tracing::warn!(
                 request_id = %request_id_str,
-                timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
                 "free_request timed out"
             );
             QueryRouterResult::Ok

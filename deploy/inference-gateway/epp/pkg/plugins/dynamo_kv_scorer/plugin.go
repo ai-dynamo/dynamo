@@ -26,74 +26,64 @@ package dynamo_kv_scorer
 #include <stdlib.h>   // for free
 #include <stdbool.h>
 
-// enum underlying type is uint32_t; matches cbindgen output
-typedef uint32_t dynamo_llm_result_t;
-enum { DYNAMO_OK = 0, DYNAMO_ERR = 1 };
+// Query router result codes (matches QueryRouterResult in Rust)
+typedef uint32_t query_router_result_t;
+enum {
+    QUERY_ROUTER_OK = 0,
+    QUERY_ROUTER_ERR_INVALID_HANDLE = 1,
+    QUERY_ROUTER_ERR_INVALID_PARAM = 2,
+    QUERY_ROUTER_ERR_INIT_FAILED = 3,
+    QUERY_ROUTER_ERR_QUERY_FAILED = 4,
+    QUERY_ROUTER_ERR_DISAGG_ENFORCED = 5,
+};
 
-// opaque handle forward-decl
-struct WorkerSelectionPipeline;
-typedef struct WorkerSelectionPipeline WorkerSelectionPipeline;
+// opaque handle forward-decl for Router bindings
+struct RouterHandles;
+typedef struct RouterHandles RouterHandles;
 
-// Prototypes (C-compatible)
-dynamo_llm_result_t dynamo_llm_init(const char *namespace_c_str,
-                                    const char *component_c_str,
-                                    int64_t worker_id,
-                                    uint32_t kv_block_size);
+// Routing result from route_chat_request
+typedef struct {
+    bool is_disaggregated;
+    uint64_t prefill_worker_id;
+    uint64_t decode_worker_id;
+    uint32_t decode_dp_rank;
+    uint32_t decode_overlap_blocks;
+    uint32_t *token_ids;
+    size_t token_count;
+} CRoutingResult;
 
-dynamo_llm_result_t dynamo_llm_shutdown(void);
-dynamo_llm_result_t dynamo_llm_load_publisher_create(void);
+// Router bindings API (replaces Pipeline API)
+query_router_result_t create_routers(const char *namespace_c_str,
+                                     const char *component_c_str,
+                                     const char *model_name_c_str,
+                                     uint32_t block_size,
+                                     bool enforce_disagg,
+                                     bool wait_for_prefill,
+                                     uint32_t prefill_timeout_secs,
+                                     RouterHandles **out_handle);
 
-dynamo_llm_result_t dynamo_kv_event_publish_stored(uint64_t event_id,
-                                                   const uint32_t *token_ids,
-                                                   const uintptr_t *num_block_tokens,
-                                                   const uint64_t *block_ids,
-                                                   size_t num_blocks,
-                                                   const uint64_t *parent_hash,
-                                                   uint64_t lora_id);
+query_router_result_t route_chat_request(RouterHandles *handle,
+                                         const char *request_json,
+                                         CRoutingResult *out_result);
 
-dynamo_llm_result_t dynamo_kv_event_publish_removed(uint64_t event_id,
-                                                    const uint64_t *block_ids,
-                                                    size_t num_blocks);
+query_router_result_t add_request(RouterHandles *handle,
+                                  const char *request_id,
+                                  const uint32_t *token_ids,
+                                  size_t token_count,
+                                  uint64_t worker_id,
+                                  uint32_t dp_rank);
 
-dynamo_llm_result_t dynamo_create_worker_selection_pipeline(const char *namespace_c_str,
-                                                            const char *component_c_str,
-                                                            const char *model_name_c_str,
-                                                            bool use_kv_routing,
-                                                            double busy_threshold,
-                                                            double overlap_score_weight,
-                                                            double router_temperature,
-                                                            bool use_kv_events,
-                                                            bool router_replica_sync,
-                                                            bool enforce_disagg,
-                                                            WorkerSelectionPipeline **pipeline_out);
+query_router_result_t mark_prefill_complete(RouterHandles *handle,
+                                            const char *request_id);
 
-dynamo_llm_result_t dynamo_destroy_worker_selection_pipeline(WorkerSelectionPipeline *pipeline);
+query_router_result_t free_request(RouterHandles *handle,
+                                   const char *request_id);
 
-dynamo_llm_result_t dynamo_query_worker_selection_and_annotate(WorkerSelectionPipeline *pipeline,
-                                                               const char *request_json_c_str,
-                                                               int64_t *decode_worker_id_out,
-                                                               int64_t *prefill_worker_id_out,
-                                                               uint32_t **token_ids_out,
-                                                               size_t *token_count_out,
-                                                               char **annotated_request_json_out);
+void free_routing_result(CRoutingResult *result);
 
-dynamo_llm_result_t dynamo_free_worker_selection_result(uint32_t *token_ids,
-                                                        size_t token_count,
-                                                        char *annotated_request_json);
+void destroy(RouterHandles *handle);
 
-// Router bookkeeping functions for GAIE integration
-dynamo_llm_result_t dynamo_router_add_request(WorkerSelectionPipeline *pipeline,
-                                              const char *request_id_c_str,
-                                              const uint32_t *token_ids,
-                                              size_t token_count,
-                                              uint64_t worker_id,
-                                              uint32_t dp_rank);
-
-dynamo_llm_result_t dynamo_router_mark_prefill_complete(WorkerSelectionPipeline *pipeline,
-                                                        const char *request_id_c_str);
-
-dynamo_llm_result_t dynamo_router_free_request(WorkerSelectionPipeline *pipeline,
-                                               const char *request_id_c_str);
+bool is_disaggregated(RouterHandles *handle);
 */
 import "C"
 
@@ -214,31 +204,24 @@ var (
 	ffiOnce sync.Once
 	ffiErr  error
 
-	ffiNamespace          string
-	ffiComponent          string
-	ffiModel              string
-	ffiOverlapScoreWeight float64
-	ffiRouterTemperature  float64
-	ffiKvBlockSize        uint32
-	ffiWorkerID           int64
-	ffiEnforceDisagg      bool
+	ffiNamespace     string
+	ffiComponent     string
+	ffiModel         string
+	ffiKvBlockSize   uint32
+	ffiEnforceDisagg bool
 
-	runtimeInitialized bool
+	routerInitialized bool
 
-	// Boxed pipeline handle (owned on the Rust side, opaque here)
-	pipeline      *C.struct_WorkerSelectionPipeline
-	pipelineMutex sync.RWMutex
+	// Router handles (owned on the Rust side, opaque here)
+	routerHandles      *C.struct_RouterHandles
+	routerHandlesMutex sync.RWMutex
 )
 
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
-	ffiComponent = "backend" // The pipeline uses backend not DYN_COMPONENT which is epp
+	ffiComponent = getEnvOrDefault("DYN_COMPONENT", "backend")
 	ffiModel = getEnvOrDefault("DYN_MODEL", "Qwen/Qwen3-0.6B")
-	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)
 	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", false)
-
-	ffiOverlapScoreWeight = getEnvFloatOrDefault("DYNAMO_OVERLAP_SCORE_WEIGHT", -1.0)
-	ffiRouterTemperature = getEnvFloatOrDefault("DYNAMO_ROUTER_TEMPERATURE", -1.0)
 
 	kvBlockSizeStr := os.Getenv("DYN_KV_BLOCK_SIZE")
 	if kvBlockSizeStr == "" {
@@ -275,16 +258,6 @@ func getEnvInt64OrDefault(key string, def int64) int64 {
 	return def
 }
 
-func getEnvFloatOrDefault(key string, def float64) float64 {
-	if v := os.Getenv(key); v != "" {
-		var p float64
-		if n, err := fmt.Sscanf(v, "%f", &p); err == nil && n == 1 {
-			return p
-		}
-	}
-	return def
-}
-
 func getEnvBoolOrDefault(key string, def bool) bool {
 	if v := os.Getenv(key); v != "" {
 		switch strings.ToLower(v) {
@@ -297,7 +270,7 @@ func getEnvBoolOrDefault(key string, def bool) bool {
 	return def
 }
 
-// initFFI: initialize runtime and create a persistent boxed pipeline.
+// initFFI: initialize router handles using the new Router bindings.
 func initFFI() error {
 	ffiOnce.Do(func() {
 		loadDynamoConfig()
@@ -309,34 +282,28 @@ func initFFI() error {
 		defer C.free(unsafe.Pointer(cm))
 		defer C.free(unsafe.Pointer(model))
 
-		// Init Dynamo runtime
-		if rc := C.dynamo_llm_init(ns, cm, C.int64_t(ffiWorkerID), C.uint32_t(ffiKvBlockSize)); rc != C.DYNAMO_OK {
-			ffiErr = fmt.Errorf("dynamo_llm_init failed")
-			return
-		}
-		runtimeInitialized = true
+		// Create router handles
+		routerHandlesMutex.Lock()
+		defer routerHandlesMutex.Unlock()
 
-		// Create persistent pipeline
-		pipelineMutex.Lock()
-		defer pipelineMutex.Unlock()
+		waitForPrefill := getEnvBoolOrDefault("DYNAMO_WAIT_FOR_PREFILL", false)
+		prefillTimeoutSecs := uint32(getEnvInt64OrDefault("DYNAMO_PREFILL_TIMEOUT_SECS", 30))
 
-		rc := C.dynamo_create_worker_selection_pipeline(
+		rc := C.create_routers(
 			ns,
 			cm,
 			model,
-			C.bool(getEnvBoolOrDefault("DYNAMO_USE_KV_ROUTING", true)),
-			C.double(getEnvFloatOrDefault("DYNAMO_BUSY_THRESHOLD", -1.0)),
-			C.double(ffiOverlapScoreWeight),
-			C.double(ffiRouterTemperature),
-			C.bool(getEnvBoolOrDefault("DYNAMO_USE_KV_EVENTS", true)),
-			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", false)), // no need as long as we call the Router Book keeping operations from the EPP.
+			C.uint32_t(ffiKvBlockSize),
 			C.bool(ffiEnforceDisagg),
-			&pipeline,
+			C.bool(waitForPrefill),
+			C.uint32_t(prefillTimeoutSecs),
+			&routerHandles,
 		)
-		if rc != C.DYNAMO_OK {
-			ffiErr = fmt.Errorf("dynamo_create_worker_selection_pipeline failed")
+		if rc != C.QUERY_ROUTER_OK {
+			ffiErr = fmt.Errorf("create_routers failed with code %d", rc)
 			return
 		}
+		routerInitialized = true
 	})
 	return ffiErr
 }
@@ -476,7 +443,7 @@ func (k *KVAwareScorer) ResponseStreaming(
 
 // ResponseComplete is called after the complete response is sent to the client.
 // It cleans up the router bookkeeping state for the completed request by calling
-// dynamo_router_free_request to release resources associated with the request.
+// free_request to release resources associated with the request.
 func (k *KVAwareScorer) ResponseComplete(
 	ctx context.Context,
 	request *schedtypes.LLMRequest,
@@ -510,7 +477,7 @@ func (k *KVAwareScorer) ResponseComplete(
 		"requestID", requestID)
 }
 
-// --------------------------- router call (persistent only) ---------------------------
+// --------------------------- router call ---------------------------
 
 func (k *KVAwareScorer) callDynamoRouter(
 	ctx context.Context,
@@ -522,16 +489,16 @@ func (k *KVAwareScorer) callDynamoRouter(
 		logger.V(logutil.DEFAULT).Error(err, "FFI init failed")
 		return "", "", nil, err
 	}
-	if !runtimeInitialized {
-		return "", "", nil, fmt.Errorf("dynamo runtime not initialized")
+	if !routerInitialized {
+		return "", "", nil, fmt.Errorf("dynamo router not initialized")
 	}
 
-	pipelineMutex.RLock()
-	currentPipeline := pipeline
-	pipelineMutex.RUnlock()
+	routerHandlesMutex.RLock()
+	currentRouter := routerHandles
+	routerHandlesMutex.RUnlock()
 
-	if currentPipeline == nil {
-		return "", "", nil, fmt.Errorf("dynamo worker selection pipeline not created")
+	if currentRouter == nil {
+		return "", "", nil, fmt.Errorf("dynamo router handles not created")
 	}
 
 	// Build OpenAI-compatible JSON request from the new LLMRequest structure
@@ -544,47 +511,38 @@ func (k *KVAwareScorer) callDynamoRouter(
 	cRequestJSON := C.CString(string(requestJSON))
 	defer C.free(unsafe.Pointer(cRequestJSON))
 
-	// Output variables
-	var cDecodeWorkerID C.int64_t
-	var cPrefillWorkerID C.int64_t
-	var cTokens *C.uint32_t
-	var cTokenCount C.size_t
-	var cAnnotatedJSON *C.char
+	// Output result
+	var result C.CRoutingResult
 
-	// Call the worker selection pipeline
-	rc := C.dynamo_query_worker_selection_and_annotate(
-		currentPipeline,
-		cRequestJSON,
-		&cDecodeWorkerID,
-		&cPrefillWorkerID,
-		&cTokens,
-		&cTokenCount,
-		&cAnnotatedJSON,
-	)
-	if rc != C.DYNAMO_OK {
-		return "", "", nil, fmt.Errorf("dynamo_query_worker_selection_and_annotate failed")
+	// Call the router
+	rc := C.route_chat_request(currentRouter, cRequestJSON, &result)
+	if rc != C.QUERY_ROUTER_OK {
+		return "", "", nil, fmt.Errorf("route_chat_request failed with code %d", rc)
 	}
 
-	// Copy tokens into Go memory and free C memory
-	count := int(uintptr(cTokenCount))
+	// Copy tokens into Go memory
+	count := int(result.token_count)
 	var tokens64 []int64
-	if count > 0 && cTokens != nil {
-		src := unsafe.Slice((*uint32)(unsafe.Pointer(cTokens)), count)
+	if count > 0 && result.token_ids != nil {
+		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
 		tokens64 = make([]int64, count)
 		for i := 0; i < count; i++ {
 			tokens64[i] = int64(src[i])
 		}
 	}
-	C.dynamo_free_worker_selection_result(cTokens, cTokenCount, cAnnotatedJSON)
 
-	workerIDStr := fmt.Sprintf("%d", int64(cDecodeWorkerID))
+	// Free the routing result
+	C.free_routing_result(&result)
+
+	workerIDStr := fmt.Sprintf("%d", uint64(result.decode_worker_id))
 	prefillWorkerIDStr := ""
-	// Rust returns -1 for prefill_worker_id when not in disaggregated mode
-	if int64(cPrefillWorkerID) >= 0 {
-		prefillWorkerIDStr = fmt.Sprintf("%d", int64(cPrefillWorkerID))
+	if result.is_disaggregated {
+		prefillWorkerIDStr = fmt.Sprintf("%d", uint64(result.prefill_worker_id))
 	}
 	logger.V(logutil.DEFAULT).Info("Worker selection completed",
-		"workerID", workerIDStr, "prefillWorkerID", prefillWorkerIDStr, "tokenCount", count)
+		"workerID", workerIDStr, "prefillWorkerID", prefillWorkerIDStr,
+		"isDisaggregated", result.is_disaggregated, "tokenCount", count,
+		"dpRank", result.decode_dp_rank, "overlapBlocks", result.decode_overlap_blocks)
 
 	return workerIDStr, prefillWorkerIDStr, tokens64, nil
 }
@@ -637,16 +595,16 @@ func (k *KVAwareScorer) callAddRequest(
 ) error {
 	logger := log.FromContext(ctx)
 
-	if !runtimeInitialized {
-		return fmt.Errorf("dynamo runtime not initialized")
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
 	}
 
-	pipelineMutex.RLock()
-	currentPipeline := pipeline
-	pipelineMutex.RUnlock()
+	routerHandlesMutex.RLock()
+	currentRouter := routerHandles
+	routerHandlesMutex.RUnlock()
 
-	if currentPipeline == nil {
-		return fmt.Errorf("dynamo worker selection pipeline not created")
+	if currentRouter == nil {
+		return fmt.Errorf("dynamo router handles not created")
 	}
 
 	// Parse worker ID (use decode worker for bookkeeping in disagg mode)
@@ -669,8 +627,8 @@ func (k *KVAwareScorer) callAddRequest(
 		cTokens = (*C.uint32_t)(unsafe.Pointer(&tokens[0]))
 	}
 
-	rc := C.dynamo_router_add_request(
-		currentPipeline,
+	rc := C.add_request(
+		currentRouter,
 		cRequestID,
 		cTokens,
 		C.size_t(len(tokens)),
@@ -678,8 +636,8 @@ func (k *KVAwareScorer) callAddRequest(
 		C.uint32_t(0), // dp_rank = 0 for now
 	)
 
-	if rc != C.DYNAMO_OK {
-		return fmt.Errorf("dynamo_router_add_request failed")
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("add_request failed with code %d", rc)
 	}
 
 	logger.V(logutil.VERBOSE).Info("Added request to router bookkeeping",
@@ -690,48 +648,48 @@ func (k *KVAwareScorer) callAddRequest(
 // CallMarkPrefillComplete marks prefill as completed for a request.
 // Exported for use by response handlers.
 func CallMarkPrefillComplete(requestID string) error {
-	if !runtimeInitialized {
-		return fmt.Errorf("dynamo runtime not initialized")
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
 	}
 
-	pipelineMutex.RLock()
-	currentPipeline := pipeline
-	pipelineMutex.RUnlock()
+	routerHandlesMutex.RLock()
+	currentRouter := routerHandles
+	routerHandlesMutex.RUnlock()
 
-	if currentPipeline == nil {
-		return fmt.Errorf("dynamo worker selection pipeline not created")
+	if currentRouter == nil {
+		return fmt.Errorf("dynamo router handles not created")
 	}
 
 	cRequestID := C.CString(requestID)
 	defer C.free(unsafe.Pointer(cRequestID))
 
-	rc := C.dynamo_router_mark_prefill_complete(currentPipeline, cRequestID)
-	if rc != C.DYNAMO_OK {
-		return fmt.Errorf("dynamo_router_mark_prefill_complete failed")
+	rc := C.mark_prefill_complete(currentRouter, cRequestID)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("mark_prefill_complete failed with code %d", rc)
 	}
 	return nil
 }
 
 // callFreeRequestInternal cleans up router state for a completed/cancelled request.
 func callFreeRequestInternal(requestID string) error {
-	if !runtimeInitialized {
-		return fmt.Errorf("dynamo runtime not initialized")
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
 	}
 
-	pipelineMutex.RLock()
-	currentPipeline := pipeline
-	pipelineMutex.RUnlock()
+	routerHandlesMutex.RLock()
+	currentRouter := routerHandles
+	routerHandlesMutex.RUnlock()
 
-	if currentPipeline == nil {
-		return fmt.Errorf("dynamo worker selection pipeline not created")
+	if currentRouter == nil {
+		return fmt.Errorf("dynamo router handles not created")
 	}
 
 	cRequestID := C.CString(requestID)
 	defer C.free(unsafe.Pointer(cRequestID))
 
-	rc := C.dynamo_router_free_request(currentPipeline, cRequestID)
-	if rc != C.DYNAMO_OK {
-		return fmt.Errorf("dynamo_router_free_request failed")
+	rc := C.free_request(currentRouter, cRequestID)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("free_request failed with code %d", rc)
 	}
 	return nil
 }
@@ -739,21 +697,14 @@ func callFreeRequestInternal(requestID string) error {
 // --------------------------- shutdown ---------------------------
 
 func cleanupDynamo() error {
-	pipelineMutex.Lock()
-	defer pipelineMutex.Unlock()
+	routerHandlesMutex.Lock()
+	defer routerHandlesMutex.Unlock()
 
-	if pipeline != nil {
-		if rc := C.dynamo_destroy_worker_selection_pipeline(pipeline); rc != C.DYNAMO_OK {
-			fmt.Printf("Warning: dynamo_destroy_worker_selection_pipeline failed\n")
-		}
-		pipeline = nil
+	if routerHandles != nil {
+		C.destroy(routerHandles)
+		routerHandles = nil
 	}
 
-	if runtimeInitialized {
-		if rc := C.dynamo_llm_shutdown(); rc != C.DYNAMO_OK {
-			return fmt.Errorf("dynamo_llm_shutdown failed")
-		}
-		runtimeInitialized = false
-	}
+	routerInitialized = false
 	return nil
 }
