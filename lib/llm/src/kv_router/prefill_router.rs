@@ -576,11 +576,11 @@ impl
 
                 // Record prefill worker on the main request's tracker for metrics
                 // (call_prefill returns the worker_id from the prefill routing)
-                if let Ok((_, Some(worker_id))) = &result {
-                    if let Some(ref tracker) = req.tracker {
-                        // Use dp_rank=0 as we don't have it in this path
-                        tracker.record_prefill_worker_with_rank(*worker_id, 0);
-                    }
+                if let Ok((_, Some(worker_id))) = &result
+                    && let Some(ref tracker) = req.tracker
+                {
+                    // Use dp_rank=0 as we don't have it in this path
+                    tracker.record_prefill_worker_with_rank(*worker_id, 0);
                 }
 
                 result.map(|(result, worker_id)| (Some(result), worker_id, None))

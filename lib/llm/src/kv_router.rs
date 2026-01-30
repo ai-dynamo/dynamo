@@ -328,6 +328,7 @@ pub struct KvRouter {
 }
 
 impl KvRouter {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
@@ -1113,7 +1114,7 @@ impl TrackedPushRouter {
         };
 
         // Record the worker info in the request's tracker
-        if let Some(ref tracker) = (*request).tracker {
+        if let Some(ref tracker) = request.tracker {
             tracker.record_worker_with_rank(instance_id, 0);
         }
 
@@ -1203,7 +1204,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         // Record the worker info in the request's tracker
         // Use dp_rank=0 as default for non-KV routing (we don't have dp_rank info here)
-        if let Some(ref tracker) = (*request).tracker {
+        if let Some(ref tracker) = request.tracker {
             tracker.record_worker_with_rank(instance_id, 0);
         }
 
