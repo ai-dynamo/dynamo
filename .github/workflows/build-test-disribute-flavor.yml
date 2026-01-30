@@ -184,18 +184,18 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: true
-      - name: Show summary
-        shell: bash
-        run: |
-            IMAGE_URIS=(${{ inputs.extra_tags }} ${{ steps.build-image.outputs.image_tag }})
-            echo "IMAGE_URIS=${IMAGE_URIS}"
-            # echo "### 🐳 ${{ inputs.framework }} Container Images" >> $GITHUB_STEP_SUMMARY
-            # echo "" >> $GITHUB_STEP_SUMMARY
-            # echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-            # echo "|-----|" >> $GITHUB_STEP_SUMMARY
-            # for image_uri in "${IMAGE_URIS[@]}"; do
-            #   echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-            # done
+      # - name: Show summary
+      #   shell: bash
+      #   run: |
+      #       IMAGE_URIS=(${{ inputs.extra_tags }} ${{ steps.build-image.outputs.image_tag }})
+      #       echo "IMAGE_URIS=${IMAGE_URIS}"
+      #       # echo "### 🐳 ${{ inputs.framework }} Container Images" >> $GITHUB_STEP_SUMMARY
+      #       # echo "" >> $GITHUB_STEP_SUMMARY
+      #       # echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+      #       # echo "|-----|" >> $GITHUB_STEP_SUMMARY
+      #       # for image_uri in "${IMAGE_URIS[@]}"; do
+      #       #   echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+      #       # done
 
 
   # ============================================================================
@@ -308,9 +308,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: ['amd64']
+        arch: ['amd64']
         cuda_version: ${{ fromJson(inputs.cuda_versions) }}
-    name: copy ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
+    name: copy ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.arch }}
     runs-on: prod-default-small-v2
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
@@ -325,16 +325,18 @@ jobs:
           CUDA_VERSION_RAW=${{ matrix.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ matrix.arch }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Copy image to target registry
         uses: ./.github/actions/skopeo-copy
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           source_image: ai-dynamo/dynamo
-          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform.arch }}
+          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.arch }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform.arch }}
+          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.arch }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
