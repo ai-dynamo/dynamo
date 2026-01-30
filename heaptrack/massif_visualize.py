@@ -199,6 +199,7 @@ def to_html(
                 borderColor: 'rgb(75, 192, 192)',
                 fill: false,
                 pointRadius: 0,
+                showLine: true,
             }}];
             if (rssData.length) {{
                 ds.push({{
@@ -207,6 +208,7 @@ def to_html(
                     borderColor: 'rgb(255, 99, 132)',
                     fill: false,
                     pointRadius: 0,
+                    showLine: true,
                 }});
             }}
             return ds;
