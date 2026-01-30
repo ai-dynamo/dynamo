@@ -195,9 +195,9 @@ Pre-built deployment configurations for common models and topologies:
 
 | Model | Framework | Mode | GPUs | Recipe |
 |-------|-----------|------|------|--------|
-| Llama-3.1-70B | vLLM | Aggregated | 4x H100 | [View](recipes/vllm/llama-3.1-70b/) |
-| DeepSeek-R1 | SGLang | Disaggregated | 8x H200 | [View](recipes/sglang/deepseek-r1/) |
-| Qwen3-32B | TensorRT-LLM | Disaggregated | 8x GPU | [View](recipes/trtllm/qwen3-32b/) |
+| Llama-3-70B | vLLM | Aggregated | 4x H100 | [View](recipes/llama-3-70b/vllm/) |
+| DeepSeek-R1 | SGLang | Disaggregated | 8x H200 | [View](recipes/deepseek-r1/sglang/) |
+| Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | 8x GPU | [View](recipes/qwen3-32b-fp8/trtllm/) |
 
 See [recipes/README.md](recipes/README.md) for the full list and deployment instructions.
 
