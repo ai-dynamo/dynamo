@@ -110,18 +110,6 @@ pub trait Slot: std::fmt::Debug {
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError>;
 
-    // TRT-LLM does not include scheduled tokens in the scheduler output.
-    // Ideally, we should have a dedicated implementation for the TRT-LLM slot.
-    // However, since only this single function needs to be rewritten for now,
-    // we keep it as a separate function in Slot.
-    fn apply_scheduler_output_with_computed_position(
-        &mut self,
-        tokens: &[u32],
-        block_ids: &[usize],
-        computed_position: usize,
-        is_new_request: bool,
-    ) -> Result<(), SlotError>;
-
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
 
     fn mark_as_prefilling(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -638,111 +626,6 @@ impl Slot for VllmConnectorSlot {
 
         // advance current and computed position
         self.current_position += num_scheduled_tokens;
-
-        Ok(())
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id.as_str()))]
-    fn apply_scheduler_output_with_computed_position(
-        &mut self,
-        tokens: &[u32],
-        block_ids: &[usize],
-        computed_position: usize,
-        is_new_request: bool,
-    ) -> Result<(), SlotError> {
-        // TRTLLM's KV Connector Manager will have (computed_position - external matches)
-        // in onborading case
-        if computed_position < self.current_position {
-            tracing::debug!(
-                "computed_position={} < current_position={}, so we are onboarding during prefilling phase",
-                computed_position,
-                self.current_position
-            );
-            return Ok(());
-        }
-
-        // now we decide what we should do for the new computed tokens
-        tracing::debug!(
-            "applying scheduler output, computed_position={}, sequence_total_tokens={}",
-            computed_position,
-            self.sequence.total_tokens()
-        );
-
-        if computed_position < self.sequence.total_tokens() {
-            // no need to apply new tokens, since it's applied when created the slot during prefilling
-            self.state = SlotState::Prefilling;
-        } else {
-            tracing::debug!(
-                "appending {} newly decoded tokens to sequence",
-                tokens.len()
-            );
-            self.sequence.extend(tokens.into()).unwrap();
-            self.state = SlotState::Decoding;
-        }
-
-        // apply new block_ids, this should be applied for both prefilling and decoding
-        // because this is unknown when creating the slot
-        if !block_ids.is_empty() {
-            tracing::debug!("assigning {} new device blocks slot", block_ids.len());
-            self.device_blocks.extend(block_ids);
-        }
-
-        // This approach is fragile, but it’s the only way currently to skip evaluating
-        // the device matched blocks and to avoid offloading them again.
-        // TODO: Consider adding an indicator in the scheduler output to distinguish between
-        // matched and unmatched device blocks/tokens from the scheduler.
-        let maybe_have_device_matched_blocks =
-            is_new_request && computed_position > 0 && self.evaluated_blocks == 0;
-
-        if maybe_have_device_matched_blocks {
-            self.evaluated_blocks = (computed_position + 1) / self.block_size;
-        }
-
-        let num_candidate_blocks =
-            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
-
-        if num_candidate_blocks > 0 {
-            // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
-            // for now, offload all the blocks to the host
-            let offload_block_ids: Vec<usize> = self
-                .device_blocks
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .copied()
-                .collect::<Vec<_>>();
-
-            assert_eq!(
-                offload_block_ids.len(),
-                num_candidate_blocks,
-                "device block overflow - candidate blocks exceed block count at offset {}",
-                self.evaluated_blocks
-            );
-
-            let offload_token_blocks: Vec<TokenBlock> = self
-                .sequence
-                .blocks()
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .cloned()
-                .collect::<Vec<_>>();
-
-            self.offload_blocks(&offload_block_ids, &offload_token_blocks)
-                .expect("failed to offload blocks");
-
-            self.evaluated_blocks += num_candidate_blocks;
-        }
-
-        // done applying policy
-        tracing::debug!(
-            "done applying kv cache policy at current_position: {}; computed_position: {}",
-            self.current_position,
-            computed_position,
-        );
-
-        // advance current position to computed position
-        self.current_position = computed_position;
 
         Ok(())
     }
