@@ -35,7 +35,7 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False)
 
 
 def terminate_process_tree(
-    pid, logger=logging.getLogger(), immediate_kill=False, timeout=2
+    pid, logger=logging.getLogger(), immediate_kill=False, timeout=10
 ):
     try:
         parent = psutil.Process(pid)
@@ -48,8 +48,12 @@ def terminate_process_tree(
     # 2. Terminate parent first (graceful)
     terminate_process(parent, logger, immediate_kill=immediate_kill)
 
-    # 3. Give parent a moment to shutdown
-    time.sleep(0.1)
+    # 3. Wait for parent to exit
+    try:
+        parent.wait(timeout=timeout)
+    except psutil.TimeoutExpired:
+        logger.warning("Parent process did not exit within timeout")
+        terminate_process(parent, logger, immediate_kill=True)
 
     # 4. Terminate children if still alive
     for child in children:
@@ -621,6 +625,7 @@ class DynamoFrontendProcess(ManagedProcess):
         extra_env: Optional[dict[str, str]] = None,
         # Default to false so pytest-xdist workers don't kill each other's frontends.
         terminate_existing: bool = False,
+        display_name: Optional[str] = None,
     ):
         # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
         # use this shared implementation (and delete the copies):
@@ -670,6 +675,7 @@ class DynamoFrontendProcess(ManagedProcess):
             display_output=True,
             terminate_existing=terminate_existing,
             log_dir=log_dir,
+            display_name=display_name,
         )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
