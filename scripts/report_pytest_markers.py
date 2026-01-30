@@ -113,6 +113,9 @@ STUB_MODULES = [
     "gpu_memory_service.common",
     "gpu_memory_service.common.utils",
     "torch",
+    "tensorrt_llm",
+    "vllm",
+    "sglang",
 ]
 
 # Project paths for local imports
@@ -151,6 +154,7 @@ class DependencyStubber:
 
     def __init__(self):
         self.stubbed: Set[str] = set()
+        self._original_find_spec = None
 
     def _create_module_stub(self, name: str) -> MagicMock:
         """Create a stub module with proper Python module attributes."""
@@ -161,6 +165,27 @@ class DependencyStubber:
         stub.__spec__ = None
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
+
+    def _patched_find_spec(self, name: str, package=None):
+        """Patched find_spec that returns a mock spec for stubbed modules."""
+        # Check if module or any parent is stubbed
+        parts = name.split(".")
+        for i in range(len(parts), 0, -1):
+            check_name = ".".join(parts[:i])
+            if check_name in self.stubbed:
+                # Return a mock spec so find_spec() is truthy
+                mock_spec = MagicMock()
+                mock_spec.name = name
+                return mock_spec
+        # Fall back to original find_spec
+        return self._original_find_spec(name, package)
+
+    def patch_find_spec(self):
+        """Patch importlib.util.find_spec to recognize stubbed modules."""
+        import importlib.util
+
+        self._original_find_spec = importlib.util.find_spec
+        importlib.util.find_spec = self._patched_find_spec
 
     def ensure_available(self, module_name: str) -> ModuleType:
         """Ensure a module is available, stubbing it if not installed."""
@@ -365,6 +390,10 @@ def run_collection(test_paths: List[str], use_stubbing: bool) -> tuple[int, Repo
         stubber = DependencyStubber()
         for module in STUB_MODULES:
             stubber.ensure_available(module)
+
+        # Patch find_spec so conftest.py checks like `find_spec("tensorrt_llm")`
+        # return truthy values for stubbed modules
+        stubber.patch_find_spec()
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:
