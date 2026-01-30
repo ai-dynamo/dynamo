@@ -60,118 +60,128 @@ def _to_signed_i64(value: int | None) -> int | None:
 # =============================================================================
 
 
-def extract_mm_info(
-    blocks_data: list[dict], all_token_ids: list[int]
-) -> tuple[list[int] | None, list[list[int]] | None]:
-    """Extract multimodal hash info from TRTLLM block data.
+# def extract_mm_info(
+#     blocks_data: list[dict]
+# ) -> tuple[list[int] | None, list[list[int]] | None]:
+#     """Extract all multimodal hash info from TRTLLM block data.
 
-    Handles multiple images by extracting all mm_hashes and matching them
-    to their corresponding image token ranges.
+#     Processes blocks_data to extract mm_hashes.
 
-    Returns:
-        Tuple of (list of mm_hashes, list of offsets) or (None, None).
-        Each offset is [start, end) for one image's token range.
-    """
-    # Collect all mm_hashes from blocks
-    mm_hashes: list[int] = []
-    for block in blocks_data:
-        mm_keys = block.get("mm_keys", [])
-        for mm_key in mm_keys:
-            if mm_key.get("type") != "mm_key":
-                continue
-            hash_hex = mm_key.get("hash", "")
-            if hash_hex:
-                mm_hash = int(hash_hex[:16], 16)
-                if mm_hash not in mm_hashes:  # Avoid duplicates
-                    mm_hashes.append(mm_hash)
+#     Args:
+#         blocks_data: List of block dictionaries containing stored blocks with mm_keys.
+#             Each block has structure:
+#             {
+#                 "type": "stored_block",
+#                 "block_hash": 14782484735836510181,
+#                 "tokens": [{"type":"unique_token","token_id":151644,"token_extra_id":0}, ...],
+#                 "cache_level": 0,
+#                 "priority": 35,
+#                 "mm_keys": [{"type":"mm_key","hash":"8132011fac7b49cb2dcce26e58785eac59970d73e835fda71a6104bf61f36f8f","start_offset":81}]
+#             }
 
-    if not mm_hashes:
-        return None, None
+#     Returns:
+#         Tuple of (mm_hashes, offsets) where mm_hashes is a list of integer hashes
+#         and offsets is a list of [start, end) ranges for each image's tokens.
+#         Returns (None, None) if no multimodal data found.
+#     """
+#     print("[+++++++]")
+#     print(blocks_data)
+#     print("[+++++++]")
+#     # Collect all mm_hashes from blocks
+#     mm_hashes: list[int] = []
+#     for block in blocks_data:
+#         mm_keys = block.get("mm_keys", [])
+#         for mm_key in mm_keys:
+#             if mm_key.get("type") != "mm_key":
+#                 continue
+#             hash_hex = mm_key.get("hash", "")
+#             if hash_hex:
+#                 mm_hash = int(hash_hex[:16], 16)
+#                 mm_hashes.append(mm_hash)
 
-    # Find all image token ranges
-    image_offsets_list = find_all_image_token_ranges(all_token_ids)
-    if not image_offsets_list:
-        return None, None
-
-    # Match mm_hashes to image_offsets by order
-    # (assumes mm_hashes appear in same order as images in token sequence)
-    return mm_hashes, image_offsets_list
-
-
-def find_all_image_token_ranges(token_ids: list[int]) -> list[list[int]] | None:
-    """Find all [start, end) ranges of contiguous image tokens.
-
-    Returns:
-        List of [start, end) ranges, one per contiguous image token sequence.
-        Returns None if no image tokens found.
-    """
-    ranges: list[list[int]] = []
-    current_start: int | None = None
-
-    for i, tid in enumerate(token_ids):
-        if tid == IMAGE_TOKEN_ID:
-            if current_start is None:
-                current_start = i
-        elif current_start is not None:
-            # End of contiguous sequence
-            ranges.append([current_start, i])
-            current_start = None
-
-    # Handle sequence ending with image tokens
-    if current_start is not None:
-        ranges.append([current_start, len(token_ids)])
-
-    return ranges if ranges else None
+#     return mm_hashes or None
 
 
-def build_per_block_mm_infos(
-    num_blocks: int,
-    block_size: int,
-    mm_hashes: list[int] | None,
-    image_offsets_list: list[list[int]] | None,
-) -> list[dict | None] | None:
-    """Build per-block mm_infos list for multiple images.
+# def find_all_image_token_ranges(token_ids: list[int], image_token_id: int) -> list[list[int]] | None:
+#     """Find all [start, end) ranges of contiguous image tokens.
 
-    Each block that overlaps with an image's token range gets the corresponding
-    mm_info with that image's mm_hash.
+#     Returns:
+#         List of [start, end) ranges, one per contiguous image token sequence.
+#         Returns None if no image tokens found.
+#     """
+#     ranges: list[list[int]] = []
+#     range_start: int | None = None
 
-    Args:
-        num_blocks: Number of blocks in the stored event.
-        block_size: Number of tokens per block.
-        mm_hashes: List of mm_hash values, one per image.
-        image_offsets_list: List of [start, end) token ranges, one per image.
+#     for i, tid in enumerate(token_ids):
 
-    Returns:
-        List of mm_info (one per block), with None for blocks without image tokens.
-        Returns None if no mm_info is provided.
-    """
-    if mm_hashes is None or image_offsets_list is None:
-        return None
+#         # Start of a new image token range
+#         if tid == image_token_id and range_start is None: 
+#             range_start = i
 
-    if not mm_hashes or not image_offsets_list:
-        return None
+#         # End of a contiguous image token range
+#         elif tid != image_token_id and range_start is not None: 
+#             ranges.append([range_start, i])
+#             range_start = None
+    
+#     # Handle sequence ending with image tokens
+#     if range_start is not None:
+#         ranges.append([range_start, len(token_ids)])
+    
+#     return ranges or None
 
-    # Initialize result with None for all blocks
-    result: list[dict | None] = [None] * num_blocks
 
-    # Process each image
-    for mm_hash, offsets in zip(mm_hashes, image_offsets_list):
-        img_start, img_end = offsets
 
-        for block_idx in range(num_blocks):
-            block_start = block_idx * block_size
-            block_end = block_start + block_size
+# def build_per_block_mm_infos(
+#     num_blocks: int,
+#     block_size: int,
+#     mm_hashes: list[int],
+#     image_offsets_list: list[list[int]],
+# ) -> list[dict | None] | None:
+#     """Build per-block mm_infos list for multiple images.
 
-            # Check if this block overlaps with this image's token range
-            if block_end > img_start and block_start < img_end:
-                if result[block_idx] is None:
-                    result[block_idx] = {"mm_objects": []}
-                # Add this image's mm_object to the block
-                result[block_idx]["mm_objects"].append(
-                    {"mm_hash": mm_hash, "offsets": [offsets]}
-                )
+#     Each block that overlaps with an image's token range gets the corresponding
+#     mm_info with that image's mm_hash.
 
-    return result
+#     Args:
+#         num_blocks: Number of blocks in the stored event.
+#         block_size: Number of tokens per block.
+#         mm_hashes: List of mm_hash values, one per image.
+#         image_offsets_list: List of [start, end) token ranges, one per image.
+
+#     Returns:
+#         List of mm_info (one per block), with None for blocks without image tokens.
+#         Returns None if no mm_info is provided or if inputs are invalid.
+#     """
+
+#     # Sanity check: mm_hashes and image_offsets_list must have same length
+#     if len(mm_hashes) != len(image_offsets_list):
+#         logging.warning(
+#             f"mm_hashes ({len(mm_hashes)}) and image_offsets_list "
+#             f"({len(image_offsets_list)}) length mismatch"
+#         )
+#         return None
+
+#     # Initialize result with None for all blocks
+#     result: list[dict | None] = [None] * num_blocks
+
+#     # Process each image
+#     for mm_hash, offsets in zip(mm_hashes, image_offsets_list, strict=True):
+#         img_start, img_end = offsets
+
+#         for block_idx in range(num_blocks):
+#             block_start = block_idx * block_size
+#             block_end = block_start + block_size
+
+#             # Check if this block overlaps with this image's token range
+#             if block_end > img_start and block_start < img_end:
+#                 if result[block_idx] is None:
+#                     result[block_idx] = {"mm_objects": []}
+#                 # Add this image's mm_object to the block
+#                 result[block_idx]["mm_objects"].append(
+#                     {"mm_hash": mm_hash, "offsets": [offsets]}
+#                 )
+
+#     return result
 
 
 class ZmqKvEventPublisher:
@@ -557,12 +567,22 @@ class Publisher:
             event_id = event["event_id"]
             data = event["data"]
             if data["type"] == "stored":
+            # BlockStored event looks like this: ref: https://nvidia.github.io/TensorRT-LLM/_cpp_gen/executor.html#_CPPv4N12tensorrt_llm8executor22KVCacheStoredBlockDataE
+            # {
+            #     "type": "stored_block",
+            #     "block_hash": 14782484735836510181,
+            #     "tokens": [{"type":"unique_token","token_id":151644,"token_extra_id":0}, ...],
+            #     "cache_level": 0,
+            #     "priority": 35,
+            #     "mm_keys": [{"type":"mm_key","hash":"8132011fac7b49cb2dcce26e58785eac59970d73e835fda71a6104bf61f36f8f","start_offset":81}]
+            # }
                 self.processing_initial_created_events = False
                 parent_hash = _to_signed_i64(data["parent_hash"])
                 token_ids: list[int] = []
                 num_block_tokens: list[int] = []
                 block_hashes: list[int] = []
                 blocks_data: list[dict] = data["blocks"]
+                block_mm_infos: list[dict | None] = []
                 for block in blocks_data:
                     token_num_in_block = len(block["tokens"])
                     block_hash = _to_signed_i64(block["block_hash"])
@@ -586,22 +606,33 @@ class Publisher:
                     block_hashes.append(block_hash)
                     for token in block["tokens"]:
                         token_ids.append(int(token["token_id"]))
+                    
+                    # Extract multimodal hash info for this block and build block_mm_infos
+                    # mm_keys looks like this:
+                    # "mm_keys": [{"type":"mm_key","hash":"8132011fac7b49cb2dcce26e58785eac59970d73e835fda71a6104bf61f36f8f","start_offset":81}]
+
+                    # block_mm_infos looks like this:
+                    # {
+                    #     "mm_objects": [{"mm_hash": 1234567890, "offsets": []}]
+                    # }
+                    mm_keys = block.get("mm_keys", []) # a block can have multiple mm_keys
+                    mm_hashes = [
+                        int(mm_key["hash"][:16], 16)
+                        for mm_key in mm_keys
+                        if mm_key.get("type") == "mm_key" and mm_key.get("hash")
+                    ]
+                    if mm_hashes:
+                        block_mm_infos.append({
+                            "mm_objects": [{"mm_hash": mm_hash, "offsets": []} for mm_hash in mm_hashes]
+                        })
+                    else:
+                        block_mm_infos.append(None)
 
                 # Note: Currently data does not have lora_id.
                 # Using 0 as default value. If later data has
                 # lora_id, we need to verify if this is correct.
                 lora_id = data.get("lora_id", 0)
 
-                # Extract multimodal hash info from TRTLLM blocks
-                mm_hashes, image_offsets = extract_mm_info(blocks_data, token_ids)
-                block_mm_infos = build_per_block_mm_infos(
-                    len(block_hashes), self.kv_block_size, mm_hashes, image_offsets
-                )
-                if block_mm_infos:
-                    logging.debug(
-                        f"Multimodal info extracted: mm_hashes={mm_hashes}, "
-                        f"offsets={image_offsets}"
-                    )
 
                 logging.debug(
                     f"publish stored event: event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
