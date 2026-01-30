@@ -53,7 +53,8 @@ class GitHubAlertsTransformer:
 
     def __init__(self):
         # Regex to match GitHub alert syntax in text
-        self.alert_pattern = re.compile(r"^\[!(.*?)\](?:\s+(.*))?$")
+        # Uses [^\]]* instead of .*? to prevent backtracking on ] characters
+        self.alert_pattern = re.compile(r"^\[!([^\]]*)\](?:\s+(.*))?$")
 
     def is_github_alert_blockquote(self, node: nodes.block_quote) -> bool:
         """
