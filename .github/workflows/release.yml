@@ -368,6 +368,52 @@ jobs:
             FAILED_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch - missing archs)")
           fi
 
+          # Copy operator images from ECR (built by ci-test-suite.yml)
+          echo ""
+          echo "Copying operator images from ECR..."
+          OPERATOR_IMAGES=()
+          for ARCH in "${ARCHITECTURES[@]}"; do
+            SOURCE_TAG="${IMAGE_PREFIX}-operator-${ARCH}"
+            SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
+            NGC_TAG="${NGC_VERSION_TAG}-${ARCH}"
+            NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-operator:${NGC_TAG}"
+
+            echo "----------------------------------------"
+            echo "Copying: dynamo-operator:${NGC_TAG}"
+
+            if crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+              echo "✅ Copied: dynamo-operator:${NGC_TAG}"
+              SUCCESSFUL_COPIES+=("dynamo-operator:${NGC_TAG}")
+              OPERATOR_IMAGES+=("${NGC_IMAGE}")
+            else
+              echo "⚠️  Warning: Failed to copy dynamo-operator (${ARCH}), skipping..."
+              FAILED_COPIES+=("dynamo-operator:${NGC_TAG}")
+            fi
+          done
+
+          # Create multi-arch manifest for operator
+          echo ""
+          echo "Creating multi-arch manifest for dynamo-operator..."
+          OPERATOR_MULTIARCH="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-operator:${NGC_VERSION_TAG}"
+
+          if [ ${#OPERATOR_IMAGES[@]} -eq 2 ]; then
+            echo "Creating manifest index: ${OPERATOR_MULTIARCH}"
+            docker manifest create "${OPERATOR_MULTIARCH}" \
+              "${OPERATOR_IMAGES[0]}" \
+              "${OPERATOR_IMAGES[1]}" || true
+
+            if docker manifest push "${OPERATOR_MULTIARCH}"; then
+              echo "✅ Created multi-arch manifest: dynamo-operator:${NGC_VERSION_TAG}"
+              SUCCESSFUL_COPIES+=("dynamo-operator:${NGC_VERSION_TAG} (multi-arch)")
+            else
+              echo "⚠️  Warning: Failed to create multi-arch manifest for operator"
+              FAILED_COPIES+=("dynamo-operator:${NGC_VERSION_TAG} (multi-arch)")
+            fi
+          else
+            echo "⚠️  Warning: Not all operator architectures available, skipping multi-arch manifest"
+            FAILED_COPIES+=("dynamo-operator:${NGC_VERSION_TAG} (multi-arch - missing archs)")
+          fi
+
           # Output counts for summary
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
           echo "failed_count=${#FAILED_COPIES[@]}" >> $GITHUB_OUTPUT
@@ -439,4 +485,9 @@ jobs:
           echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-amd64\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-arm64\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Operator images:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-operator:${NGC_VERSION_TAG}\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-operator:${NGC_VERSION_TAG}-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-operator:${NGC_VERSION_TAG}-arm64\`" >> $GITHUB_STEP_SUMMARY
 
