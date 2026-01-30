@@ -45,7 +45,7 @@ use derive_getters::Getters;
 use dynamo_runtime::component::Component;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Getters)]
@@ -292,7 +292,9 @@ impl KvManager {
     pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
-            .filter(|&block| !self.active_blocks.contains_key(block) && !self.inactive_blocks.contains(block))
+            .filter(|&block| {
+                !self.active_blocks.contains_key(block) && !self.inactive_blocks.contains(block)
+            })
             .count()
     }
 

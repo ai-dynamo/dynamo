@@ -216,10 +216,10 @@ impl ActiveSequence {
             .map(|block| match block {
                 UniqueBlock::PartialBlock(uuid) => {
                     MoveBlock::Destroy(vec![UniqueBlock::PartialBlock(*uuid)])
-            }
+                }
                 UniqueBlock::FullBlock(hash) => {
                     MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
-        }
+                }
             })
             .collect()
     }

@@ -324,18 +324,6 @@ impl Scheduler {
                     dp_rank,
                     active_decode_blocks: kv_manager.num_active_blocks() as u64,
                 });
-
-                // 5. Sleep to maintain target iteration timing
-                // Skip sleep if speedup_ratio is infinite (instant execution)
-                if args.speedup_ratio.is_finite() {
-                    let target_duration =
-                        Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
-                    let elapsed = iteration_start.elapsed();
-
-                    if elapsed < target_duration {
-                        tokio::time::sleep(target_duration - elapsed).await;
-                    }
-                }
             }
         });
 
@@ -426,9 +414,10 @@ async fn simulate_prefill(
             break;
         }
     }
-
-    let deadline = start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
-    tokio::time::sleep_until(deadline).await;
+    if speedup_ratio.is_finite() {
+        let deadline = start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+        tokio::time::sleep_until(deadline).await;
+    }
 
     total_time
 }
@@ -451,7 +440,13 @@ async fn simulate_decode(
     let total_length: usize = state
         .decode
         .keys()
-        .map(|uuid| if let Request::Active(seq) = state.requests.get(uuid).unwrap() { seq.len() } else { 0 })
+        .map(|uuid| {
+            if let Request::Active(seq) = state.requests.get(uuid).unwrap() {
+                seq.len()
+            } else {
+                0
+            }
+        })
         .sum();
     let count = state.decode.len();
 
@@ -483,12 +478,12 @@ async fn simulate_decode(
         let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
 
         let send_failed = output_tx.as_ref().is_some_and(|tx| {
-                tx.send(OutputSignal {
-                    uuid,
-                    completed: is_complete,
-                })
-                .is_err()
-            });
+            tx.send(OutputSignal {
+                uuid,
+                completed: is_complete,
+            })
+            .is_err()
+        });
 
         if send_failed {
             for signal in &sequence.free_signal() {
@@ -500,9 +495,10 @@ async fn simulate_decode(
             state.complete(&uuid);
         }
     }
-
-    let deadline = start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
-    tokio::time::sleep_until(deadline).await;
+    if speedup_ratio.is_finite() {
+        let deadline = start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+        tokio::time::sleep_until(deadline).await;
+    }
 
     total_time
 }
