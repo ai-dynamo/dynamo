@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+from typing import List, Optional
 
 import sglang as sgl
 import uvloop
@@ -66,6 +67,47 @@ async def _handle_non_leader_node(
     await asyncio.Event().wait()
 
 
+async def wait_for_checkpoint_signal_file(signal_file: str) -> bool:
+    """
+    Wait for checkpoint signal file OR restore marker file.
+
+    In checkpoint creation mode, poll until either:
+    1. The signal file exists (checkpoint complete, should exit)
+    2. The restore marker file exists (restored by CRIU, should proceed)
+
+    The restore marker file is created by the restore-entrypoint before CRIU restore,
+    so the restored process can detect it was restored even though os.environ is
+    restored from the checkpoint and doesn't contain new container env vars.
+
+    Args:
+        signal_file: Path to the checkpoint signal file
+
+    Returns:
+        True if restored (should proceed with registration)
+        False if signal file detected (should exit)
+    """
+    # Get restore marker file path (created by restore entrypoint before CRIU restore)
+    restore_marker = os.environ.get("DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored")
+
+    logging.info("CHECKPOINT_READY: Model loaded, ready for container checkpoint")
+    logging.info(f"CHECKPOINT_READY: Waiting for signal file: {signal_file}")
+    logging.info(f"CHECKPOINT_READY: Or restore marker file: {restore_marker}")
+
+    while True:
+        # Check if we've been restored (marker file created by restore entrypoint)
+        if os.path.exists(restore_marker):
+            logging.info(
+                f"Detected restore from checkpoint (marker file exists: {restore_marker})"
+            )
+            return True  # Restored - proceed with registration
+
+        # Check if checkpoint is complete (signal file exists)
+        if os.path.exists(signal_file):
+            logging.info(f"Checkpoint signal file detected: {signal_file}")
+            return False  # Checkpoint done - exit
+
+        await asyncio.sleep(1)
+
 async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
@@ -77,6 +119,70 @@ async def worker():
         config.server_args.load_format = setup_gms(config.server_args)
 
     loop = asyncio.get_running_loop()
+
+    # Check checkpoint-related environment variables EARLY
+    signal_file = os.environ.get("DYN_CHECKPOINT_SIGNAL_FILE")
+    ready_file = os.environ.get("DYN_CHECKPOINT_READY_FILE")
+
+    is_checkpoint_mode = signal_file is not None
+
+    # EARLY EXIT: Check if checkpoint already exists (before loading model!)
+    if is_checkpoint_mode:
+        storage_type = os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE")
+        checkpoint_location = os.environ.get("DYN_CHECKPOINT_LOCATION")
+
+        if storage_type == "pvc" and checkpoint_location:
+            done_marker = f"{checkpoint_location}/checkpoint.done"
+
+            if os.path.exists(done_marker):
+                logging.info("=" * 60)
+                logging.info("CHECKPOINT ALREADY EXISTS")
+                logging.info("=" * 60)
+                logging.info(f"Storage type: {storage_type}")
+                logging.info(f"Found existing checkpoint: {checkpoint_location}")
+                logging.info(f"Marker file: {done_marker}")
+                logging.info("Skipping checkpoint creation (idempotent)")
+                logging.info("No model download or GPU initialization needed")
+                logging.info("=" * 60)
+                return
+            else:
+                logging.info(f"No existing checkpoint found at: {checkpoint_location}")
+                logging.info("Will create new checkpoint")
+
+    # CHECKPOINT MODE: Load engine BEFORE runtime creation
+    # This allows checkpointing GPU state before runtime connections are established
+    pre_created_engine = None
+    is_restored = False
+    if is_checkpoint_mode:
+        logging.info(
+            f"Checkpoint mode enabled (DYN_CHECKPOINT_SIGNAL_FILE={signal_file})"
+        )
+
+        # Prevent SGLang from blocking on non-leader nodes
+        if config.server_args.node_rank >= 1:
+            os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+
+        # CHECKPOINT MODE: Load model before runtime creation
+        pre_created_engine = sgl.Engine(server_args=config.server_args)
+
+        # TODO: release GPU memory before checkpoint here
+
+        # Write ready file to signal that we're ready for checkpointing
+        if ready_file:
+            with open(ready_file, "w") as f:
+                f.write("ready")
+            logging.info(f"Wrote checkpoint ready file: {ready_file}")
+
+        # Wait for checkpoint signal file OR restore detection
+        is_restored = await wait_for_checkpoint_signal_file(signal_file)
+
+        if is_restored:
+            # TODO: resume GPU memory and proceed with registration
+            logging.info("Proceeding with endpoint registration after restore")
+        else:
+            # Checkpoint complete, exit
+            logging.info("Exiting after checkpoint completion")
+            return
 
     # Set DYN_EVENT_PLANE environment variable based on config
     os.environ["DYN_EVENT_PLANE"] = config.dynamo_args.event_plane
@@ -104,32 +210,44 @@ async def worker():
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     if config.dynamo_args.embedding_worker:
-        await init_embedding(runtime, config)
+        await init_embedding(runtime, config, pre_created_engine=pre_created_engine)
     elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
     elif config.dynamo_args.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
     elif config.dynamo_args.multimodal_worker:
         if config.serving_mode != DisaggregationMode.PREFILL:
-            await init_multimodal_worker(runtime, config)
+            await init_multimodal_worker(
+                runtime, config, pre_created_engine=pre_created_engine
+            )
         else:
-            await init_multimodal_prefill_worker(runtime, config)
+            await init_multimodal_prefill_worker(
+                runtime, config, pre_created_engine=pre_created_engine
+            )
     elif config.dynamo_args.diffusion_worker:
-        await init_diffusion(runtime, config)
+        await init_diffusion(runtime, config, pre_created_engine=pre_created_engine)
     elif config.serving_mode != DisaggregationMode.PREFILL:
-        await init(runtime, config)
+        await init(runtime, config, pre_created_engine=pre_created_engine)
     else:
-        await init_prefill(runtime, config)
+        await init_prefill(runtime, config, pre_created_engine=pre_created_engine)
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(
+    runtime: DistributedRuntime,
+    config: Config,
+    pre_created_engine: Optional[sgl.Engine] = None,
+):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -209,14 +327,22 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config):
+async def init_prefill(
+    runtime: DistributedRuntime,
+    config: Config,
+    pre_created_engine: Optional[sgl.Engine] = None,
+):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -286,7 +412,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_diffusion(runtime: DistributedRuntime, config: Config):
+async def init_diffusion(
+    runtime: DistributedRuntime,
+    config: Config,
+    pre_created_engine: Optional[sgl.Engine] = None,
+):
     """Initialize diffusion language model worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -302,7 +432,11 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -371,11 +505,19 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_embedding(runtime: DistributedRuntime, config: Config):
+async def init_embedding(
+    runtime: DistributedRuntime,
+    config: Config,
+    pre_created_engine: Optional[sgl.Engine] = None,
+):
     """Initialize embedding worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -518,7 +660,11 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         handler.cleanup()
 
 
-async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_worker(
+    runtime: DistributedRuntime,
+    config: Config,
+    pre_created_engine: Optional[sgl.Engine] = None,
+):
     """Initialize multimodal worker component for aggregated or decode mode"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -528,7 +674,11 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client for multimodal decode worker")
@@ -581,11 +731,19 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_prefill_worker(
+    runtime: DistributedRuntime,
+    config: Config,
+    pre_created_engine: Optional[sgl.Engine] = None,
+):
     """Initialize multimodal prefill worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
