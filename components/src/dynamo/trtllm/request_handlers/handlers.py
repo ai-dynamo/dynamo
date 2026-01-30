@@ -9,6 +9,7 @@ from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
+from dynamo.trtllm.request_handlers.aggregated_handler import AggregatedHandler
 from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
@@ -31,33 +32,19 @@ class RequestHandlerFactory:
             raise ValueError(
                 f"Invalid disaggregation_mode '{config.disaggregation_mode.value}'"
             )
+        encoder_cache = None
+        if config.encoder_cache_capacity_gb > 0:
+            capacity_bytes = int(config.encoder_cache_capacity_gb * 1024**3)
+            encoder_cache = EncoderCacheManager(capacity_bytes)
         if config.disaggregation_mode.value == "prefill":
-            encoder_cache = None
-            if config.encoder_cache_capacity_gb > 0:
-                # Create encoder cache for prefill handler
-                capacity_bytes = int(config.encoder_cache_capacity_gb * 1024**3)
-                encoder_cache = EncoderCacheManager(capacity_bytes)
             return PrefillHandler(config, encoder_cache=encoder_cache)
+        if config.disaggregation_mode.value == "prefill_and_decode":
+            return AggregatedHandler(config, encoder_cache=encoder_cache)
         return self.handlers[config.disaggregation_mode.value](config)
 
 
 def get_request_handler(config: RequestHandlerConfig) -> HandlerBase:
     return RequestHandlerFactory().get_request_handler(config)
-
-
-class AggregatedHandler(HandlerBase):
-    """
-    Handler for the aggregated mode.
-    """
-
-    def __init__(self, config: RequestHandlerConfig):
-        super().__init__(config)
-
-    async def generate(self, request: dict, context: Context):
-        logging.debug(f"New Request ID: {context.id()}")
-        # Implement all steps locally.
-        async for res in self.generate_locally(request, context):
-            yield res
 
 
 class EncodeHandler(HandlerBase):
