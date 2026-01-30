@@ -429,6 +429,20 @@ class BaseWorkerHandler(ABC):
                 self._lora_load_locks[lora_name] = lock
             return lock
 
+    def _normalize_finish_reason(self, finish_reason: str) -> str:
+        """
+        Normalize vLLM finish reasons to Dynamo-compatible values.
+
+        vLLM may return finish reasons that aren't recognized by Dynamo's Rust layer.
+        This method maps them to compatible values.
+        [TODO]: Remove this method and add the right code in the Rust layer.
+        """
+        # Map vLLM's "abort" to Dynamo's "cancelled"
+        if finish_reason.startswith("abort"):
+            logging.debug(f"Normalizing finish reason: {finish_reason} to cancelled")
+            return "cancelled"
+        return finish_reason
+
     async def load_lora(self, request=None):
         """
         Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
@@ -1183,7 +1197,9 @@ class BaseWorkerHandler(ABC):
                     out["top_logprobs"] = top_logprobs
 
                 if output.finish_reason:
-                    out["finish_reason"] = output.finish_reason
+                    out["finish_reason"] = self._normalize_finish_reason(
+                        output.finish_reason
+                    )
                     out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
                         request_output=res,
                         embedding_sequence_length=embedding_sequence_length,
@@ -1395,7 +1411,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "role": "assistant",
                             "content": delta_text,
                         },
-                        "finish_reason": output.finish_reason,
+                        "finish_reason": self._normalize_finish_reason(
+                            output.finish_reason
+                        ),
                     }
 
                     chunk = {
