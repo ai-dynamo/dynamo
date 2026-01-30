@@ -73,9 +73,12 @@ fn get_discovery_timeout_secs() -> u64 {
 /// This ensures list() calls will have data available.
 ///
 /// This function waits indefinitely until workers are discovered.
-/// The Kubernetes StartupProbe is the sole timeout mechanism - if no workers
-/// are found within the probe's failureThreshold × periodSeconds, the pod
-/// will be killed and restarted.
+// EPP needs to wait for the discovery daemon to sync and return at least one instance in the `wait_for_discovery_sync`
+// This is because the Model info is registered by workers and it may take up to 30 min for the model weights to load and for the worker to register itself.
+
+// The waiting timeout is implemented in the Kubernetes StartupProbe. The EPP waiting loops runs indefinitely, the Probe is a single source of truth with when to kill the EPP if discovery fails.
+// If workers are found within the probe's failureThreshold × periodSeconds, the pod will be killed and restarted.
+// Users can adjust the StartupProbe waiting timed in the DGD for large models.
 ///
 /// Returns the number of instances found.
 async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
