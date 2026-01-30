@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Video generation request handler for TensorRT-LLM Video Diffusion."""
+
+import asyncio
+import logging
+import time
+import uuid
+from typing import Any, AsyncGenerator, Optional
+
+from dynamo._core import Component, Context
+
+from dynamo.trtllm_diffusion.args import VideoConfig
+from dynamo.trtllm_diffusion.engine import WanDiffusionEngine
+from dynamo.trtllm_diffusion.protocol import NvCreateVideoRequest, NvVideosResponse, VideoData
+from dynamo.trtllm_diffusion.utils.video_utils import encode_to_mp4
+
+logger = logging.getLogger(__name__)
+
+
+class VideoGenerationHandler:
+    """Handler for video generation requests.
+
+    This handler receives video generation requests, runs the TRT-LLM visual_gen
+    pipeline, encodes the output to MP4, and returns the video URL.
+    """
+
+    def __init__(
+        self,
+        component: Component,
+        engine: WanDiffusionEngine,
+        config: VideoConfig,
+    ):
+        """Initialize the handler.
+
+        Args:
+            component: The Dynamo runtime component.
+            engine: The WanDiffusionEngine instance.
+            config: Video generation configuration.
+        """
+        self.component = component
+        self.engine = engine
+        self.config = config
+
+    def _parse_size(self, size: Optional[str]) -> tuple[int, int]:
+        """Parse 'WxH' string to (width, height) tuple.
+
+        Args:
+            size: Size string in 'WxH' format (e.g., '832x480').
+
+        Returns:
+            Tuple of (width, height).
+        """
+        if not size:
+            return self.config.default_width, self.config.default_height
+        try:
+            w, h = size.split("x")
+            return int(w), int(h)
+        except (ValueError, AttributeError):
+            logger.warning(f"Invalid size format: {size}, using defaults")
+            return self.config.default_width, self.config.default_height
+
+    def _compute_num_frames(self, req: NvCreateVideoRequest) -> int:
+        """Compute num_frames from request parameters.
+
+        Priority:
+        1. num_frames if explicitly set
+        2. seconds * fps
+        3. config defaults
+
+        Args:
+            req: The video generation request.
+
+        Returns:
+            Number of frames to generate.
+        """
+        if req.num_frames is not None:
+            return req.num_frames
+
+        seconds = req.seconds if req.seconds is not None else 4
+        fps = req.fps if req.fps is not None else 24
+        return seconds * fps
+
+    async def generate(
+        self, request: dict[str, Any], context: Context
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Generate video from request.
+
+        This is the main entry point called by Dynamo's endpoint.serve_endpoint().
+
+        Args:
+            request: Request dictionary with video generation parameters.
+            context: Dynamo context for request tracking.
+
+        Yields:
+            Response dictionary with generated video data.
+        """
+        start_time = time.time()
+        request_id = str(uuid.uuid4())
+
+        logger.info(f"Received video generation request: {request_id}")
+
+        try:
+            # Parse request
+            req = NvCreateVideoRequest(**request)
+
+            # Parse parameters
+            width, height = self._parse_size(req.size)
+            num_frames = self._compute_num_frames(req)
+            num_inference_steps = (
+                req.num_inference_steps
+                if req.num_inference_steps is not None
+                else self.config.default_num_inference_steps
+            )
+            guidance_scale = (
+                req.guidance_scale
+                if req.guidance_scale is not None
+                else self.config.default_guidance_scale
+            )
+
+            logger.info(
+                f"Request {request_id}: prompt='{req.prompt[:50]}...', "
+                f"size={width}x{height}, frames={num_frames}, steps={num_inference_steps}"
+            )
+
+            # Run generation in thread pool (blocking operation)
+            frames = await asyncio.to_thread(
+                self.engine.generate,
+                prompt=req.prompt,
+                negative_prompt=req.negative_prompt,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                seed=req.seed,
+            )
+
+            # Determine output format
+            response_format = req.response_format or "url"
+            fps = req.fps or 16  # Default output fps
+
+            if response_format == "url":
+                # Encode to MP4 and save to file
+                output_path = encode_to_mp4(
+                    frames,
+                    self.config.output_dir,
+                    request_id,
+                    fps=fps,
+                )
+                video_data = VideoData(url=output_path)
+            else:
+                # Encode to base64
+                import base64
+                import io
+                from dynamo.trtllm_diffusion.utils.video_utils import encode_to_mp4_bytes
+
+                video_bytes = encode_to_mp4_bytes(frames, fps=fps)
+                b64_video = base64.b64encode(video_bytes).decode("utf-8")
+                video_data = VideoData(b64_json=b64_video)
+
+            inference_time = time.time() - start_time
+
+            response = NvVideosResponse(
+                id=request_id,
+                object="video",
+                model=req.model,
+                status="completed",
+                progress=100,
+                created=int(time.time()),
+                data=[video_data],
+                inference_time_s=inference_time,
+            )
+
+            logger.info(
+                f"Request {request_id} completed in {inference_time:.2f}s"
+            )
+
+            yield response.model_dump()
+
+        except Exception as e:
+            logger.error(f"Request {request_id} failed: {e}", exc_info=True)
+            inference_time = time.time() - start_time
+
+            error_response = NvVideosResponse(
+                id=request_id,
+                object="video",
+                model=request.get("model", "unknown"),
+                status="failed",
+                progress=0,
+                created=int(time.time()),
+                data=[],
+                error=str(e),
+                inference_time_s=inference_time,
+            )
+
+            yield error_response.model_dump()
+
+    def cleanup(self) -> None:
+        """Cleanup handler resources."""
+        logger.info("VideoGenerationHandler cleanup")
