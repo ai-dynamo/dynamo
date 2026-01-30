@@ -12,13 +12,12 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: llama3-70b-disagg-mn
       volumeMounts:
         - name: model-cache
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/examples/backends/vllm
       envs:
         - name: HF_HOME
@@ -27,7 +26,6 @@ spec:
     VllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
-      dynamoNamespace: llama3-70b-disagg-mn
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
@@ -40,15 +38,15 @@ spec:
             - name: SERVED_MODEL_NAME
               value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: MODEL_PATH
-              value: "/opt/models/hub/models--RedHatAI--Llama-3.3-70B-Instruct-FP8-dynamic/snapshots/ddb4128556dfcff99e0c41aee159ea6c3e655dcd"
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: HF_HOME
               value: /opt/models
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 8 --data-parallel-size 1 --is-prefill-worker --gpu-memory-utilization 0.95 --no-enable-prefix-caching --block-size 128"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 8 --data-parallel-size 1 --is-prefill-worker --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
@@ -59,7 +57,6 @@ spec:
     VllmDecodeWorker:
       componentType: worker
       subComponentType: decode
-      dynamoNamespace: llama3-70b-disagg-mn
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
@@ -72,7 +69,7 @@ spec:
             - name: SERVED_MODEL_NAME
               value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: MODEL_PATH
-              value: "/opt/models/hub/models--RedHatAI--Llama-3.3-70B-Instruct-FP8-dynamic/snapshots/ddb4128556dfcff99e0c41aee159ea6c3e655dcd"
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: HF_HOME
               value: /opt/models
           args:
@@ -80,7 +77,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:

@@ -7,7 +7,7 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_llm`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin (TODO: Add flags to enable KV routing).
+# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -86,6 +86,11 @@ def validate_model_path(value):
 
 
 def parse_args():
+    """Parse command-line arguments for the Dynamo frontend.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
@@ -205,6 +210,20 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
     )
     parser.add_argument(
+        "--no-assume-kv-reuse",
+        action="store_false",
+        dest="router_assume_kv_reuse",
+        default=True,
+        help="KV Router: When tracking active blocks, do not assume KV cache reuse (generate random hashes instead of computing actual block hashes). Useful when KV cache reuse is not expected. By default, KV cache reuse is assumed.",
+    )
+    parser.add_argument(
+        "--track-output-blocks",
+        action="store_true",
+        dest="router_track_output_blocks",
+        default=False,
+        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
+    )
+    parser.add_argument(
         "--enforce-disagg",
         action="store_true",
         default=False,
@@ -230,7 +249,7 @@ def parse_args():
     parser.add_argument(
         "--model-path",
         type=validate_model_path,
-        help="Path to model directory on disk (e.g., /tmp/model_cache/lama3.2_1B/)",
+        help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
     )
     parser.add_argument(
         "--metrics-prefix",
@@ -272,7 +291,7 @@ def parse_args():
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -280,6 +299,13 @@ def parse_args():
         choices=["nats", "http", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
         "--exp-python-factory",
@@ -301,6 +327,11 @@ def parse_args():
 
 
 async def async_main():
+    """Main async entry point for the Dynamo frontend.
+
+    Initializes the distributed runtime, configures routing, and starts
+    the HTTP server or interactive mode based on command-line arguments.
+    """
     # The system status server port is a worker concern.
     #
     # Serve tests set DYN_SYSTEM_PORT for the worker, but aggregated launch scripts
@@ -310,7 +341,7 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
-
+    os.environ["DYN_EVENT_PLANE"] = flags.event_plane
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
@@ -327,8 +358,14 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
-    # Enable NATS for KV router mode when kv_events are used (when --no-kv-events is not set)
-    enable_nats = (flags.router_mode == "kv") and flags.use_kv_events
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    enable_nats = flags.request_plane == "nats" or (
+        flags.event_plane == "nats"
+        and flags.router_mode == "kv"
+        and (flags.use_kv_events or flags.router_replica_sync)
+    )
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
@@ -346,9 +383,11 @@ async def async_main():
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
             router_replica_sync=flags.router_replica_sync,
+            router_track_active_blocks=flags.router_track_active_blocks,
+            router_track_output_blocks=flags.router_track_output_blocks,
+            router_assume_kv_reuse=flags.router_assume_kv_reuse,
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,
-            router_track_active_blocks=flags.router_track_active_blocks,
             router_ttl_secs=flags.router_ttl,
             router_max_tree_size=flags.router_max_tree_size,
             router_prune_target_ratio=flags.router_prune_target_ratio,
@@ -412,10 +451,16 @@ async def async_main():
 
 
 async def graceful_shutdown(runtime):
+    """Handle graceful shutdown of the distributed runtime.
+
+    Args:
+        runtime: The DistributedRuntime instance to shut down.
+    """
     runtime.shutdown()
 
 
 def main():
+    """Entry point for the Dynamo frontend CLI."""
     uvloop.run(async_main())
 
 

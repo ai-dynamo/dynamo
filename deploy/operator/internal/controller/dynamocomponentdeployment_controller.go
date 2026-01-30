@@ -38,6 +38,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -153,7 +154,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		validator := webhookvalidation.NewDynamoComponentDeploymentValidator(dynamoComponentDeployment)
-		if _, validationErr := validator.Validate(); validationErr != nil {
+		if _, validationErr := validator.Validate(ctx); validationErr != nil {
 			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
 
 			// Set validation error condition
@@ -737,6 +738,13 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Finalizing the DynamoComponentDeployment", "dynamoComponentDeployment", dynamoComponentDeployment)
+
+	// Only delete etcd keys if using etcd discovery backend
+	// When using Kubernetes discovery (the default), skip etcd cleanup to avoid hangs
+	if r.Config.DiscoveryBackend != "etcd" {
+		return nil
+	}
+
 	if dynamoComponentDeployment.Spec.ServiceName != "" && dynamoComponentDeployment.Spec.DynamoNamespace != nil && *dynamoComponentDeployment.Spec.DynamoNamespace != "" {
 		logger.Info("Deleting the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
 		err := r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *dynamoComponentDeployment.Spec.DynamoNamespace, dynamoComponentDeployment.Spec.ServiceName))
@@ -1335,14 +1343,24 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 
 	var servicePort corev1.ServicePort
-	if opt.dynamoComponentDeployment.IsFrontendComponent() {
+	switch opt.dynamoComponentDeployment.Spec.ComponentType {
+	case commonconsts.ComponentTypeFrontend:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoServicePortName,
 			Port:       commonconsts.DynamoServicePort,
 			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}
-	} else { // TODO: only for worker components
+	case commonconsts.ComponentTypeEPP:
+		// EPP exposes the gRPC endpoint for InferencePool communication
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.EPPGRPCPortName,
+			Port:       commonconsts.EPPGRPCPort,
+			TargetPort: intstr.FromInt(commonconsts.EPPGRPCPort),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	default:
+		// Worker and other components use the system port for metrics/health
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoSystemPortName,
 			Port:       commonconsts.DynamoSystemPort,
@@ -1386,6 +1404,7 @@ type IngressConfig struct {
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	m := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1419,7 +1438,9 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
-	return m.Complete(r)
+	// Wrap with metrics collection
+	observedReconciler := observability.NewObservedReconciler(r, commonconsts.ResourceTypeDynamoComponentDeployment)
+	return m.Complete(observedReconciler)
 }
 
 func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {

@@ -29,7 +29,15 @@ The Dynamo KVBM is a distributed KV-cache block management system designed for s
 - **Runtime-Agnostic:** Works out-of-the-box with vLLM, TensorRT-LLM, and SGLang via lightweight connectors.
 - **Memory-Safe & Modular:** RAII lifecycle and pluggable design for reliability, portability, and backend extensibility.
 
-## Build and Installation
+## Installation
+
+```bash
+pip install kvbm
+```
+
+See the [support matrix](../../../docs/reference/support-matrix.md) for version compatibility questions.
+
+## Build from Source
 
 The pip wheel is built through a Docker build process:
 
@@ -78,6 +86,7 @@ Note that the default pip wheel built is not compatible with CUDA 13 at the mome
 | `DYN_KVBM_METRICS` | Enable metrics endpoint | `false` |
 | `DYN_KVBM_METRICS_PORT` | Metrics port | `6880` |
 | `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` | Disable disk offload filtering to remove SSD lifespan protection | `false` |
+| `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY` | Minimum priority (0-100) for CPU offload with contiguous (prefix) semantics: offloading stops at the first block below threshold, and all subsequent blocks are also skipped. Used for priority-based filtering. | `0` (no filtering) |
 
 #### Disk Storage Configuration
 

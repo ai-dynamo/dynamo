@@ -199,6 +199,7 @@ func (m *mockEtcdStorage) DeleteKeys(ctx context.Context, prefix string) error {
 func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 	type fields struct {
 		EtcdStorage etcdStorage
+		Config      controller_common.Config
 	}
 	type args struct {
 		ctx                       context.Context
@@ -221,6 +222,7 @@ func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 						return fmt.Errorf("invalid prefix: %s", prefix)
 					},
 				},
+				Config: controller_common.Config{DiscoveryBackend: "etcd"},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -243,6 +245,7 @@ func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 						return fmt.Errorf("invalid prefix: %s", prefix)
 					},
 				},
+				Config: controller_common.Config{DiscoveryBackend: "etcd"},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -262,6 +265,7 @@ func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &DynamoComponentDeploymentReconciler{
 				EtcdStorage: tt.fields.EtcdStorage,
+				Config:      tt.fields.Config,
 			}
 			if err := r.FinalizeResource(tt.args.ctx, tt.args.dynamoComponentDeployment); (err != nil) != tt.wantErr {
 				t.Errorf("DynamoComponentDeploymentReconciler.FinalizeResource() error = %v, wantErr %v", err, tt.wantErr)
@@ -851,7 +855,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
-											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
+											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
@@ -986,7 +990,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
-											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
+											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
