@@ -131,3 +131,37 @@ class DisaggSglangMultimodalRequest(BaseModel):
     request: SglangMultimodalRequest
     sampling_params: dict
     data_parallel_rank: Optional[int] = None
+
+
+# ============================================================================
+# Image diffusion Protocol Types
+# ============================================================================
+
+
+class CreateImageRequest(BaseModel):
+    """OpenAI /v1/images/generations compatible request"""
+
+    prompt: str
+    model: str  # e.g. "stabilityai/stable-diffusion-3.5-medium"
+    n: int = 1  # Number of images
+    negative_prompt: Optional[str] = None
+    size: Optional[str] = "1024x1024"  # "WxH" format
+    quality: Optional[str] = "standard"  # standard, hd
+    response_format: Optional[str] = "url"  # url or b64_json
+    num_inference_steps: Optional[int] = 50  # Denoising steps
+    guidance_scale: float = 7.5  # CFG scale
+    seed: Optional[int] = None
+    user: Optional[str] = None
+
+
+class ImageData(BaseModel):
+    url: Optional[str] = None  # S3 URL
+    b64_json: Optional[str] = None  # Base64 encoded
+    revised_prompt: Optional[str] = None
+
+
+class ImagesResponse(BaseModel):
+    """OpenAI-compatible response"""
+
+    created: int  # Unix timestamp
+    data: list[ImageData]
