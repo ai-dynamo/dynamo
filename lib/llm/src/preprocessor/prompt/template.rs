@@ -14,7 +14,8 @@ mod oai;
 mod tokcfg;
 
 use super::{OAIChatLikeRequest, OAIPromptFormatter, PromptFormatter};
-use tokcfg::{ChatTemplate, ChatTemplateValue};
+use tokcfg::ChatTemplateValue;
+pub use tokcfg::ChatTemplate;
 
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {

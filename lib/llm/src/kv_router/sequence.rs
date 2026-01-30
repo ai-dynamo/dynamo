@@ -1095,6 +1095,9 @@ impl ActiveSequencesMultiWorker {
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
+        let start = Instant::now();
+        let num_workers = self.senders.len();
+
         let mut potential_blocks = HashMap::new();
         let mut potential_tokens = HashMap::new();
         let token_sequence_shared = token_sequence.map(Arc::new);
@@ -1126,6 +1129,8 @@ impl ActiveSequencesMultiWorker {
             }
         }
 
+        let send_elapsed = start.elapsed();
+
         // Collect results from all workers
         for (worker, receiver) in receivers {
             match tokio::time::timeout(tokio::time::Duration::from_secs(1), receiver).await {
@@ -1141,6 +1146,14 @@ impl ActiveSequencesMultiWorker {
                 }
             }
         }
+
+        let total_elapsed = start.elapsed();
+        tracing::trace!(
+            num_workers,
+            send_us = send_elapsed.as_micros() as u64,
+            total_us = total_elapsed.as_micros() as u64,
+            "potential_blocks_and_tokens completed"
+        );
 
         (potential_blocks, potential_tokens)
     }
