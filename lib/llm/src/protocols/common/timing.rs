@@ -78,8 +78,14 @@ pub struct RequestTracker {
     /// Prefill worker ID (for disaggregated serving) - set once via OnceLock
     prefill_worker_id: OnceLock<u64>,
 
+    /// Prefill DP rank - set once via OnceLock
+    prefill_dp_rank: OnceLock<u32>,
+
     /// Decode worker ID - set once via OnceLock
     decode_worker_id: OnceLock<u64>,
+
+    /// Decode DP rank - set once via OnceLock
+    decode_dp_rank: OnceLock<u32>,
 
     /// Request phase (Prefill/Decode/Aggregated)
     phase: Mutex<RequestPhase>,
@@ -109,7 +115,9 @@ impl RequestTracker {
             kv_overlap_blocks: OnceLock::new(),
             isl_blocks: OnceLock::new(),
             prefill_worker_id: OnceLock::new(),
+            prefill_dp_rank: OnceLock::new(),
             decode_worker_id: OnceLock::new(),
+            decode_dp_rank: OnceLock::new(),
             phase: Mutex::new(RequestPhase::Aggregated),
             phase_semaphore: Arc::new(Semaphore::new(1)),
         }
@@ -180,8 +188,20 @@ impl RequestTracker {
         self.prefill_worker_id.set(id).is_ok()
     }
 
+    /// Record the prefill worker ID and DP rank. Returns true if worker_id was recorded for the first time.
+    pub fn record_prefill_worker_with_rank(&self, id: u64, dp_rank: u32) -> bool {
+        let _ = self.prefill_dp_rank.set(dp_rank);
+        self.prefill_worker_id.set(id).is_ok()
+    }
+
     /// Record the decode worker ID. Returns true if this was the first call.
     pub fn record_decode_worker(&self, id: u64) -> bool {
+        self.decode_worker_id.set(id).is_ok()
+    }
+
+    /// Record the decode worker ID and DP rank. Returns true if worker_id was recorded for the first time.
+    pub fn record_decode_worker_with_rank(&self, id: u64, dp_rank: u32) -> bool {
+        let _ = self.decode_dp_rank.set(dp_rank);
         self.decode_worker_id.set(id).is_ok()
     }
 
@@ -230,6 +250,26 @@ impl RequestTracker {
         }
     }
 
+    /// Record worker ID and DP rank based on the current phase.
+    ///
+    /// - Prefill phase: records as prefill_worker_id/prefill_dp_rank
+    /// - Decode phase: records as decode_worker_id/decode_dp_rank
+    /// - Aggregated phase: records as both prefill and decode worker/rank
+    pub fn record_worker_with_rank(&self, instance_id: u64, dp_rank: u32) {
+        match self.phase() {
+            RequestPhase::Prefill => {
+                self.record_prefill_worker_with_rank(instance_id, dp_rank);
+            }
+            RequestPhase::Decode => {
+                self.record_decode_worker_with_rank(instance_id, dp_rank);
+            }
+            RequestPhase::Aggregated => {
+                self.record_prefill_worker_with_rank(instance_id, dp_rank);
+                self.record_decode_worker_with_rank(instance_id, dp_rank);
+            }
+        }
+    }
+
     /// Get worker ID information if any worker IDs have been recorded.
     pub fn get_worker_info(&self) -> Option<WorkerIdInfo> {
         let prefill = self.prefill_worker_id.get().copied();
@@ -243,6 +283,26 @@ impl RequestTracker {
             prefill_worker_id: prefill,
             decode_worker_id: decode,
         })
+    }
+
+    /// Get the decode worker ID if recorded.
+    pub fn decode_worker_id(&self) -> Option<u64> {
+        self.decode_worker_id.get().copied()
+    }
+
+    /// Get the decode DP rank if recorded.
+    pub fn decode_dp_rank(&self) -> Option<u32> {
+        self.decode_dp_rank.get().copied()
+    }
+
+    /// Get the prefill worker ID if recorded.
+    pub fn prefill_worker_id(&self) -> Option<u64> {
+        self.prefill_worker_id.get().copied()
+    }
+
+    /// Get the prefill DP rank if recorded.
+    pub fn prefill_dp_rank(&self) -> Option<u32> {
+        self.prefill_dp_rank.get().copied()
     }
 
     pub fn get_timing_info(&self) -> TimingInfo {

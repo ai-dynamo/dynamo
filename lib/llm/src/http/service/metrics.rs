@@ -14,10 +14,12 @@ use dynamo_runtime::{
         frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
     },
 };
-use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
+use prometheus::{
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+};
 use serde::Serialize;
 use std::{
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
@@ -28,6 +30,54 @@ use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 pub use prometheus::Registry;
 
 use super::RouteDoc;
+
+/// Worker type label values for Prometheus timing metrics
+pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+
+/// Global Prometheus gauge for last observed TTFT per worker (in seconds)
+/// Labels: worker_id, dp_rank, worker_type
+pub static WORKER_LAST_TTFT_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+    GaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::WORKER_LAST_TTFT_SECONDS
+            ),
+            "Last observed time to first token per worker (seconds)",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_ttft gauge")
+});
+
+/// Global Prometheus gauge for last observed ITL per worker (in seconds)
+/// Labels: worker_id, dp_rank, worker_type
+pub static WORKER_LAST_ITL_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+    GaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::WORKER_LAST_ITL_SECONDS
+            ),
+            "Last observed inter-token latency per worker (seconds)",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_itl gauge")
+});
+
+/// Register the global per-worker TTFT/ITL Prometheus metrics with the given registry.
+///
+/// This should be called once during HTTP service setup to expose the metrics
+/// via the `/metrics` endpoint.
+///
+/// # Errors
+/// Returns an error if the metrics are already registered with the registry.
+pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(WORKER_LAST_TTFT_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_LAST_ITL_GAUGE.clone()))?;
+    Ok(())
+}
 
 /// Generate log-spaced histogram buckets with values rounded to 2 significant figures.
 ///
@@ -256,6 +306,12 @@ pub struct ResponseMetricCollector {
     osl: usize,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
+    // Prefill worker info for TTFT attribution (set from LLMMetricAnnotation)
+    prefill_worker_id: Option<u64>,
+    prefill_dp_rank: Option<u32>,
+    // Decode worker info for ITL attribution (set from LLMMetricAnnotation)
+    decode_worker_id: Option<u64>,
+    decode_dp_rank: Option<u32>,
 }
 
 impl Default for Metrics {
@@ -886,6 +942,33 @@ impl ResponseMetricCollector {
             start_time: Instant::now(),
             osl: 0,
             cached_tokens_observed: false,
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+        }
+    }
+
+    /// Set the worker info for per-worker TTFT/ITL metrics.
+    /// In disaggregated mode, TTFT is attributed to prefill worker, ITL to decode worker.
+    pub fn set_worker_info(
+        &mut self,
+        prefill_worker_id: Option<u64>,
+        prefill_dp_rank: Option<u32>,
+        decode_worker_id: Option<u64>,
+        decode_dp_rank: Option<u32>,
+    ) {
+        if self.prefill_worker_id.is_none() {
+            self.prefill_worker_id = prefill_worker_id;
+        }
+        if self.prefill_dp_rank.is_none() {
+            self.prefill_dp_rank = prefill_dp_rank;
+        }
+        if self.decode_worker_id.is_none() {
+            self.decode_worker_id = decode_worker_id;
+        }
+        if self.decode_dp_rank.is_none() {
+            self.decode_dp_rank = decode_dp_rank;
         }
     }
 
@@ -936,6 +1019,21 @@ impl ResponseMetricCollector {
                 .with_label_values(&[&self.model])
                 .observe(ttft);
 
+            // Update per-worker TTFT gauge - attributed to prefill worker (worker_type=prefill)
+            if let Some(worker_id) = self.prefill_worker_id {
+                let worker_id_str = worker_id.to_string();
+                let dp_rank_str = self
+                    .prefill_dp_rank
+                    .map_or("0".to_string(), |r| r.to_string());
+                WORKER_LAST_TTFT_GAUGE
+                    .with_label_values(&[
+                        worker_id_str.as_str(),
+                        dp_rank_str.as_str(),
+                        WORKER_TYPE_PREFILL,
+                    ])
+                    .set(ttft);
+            }
+
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
             self.metrics
@@ -954,6 +1052,21 @@ impl ResponseMetricCollector {
                     .inter_token_latency
                     .with_label_values(&[&self.model])
                     .observe(itl);
+            }
+
+            // Update per-worker ITL gauge - attributed to decode worker (worker_type=decode)
+            if let Some(worker_id) = self.decode_worker_id {
+                let worker_id_str = worker_id.to_string();
+                let dp_rank_str = self
+                    .decode_dp_rank
+                    .map_or("0".to_string(), |r| r.to_string());
+                WORKER_LAST_ITL_GAUGE
+                    .with_label_values(&[
+                        worker_id_str.as_str(),
+                        dp_rank_str.as_str(),
+                        WORKER_TYPE_DECODE,
+                    ])
+                    .set(itl);
             }
         }
 
@@ -987,6 +1100,12 @@ pub fn process_response_and_observe_metrics<T>(
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_cached_tokens(metrics.cached_tokens);
+        response_collector.set_worker_info(
+            metrics.prefill_worker_id,
+            metrics.prefill_dp_rank,
+            metrics.decode_worker_id,
+            metrics.decode_dp_rank,
+        );
 
         // Drop http_queue_guard on first token for non-streaming (same as streaming)
         if response_collector.is_first_token()
@@ -1028,6 +1147,12 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_cached_tokens(metrics.cached_tokens);
+        response_collector.set_worker_info(
+            metrics.prefill_worker_id,
+            metrics.prefill_dp_rank,
+            metrics.decode_worker_id,
+            metrics.decode_dp_rank,
+        );
 
         // Drop http_queue_guard on first token for streaming
         if response_collector.is_first_token()
@@ -1521,6 +1646,10 @@ mod tests {
             output_tokens: 20,
             chunk_tokens: 5,
             cached_tokens: Some(15),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -1580,6 +1709,10 @@ mod tests {
             output_tokens: 20,
             chunk_tokens: 5,
             cached_tokens: Some(15),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();

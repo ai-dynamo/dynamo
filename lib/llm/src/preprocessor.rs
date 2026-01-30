@@ -72,6 +72,18 @@ pub struct LLMMetricAnnotation {
     pub output_tokens: usize,
     pub chunk_tokens: usize,
     pub cached_tokens: Option<usize>,
+    /// Prefill worker ID (for TTFT attribution in disaggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+    /// Prefill worker DP rank
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
+    /// Decode worker ID (for ITL attribution in disaggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+    /// Decode worker DP rank
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_dp_rank: Option<u32>,
 }
 
 impl LLMMetricAnnotation {
@@ -641,12 +653,21 @@ impl OpenAIPreprocessor {
                             .map_err(|e| e.to_string())
                     });
 
-                    // Create LLM metrics annotation
+                    // Create LLM metrics annotation with prefill/decode worker info from tracker
+                    let tracker = inner.response_generator.tracker();
+                    let prefill_worker_id = tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                    let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                    let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                    let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
                     let llm_metrics = LLMMetricAnnotation {
                         input_tokens: isl,
                         output_tokens: current_osl,
                         chunk_tokens,
                         cached_tokens: None,
+                        prefill_worker_id,
+                        prefill_dp_rank,
+                        decode_worker_id,
+                        decode_dp_rank,
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -679,6 +700,12 @@ impl OpenAIPreprocessor {
 
                         let usage_chunk = inner.response_generator.create_usage_chunk();
                         let usage = inner.response_generator.get_usage();
+                        let tracker = inner.response_generator.tracker();
+                        let prefill_worker_id =
+                            tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                        let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                        let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                        let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
                         let llm_metrics = LLMMetricAnnotation {
                             input_tokens: usage.prompt_tokens as usize,
                             output_tokens: usage.completion_tokens as usize,
@@ -687,6 +714,10 @@ impl OpenAIPreprocessor {
                                 .prompt_tokens_details
                                 .as_ref()
                                 .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                            prefill_worker_id,
+                            prefill_dp_rank,
+                            decode_worker_id,
+                            decode_dp_rank,
                         };
 
                         // Create annotation string

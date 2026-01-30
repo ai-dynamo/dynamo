@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
+    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher, WORKER_TYPE_DECODE},
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
@@ -270,8 +270,20 @@ where
         .await?;
 
     let service_backend = match router_mode {
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-            ServiceBackend::from_engine(Arc::new(router))
+        RouterMode::Random | RouterMode::RoundRobin => {
+            // Use TrackedPushRouter for non-KV routing to record worker info for metrics
+            let tracked_router =
+                crate::kv_router::TrackedPushRouter::new(router, WORKER_TYPE_DECODE);
+            ServiceBackend::from_engine(Arc::new(tracked_router))
+        }
+        RouterMode::Direct(instance_id) => {
+            // Use TrackedPushRouter for direct routing to record worker info for metrics
+            let tracked_router = crate::kv_router::TrackedPushRouter::new_direct(
+                router,
+                instance_id,
+                WORKER_TYPE_DECODE,
+            );
+            ServiceBackend::from_engine(Arc::new(tracked_router))
         }
         RouterMode::KV => {
             let Some(chooser) = chooser else {

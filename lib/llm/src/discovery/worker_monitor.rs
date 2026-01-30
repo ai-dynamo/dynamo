@@ -1,17 +1,69 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::http::service::metrics::{WORKER_LAST_ITL_GAUGE, WORKER_LAST_TTFT_GAUGE};
 use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::protocols::ActiveLoad;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
+use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
+use prometheus::{IntGaugeVec, Opts, Registry};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
+
+/// Worker type label values for Prometheus metrics
+pub const WORKER_TYPE_PREFILL: &str = "prefill";
+pub const WORKER_TYPE_DECODE: &str = "decode";
+
+/// Global Prometheus gauge for active decode blocks per worker (labels: worker_id, dp_rank, worker_type)
+/// This is shared across all KvWorkerMonitor instances.
+pub static WORKER_ACTIVE_DECODE_BLOCKS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::WORKER_ACTIVE_DECODE_BLOCKS
+            ),
+            "Active KV cache decode blocks per worker",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_active_decode_blocks gauge")
+});
+
+/// Global Prometheus gauge for active prefill tokens per worker (labels: worker_id, dp_rank, worker_type)
+/// This is shared across all KvWorkerMonitor instances.
+pub static WORKER_ACTIVE_PREFILL_TOKENS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::WORKER_ACTIVE_PREFILL_TOKENS
+            ),
+            "Active prefill tokens queued per worker",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_active_prefill_tokens gauge")
+});
+
+/// Register the global worker load Prometheus metrics with the given registry.
+///
+/// This should be called once during HTTP service setup to expose the worker load
+/// metrics via the `/metrics` endpoint.
+///
+/// # Errors
+/// Returns an error if the metrics are already registered with the registry.
+pub fn register_worker_load_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(WORKER_ACTIVE_DECODE_BLOCKS_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_ACTIVE_PREFILL_TOKENS_GAUGE.clone()))?;
+    Ok(())
+}
 
 /// Scale factor for storing f64 thresholds as u32 (10000 = 4 decimal places)
 const THRESHOLD_SCALE: u32 = 10000;
@@ -83,9 +135,19 @@ impl WorkerLoadState {
 ///
 /// Cloning shares state via internal Arc-wrapped fields. This allows multiple pipelines
 /// (e.g., chat and completions) to share the same monitor instance.
+///
+/// Prometheus metrics are exposed via the global gauges [`WORKER_ACTIVE_DECODE_BLOCKS_GAUGE`]
+/// and [`WORKER_ACTIVE_PREFILL_TOKENS_GAUGE`], which should be registered with the HTTP
+/// service's Prometheus registry using [`register_worker_load_metrics`].
+///
+/// In disaggregated mode, use `set_prefill_client` to register the prefill endpoint for
+/// proper TTFT metric cleanup when prefill workers are removed.
 #[derive(Clone)]
 pub struct KvWorkerMonitor {
+    /// Decode endpoint client (used for ITL cleanup and busy detection)
     client: Client,
+    /// Optional prefill endpoint client (used for TTFT cleanup in disaggregated mode)
+    prefill_client: Arc<RwLock<Option<Client>>>,
     worker_load_states: Arc<RwLock<HashMap<u64, WorkerLoadState>>>,
     /// Active decode blocks threshold stored as parts-per-10000 (e.g., 8500 = 0.85)
     active_decode_blocks_threshold: Arc<AtomicU32>,
@@ -103,6 +165,12 @@ impl KvWorkerMonitor {
     ///
     /// Both thresholds can be dynamically updated via `set_active_decode_blocks_threshold()` and
     /// `set_active_prefill_tokens_threshold()`.
+    ///
+    /// Prometheus metrics are exposed via the global gauges and should be registered
+    /// using [`register_worker_load_metrics`] during HTTP service setup.
+    ///
+    /// For disaggregated mode, call `set_prefill_client` after creation to enable
+    /// proper TTFT metric cleanup when prefill workers are removed.
     pub fn new(
         client: Client,
         active_decode_blocks_threshold: f64,
@@ -110,6 +178,7 @@ impl KvWorkerMonitor {
     ) -> Self {
         Self {
             client,
+            prefill_client: Arc::new(RwLock::new(None)),
             worker_load_states: Arc::new(RwLock::new(HashMap::new())),
             active_decode_blocks_threshold: Arc::new(AtomicU32::new(
                 Self::active_decode_blocks_threshold_to_scaled(active_decode_blocks_threshold),
@@ -119,6 +188,20 @@ impl KvWorkerMonitor {
             )),
             started: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Set the prefill client for disaggregated mode.
+    ///
+    /// This enables monitoring of prefill endpoint instances for TTFT metric cleanup.
+    /// In disaggregated mode, TTFT metrics are attributed to prefill workers, so we need
+    /// to watch the prefill endpoint to clean up TTFT gauges when prefill workers disappear.
+    ///
+    /// This method can be called after `start_monitoring` - the monitoring loop will
+    /// pick up the prefill client on its next iteration.
+    pub fn set_prefill_client(&self, prefill_client: Client) {
+        let mut guard = self.prefill_client.write().unwrap();
+        *guard = Some(prefill_client);
+        tracing::debug!("KvWorkerMonitor: prefill client registered for TTFT cleanup");
     }
 
     /// Convert a f64 active decode blocks threshold (0.0-1.0) to scaled u32 for atomic storage.
@@ -185,30 +268,78 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
         // Watch for runtime config updates from model deployment cards via discovery interface
         let discovery = component.drt().discovery();
-        let discovery_stream = discovery
+        let discovery_stream = match discovery
             .list_and_watch(DiscoveryQuery::AllModels, Some(cancellation_token.clone()))
-            .await?;
+            .await
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::error!("KvWorkerMonitor: failed to create discovery stream: {}", e);
+                // Reset started flag so retry can work
+                self.started.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
         let mut config_events_rx =
             watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
                 card.runtime_config
             });
 
         // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
-        let mut kv_metrics_rx =
-            EventSubscriber::for_namespace(component.namespace(), KV_METRICS_SUBJECT)
-                .await?
-                .typed::<ActiveLoad>();
+        // This is optional - if NATS isn't available, we skip KV metrics but still do TTFT/ITL cleanup
+        let kv_metrics_rx = match EventSubscriber::for_namespace(
+            component.namespace(),
+            KV_METRICS_SUBJECT,
+        )
+        .await
+        {
+            Ok(sub) => Some(sub.typed::<ActiveLoad>()),
+            Err(e) => {
+                tracing::warn!(
+                    "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
+                    e
+                );
+                None
+            }
+        };
+
+        // Watch decode endpoint instances for cleanup (ITL metrics)
+        let mut decode_instances_rx = self.client.instance_avail_watcher();
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
+        let prefill_client_holder = self.prefill_client.clone();
         let active_decode_blocks_threshold = self.active_decode_blocks_threshold.clone();
         let active_prefill_tokens_threshold = self.active_prefill_tokens_threshold.clone();
 
         // Spawn background monitoring task
         tokio::spawn(async move {
+            let mut kv_metrics_rx = kv_metrics_rx; // Move into async block
             let mut previous_busy_instances = Vec::new(); // Track previous state
 
+            // Track decode worker IDs (for ITL cleanup)
+            let mut known_decode_workers: std::collections::HashSet<u64> =
+                decode_instances_rx.borrow().iter().copied().collect();
+
+            // Track prefill worker IDs (for TTFT cleanup in disaggregated mode)
+            let mut known_prefill_workers: std::collections::HashSet<u64> =
+                std::collections::HashSet::new();
+            let mut prefill_instances_rx: Option<tokio::sync::watch::Receiver<Vec<u64>>> = None;
+
+            let mut known_worker_dp_ranks: HashMap<u64, std::collections::HashSet<u32>> =
+                HashMap::new();
+
             loop {
+                // Create a future that either reads from kv_metrics or pends forever if unavailable
+                let kv_event_future = async {
+                    if let Some(ref mut rx) = kv_metrics_rx {
+                        rx.next().await
+                    } else {
+                        // If no subscriber, pend forever (this branch is effectively disabled)
+                        std::future::pending().await
+                    }
+                };
+
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
                         tracing::debug!("Worker monitoring cancelled");
@@ -219,12 +350,50 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     _ = config_events_rx.changed() => {
                         let runtime_configs = config_events_rx.borrow().clone();
 
+                        // Find workers that are being removed (not in runtime_configs anymore)
+                        let removed_workers: Vec<u64> = known_worker_dp_ranks
+                            .keys()
+                            .filter(|id| !runtime_configs.contains_key(id))
+                            .copied()
+                            .collect();
+
+                        // Clean up Prometheus metrics for removed workers
+                        for worker_id in &removed_workers {
+                            if let Some(dp_ranks) = known_worker_dp_ranks.remove(worker_id) {
+                                let worker_id_str = worker_id.to_string();
+                                for dp_rank in dp_ranks {
+                                    let dp_rank_str = dp_rank.to_string();
+                                    // Clean up load metrics
+                                    let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
+                                        .remove_label_values(&[&worker_id_str, &dp_rank_str]);
+                                    let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
+                                        .remove_label_values(&[&worker_id_str, &dp_rank_str]);
+                                    // Clean up timing metrics (TTFT/ITL per worker)
+                                    let _ = WORKER_LAST_TTFT_GAUGE
+                                        .remove_label_values(&[&worker_id_str, &dp_rank_str]);
+                                    let _ = WORKER_LAST_ITL_GAUGE
+                                        .remove_label_values(&[&worker_id_str, &dp_rank_str]);
+                                }
+                                tracing::debug!(
+                                    "Removed Prometheus metrics for worker {}",
+                                    worker_id
+                                );
+                            }
+                        }
+
                         let mut states = worker_load_states.write().unwrap();
                         states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
 
-                        // Update worker load states with total blocks for all dp_ranks
+                        // Update worker load states and known_worker_dp_ranks for all workers
+                        // This ensures we track workers from MDCs even if they don't publish ActiveLoad
                         for (lease_id, runtime_config) in runtime_configs.iter() {
                             let state = states.entry(*lease_id).or_default();
+
+                            // Track dp_ranks for this worker (for cleanup when worker disappears)
+                            let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
+                            for dp_rank in 0..runtime_config.data_parallel_size {
+                                dp_ranks_set.insert(dp_rank);
+                            }
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
                             if let Some(total_blocks) = runtime_config.total_kv_blocks {
@@ -235,8 +404,10 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
                     }
 
-                    // Handle KV metrics updates (ActiveLoad)
-                    kv_event = kv_metrics_rx.next() => {
+                    // Handle KV metrics updates (ActiveLoad) - only if subscriber is available
+                    // Note: Prometheus gauges are updated directly by sequence.rs (router's own bookkeeping)
+                    // This branch only updates WorkerLoadState for busy detection thresholds
+                    kv_event = kv_event_future => {
                         let Some(event_result) = kv_event else {
                             tracing::debug!("KV metrics stream closed");
                             break;
@@ -250,7 +421,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let worker_id = active_load.worker_id;
                         let dp_rank = active_load.dp_rank;
 
-                        // Update worker load state per dp_rank
+                        // Track known worker/dp_rank combinations for cleanup
+                        known_worker_dp_ranks
+                            .entry(worker_id)
+                            .or_default()
+                            .insert(dp_rank);
+
+                        // Update worker load state per dp_rank (for busy detection only)
+                        // Note: Prometheus gauges are updated directly by sequence.rs
                         let mut states = worker_load_states.write().unwrap();
                         let state = states.entry(worker_id).or_default();
 
@@ -285,6 +463,91 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             tracing::debug!("Busy instances changed: {:?}", busy_instances);
                             client.update_free_instances(&busy_instances);
                             previous_busy_instances = busy_instances;
+                        }
+                    }
+
+                    // Handle decode endpoint instance changes (for ITL and decode metrics cleanup)
+                    _ = decode_instances_rx.changed() => {
+                        let current_instances: std::collections::HashSet<u64> =
+                            decode_instances_rx.borrow().iter().copied().collect();
+
+                        // Find decode workers that disappeared
+                        let removed_workers: Vec<u64> = known_decode_workers
+                            .difference(&current_instances)
+                            .copied()
+                            .collect();
+
+                        if !removed_workers.is_empty() {
+                            // Clean up metrics for removed decode workers (with worker_type=decode label)
+                            for worker_id in &removed_workers {
+                                let worker_id_str = worker_id.to_string();
+                                let _ = WORKER_LAST_ITL_GAUGE
+                                    .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_DECODE]);
+                                let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
+                                    .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_DECODE]);
+                                let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
+                                    .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_DECODE]);
+                                tracing::debug!(
+                                    "Cleaned up metrics for removed decode worker {}",
+                                    worker_id
+                                );
+                            }
+                        }
+
+                        known_decode_workers = current_instances;
+                    }
+
+                    // Handle prefill endpoint instance changes (for TTFT and prefill metrics cleanup in disaggregated mode)
+                    _ = async {
+                        if let Some(ref mut rx) = prefill_instances_rx {
+                            rx.changed().await
+                        } else {
+                            // No prefill watcher yet, pend forever
+                            std::future::pending().await
+                        }
+                    } => {
+                        if let Some(ref rx) = prefill_instances_rx {
+                            let current_instances: std::collections::HashSet<u64> =
+                                rx.borrow().iter().copied().collect();
+
+                            // Find prefill workers that disappeared
+                            let removed_workers: Vec<u64> = known_prefill_workers
+                                .difference(&current_instances)
+                                .copied()
+                                .collect();
+
+                            if !removed_workers.is_empty() {
+                                // Clean up metrics for removed prefill workers (with worker_type=prefill label)
+                                for worker_id in &removed_workers {
+                                    let worker_id_str = worker_id.to_string();
+                                    let _ = WORKER_LAST_TTFT_GAUGE
+                                        .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_PREFILL]);
+                                    let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
+                                        .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_PREFILL]);
+                                    let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
+                                        .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_PREFILL]);
+                                    tracing::debug!(
+                                        "Cleaned up metrics for removed prefill worker {}",
+                                        worker_id
+                                    );
+                                }
+                            }
+
+                            known_prefill_workers = current_instances;
+                        }
+                    }
+
+                    // Periodically check if a prefill client has been registered
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)), if prefill_instances_rx.is_none() => {
+                        let guard = prefill_client_holder.read().unwrap();
+                        if let Some(ref prefill_client) = *guard {
+                            let rx = prefill_client.instance_avail_watcher();
+                            known_prefill_workers = rx.borrow().iter().copied().collect();
+                            prefill_instances_rx = Some(rx);
+                            tracing::info!(
+                                "KvWorkerMonitor: prefill endpoint watcher activated, tracking {} workers",
+                                known_prefill_workers.len()
+                            );
                         }
                     }
                 }

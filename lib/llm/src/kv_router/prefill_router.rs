@@ -20,8 +20,8 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
+    discovery::{ModelManager, WORKER_TYPE_PREFILL},
+    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, TrackedPushRouter},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
     protocols::common::timing::{RequestPhase, RequestTracker},
@@ -49,8 +49,8 @@ pub enum PrefillError {
 enum InnerPrefillRouter {
     /// KV-aware routing using KvPushRouter
     KvRouter(Arc<KvPushRouter>),
-    /// Simple routing (RoundRobin, Random, Direct)
-    SimpleRouter(Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>),
+    /// Simple routing (RoundRobin, Random, Direct) with metrics tracking
+    SimpleRouter(Arc<TrackedPushRouter>),
 }
 
 impl InnerPrefillRouter {
@@ -104,6 +104,8 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    /// Model name used to look up the worker monitor for prefill client registration
+    model_name: String,
 }
 
 impl PrefillRouter {
@@ -120,6 +122,7 @@ impl PrefillRouter {
             cancel_token: CancellationToken::new(),
             router_mode,
             enforce_disagg,
+            model_name: String::new(), // Not used for disabled router
         })
     }
 
@@ -130,6 +133,7 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         enforce_disagg: bool,
+        model_name: String,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -141,6 +145,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
+            model_name,
         });
 
         // Spawn background task to wait for activation
@@ -194,13 +199,23 @@ impl PrefillRouter {
             .await?;
 
         let inner_router = if self.router_mode.is_kv_routing() {
-            // Create KV chooser using the endpoint
+            // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
-                .kv_chooser_for(&endpoint, kv_cache_block_size, kv_router_config)
+                .kv_chooser_for(
+                    &endpoint,
+                    kv_cache_block_size,
+                    kv_router_config,
+                    WORKER_TYPE_PREFILL,
+                )
                 .await?;
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
+
+            // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
+            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+                monitor.set_prefill_client(client.clone());
+            }
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
@@ -217,6 +232,11 @@ impl PrefillRouter {
             // Create client for simple router
             let client = endpoint.client().await?;
 
+            // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
+            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+                monitor.set_prefill_client(client.clone());
+            }
+
             // Create simple push router with the frontend's router mode
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
                 client,
@@ -226,7 +246,9 @@ impl PrefillRouter {
             )
             .await?;
 
-            InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
+            // Wrap in TrackedPushRouter for metrics (worker_type=prefill)
+            let tracked_router = TrackedPushRouter::new(push_router, WORKER_TYPE_PREFILL);
+            InnerPrefillRouter::SimpleRouter(Arc::new(tracked_router))
         };
 
         // Set the router (ignore error if already set)
@@ -520,6 +542,12 @@ impl
                     router.select_next_worker();
                 }
 
+                // Record prefill worker on the main request's tracker for metrics
+                // (The cloned prefill_req has its own tracker, so we need to record here)
+                if let Some(ref tracker) = req.tracker {
+                    tracker.record_prefill_worker_with_rank(worker_id, dp_rank);
+                }
+
                 let routing = prefill_req.routing_mut();
                 routing.prefill_worker_id = Some(worker_id);
                 routing.dp_rank = Some(dp_rank);
@@ -544,9 +572,18 @@ impl
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
-                self.call_prefill(prefill_context)
-                    .await
-                    .map(|(result, worker_id)| (Some(result), worker_id, None))
+                let result = self.call_prefill(prefill_context).await;
+
+                // Record prefill worker on the main request's tracker for metrics
+                // (call_prefill returns the worker_id from the prefill routing)
+                if let Ok((_, Some(worker_id))) = &result {
+                    if let Some(ref tracker) = req.tracker {
+                        // Use dp_rank=0 as we don't have it in this path
+                        tracker.record_prefill_worker_with_rank(*worker_id, 0);
+                    }
+                }
+
+                result.map(|(result, worker_id)| (Some(result), worker_id, None))
             }
         }
         .instrument(tracing::info_span!("prefill_routing"))

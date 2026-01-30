@@ -23,6 +23,7 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
+    discovery::WORKER_TYPE_DECODE,
     entrypoint::{self, EngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
@@ -392,6 +393,7 @@ impl ModelWatcher {
                             &endpoint,
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config),
+                            WORKER_TYPE_DECODE, // This is the decode router
                         )
                         .await?,
                 )
@@ -404,9 +406,10 @@ impl ModelWatcher {
 
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
+            let model_name = card.name().to_string();
             let prefill_chooser = self
                 .manager
-                .register_prefill_router(card.name().to_string())
+                .register_prefill_router(model_name.clone())
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
                     let mut prefill_config = self.router_config.kv_router_config;
@@ -419,33 +422,28 @@ impl ModelWatcher {
                         card.kv_cache_block_size,
                         Some(prefill_config),
                         self.router_config.enforce_disagg,
+                        model_name.clone(), // Pass model name for worker monitor lookup
                     )
                 });
 
-            // Get or create the worker monitor for this model
-            // This allows dynamic threshold updates via the ModelManager
-            // Create monitor if either threshold is configured
-            let worker_monitor = if self.router_config.active_decode_blocks_threshold.is_some()
-                || self.router_config.active_prefill_tokens_threshold.is_some()
-            {
-                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
-                let active_decode_blocks = self
-                    .router_config
-                    .active_decode_blocks_threshold
-                    .unwrap_or(1.0);
-                let active_prefill_tokens = self
-                    .router_config
-                    .active_prefill_tokens_threshold
-                    .unwrap_or(1000000);
-                Some(self.manager.get_or_create_worker_monitor(
-                    card.name(),
-                    client.clone(),
-                    active_decode_blocks,
-                    active_prefill_tokens,
-                ))
-            } else {
-                None
-            };
+            // Get or create the worker monitor for this model.
+            // Always create the monitor for Prometheus metrics (active_decode_blocks, active_prefill_tokens,
+            // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
+            // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
+            let active_decode_blocks = self
+                .router_config
+                .active_decode_blocks_threshold
+                .unwrap_or(1.0);
+            let active_prefill_tokens = self
+                .router_config
+                .active_prefill_tokens_threshold
+                .unwrap_or(1000000);
+            let worker_monitor = Some(self.manager.get_or_create_worker_monitor(
+                card.name(),
+                client.clone(),
+                active_decode_blocks,
+                active_prefill_tokens,
+            ));
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {

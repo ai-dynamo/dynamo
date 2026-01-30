@@ -332,6 +332,7 @@ impl ModelManager {
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        worker_type: &'static str,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let endpoint_id = endpoint.id();
 
@@ -381,6 +382,7 @@ impl ModelManager {
             Some(selector),
             kv_router_config,
             instance_id,
+            worker_type,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
