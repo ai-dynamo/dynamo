@@ -177,7 +177,7 @@ For detailed etcd configuration options beyond `etcd.enabled`, please refer to t
 
 ## 📚 Additional Resources
 
-- [Dynamo Kubernetes Platform Installation Guide](../../../../docs/kubernetes/installation_guide.md)
+- [Dynamo Cloud Deployment Installation Guide](../../../../docs/kubernetes/installation_guide.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
