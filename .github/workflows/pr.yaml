@@ -65,7 +65,7 @@ jobs:
 
 #   backend-status-check:
 #     runs-on: ubuntu-latest
-#     needs: [changed-files, vllm-cuda12-amd64, sglang-cuda12-amd64, trtllm-cuda12-amd64, operator]  # THIS list determines blocking jobs
+#     needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
 #     if: always()
 #     steps:
 #       - name: "Check all dependent jobs"
@@ -176,15 +176,15 @@ jobs:
 # FRAMEWORK PIPELINES (Build → Test → Copy)
 # ============================================================================
   # ============================================================================
-  # VLLM PIPELINES
+  # VLLM PIPELINE
   # ============================================================================
-  vllm-cuda12-amd64:
+  vllm-pipeline:
     needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    uses: ./.github/workflows/flavor-matrix.yml
     with:
       framework: vllm
-      platform: amd64
-      cuda_version: '12.9'
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
@@ -196,70 +196,16 @@ jobs:
       push_image: true
     secrets: inherit
 
-  vllm-cuda12-arm64:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    with:
-      framework: vllm
-      platform: arm64
-      cuda_version: '12.9'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_image: true
-      run_tests: true
-      copy_to_acr: false
-      push_image: true
-    secrets: inherit
-
-  vllm-cuda13-amd64:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    with:
-      framework: vllm
-      platform: amd64
-      cuda_version: '13.0'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_image: true
-      run_tests: true
-      copy_to_acr: true
-      push_image: true
-    secrets: inherit
-
-  vllm-cuda13-arm64:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    with:
-      framework: vllm
-      platform: arm64
-      cuda_version: '13.0'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_image: true
-      run_tests: true
-      copy_to_acr: false
-      push_image: true
-    secrets: inherit
-
   # ============================================================================
-  # SGLANG PIPELINES
+  # SGLANG PIPELINE
   # ============================================================================
-  sglang-cuda12-amd64:
+  sglang-pipeline:
     needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    uses: ./.github/workflows/flavor-matrix.yml
     with:
       framework: sglang
-      platform: amd64
-      cuda_version: '12.9'
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
@@ -269,64 +215,16 @@ jobs:
       copy_to_acr: true
     secrets: inherit
 
-  sglang-cuda12-arm64:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    with:
-      framework: sglang
-      platform: arm64
-      cuda_version: '12.9'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_tests: true
-      copy_to_acr: false
-    secrets: inherit
-
-  sglang-cuda13-amd64:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    with:
-      framework: sglang
-      platform: amd64
-      cuda_version: '13.0'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_tests: true
-      copy_to_acr: true
-    secrets: inherit
-
-  sglang-cuda13-arm64:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    with:
-      framework: sglang
-      platform: arm64
-      cuda_version: '13.0'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_tests: true
-      copy_to_acr: false
-    secrets: inherit
-
   # ============================================================================
-  # TRTLLM PIPELINES
+  # TRTLLM PIPELINE
   # ============================================================================
-  trtllm-cuda12-amd64:
+  trtllm-pipeline:
     needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    uses: ./.github/workflows/flavor-matrix.yml
     with:
       framework: trtllm
-      platform: amd64
-      cuda_version: '12.9'
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
@@ -334,22 +232,6 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: true
       copy_to_acr: true
-    secrets: inherit
-
-  trtllm-cuda12-arm64:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    with:
-      framework: trtllm
-      platform: arm64
-      cuda_version: '12.9'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_tests: true
-      copy_to_acr: false
     secrets: inherit
 
 
@@ -361,7 +243,7 @@ jobs:
   deploy-operator:
     runs-on: prod-default-small-v2
     if: needs.changed-files.outputs.core == 'true'
-    needs: [changed-files, operator, vllm-cuda12-amd64, sglang-cuda12-amd64, trtllm-cuda12-amd64]
+    needs: [changed-files, operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     outputs:
@@ -434,7 +316,7 @@ jobs:
   deploy-test-vllm:
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     runs-on: prod-default-small-v2
-    needs: [deploy-operator, vllm-cuda12-amd64]
+    needs: [deploy-operator, vllm-pipeline]
     permissions:
       contents: read
     strategy:
@@ -460,7 +342,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-cuda12-amd64.outputs.image_tag }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
           model_name: "Qwen/Qwen3-0.6B"
           test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
 
@@ -475,7 +357,7 @@ jobs:
   deploy-test-vllm-disagg-router:
     runs-on:  prod-default-small-v2
     # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [changed-files, deploy-operator, vllm-cuda12-amd64]
+    needs: [changed-files, deploy-operator, vllm-pipeline]
     permissions:
       contents: read
     strategy:
@@ -498,7 +380,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-cuda12-amd64.outputs.image_tag }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
           model_name: "Qwen/Qwen3-0.6B"
           test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
 
@@ -507,7 +389,7 @@ jobs:
     runs-on: prod-default-small-v2
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [changed-files, deploy-operator, sglang-cuda12-amd64]
+    needs: [changed-files, deploy-operator, sglang-pipeline]
     permissions:
       contents: read
     strategy:
@@ -531,7 +413,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.sglang-cuda12-amd64.outputs.image_tag }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
           model_name: "Qwen/Qwen3-0.6B"
           test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
 
@@ -540,7 +422,7 @@ jobs:
     runs-on: prod-default-small-v2
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [changed-files, deploy-operator, trtllm-cuda12-amd64]
+    needs: [changed-files, deploy-operator, trtllm-pipeline]
     permissions:
       contents: read
     strategy:
@@ -566,7 +448,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.trtllm-cuda12-amd64.outputs.image_tag }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda12-amd64
           model_name: "Qwen/Qwen3-0.6B"
           test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
 
@@ -579,7 +461,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-cuda12-amd64, vllm-cuda12-arm64, vllm-cuda13-amd64, vllm-cuda13-arm64, sglang-cuda12-amd64, sglang-cuda12-arm64, sglang-cuda13-amd64, sglang-cuda13-arm64, trtllm-cuda12-amd64, trtllm-cuda12-arm64, operator, changed-files]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
