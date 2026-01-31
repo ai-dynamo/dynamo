@@ -46,8 +46,6 @@ typedef struct {
     bool is_disaggregated;
     uint64_t prefill_worker_id;
     uint64_t decode_worker_id;
-    uint32_t decode_dp_rank;
-    uint32_t decode_overlap_blocks;
     uint32_t *token_ids;
     size_t token_count;
 } CRoutingResult;
@@ -62,7 +60,7 @@ query_router_result_t create_routers(const char *namespace_c_str,
                                      uint32_t prefill_timeout_secs,
                                      RouterHandles **out_handle);
 
-query_router_result_t route_chat_request(RouterHandles *handle,
+query_router_result_t route_request(RouterHandles *handle,
                                          const char *request_json,
                                          CRoutingResult *out_result);
 
@@ -515,9 +513,9 @@ func (k *KVAwareScorer) callDynamoRouter(
 	var result C.CRoutingResult
 
 	// Call the router
-	rc := C.route_chat_request(router, cRequestJSON, &result)
+	rc := C.route_request(router, cRequestJSON, &result)
 	if rc != C.QUERY_ROUTER_OK {
-		return "", "", nil, fmt.Errorf("route_chat_request failed with code %d", rc)
+		return "", "", nil, fmt.Errorf("route_request failed with code %d", rc)
 	}
 
 	// Copy tokens into Go memory
@@ -542,8 +540,7 @@ func (k *KVAwareScorer) callDynamoRouter(
 	}
 	logger.V(logutil.DEFAULT).Info("Worker selection completed",
 		"workerID", workerIDStr, "prefillWorkerID", prefillWorkerIDStr,
-		"isDisaggregated", result.is_disaggregated, "tokenCount", count,
-		"dpRank", result.decode_dp_rank, "overlapBlocks", result.decode_overlap_blocks)
+		"isDisaggregated", result.is_disaggregated, "tokenCount", count)
 
 	return workerIDStr, prefillWorkerIDStr, tokens64, nil
 }

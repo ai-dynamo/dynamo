@@ -189,20 +189,6 @@ impl NvExt {
     pub fn builder() -> NvExtBuilder {
         NvExtBuilder::default()
     }
-
-    /// Apply resolved routing hints to this NvExt.
-    /// This updates the routing fields with the resolved values.
-    pub fn apply_resolved_hints(&mut self, hints: &ResolvedRoutingHints) {
-        if let Some(id) = hints.backend_instance_id {
-            self.backend_instance_id = Some(id);
-        }
-        if let Some(id) = hints.decode_worker_id {
-            self.decode_worker_id = Some(id);
-        }
-        if let Some(id) = hints.prefill_worker_id {
-            self.prefill_worker_id = Some(id);
-        }
-    }
 }
 
 fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {

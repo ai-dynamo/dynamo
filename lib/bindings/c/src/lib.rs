@@ -393,22 +393,6 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) ->
     }
 }
 
-/// C-compatible result of a worker query (worker ID and dp_rank)
-///
-/// NOTE: EPP patches need to be updated to:
-/// 1. Add `DpRankHeader = "x-dp-rank"` constant
-/// 2. Set header: `req.Headers[DpRankHeader] = fmt.Sprintf("%d", decode_result.dp_rank)`
-/// 3. Read header in callAddRequest: parse dp_rank from `req.Headers[DpRankHeader]`
-/// 4. Pass parsed dp_rank to `dynamo_router_add_request` instead of hardcoded 0
-#[repr(C)]
-#[derive(Debug, Clone, Default)]
-pub struct CWorkerQueryResult {
-    /// The selected worker ID
-    pub worker_id: u64,
-    /// Data parallel rank (0 if not applicable)
-    pub dp_rank: u32,
-}
-
 /// Result of tokenization (C-compatible)
 #[repr(C)]
 pub struct CTokenizedResult {
@@ -434,10 +418,6 @@ pub struct CRoutingResult {
     pub prefill_worker_id: u64,
     /// Decode worker ID
     pub decode_worker_id: u64,
-    /// Decode worker's data parallel rank
-    pub decode_dp_rank: u32,
-    /// Number of overlapping blocks on decode worker
-    pub decode_overlap_blocks: u32,
     /// Token IDs (needed for add_request callback)
     pub token_ids: *mut u32,
     /// Number of tokens in the request
@@ -450,8 +430,6 @@ impl Default for CRoutingResult {
             is_disaggregated: false,
             prefill_worker_id: 0,
             decode_worker_id: 0,
-            decode_dp_rank: 0,
-            decode_overlap_blocks: 0,
             token_ids: ptr::null_mut(),
             token_count: 0,
         }
@@ -480,6 +458,54 @@ pub struct RouterHandles {
     runtime: Runtime,
     /// Preprocessor for tokenization and template application (fetched via discovery)
     preprocessor: Option<Arc<OpenAIPreprocessor>>,
+}
+
+impl RouterHandles {
+    /// Query optimal prefill worker for a request.
+    /// Returns (worker_id, dp_rank) on success.
+    async fn query_prefill_worker(
+        &self,
+        tokens: &[u32],
+        update_states: bool,
+    ) -> Result<(u64, u32), QueryRouterResult> {
+        self.prefill_router
+            .query_prefill_worker(tokens, update_states)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, "Prefill query failed");
+                QueryRouterResult::ErrQueryFailed
+            })
+    }
+
+    /// Query optimal decode worker for a request.
+    /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_weight=0
+    /// (since KV cache is being transferred from prefill, not reused).
+    /// Returns (worker, overlap_blocks) on success.
+    async fn query_decode_worker(
+        &self,
+        tokens: &[u32],
+        update_states: bool,
+        is_disaggregated: bool,
+    ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
+        // For decode phase in disaggregated mode, use overlap_score_weight=0
+        // This matches prefill_router.rs line 622-625
+        let config_override = if is_disaggregated {
+            Some(RouterConfigOverride {
+                overlap_score_weight: Some(0.0),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
+        self.decode_router
+            .find_best_match(None, tokens, config_override.as_ref(), update_states)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, "Decode query failed");
+                QueryRouterResult::ErrQueryFailed
+            })
+    }
 }
 
 /// Opaque handle for the router pair
@@ -718,116 +744,6 @@ pub unsafe extern "C" fn create_routers(
     }
 }
 
-/// Query optimal decode worker for a request.
-///
-/// This queries the decode/aggregated KvRouter to find the best worker based on
-/// KV cache overlap and load balancing. Use this for both aggregated mode and
-/// the decode phase of disaggregated mode.
-///
-/// For disaggregated decode, set `for_decode_phase` to true to use overlap_score_weight=0
-/// (since KV cache is being transferred, not reused).
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-/// - `token_ids` must point to `token_count` valid u32 values
-/// - `out_result` must be a valid pointer
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn query_decode(
-    handle: RouterHandlesPtr,
-    token_ids: *const u32,
-    token_count: usize,
-    update_states: bool,
-    for_decode_phase: bool,
-    out_result: *mut CWorkerQueryResult,
-) -> QueryRouterResult {
-    if handle.is_null() || token_ids.is_null() || out_result.is_null() {
-        return QueryRouterResult::ErrInvalidParam;
-    }
-
-    let handles = unsafe { &*handle };
-    let tokens = unsafe { std::slice::from_raw_parts(token_ids, token_count) };
-
-    let result = handles.runtime.secondary().block_on(async {
-        // For decode phase in disaggregated mode, use overlap_score_weight=0
-        let config_override = if for_decode_phase {
-            let mut override_cfg = RouterConfigOverride::default();
-            override_cfg.overlap_score_weight = Some(0.0);
-            Some(override_cfg)
-        } else {
-            None
-        };
-
-        handles
-            .decode_router
-            .find_best_match(None, tokens, config_override.as_ref(), update_states)
-            .await
-    });
-
-    match result {
-        Ok((worker, _overlap)) => {
-            unsafe {
-                *out_result = CWorkerQueryResult {
-                    worker_id: worker.worker_id,
-                    dp_rank: worker.dp_rank,
-                }
-            };
-            QueryRouterResult::Ok
-        }
-        Err(e) => {
-            tracing::error!(error = ?e, "Decode query failed");
-            QueryRouterResult::ErrQueryFailed
-        }
-    }
-}
-
-/// Query optimal prefill worker for a request (disaggregated mode only).
-///
-/// This queries the prefill router to find the best prefill worker.
-/// Only call this when `is_disaggregated()` returns true.
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-/// - `token_ids` must point to `token_count` valid u32 values
-/// - `out_worker_id` must be a valid pointer
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn query_prefill(
-    handle: RouterHandlesPtr,
-    token_ids: *const u32,
-    token_count: usize,
-    update_states: bool,
-    out_worker_id: *mut u64,
-) -> QueryRouterResult {
-    if handle.is_null() || token_ids.is_null() || out_worker_id.is_null() {
-        return QueryRouterResult::ErrInvalidParam;
-    }
-
-    let handles = unsafe { &*handle };
-    let tokens = unsafe { std::slice::from_raw_parts(token_ids, token_count) };
-
-    // Check if prefill router is activated
-    if !handles.prefill_router.is_activated() {
-        return QueryRouterResult::ErrDisaggEnforced;
-    }
-
-    let result = handles.runtime.secondary().block_on(async {
-        handles
-            .prefill_router
-            .query_prefill_worker(tokens, update_states)
-            .await
-    });
-
-    match result {
-        Ok((worker_id, _dp_rank)) => {
-            unsafe { *out_worker_id = worker_id };
-            QueryRouterResult::Ok
-        }
-        Err(e) => {
-            tracing::error!(error = ?e, "Prefill query failed");
-            QueryRouterResult::ErrQueryFailed
-        }
-    }
-}
-
 /// Check if disaggregated mode is active
 ///
 /// # Safety
@@ -897,7 +813,7 @@ pub unsafe extern "C" fn add_request(
             };
 
             decode_router
-                .add_request(request_id_owned.clone(), &tokens, overlap_blocks, worker)
+                .add_request(request_id_owned.clone(), &tokens, overlap_blocks, None, worker)
                 .await;
 
             tracing::debug!(
@@ -1291,7 +1207,7 @@ pub unsafe extern "C" fn has_preprocessor(handle: RouterHandlesPtr) -> bool {
 /// - `request_json` must be a valid null-terminated C string containing JSON
 /// - `out_result` must be a valid pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn route_chat_request(
+pub unsafe extern "C" fn route_request(
     handle: RouterHandlesPtr,
     request_json: *const c_char,
     out_result: *mut CRoutingResult,
@@ -1349,47 +1265,19 @@ pub unsafe extern "C" fn route_chat_request(
     let token_count = tokens.len();
     let is_disaggregated = handles.prefill_router.is_activated();
 
-    // Query workers
+    // Query workers using internal methods
     let result = handles.runtime.secondary().block_on(async {
-        let mut prefill_worker_id: u64 = 0;
-
         // Query prefill worker if disaggregated
-        if is_disaggregated {
-            match handles
-                .prefill_router
-                .query_prefill_worker(tokens, true)
-                .await
-            {
-                Ok((worker_id, _dp_rank)) => {
-                    prefill_worker_id = worker_id;
-                }
-                Err(e) => {
-                    tracing::error!(error = ?e, "Prefill query failed");
-                    return Err(QueryRouterResult::ErrQueryFailed);
-                }
-            }
-        }
+        let prefill_worker_id = if is_disaggregated {
+            handles.query_prefill_worker(tokens, true).await?.0
+        } else {
+            0
+        };
 
         // Query decode worker
-        let config_override = if is_disaggregated {
-            let mut cfg = RouterConfigOverride::default();
-            cfg.overlap_score_weight = Some(0.0);
-            Some(cfg)
-        } else {
-            None
-        };
-
-        let (decode_worker, overlap_blocks) = match handles
-            .decode_router
-            .find_best_match(None, tokens, config_override.as_ref(), true)
-            .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::error!(error = ?e, "Decode query failed");
-                return Err(QueryRouterResult::ErrQueryFailed);
-            }
-        };
+        let (decode_worker, overlap_blocks) = handles
+            .query_decode_worker(tokens, true, is_disaggregated)
+            .await?;
 
         tracing::info!(
             is_disaggregated = is_disaggregated,
@@ -1404,7 +1292,7 @@ pub unsafe extern "C" fn route_chat_request(
     });
 
     match result {
-        Ok((prefill_worker_id, decode_worker, overlap_blocks)) => {
+        Ok((prefill_worker_id, decode_worker, _overlap_blocks)) => {
             // Allocate and copy token IDs for caller
             let token_vec: Vec<u32> = tokens.to_vec();
             let mut tokens_boxed = token_vec.into_boxed_slice();
@@ -1416,8 +1304,6 @@ pub unsafe extern "C" fn route_chat_request(
                     is_disaggregated,
                     prefill_worker_id,
                     decode_worker_id: decode_worker.worker_id,
-                    decode_dp_rank: decode_worker.dp_rank,
-                    decode_overlap_blocks: overlap_blocks,
                     token_ids: token_ptr,
                     token_count,
                 };
