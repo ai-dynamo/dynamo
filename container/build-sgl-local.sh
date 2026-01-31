@@ -209,10 +209,10 @@ CACHE_FROM=""
 CACHE_TO=""
 
 # Only use cache if --no-cache is not set
-# Using mode=min (default) instead of mode=max to only cache final image layers (much faster export)
+# Using mode=max to cache all intermediate stages for better rebuild performance
 if [[ -z "$NO_CACHE" ]]; then
     CACHE_FROM="--cache-from type=registry,ref=${CACHE_IMAGE}"
-    CACHE_TO="--cache-to type=registry,ref=${CACHE_IMAGE}"
+    CACHE_TO="--cache-to type=registry,ref=${CACHE_IMAGE},mode=max"
 fi
 
 # Build the image
