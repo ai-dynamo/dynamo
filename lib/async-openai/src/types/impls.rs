@@ -40,7 +40,7 @@ use super::{
     EmbeddingInput, FileInput, FilePurpose, FunctionName, Image, ImageInput, ImageModel,
     ImageResponseFormat, ImageSize, ImageUrl, ImagesResponse, ModerationInput, Prompt, Role, Stop,
     TimestampGranularity, VideoUrl,
-    responses::{CodeInterpreterContainer, Input, InputContent, Role as ResponsesRole},
+    // responses types now have their own impls in responses/impls.rs
 };
 
 /// for `impl_from!(T, Enum)`, implements
@@ -1056,50 +1056,4 @@ impl AsyncTryFrom<AddUploadPartRequest> for reqwest::multipart::Form {
 
 // end: types to multipart form
 
-impl Default for Input {
-    fn default() -> Self {
-        Self::Text("".to_string())
-    }
-}
-
-impl Default for InputContent {
-    fn default() -> Self {
-        Self::TextInput("".to_string())
-    }
-}
-
-impl From<String> for Input {
-    fn from(value: String) -> Self {
-        Input::Text(value)
-    }
-}
-
-impl From<&str> for Input {
-    fn from(value: &str) -> Self {
-        Input::Text(value.to_owned())
-    }
-}
-
-impl Default for ResponsesRole {
-    fn default() -> Self {
-        Self::User
-    }
-}
-
-impl From<String> for InputContent {
-    fn from(value: String) -> Self {
-        Self::TextInput(value)
-    }
-}
-
-impl From<&str> for InputContent {
-    fn from(value: &str) -> Self {
-        Self::TextInput(value.to_owned())
-    }
-}
-
-impl Default for CodeInterpreterContainer {
-    fn default() -> Self {
-        CodeInterpreterContainer::Id("".to_string())
-    }
-}
+// Responses API impls are now in responses/impls.rs
