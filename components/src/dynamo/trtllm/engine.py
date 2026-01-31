@@ -3,12 +3,14 @@
 
 import enum
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
 from tensorrt_llm import LLM, MultimodalEncoder
 from tensorrt_llm.llmapi.llm import BaseLLM
 
+from dynamo.prometheus_names import labels
 from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
@@ -129,10 +131,37 @@ class TensorRTLLMEngine:
 async def get_llm_engine(
     engine_args,
     disaggregation_mode: Optional[DisaggregationMode] = None,
+    component_gauges=None,
+    model_name: Optional[str] = None,
+    component_name: Optional[str] = None,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
+    """Get TensorRT-LLM engine instance with load time tracking.
+
+    Args:
+        engine_args: Engine configuration arguments.
+        disaggregation_mode: Optional disaggregation mode configuration.
+        component_gauges: Optional DynamoComponentGauges instance for recording load time.
+        model_name: Optional model name for metrics labeling.
+        component_name: Optional component name for metrics labeling (e.g., "backend", "prefill", "decode").
+    """
+    # Time engine initialization
+    start_time = time.time()
+
     engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
         await engine.initialize()
+        load_time = time.time() - start_time
+        logger.debug(f"TensorRT-LLM engine initialized in {load_time:.2f}s")
+
+        # Record model load time immediately after measurement
+        if component_gauges and model_name and component_name:
+            component_gauges.model_load_time.labels(
+                **{
+                    labels.MODEL: model_name,
+                    labels.COMPONENT: component_name,
+                }
+            ).set(load_time)
+
         yield engine
     except Exception as e:
         logging.error(f"Error in engine context: {e}")

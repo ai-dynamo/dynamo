@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import time
 
 import sglang as sgl
 import uvloop
@@ -13,6 +14,7 @@ import uvloop
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
+from dynamo.prometheus_names import labels
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
@@ -129,7 +131,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    # Time model loading
+    start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
+    load_time = time.time() - start_time
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -147,6 +152,17 @@ async def init(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
+
+    # Record model load time immediately after publisher setup (which creates the gauges)
+    if publisher.component_gauges:
+        # Use the component name from dynamo_args (e.g., "backend", "prefill", "decode")
+        publisher.component_gauges.model_load_time.labels(
+            **{
+                labels.MODEL: server_args.served_model_name,
+                labels.COMPONENT: dynamo_args.component,
+            }
+        ).set(load_time)
+        logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:

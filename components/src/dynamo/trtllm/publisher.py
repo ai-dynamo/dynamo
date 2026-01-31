@@ -32,10 +32,24 @@ from typing import Awaitable, Callable, Optional, Union
 
 import msgpack
 import zmq
+from prometheus_client import CollectorRegistry
 
+from dynamo.common.utils.prometheus import DynamoComponentMetrics
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.prometheus_names import labels
 
 logging.basicConfig(level=logging.DEBUG)
+
+# Create a dedicated registry for dynamo_component metrics
+# This ensures these metrics are isolated and can be exposed via their own callback
+DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
+
+# Create all Dynamo component gauges using the dedicated registry
+# This returns a bundle of gauges (active_decode_blocks, etc.)
+# Gauges are automatically initialized to 0 by the factory
+DYNAMO_COMPONENT_GAUGES = DynamoComponentMetrics.create_all(
+    registry=DYNAMO_COMPONENT_REGISTRY
+)
 
 # Use non-blocking RPC calls; control overhead with backoff sleeps.
 _STATS_TIMEOUT_SEC = 0.01
@@ -369,7 +383,12 @@ class Publisher:
             return
 
         # Publish initial metrics with 0 active blocks
+        # TRT-LLM doesn't use data parallelism currently (dp_rank="0")
         self.metrics_publisher.publish(None, 0)
+        DYNAMO_COMPONENT_GAUGES.total_blocks.labels(**{labels.DP_RANK: "0"}).set(0)
+        DYNAMO_COMPONENT_GAUGES.gpu_cache_usage_percent.labels(
+            **{labels.DP_RANK: "0"}
+        ).set(0.0)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -431,9 +450,23 @@ class Publisher:
 
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
+            kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-            # TRT-LLM doesn't use data parallelism currently (dp_rank=None)
+            # TRT-LLM doesn't use data parallelism currently (dp_rank=None for NATS, "0" for Prometheus)
             self.metrics_publisher.publish(None, kv_active_blocks)
+
+            # Publish Prometheus metrics
+            DYNAMO_COMPONENT_GAUGES.total_blocks.labels(**{labels.DP_RANK: "0"}).set(
+                kv_total_blocks
+            )
+
+            # Calculate and publish GPU cache usage percentage
+            gpu_cache_usage = (
+                kv_active_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
+            )
+            DYNAMO_COMPONENT_GAUGES.gpu_cache_usage_percent.labels(
+                **{labels.DP_RANK: "0"}
+            ).set(gpu_cache_usage)
 
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),

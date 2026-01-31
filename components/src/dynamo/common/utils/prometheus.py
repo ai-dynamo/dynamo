@@ -17,12 +17,13 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
 from dynamo._core import Endpoint
+from dynamo.prometheus_names import kvstats, labels, model_info, name_prefix
 
-# Import CollectorRegistry only for type hints to avoid importing prometheus_client at module load time.
+# Import CollectorRegistry and Gauge only for type hints to avoid importing prometheus_client at module load time.
 # prometheus_client must be imported AFTER set_prometheus_multiproc_dir() is called.
 # See main.py worker() function for detailed explanation.
 if TYPE_CHECKING:
-    from prometheus_client import CollectorRegistry
+    from prometheus_client import CollectorRegistry, Gauge
 
 
 def register_engine_metrics_callback(
@@ -66,12 +67,13 @@ def register_engine_metrics_callback(
 
     def get_expfmt() -> str:
         """Callback to return engine Prometheus metrics in exposition format"""
-        return get_prometheus_expfmt(
+        result = get_prometheus_expfmt(
             registry,
             metric_prefix_filters=metric_prefix_filters,
             exclude_prefixes=exclude_prefixes,
             add_prefix=add_prefix,
         )
+        return result
 
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
 
@@ -237,3 +239,167 @@ def get_prometheus_expfmt(
     except Exception as e:
         logging.error(f"Error getting metrics: {e}")
         return ""
+
+
+class DynamoComponentGauges:
+    """Bundle of Dynamo component Prometheus gauges.
+
+    This class holds references to all Dynamo component gauges for a specific registry.
+    Use DynamoComponentMetrics.create_all() to create an instance.
+
+    Attributes:
+        total_blocks: Gauge for tracking total KV cache blocks available.
+        gpu_cache_usage_percent: Gauge for tracking GPU cache usage percentage (0.0-1.0).
+        model_load_time: Gauge for tracking model load time in seconds.
+    """
+
+    def __init__(
+        self,
+        total_blocks: "Gauge",
+        gpu_cache_usage_percent: "Gauge",
+        model_load_time: "Gauge",
+    ):
+        self.total_blocks = total_blocks
+        self.gpu_cache_usage_percent = gpu_cache_usage_percent
+        self.model_load_time = model_load_time
+
+
+class DynamoComponentMetrics:
+    """Factory for creating Dynamo-scoped Prometheus metrics.
+
+    This class provides strongly-typed factory methods for creating Dynamo component metrics
+    that are stable across backend engine changes. All metrics use the `dynamo_component_`
+    prefix and are designed to be exposed via the metrics passthrough callback.
+
+    For metrics to appear via the callback, the metrics registry must include
+    `dynamo_component_` prefix in `metric_prefix_filters`.
+
+    Example - Create all metrics at once:
+        from prometheus_client import CollectorRegistry
+        from dynamo.common.utils.prometheus import DynamoComponentMetrics
+
+        registry = CollectorRegistry()
+        gauges = DynamoComponentMetrics.create_all(registry=registry)
+        gauges.total_blocks.labels(dp_rank="0").set(1000)
+        gauges.gpu_cache_usage_percent.labels(dp_rank="0").set(0.75)
+        gauges.model_load_time.labels(model="my-model", dynamo_component="backend").set(5.2)
+
+    Example - Create individual metrics:
+        registry = CollectorRegistry()
+        gauge = DynamoComponentMetrics.total_blocks(registry=registry)
+        gauge.labels(dp_rank="0").set(1000)
+    """
+
+    @staticmethod
+    def create_all(registry=None) -> DynamoComponentGauges:
+        """Create all Dynamo component gauges in a single call.
+
+        This is the recommended way to create metrics - it returns a bundle containing
+        all available gauges. Adding new metrics in the future won't require changing
+        any signatures in calling code.
+
+        Args:
+            registry: Optional Prometheus CollectorRegistry. If None, uses default registry.
+
+        Returns:
+            DynamoComponentGauges instance containing all gauges.
+
+        Example:
+            registry = CollectorRegistry()
+            gauges = DynamoComponentMetrics.create_all(registry=registry)
+            gauges.total_blocks.labels(dp_rank="0").set(1000)
+        """
+        return DynamoComponentGauges(
+            total_blocks=DynamoComponentMetrics.total_blocks(registry),
+            gpu_cache_usage_percent=DynamoComponentMetrics.gpu_cache_usage_percent(
+                registry
+            ),
+            model_load_time=DynamoComponentMetrics.model_load_time(registry),
+        )
+
+    @staticmethod
+    def total_blocks(registry=None) -> "Gauge":
+        """Create a gauge for tracking total KV cache blocks available.
+
+        Args:
+            registry: Optional Prometheus CollectorRegistry. If None, uses default registry.
+
+        Returns:
+            Gauge with metric name `dynamo_component_kvstats_total_blocks` and label `dp_rank`.
+            Initialized to 0 for dp_rank="0" so it appears in metrics immediately.
+
+        Labels:
+            dp_rank: Data-parallel rank ID (string representation of integer).
+        """
+        # Import deferred: prometheus_client must be imported AFTER set_prometheus_multiproc_dir()
+        # is called (see main.py worker() function for details)
+        from prometheus_client import Gauge
+
+        gauge = Gauge(
+            f"{name_prefix.COMPONENT}_{kvstats.TOTAL_BLOCKS}",
+            "Total number of KV cache blocks available on the worker.",
+            labelnames=[labels.DP_RANK],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        # Initialize to 0 so metric appears immediately in /metrics output
+        gauge.labels(**{labels.DP_RANK: "0"}).set(0)
+        return gauge
+
+    @staticmethod
+    def gpu_cache_usage_percent(registry=None) -> "Gauge":
+        """Create a gauge for tracking GPU cache usage percentage.
+
+        Args:
+            registry: Optional Prometheus CollectorRegistry. If None, uses default registry.
+
+        Returns:
+            Gauge with metric name `dynamo_component_kvstats_gpu_cache_usage_percent` and label `dp_rank`.
+            Initialized to 0.0 for dp_rank="0" so it appears in metrics immediately.
+
+        Labels:
+            dp_rank: Data-parallel rank ID (string representation of integer).
+        """
+        # Import deferred: prometheus_client must be imported AFTER set_prometheus_multiproc_dir()
+        # is called (see main.py worker() function for details)
+        from prometheus_client import Gauge
+
+        gauge = Gauge(
+            f"{name_prefix.COMPONENT}_{kvstats.GPU_CACHE_USAGE_PERCENT}",
+            "GPU cache usage as a percentage (0.0-1.0).",
+            labelnames=[labels.DP_RANK],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        # Initialize to 0.0 so metric appears immediately in /metrics output
+        gauge.labels(**{labels.DP_RANK: "0"}).set(0.0)
+        return gauge
+
+    @staticmethod
+    def model_load_time(registry=None) -> "Gauge":
+        """Create a gauge for tracking model load time in seconds.
+
+        Args:
+            registry: Optional Prometheus CollectorRegistry. If None, uses default registry.
+
+        Returns:
+            Gauge with metric name `dynamo_component_model_load_time` with labels `model` and `dynamo_component`.
+            Not initialized (no default labels) - caller must provide model name and component.
+
+        Labels:
+            model: Model name/identifier (string).
+            dynamo_component: Component name (e.g., "backend", "prefill", "decode", "decoder", etc.).
+        """
+        # Import deferred: prometheus_client must be imported AFTER set_prometheus_multiproc_dir()
+        # is called (see main.py worker() function for details)
+        from prometheus_client import Gauge
+
+        gauge = Gauge(
+            f"{name_prefix.COMPONENT}_{model_info.LOAD_TIME_SECONDS}",
+            "Model load time in seconds.",
+            labelnames=[labels.MODEL, labels.COMPONENT],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        # Note: Not initialized with default labels - caller must provide model name and component
+        return gauge
