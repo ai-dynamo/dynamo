@@ -45,14 +45,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--dyn-tool-call-parser"],
         "type": str,
         "default": None,
-        "choices": get_tool_parser_names(),
         "help": "Tool call parser name for the model.",
     },
     "reasoning-parser": {
         "flags": ["--dyn-reasoning-parser"],
         "type": str,
         "default": None,
-        "choices": get_reasoning_parser_names(),
         "help": "Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     },
     "custom-jinja-template": {
@@ -228,30 +226,14 @@ def _set_parser(
 
     Returns:
         Resolved parser name, preferring Dynamo's value if both set.
-
-    Raises:
-        ValueError: If parser name is not valid.
     """
-    # If both are present, give preference to dynamo_str
     if sglang_str is not None and dynamo_str is not None:
         logging.warning(
             f"--dyn-{arg_name} and --{arg_name} are both set. Giving preference to --dyn-{arg_name}"
         )
         return dynamo_str
-    # If dynamo_str is not set, use try to use sglang_str if it matches with the allowed parsers
     elif sglang_str is not None:
         logging.warning(f"--dyn-{arg_name} is not set. Using --{arg_name}.")
-        if arg_name == "tool-call-parser" and sglang_str not in get_tool_parser_names():
-            raise ValueError(
-                f"--{arg_name} is not a valid tool call parser. Valid parsers are: {get_tool_parser_names()}"
-            )
-        elif (
-            arg_name == "reasoning-parser"
-            and sglang_str not in get_reasoning_parser_names()
-        ):
-            raise ValueError(
-                f"--{arg_name} is not a valid reasoning parser. Valid parsers are: {get_reasoning_parser_names()}"
-            )
         return sglang_str
     else:
         return dynamo_str
@@ -481,6 +463,23 @@ async def parse_args(args: list[str]) -> Config:
         parsed_args.dyn_reasoning_parser,
         "reasoning-parser",
     )
+
+    # Validate parser names when using Dynamo's tokenizer (not SGLang's)
+    if not parsed_args.use_sglang_tokenizer:
+        if tool_call_parser and tool_call_parser not in get_tool_parser_names():
+            logging.error(
+                f"Tool call parser '{tool_call_parser}' is not valid when using Dynamo's tokenizer. "
+                f"Valid parsers are: {get_tool_parser_names()}. "
+                f"Use --use-sglang-tokenizer to delegate tool parsing to SGLang."
+            )
+            sys.exit(1)
+        if reasoning_parser and reasoning_parser not in get_reasoning_parser_names():
+            logging.error(
+                f"Reasoning parser '{reasoning_parser}' is not valid when using Dynamo's tokenizer. "
+                f"Valid parsers are: {get_reasoning_parser_names()}. "
+                f"Use --use-sglang-tokenizer to delegate reasoning parsing to SGLang."
+            )
+            sys.exit(1)
 
     if parsed_args.custom_jinja_template and parsed_args.use_sglang_tokenizer:
         logging.error(

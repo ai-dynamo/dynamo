@@ -75,3 +75,49 @@ async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_
         f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
         f"got {config.dynamo_args.custom_jinja_template}"
     )
+
+
+# --- Tool Call Parser Validation Tests ---
+
+
+@pytest.mark.asyncio
+async def test_tool_call_parser_valid_with_dynamo_tokenizer(mock_sglang_cli):
+    """Valid parser name works when using Dynamo's tokenizer."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-tool-call-parser",
+        "hermes",  # supported by Dynamo
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.dynamo_args.tool_call_parser == "hermes"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_parser_invalid_with_dynamo_tokenizer(mock_sglang_cli):
+    """Invalid parser name exits when using Dynamo's tokenizer."""
+    mock_sglang_cli(
+        "--model", "Qwen/Qwen3-0.6B", "--dyn-tool-call-parser", "nonexistent_parser"
+    )
+
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_tool_call_parser_invalid_with_sglang_tokenizer(mock_sglang_cli):
+    """Invalid Dynamo parser name is allowed when using SGLang's tokenizer."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-tool-call-parser",
+        "sglang_only_parser",
+        "--use-sglang-tokenizer",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.dynamo_args.tool_call_parser == "sglang_only_parser"
+    assert config.dynamo_args.use_sglang_tokenizer is True
