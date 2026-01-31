@@ -71,25 +71,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Preserve versioned content list
-        id: preserve
-        run: |
-          cd fern-checkout/fern
-
-          # Find all versioned pages directories (pages-vX.Y.Z)
-          VERSIONED_PAGES=$(find . -maxdepth 1 -type d -name 'pages-v*' | sort)
-          echo "Found versioned pages directories:"
-          echo "$VERSIONED_PAGES"
-
-          # Find all versioned config files (versions/vX.Y.Z.yml)
-          VERSIONED_CONFIGS=$(find versions -maxdepth 1 -type f -name 'v*.yml' 2>/dev/null | sort || true)
-          echo "Found versioned config files:"
-          echo "$VERSIONED_CONFIGS"
-
-          # Extract versions section from docs.yml to preserve it
-          # We'll preserve everything after the "- display-name: Next" entry
-          echo "Extracting versions from docs.yml..."
-
       - name: Sync vNext content from main
         run: |
           # Sync pages/ directory (vNext content)
