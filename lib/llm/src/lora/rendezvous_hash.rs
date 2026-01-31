@@ -4,8 +4,7 @@
 //! Implements Highest Random Weight (HRW) / Rendezvous hashing,
 //! for deterministic and stable LORA-to-server assignment.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use blake3;
 
 use crate::kv_router::protocols::WorkerWithDpRank;
 
@@ -14,11 +13,17 @@ pub struct RendezvousHasher;
 impl RendezvousHasher {
     /// Compute a deterministic score for a LORA-worker pair
     pub fn compute_score(lora_name: &str, worker: WorkerWithDpRank) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        lora_name.hash(&mut hasher);
-        worker.worker_id.hash(&mut hasher);
-        worker.dp_rank.hash(&mut hasher);
-        hasher.finish()
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(lora_name.as_bytes());
+        hasher.update(&worker.worker_id.to_le_bytes());
+        hasher.update(&worker.dp_rank.to_le_bytes());
+        let hash = hasher.finalize();
+
+        // Extract first 8 bytes as u64
+        let hash_bytes = hash.as_bytes();
+        let mut bytes_array = [0u8; 8];
+        bytes_array.copy_from_slice(&hash_bytes[..8]);
+        u64::from_le_bytes(bytes_array)
     }
 
     /// Rank all workers by their score for a given LORA
@@ -72,8 +77,7 @@ pub fn compute_replica_set(
 /// Uses linear interpolation: replicas = min + (num_workers - min) × demand
 ///
 /// The maximum number of replicas is automatically determined from the number
-/// of available workers, Jautomatically scaling with cluster size.
-/// ```
+/// of available workers, automatically scaling with cluster size.
 pub fn compute_replica_factor(
     demand_estimate: f64,
     min_replicas: usize,
