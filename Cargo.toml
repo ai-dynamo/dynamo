@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "launch/dynamo-run",
+    "launch/zmq-broker",
     "lib/llm",
     "lib/runtime",
     "lib/config",
@@ -103,7 +104,7 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
-zmq = { version = "0.10" }
+zmq = { version = "0.10", features = ["vendored"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["codec", "net", "rt", "io-util"] }

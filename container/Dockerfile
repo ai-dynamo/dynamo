@@ -447,6 +447,17 @@ RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
 
+# Build zmq-broker binary for scalable pub/sub event plane
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
+    cd /opt/dynamo && \
+    cargo build --release -p zmq-broker && \
+    /tmp/use-sccache.sh show-stats "zmq-broker"
+
 ##############################################
 ########## Runtime image ##############
 ##############################################
@@ -492,6 +503,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # Copy built artifacts
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/target/release/zmq-broker /usr/local/bin/zmq-broker
 
 # Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
 # This is needed to create venv and install dynamo packages

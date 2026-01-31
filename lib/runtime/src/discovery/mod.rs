@@ -170,6 +170,14 @@ impl EventTransport {
         }
     }
 
+    /// Create a ZMQ broker transport with XSUB/XPUB endpoints
+    pub fn zmq_broker(xsub_endpoints: Vec<String>, xpub_endpoints: Vec<String>) -> Self {
+        Self::ZmqBroker {
+            xsub_endpoints,
+            xpub_endpoints,
+        }
+    }
+
     /// Get the subject prefix (NATS) or endpoint (ZMQ)
     /// For ZmqBroker, returns the first XSUB endpoint
     pub fn address(&self) -> &str {
