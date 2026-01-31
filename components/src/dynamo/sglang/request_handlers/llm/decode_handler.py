@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
@@ -24,6 +24,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         config: Config,
         publisher: DynamoSglangPublisher,
         generate_endpoint=None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -32,6 +33,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
+            shutdown_event: Optional event to signal shutdown.
             generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
@@ -40,6 +42,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
             generate_endpoint,
+            shutdown_event,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
