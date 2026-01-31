@@ -5,7 +5,6 @@
 
 import asyncio
 import logging
-import tempfile
 from typing import Any, AsyncGenerator, Dict
 
 from vllm import SamplingParams
@@ -29,7 +28,9 @@ class OmniHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
     ):
         """Initialize handler with AsyncOmni orchestrator."""
-        logger.info(f"Initializing OmniHandler for multi-stage pipelines with model: {config.model}")
+        logger.info(
+            f"Initializing OmniHandler for multi-stage pipelines with model: {config.model}"
+        )
 
         omni_kwargs = {
             "model": config.model,
@@ -76,7 +77,9 @@ class OmniHandler(BaseWorkerHandler):
             }
             return
 
-        logger.info(f"Request {request_id}: Generating text for {len(token_ids)} input tokens")
+        logger.info(
+            f"Request {request_id}: Generating text for {len(token_ids)} input tokens"
+        )
 
         # Build sampling parameters from request
         sampling_params = self._build_sampling_params(request)
@@ -97,7 +100,10 @@ class OmniHandler(BaseWorkerHandler):
                 ):
                     # stage_output is OmniRequestOutput
                     # For text generation: stage_output.request_output is a single vLLM RequestOutput
-                    if stage_output.final_output_type == "text" and stage_output.request_output:
+                    if (
+                        stage_output.final_output_type == "text"
+                        and stage_output.request_output
+                    ):
                         vllm_output = stage_output.request_output
 
                         if not vllm_output.outputs:
@@ -114,8 +120,12 @@ class OmniHandler(BaseWorkerHandler):
                         out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                         if output.finish_reason:
-                            out["finish_reason"] = self._normalize_finish_reason(output.finish_reason)
-                            out["completion_usage"] = self._build_completion_usage(vllm_output)
+                            out["finish_reason"] = self._normalize_finish_reason(
+                                output.finish_reason
+                            )
+                            out["completion_usage"] = self._build_completion_usage(
+                                vllm_output
+                            )
                             logger.debug(
                                 f"Completed generation for request {request_id}: "
                                 f"{next_total_toks} output tokens, finish_reason={output.finish_reason}"
@@ -147,7 +157,7 @@ class OmniHandler(BaseWorkerHandler):
     def cleanup(self):
         """Cleanup AsyncOmni orchestrator resources."""
         try:
-            if hasattr(self, 'engine_client'):
+            if hasattr(self, "engine_client"):
                 self.engine_client.close()
                 logger.info("AsyncOmni orchestrator closed")
         except Exception as e:
