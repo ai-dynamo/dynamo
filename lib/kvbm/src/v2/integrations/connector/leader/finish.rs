@@ -178,23 +178,29 @@ impl ConnectorLeader {
             .map(|slot| slot.clone())
             .ok_or_else(|| anyhow!("Slot not found for request ID: {}", request_id))?;
 
-        let mut slot = shared_slot.lock();
-        let offloading_state = slot.txn_take_offloading()?;
+        {
+            let slot = shared_slot.lock();
 
-        // Verify all handles are complete
-        for handle in &offloading_state.handles {
-            if !handle.is_complete() {
-                tracing::warn!(
-                    "process_finished_offloading called but handle {} is not complete for request_id: {}",
-                    handle.id(),
+            // The slot should be Inactive - the cleanup task spawned by request_finished()
+            // already took the offloading state and validated handle completion.
+            // By the time we get here via update_connector_output(finished_sending),
+            // the cleanup task has completed and the slot is Inactive.
+            if !slot.txn_state().is_inactive() {
+                debug_assert!(
+                    false,
+                    "process_finished_offloading called but slot is in {:?} state, expected Inactive. \
+                     This indicates the cleanup task did not complete properly for request_id: {}",
+                    slot.txn_state().name(),
                     request_id
                 );
             }
         }
 
+        // Remove the slot from the map - this is the final cleanup step
+        self.remove_slot(request_id);
+
         tracing::debug!(
-            "finished offloading {} blocks for request_id: {}",
-            offloading_state.block_mappings.len(),
+            "removed slot for finished offloading request_id: {}",
             request_id
         );
 
