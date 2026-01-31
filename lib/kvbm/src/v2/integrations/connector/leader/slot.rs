@@ -482,7 +482,6 @@ pub enum MatchCheckOutcome {
 /// A slot representing an active request with its associated state.
 ///
 /// The state machine is private and can only be manipulated through validated methods.
-#[derive(Debug)]
 pub struct RequestSlot {
     request: Request,
 
@@ -493,6 +492,9 @@ pub struct RequestSlot {
 
     /// Private state machine - not directly accessible.
     state: SlotStateMachine,
+
+    /// The number of tokens that were provided when the slot was created.
+    initial_isl_tokens: usize,
 
     /// The number of token blocks that have been evaluated by our offloading policies.
     evaluated_tokens: usize,
@@ -511,6 +513,17 @@ pub struct RequestSlot {
     /// with external tokens to load. Consumed by `process_scheduler_output` to build
     /// the `KvConnectorMetadata.intra_pass_load` field.
     pending_intra_pass: Option<IntraPassPending>,
+}
+
+impl std::fmt::Debug for RequestSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestSlot")
+            .field("request_id", &self.request_id())
+            .field("isl", &self.initial_isl_tokens)
+            .field("total_tokens", &self.sequence.total_tokens())
+            .field("assigned_blocks", &self.block_matches.assigned_blocks.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -689,6 +702,8 @@ impl RequestSlot {
 impl RequestSlot {
     /// Create a new RequestSlot for the given request.
     pub fn new(request: Request, block_size: usize) -> Result<Self, anyhow::Error> {
+        let initial_isl_tokens = request.tokens.len();
+
         let sequence = TokenBlockSequence::new(
             request.tokens.clone(),
             block_size as u32,
@@ -696,6 +711,7 @@ impl RequestSlot {
         );
         Ok(Self {
             request,
+            initial_isl_tokens,
             sequence,
             block_matches: BlockAssignments::default(),
             state: SlotStateMachine::new(),
