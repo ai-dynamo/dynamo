@@ -508,6 +508,7 @@ def get_test_definitions(model: str) -> list[dict]:
                             {
                                 "type": "input_image",
                                 "image_url": f"data:image/png;base64,{IMAGE_BASE64}",
+                                "detail": "auto",
                             },
                         ],
                     }
