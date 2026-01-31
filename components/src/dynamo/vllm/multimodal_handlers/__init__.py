@@ -14,6 +14,17 @@ from dynamo.vllm.multimodal_handlers.worker_handler import (
     MultimodalPDWorkerHandler,
 )
 
+# Multimodal Streamline handlers (simplified F→P architecture)
+from dynamo.vllm.multimodal_handlers.multimodal_streamline_encoder_worker_handler import (
+    MultimodalStreamlineEncoderWorkerHandler,
+)
+from dynamo.vllm.multimodal_handlers.multimodal_streamline_pd_worker_handler import (
+    MultimodalStreamlinePDWorkerHandler,
+)
+from dynamo.vllm.multimodal_handlers.multimodal_streamline_prefill_worker_handler import (
+    MultimodalStreamlinePrefillWorkerHandler,
+)
+
 __all__ = [
     "EncodeWorkerHandler",
     "VLLMEncodeWorkerHandler",
@@ -21,4 +32,8 @@ __all__ = [
     "ECProcessorHandler",
     "MultimodalPDWorkerHandler",
     "MultimodalDecodeWorkerHandler",
+    # Multimodal Streamline handlers
+    "MultimodalStreamlineEncoderWorkerHandler",
+    "MultimodalStreamlinePrefillWorkerHandler",
+    "MultimodalStreamlinePDWorkerHandler",
 ]
