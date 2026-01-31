@@ -71,6 +71,7 @@ class Config:
     enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+    frontend_decoding: bool = False
 
     # vLLM-native encoder worker (ECConnector mode)
     vllm_native_encoder_worker: bool = False
@@ -215,6 +216,15 @@ def parse_args() -> Config:
             "For example, if the user prompt is 'please describe the image' and the prompt template is "
             "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
             "'USER: <image> please describe the image ASSISTANT:'."
+        ),
+    )
+    parser.add_argument(
+        "--frontend-decoding",
+        action="store_true",
+        help=(
+            "Enable frontend decoding of multimodal images. "
+            "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
+            "Without this flag, images are decoded in the Python backend (default behavior)."
         ),
     )
     parser.add_argument(
@@ -402,6 +412,7 @@ def parse_args() -> Config:
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
+    config.frontend_decoding = args.frontend_decoding
     config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
     config.ec_connector_backend = args.ec_connector_backend
     config.ec_storage_path = args.ec_storage_path

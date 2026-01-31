@@ -2354,6 +2354,7 @@ dependencies = [
  "erased-serde",
  "etcd-client",
  "ffmpeg-next",
+ "flate2",
  "futures",
  "futures-util",
  "galil-seiferas",

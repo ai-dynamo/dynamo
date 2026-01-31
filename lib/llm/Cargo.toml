@@ -25,7 +25,7 @@ block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec", "de
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
+media-nixl = ["dep:nixl-sys", "dep:dynamo-memory", "dep:flate2"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
 kv-router-stress = ["dep:clap", "dep:indicatif"]
 
@@ -109,6 +109,9 @@ aligned-vec = { version = "0.6.4", optional = true }
 nixl-sys = { version = "=0.9.0", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
+
+# media-nixl (zlib compression for NIXL metadata)
+flate2 = { version = "1", optional = true }
 
 # block_manager_bench
 clap = { version = "4.5.49", features = ["derive"], optional = true }
