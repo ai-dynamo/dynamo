@@ -52,7 +52,12 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.publisher import get_publisher
+from dynamo.trtllm.publisher import (
+    DYNAMO_COMPONENT_GAUGES,
+    DYNAMO_COMPONENT_REGISTRY,
+    _ensure_gauges_initialized,
+    get_publisher,
+)
 from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
@@ -337,7 +342,20 @@ async def init(
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
     )
 
-    async with get_llm_engine(engine_args, config.disaggregation_mode) as engine:
+    # Prepare model name for metrics
+    model_name_for_metrics = config.served_model_name or config.model_path
+
+    # Initialize gauges now that model name is available
+    _ensure_gauges_initialized(
+        model_name=model_name_for_metrics,
+        component_name=config.component,
+    )
+
+    async with get_llm_engine(
+        engine_args,
+        config.disaggregation_mode,
+        component_gauges=DYNAMO_COMPONENT_GAUGES,
+    ) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         # should ideally call get_engine_runtime_config
@@ -394,18 +412,25 @@ async def init(
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
                 # Register callback to expose TRT-LLM metrics via Dynamo endpoint
-                # Filter out python_/process_ metrics and add trtllm_ prefix to remaining metrics
+                # Note: latest TRT-LLM's MetricsCollector already adds the 'trtllm_' prefix to all metrics,
+                # so we filter by that prefix to include only TRT-LLM metrics.
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
-                    exclude_prefixes=["python_", "process_"],
-                    add_prefix="trtllm_",
+                    metric_prefix_filters=["trtllm_"],
                 )
                 logging.info("TensorRT-LLM Prometheus metrics registered")
             except Exception as e:
                 logging.warning(
                     f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
                 )
+
+        # Register callback for Dynamo component metrics using dedicated registry
+        register_engine_metrics_callback(
+            endpoint=endpoint,
+            registry=DYNAMO_COMPONENT_REGISTRY,
+        )
+        logging.debug("DYNAMO_COMPONENT_REGISTRY callback registered successfully")
 
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(

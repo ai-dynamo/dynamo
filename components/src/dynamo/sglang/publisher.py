@@ -4,18 +4,21 @@
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
+from prometheus_client import CollectorRegistry
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
 
-if TYPE_CHECKING:
-    from prometheus_client import CollectorRegistry
-
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.prometheus import (
+    LLMBackendGauges,
+    LLMBackendMetrics,
+    register_engine_metrics_callback,
+)
 from dynamo.llm import (
     KvEventPublisher,
     WorkerMetricsPublisher,
@@ -23,6 +26,10 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Component, Endpoint
 from dynamo.sglang.args import Config
+
+# Create a dedicated registry for dynamo_component metrics
+# This ensures these metrics are isolated and can be exposed via their own callback
+DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
@@ -66,6 +73,7 @@ class DynamoSglangPublisher:
         component: Component,
         generate_endpoint: Endpoint,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
+        component_gauges: Optional[LLMBackendGauges] = None,
     ) -> None:
         """Initialize the SGLang publisher for metrics and KV events.
 
@@ -75,6 +83,7 @@ class DynamoSglangPublisher:
             component: The Dynamo runtime component.
             generate_endpoint: The Dynamo endpoint for generation requests.
             metrics_labels: Optional list of label key-value pairs for metrics.
+            component_gauges: Bundle of LLM backend gauges (created via LLMBackendMetrics.create_all()).
         """
         self.engine = engine
         self.server_args = config.server_args
@@ -82,6 +91,7 @@ class DynamoSglangPublisher:
         self.generate_endpoint = generate_endpoint
         self.component = component
         self.metrics_publisher = WorkerMetricsPublisher()
+        self.component_gauges = component_gauges
         # Endpoint creation is deferred to async context in setup_sgl_metrics
 
         # Set default values (can be overridden later if needed)
@@ -125,13 +135,27 @@ class DynamoSglangPublisher:
 
         while self._running:
             try:
-                kv_metrics = await self._sock.recv_pyobj()  # type: ignore
+                # Receive KvMetrics object from SGLang scheduler via ZMQ
+                # KvMetrics class: sglang/srt/managers/scheduler_metrics_mixin.py lines 45-54
+                # Sent from: sglang/srt/managers/scheduler_metrics_mixin.py lines 482-499 (_emit_kv_metrics)
+                kv_metrics: KvMetrics = await self._sock.recv_pyobj()
                 dp_rank = (
                     kv_metrics.data_parallel_rank
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
-                self.metrics_publisher.publish(dp_rank, kv_metrics.kv_active_blocks)
+                active_decode_blocks = kv_metrics.kv_active_blocks
+                self.metrics_publisher.publish(dp_rank, active_decode_blocks)
+                if self.component_gauges:
+                    dp_rank_str = str(dp_rank)
+                    # Publish total blocks (always available in KvMetrics)
+                    self.component_gauges.set_total_blocks(
+                        dp_rank_str, kv_metrics.kv_total_blocks
+                    )
+                    # Publish GPU cache usage percentage (always available in KvMetrics)
+                    self.component_gauges.set_gpu_cache_usage(
+                        dp_rank_str, kv_metrics.gpu_cache_usage_perc
+                    )
             except Exception:
                 if self._running:
                     logging.exception(
@@ -168,6 +192,10 @@ class DynamoSglangPublisher:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         logging.info("Sending dummy metrics to initialize")
         self.metrics_publisher.publish(self.dp_rank, 0)
+        if self.component_gauges:
+            dp_rank_str = str(self.dp_rank)
+            self.component_gauges.set_total_blocks(dp_rank_str, 0)
+            self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
 
     def init_kv_event_publish(self) -> List[KvEventPublisher]:
         """Initialize KV event publisher(s) if configured.
@@ -190,6 +218,10 @@ class DynamoSglangPublisher:
         if self.server_args.kv_events_config:
             kv_events = json.loads(self.server_args.kv_events_config)
             base_ep = kv_events.get("endpoint")
+            if not base_ep:
+                raise ValueError(
+                    "sglang kv_events_config is set but missing 'endpoint'"
+                )
             local_ip = get_local_ip_auto()
 
             # Determine DP attention configuration
@@ -253,7 +285,7 @@ class DynamoSglangPublisher:
 
 def setup_prometheus_registry(
     engine: sgl.Engine, generate_endpoint: Endpoint
-) -> "CollectorRegistry":
+) -> CollectorRegistry:
     """Set up Prometheus registry for SGLang metrics collection.
 
     SGLang uses multiprocess architecture where metrics are stored in shared memory.
@@ -277,11 +309,20 @@ def setup_prometheus_registry(
 
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
+
+    # Register callback for SGLang metrics
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
         metric_prefix_filters=["sglang:"],
     )
+
+    # Register callback for Dynamo component metrics using dedicated registry
+    register_engine_metrics_callback(
+        endpoint=generate_endpoint,
+        registry=DYNAMO_COMPONENT_REGISTRY,
+    )
+
     return registry
 
 
@@ -302,9 +343,24 @@ async def setup_sgl_metrics(
     Returns:
         Tuple of (publisher instance, running asyncio task, metrics labels).
     """
+    # Create registry and register callbacks
+    setup_prometheus_registry(engine, generate_endpoint)
+
+    # Create all Dynamo component gauges using the dedicated registry
+    component_gauges = LLMBackendMetrics.create_all(
+        registry=DYNAMO_COMPONENT_REGISTRY,
+        model_name=engine.server_args.served_model_name,
+        component_name=config.dynamo_args.component,
+    )
+
     metrics_labels = [("model", engine.server_args.served_model_name)]
     publisher = DynamoSglangPublisher(
-        engine, config, component, generate_endpoint, metrics_labels
+        engine,
+        config,
+        component,
+        generate_endpoint,
+        metrics_labels,
+        component_gauges,
     )
     # Create endpoint in async context (must await before publishing)
     await publisher.metrics_publisher.create_endpoint(component)

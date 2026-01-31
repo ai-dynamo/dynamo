@@ -5,12 +5,35 @@ import asyncio
 import logging
 from typing import List, Optional, Tuple
 
+from prometheus_client import CollectorRegistry
 from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
+from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import WorkerMetricsPublisher
 from dynamo.runtime import Component
+
+# Create a dedicated registry for dynamo_component metrics
+# This ensures these metrics are isolated and can be exposed via their own callback
+DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
+
+# Gauges will be lazily initialized after PROMETHEUS_MULTIPROC_DIR is set
+DYNAMO_COMPONENT_GAUGES: LLMBackendMetrics | None = None
+
+
+def _ensure_gauges_initialized(
+    model_name: str = "",
+    component_name: str = "",
+):
+    """Lazy initialization of gauges after PROMETHEUS_MULTIPROC_DIR is set."""
+    global DYNAMO_COMPONENT_GAUGES
+    if DYNAMO_COMPONENT_GAUGES is None:
+        DYNAMO_COMPONENT_GAUGES = LLMBackendMetrics(
+            registry=DYNAMO_COMPONENT_REGISTRY,
+            model_name=model_name,
+            component_name=component_name,
+        )  # pyright: ignore[reportConstantRedefinition]
 
 
 class NullStatLogger(StatLoggerBase):
@@ -71,8 +94,22 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
         self.inner.publish(self.dp_rank, active_decode_blocks)
 
+        dp_rank_str = str(self.dp_rank)
+        DYNAMO_COMPONENT_GAUGES.set_total_blocks(dp_rank_str, self.num_gpu_block)
+
+        # Set GPU cache usage percentage directly from scheduler_stats
+        # Note: vLLM's scheduler_stats.kv_cache_usage returns very small values
+        # (e.g., 0.0000834 for ~0.08% usage), which Prometheus outputs in scientific
+        # notation (8.34e-05). This is the correct value and will be properly parsed.
+        DYNAMO_COMPONENT_GAUGES.set_gpu_cache_usage(
+            dp_rank_str, scheduler_stats.kv_cache_usage
+        )
+
     def init_publish(self):
         self.inner.publish(self.dp_rank, 0)
+        dp_rank_str = str(self.dp_rank)
+        DYNAMO_COMPONENT_GAUGES.set_total_blocks(dp_rank_str, 0)
+        DYNAMO_COMPONENT_GAUGES.set_gpu_cache_usage(dp_rank_str, 0.0)
 
     def log_engine_initialized(self) -> None:
         pass

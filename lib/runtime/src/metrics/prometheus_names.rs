@@ -47,11 +47,11 @@
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
 //! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
-//! - ✅ `nats_client_connection_duration_ms` - Connection time in milliseconds
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
-//! - ✅ `nats_client_current_connections` - Current active connections gauge
-//! - ✅ `nats_client_in_messages` - Total messages received counter
+//! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
+//! - ✅ `dynamo_messaging_client_current_connections` - Current active connections gauge
+//! - ✅ `dynamo_messaging_client_in_messages_total` - Total messages received counter
 //!
 //! ## Key Differences: Prometheus Metric Names vs Prometheus Label Names
 //!
@@ -80,6 +80,18 @@ pub mod labels {
 
     /// Label for endpoint identification
     pub const ENDPOINT: &str = "dynamo_endpoint";
+
+    /// Label for worker data-parallel rank.
+    ///
+    /// Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
+    /// It is used by worker/load-style metrics that need to disambiguate per-worker series.
+    pub const DP_RANK: &str = "dp_rank";
+
+    /// Label for model name
+    pub const MODEL: &str = "model";
+
+    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    pub const WORKER_TYPE: &str = "worker_type";
 }
 
 /// Frontend service metrics (LLM HTTP service)
@@ -329,6 +341,21 @@ pub mod kvbm {
 pub mod kvrouter {
     /// Number of KV cache events applied to the index (including status)
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
+
+// KV cache statistics metrics
+pub mod kvstats {
+    /// Total number of KV cache blocks available on the worker
+    pub const TOTAL_BLOCKS: &str = "total_blocks";
+
+    /// GPU cache usage as a percentage (0.0-1.0)
+    pub const GPU_CACHE_USAGE_PERCENT: &str = "gpu_cache_usage_percent";
+}
+
+// Model information metrics
+pub mod model_info {
+    /// Model load time in seconds
+    pub const LOAD_TIME_SECONDS: &str = "model_load_time_seconds";
 }
 
 // Shared regex patterns for Prometheus sanitization

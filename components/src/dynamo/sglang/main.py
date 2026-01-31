@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 import sglang as sgl
 import uvloop
@@ -129,7 +130,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    # Time model loading
+    start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
+    load_time = time.time() - start_time
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -142,6 +146,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
+
+    # Record model load time immediately after publisher setup (which creates the gauges)
+    if publisher.component_gauges:
+        publisher.component_gauges.set_model_load_time(load_time)
+        logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
