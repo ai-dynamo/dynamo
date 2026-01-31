@@ -243,6 +243,7 @@ class BaseWorkerHandler(ABC):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
     ):
         self.runtime = runtime
         self.component = component
@@ -251,7 +252,7 @@ class BaseWorkerHandler(ABC):
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
-        self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
@@ -271,6 +272,9 @@ class BaseWorkerHandler(ABC):
         if use_vllm_tokenizer and hasattr(engine, "tokenizer"):
             tokenizer = engine.tokenizer
         self.input_param_manager = InputParamManager(tokenizer)
+
+        # Store shutdown event for graceful shutdown monitoring
+        self.shutdown_event = shutdown_event
 
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
@@ -339,14 +343,44 @@ class BaseWorkerHandler(ABC):
         raise NotImplementedError
 
     async def _monitor_abort(self, context, request_id, is_prefill):
-        """Background task that monitors for context cancellation and aborts the request."""
+        """
+        Background task that monitors for context cancellation and shutdown.
+        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        """
         try:
-            await context.async_killed_or_stopped()
-            # If we reach here, the context was stopped or killed
+            # Build list of futures/tasks to wait for
+            wait_for = [context.async_killed_or_stopped()]
+            shutdown_task = None
+
+            if self.shutdown_event:
+                # Create task for shutdown monitoring and add to wait list
+                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+                wait_for.append(shutdown_task)
+
+            # Wait for whichever happens first
+            done, pending = await asyncio.wait(
+                wait_for,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel the pending task/future
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # Abort the request
             await self.engine_client.abort(request_id)
             logger.debug(
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
+
+            # Check which event triggered and raise GeneratorExit if shutdown
+            if shutdown_task and shutdown_task in done:
+                raise GeneratorExit("Engine was shut down during generation.")
+
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
@@ -355,18 +389,24 @@ class BaseWorkerHandler(ABC):
 
     @asynccontextmanager
     async def _abort_monitor(self, context, request_id, is_prefill=False):
-        """Context manager that creates and automatically cleans up an abort monitoring task."""
+        """
+        Context manager that creates and automatically cleans up an abort monitoring task.
+        If shutdown event was triggered, raises GeneratorExit on exit.
+        """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
             yield task
         finally:
-            # Cancel the abort monitoring task when exiting the context
+            # Clean up the abort monitoring task
             if not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+            else:
+                # If the task completed, check if it raised GeneratorExit
+                task.result()
 
     async def clear_kv_blocks(self, request=None):
         try:
@@ -388,6 +428,20 @@ class BaseWorkerHandler(ABC):
                 lock = asyncio.Lock()
                 self._lora_load_locks[lora_name] = lock
             return lock
+
+    def _normalize_finish_reason(self, finish_reason: str) -> str:
+        """
+        Normalize vLLM finish reasons to Dynamo-compatible values.
+
+        vLLM may return finish reasons that aren't recognized by Dynamo's Rust layer.
+        This method maps them to compatible values.
+        [TODO]: Remove this method and add the right code in the Rust layer.
+        """
+        # Map vLLM's "abort" to Dynamo's "cancelled"
+        if finish_reason.startswith("abort"):
+            logging.debug(f"Normalizing finish reason: {finish_reason} to cancelled")
+            return "cancelled"
+        return finish_reason
 
     async def load_lora(self, request=None):
         """
@@ -1112,63 +1166,57 @@ class BaseWorkerHandler(ABC):
             )
 
             num_output_tokens_so_far = 0
-            try:
-                async for res in gen:
-                    # res is vllm's RequestOutput
+            async for res in gen:
+                # res is vllm's RequestOutput
 
-                    if not res.outputs:
-                        self._log_with_lora_context(
-                            "Request {request_id}{lora_info} returned no outputs",
-                            request_id,
-                            lora_request,
-                        )
-                        # Use string format "error: message" for consistency with vLLM's string-based finish_reason
-                        # Rust will parse this into FinishReason::Error(message)
-                        yield {
-                            "finish_reason": "error: No outputs from vLLM engine",
-                            "token_ids": [],
-                        }
-                        break
-
-                    output = res.outputs[0]
-                    next_total_toks = len(output.token_ids)
-                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-
-                    # Extract logprobs for new tokens if available
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far
+                if not res.outputs:
+                    self._log_with_lora_context(
+                        "Request {request_id}{lora_info} returned no outputs",
+                        request_id,
+                        lora_request,
                     )
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
+                    # Use string format "error: message" for consistency with vLLM's string-based finish_reason
+                    # Rust will parse this into FinishReason::Error(message)
+                    yield {
+                        "finish_reason": "error: No outputs from vLLM engine",
+                        "token_ids": [],
+                    }
+                    break
 
-                    if output.finish_reason:
-                        out["finish_reason"] = output.finish_reason
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            embedding_sequence_length=embedding_sequence_length,
-                        )
-                        # Log completion with LoRA info (debug level to avoid log spam)
-                        self._log_with_lora_context(
-                            "Completed token generation for request {request_id}{lora_info}: "
-                            "{output_tokens} output tokens, finish_reason={finish_reason}",
-                            request_id,
-                            lora_request,
-                            output_tokens=next_total_toks,
-                            finish_reason=output.finish_reason,
-                        )
-                    if output.stop_reason:
-                        out["stop_reason"] = output.stop_reason
-                    yield out
-                    num_output_tokens_so_far = next_total_toks
-            except asyncio.CancelledError:
-                # raise EngineShGeneratorExit when engine exits so that frontend can migrate the request
-                raise GeneratorExit(
-                    "Decode engine was shut down during token generation"
-                ) from None
+                output = res.outputs[0]
+                next_total_toks = len(output.token_ids)
+                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                # Extract logprobs for new tokens if available
+                log_probs, top_logprobs = self._extract_logprobs(
+                    output, num_output_tokens_so_far
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
+                if output.finish_reason:
+                    out["finish_reason"] = self._normalize_finish_reason(
+                        output.finish_reason
+                    )
+                    out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
+                        request_output=res,
+                        embedding_sequence_length=embedding_sequence_length,
+                    )
+                    # Log completion with LoRA info (debug level to avoid log spam)
+                    self._log_with_lora_context(
+                        "Completed token generation for request {request_id}{lora_info}: "
+                        "{output_tokens} output tokens, finish_reason={finish_reason}",
+                        request_id,
+                        lora_request,
+                        output_tokens=next_total_toks,
+                        finish_reason=output.finish_reason,
+                    )
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+                yield out
+                num_output_tokens_so_far = next_total_toks
 
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
@@ -1189,6 +1237,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
     ):
         super().__init__(
             runtime,
@@ -1200,6 +1249,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            shutdown_event,
         )
 
     async def generate(self, request, context):
@@ -1361,7 +1411,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "role": "assistant",
                             "content": delta_text,
                         },
-                        "finish_reason": output.finish_reason,
+                        "finish_reason": self._normalize_finish_reason(
+                            output.finish_reason
+                        ),
                     }
 
                     chunk = {
@@ -1398,6 +1450,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
     ):
         super().__init__(
             runtime,
@@ -1409,6 +1462,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            shutdown_event,
         )
 
     async def generate(self, request, context):
@@ -1501,39 +1555,33 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
-            try:
-                async for res in gen:
-                    logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+            async for res in gen:
+                logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
-                    token_ids = res.outputs[0].token_ids if res.outputs else []
+                token_ids = res.outputs[0].token_ids if res.outputs else []
 
-                    output: Dict[str, Any] = {
-                        "token_ids": list(token_ids),
-                        "disaggregated_params": (
-                            {"kv_transfer_params": res.kv_transfer_params}
-                            if res.kv_transfer_params
-                            else None
-                        ),
-                        "completion_usage": BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            embedding_sequence_length=embedding_sequence_length,
-                        ),
-                    }
+                output: Dict[str, Any] = {
+                    "token_ids": list(token_ids),
+                    "disaggregated_params": (
+                        {"kv_transfer_params": res.kv_transfer_params}
+                        if res.kv_transfer_params
+                        else None
+                    ),
+                    "completion_usage": BaseWorkerHandler._build_completion_usage(
+                        request_output=res,
+                        embedding_sequence_length=embedding_sequence_length,
+                    ),
+                }
 
-                    # Log prefill completion with LoRA info
-                    self._log_with_lora_context(
-                        "Prefill completed for request {request_id}{lora_info}: "
-                        "generated {token_count} token(s), has_kv_params={has_kv_params}",
-                        request_id,
-                        lora_request,
-                        level="info" if lora_request else "debug",
-                        token_count=len(token_ids),
-                        has_kv_params=res.kv_transfer_params is not None,
-                    )
+                # Log prefill completion with LoRA info
+                self._log_with_lora_context(
+                    "Prefill completed for request {request_id}{lora_info}: "
+                    "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                    request_id,
+                    lora_request,
+                    level="info" if lora_request else "debug",
+                    token_count=len(token_ids),
+                    has_kv_params=res.kv_transfer_params is not None,
+                )
 
-                    yield output
-            except asyncio.CancelledError:
-                # raise the error because we cannot migrate prefill requests
-                raise GeneratorExit(
-                    "Prefill engine was shut down during token generation"
-                ) from None
+                yield output
