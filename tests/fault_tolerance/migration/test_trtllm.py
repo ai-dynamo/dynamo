@@ -175,6 +175,7 @@ class DynamoWorkerProcess(ManagedProcess):
             display_output=True,
             terminate_existing=False,
             log_dir=log_dir,
+            display_name=worker_id,
         )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
