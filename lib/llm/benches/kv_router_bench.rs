@@ -158,6 +158,10 @@ struct Args {
     #[arg(long, default_value = "5")]
     bucket_size: u64,
 
+    /// Include raw latency samples in JSON output (for graphing)
+    #[arg(long)]
+    include_raw_samples: bool,
+
     /// Model name to use in requests (should match the registered model).
     /// If not specified, auto-detects from /v1/models when exactly one model is available.
     #[arg(long)]
@@ -485,8 +489,6 @@ struct PrefixData {
     token_ids: Vec<u32>,
     /// LocalBlockHash values (tokens_hash) for each complete block
     local_hashes: Vec<LocalBlockHash>,
-    /// ExternalSequenceBlockHash values (block_hash) for each complete block
-    external_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
 impl PrefixData {
@@ -510,14 +512,12 @@ impl PrefixData {
 
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
         let local_hashes = compute_block_hashes(&token_ids, kv_block_size);
-        let external_hashes = compute_sequence_hashes(&local_hashes);
 
         Ok(Self {
             text,
             formatted_text,
             token_ids,
             local_hashes,
-            external_hashes,
         })
     }
 
@@ -533,16 +533,12 @@ struct SequenceData {
     worker_id: WorkerId,
     local_hashes: Vec<LocalBlockHash>,
     external_hashes: Vec<ExternalSequenceBlockHash>,
-    /// Index of the prefix used (for matching with HTTP requests)
-    #[allow(dead_code)]
-    prefix_idx: usize,
 }
 
 impl SequenceData {
     /// Create a sequence from the exact request content.
     fn from_request_content(
         content: &str,
-        prefix_idx: usize,
         worker_id: WorkerId,
         kv_block_size: u32,
         tokenizer: &Tokenizer,
@@ -555,7 +551,6 @@ impl SequenceData {
             worker_id,
             local_hashes,
             external_hashes,
-            prefix_idx,
         })
     }
 
@@ -682,11 +677,7 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
     unique_ids.sort_unstable();
     unique_ids.dedup();
 
-    println!(
-        "  Discovered {} workers: {:?}",
-        unique_ids.len(),
-        unique_ids
-    );
+    println!("  Discovered {} workers", unique_ids.len());
 
     if unique_ids.is_empty() {
         anyhow::bail!("No workers discovered from frontend. Are kv_stress_workers running?");
@@ -745,7 +736,7 @@ fn generate_sequences_for_requests(
         .into_par_iter()
         .map(|request_id| {
             let worker_id = worker_ids[request_id as usize % worker_ids.len()];
-            let (prefix_idx, content) = build_request_content_with_prefix(
+            let (_prefix_idx, content) = build_request_content_with_prefix(
                 request_id,
                 prefix_prompts,
                 num_prefix_prompts,
@@ -753,7 +744,6 @@ fn generate_sequences_for_requests(
             );
             let seq = SequenceData::from_request_content(
                 &content,
-                prefix_idx,
                 worker_id,
                 kv_block_size,
                 &tokenizer,
@@ -840,12 +830,22 @@ async fn build_tree_via_nats(
 }
 
 /// Result of a single HTTP request
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RequestResult {
-    request_id: u64,
     latency: Duration,
     /// Time when request completed, relative to measurement start
     completion_time: Duration,
+    success: bool,
+}
+
+/// Individual latency sample for raw data export
+#[derive(Debug, Clone, Serialize)]
+struct LatencySample {
+    /// Latency in microseconds
+    latency_us: u64,
+    /// Completion time in milliseconds from measurement start
+    completion_time_ms: u64,
+    /// Whether the request succeeded
     success: bool,
 }
 
@@ -974,15 +974,6 @@ fn generate_prefix_data(
     results
 }
 
-/// Legacy function for generating prefix prompts as strings only.
-/// Used for HTTP requests where we only need the text.
-#[allow(dead_code)]
-fn generate_prefix_prompts(num_prefixes: usize, target_tokens: usize) -> Vec<String> {
-    (0..num_prefixes)
-        .map(|prefix_id| generate_prefix_text(prefix_id, target_tokens))
-        .collect()
-}
-
 /// Build an HTTP request body that will exercise routing with cache-friendly prefixes.
 ///
 /// Uses a shared prefix prompt (based on group_id) plus a unique suffix.
@@ -1037,28 +1028,6 @@ fn build_routing_request_with_prefix(
     }
 }
 
-/// Build an HTTP request body that will exercise routing (legacy, no prefix sharing)
-#[allow(dead_code)]
-fn build_routing_request(seq: &SequenceData, model: &str) -> ChatCompletionRequest {
-    // Create a message with content that maps to the sequence's token hashes
-    // The frontend will tokenize this and use it for routing
-    let content = format!(
-        "Sequence {} with {} blocks for worker {}",
-        seq.local_hashes.first().map(|h| h.0).unwrap_or(0),
-        seq.local_hashes.len(),
-        seq.worker_id
-    );
-
-    ChatCompletionRequest {
-        model: model.to_string(),
-        messages: vec![ChatMessage {
-            role: "user".to_string(),
-            content,
-        }],
-        max_tokens: Some(1),
-    }
-}
-
 /// Send HTTP requests at a specified rate.
 /// Returns the Unix timestamp (seconds since epoch) when warmup ended.
 async fn send_requests_at_rate(
@@ -1099,19 +1068,35 @@ async fn send_requests_at_rate(
         num_prefix_prompts
     );
 
-    // Monitor in-flight count every second
+    // Counters for completed requests (updated by spawned tasks)
+    let success_count = Arc::new(AtomicU64::new(0));
+    let failure_count = Arc::new(AtomicU64::new(0));
+
+    // Monitor in-flight count and throughput every second
     let in_flight_monitor = in_flight.clone();
+    let success_monitor = success_count.clone();
+    let failure_monitor = failure_count.clone();
     let monitor_start = start;
     let monitor_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.tick().await; // Skip first immediate tick
+        let mut prev_success = 0u64;
+        let mut prev_failure = 0u64;
         loop {
             interval.tick().await;
-            let count = in_flight_monitor.load(Ordering::Relaxed);
+            let in_flight_now = in_flight_monitor.load(Ordering::Relaxed);
+            let success_now = success_monitor.load(Ordering::Relaxed);
+            let failure_now = failure_monitor.load(Ordering::Relaxed);
+            let success_delta = success_now - prev_success;
+            let failure_delta = failure_now - prev_failure;
+            prev_success = success_now;
+            prev_failure = failure_now;
             eprintln!(
-                "  [t={:>3}s] in-flight: {}",
+                "  [t={:>3}s] in-flight: {:>4}, completed: {:>4} ok / {:>3} err",
                 monitor_start.elapsed().as_secs(),
-                count
+                in_flight_now,
+                success_delta,
+                failure_delta
             );
         }
     });
@@ -1145,6 +1130,8 @@ async fn send_requests_at_rate(
         let results = results.clone();
         let in_flight_clone = in_flight.clone();
         let max_in_flight_clone = max_in_flight.clone();
+        let success_clone = success_count.clone();
+        let failure_clone = failure_count.clone();
         let measurement_start_clone = measurement_start.clone();
         let req_id = request_id;
 
@@ -1161,6 +1148,17 @@ async fn send_requests_at_rate(
             in_flight_clone.fetch_sub(1, Ordering::Relaxed);
             drop(permit);
 
+            // Determine success/failure and update counters
+            let success = match &response {
+                Ok(resp) => resp.status().is_success(),
+                Err(_) => false,
+            };
+            if success {
+                success_clone.fetch_add(1, Ordering::Relaxed);
+            } else {
+                failure_clone.fetch_add(1, Ordering::Relaxed);
+            }
+
             // Only record results after warmup
             if !is_warmup {
                 // Initialize measurement start on first non-warmup completion
@@ -1171,22 +1169,10 @@ async fn send_requests_at_rate(
                 let measurement_base = ms_guard.unwrap();
                 drop(ms_guard);
 
-                let result = match response {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        RequestResult {
-                            request_id: req_id,
-                            latency: complete_time.duration_since(submit_time),
-                            completion_time: complete_time.duration_since(measurement_base),
-                            success: status.is_success(),
-                        }
-                    }
-                    Err(_e) => RequestResult {
-                        request_id: req_id,
-                        latency: complete_time.duration_since(submit_time),
-                        completion_time: complete_time.duration_since(measurement_base),
-                        success: false,
-                    },
+                let result = RequestResult {
+                    latency: complete_time.duration_since(submit_time),
+                    completion_time: complete_time.duration_since(measurement_base),
+                    success,
                 };
 
                 if verbose {
@@ -1409,6 +1395,10 @@ struct StressResults {
     // Time-bucketed latency stats for tracking latency over time
     #[serde(skip_serializing_if = "Vec::is_empty")]
     time_buckets: Vec<TimeBucketStats>,
+
+    // Raw latency samples for detailed graphing
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    raw_samples: Vec<LatencySample>,
 }
 
 impl StressResults {
@@ -1792,11 +1782,33 @@ async fn main() -> Result<()> {
     let successful_results: Vec<&RequestResult> = results.iter().filter(|r| r.success).collect();
     let failed_count = results.len() - successful_results.len();
 
+    // Compute actual measurement duration from completion times of successful requests.
+    // This accounts for the drain phase where in-flight requests complete after submission stops.
+    let actual_duration_secs = successful_results
+        .iter()
+        .map(|r| r.completion_time.as_secs_f64())
+        .fold(0.0_f64, |a, b| a.max(b))
+        .max(1.0); // Avoid division by zero
+
     let stats = LatencyStats::from_durations(&latencies);
 
     // Compute time-bucketed stats for latency-over-time tracking
     let time_buckets = if args.bucket_size > 0 {
         compute_time_bucket_stats(&results, args.bucket_size)
+    } else {
+        Vec::new()
+    };
+
+    // Collect raw latency samples if requested
+    let raw_samples: Vec<LatencySample> = if args.include_raw_samples {
+        results
+            .iter()
+            .map(|r| LatencySample {
+                latency_us: r.latency.as_micros() as u64,
+                completion_time_ms: r.completion_time.as_millis() as u64,
+                success: r.success,
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -1830,9 +1842,10 @@ async fn main() -> Result<()> {
             .as_ref()
             .map(|s| s.max.as_micros() as u64)
             .unwrap_or(0),
-        achieved_request_rate: results.len() as f64 / args.duration as f64,
+        achieved_request_rate: successful_results.len() as f64 / actual_duration_secs,
         max_in_flight: max_in_flight.load(Ordering::Relaxed),
         time_buckets,
+        raw_samples,
     };
 
     stress_results.print_report();
