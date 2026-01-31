@@ -120,23 +120,41 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
 
         nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
         if enable_attention_dp:
-            logger.info(
-                "DEP mode detected, creating NCCL communicator "
-                "for KVBM replicated mode"
-            )
+            logger.info("DEP mode (enable_attention_dp=true) detected")
             nccl_rank, nccl_world_size = _get_mpi_info()
+
             if nccl_rank is not None and nccl_world_size is not None:
-                nccl_comm_ptr = _create_kvbm_nccl_comm(
-                    nccl_rank, nccl_world_size
-                )
-                logger.info(
-                    f"KVBM NCCL comm created: rank={nccl_rank}, "
-                    f"world_size={nccl_world_size}"
-                )
+                try:
+                    nccl_comm_ptr = _create_kvbm_nccl_comm(
+                        nccl_rank, nccl_world_size
+                    )
+                    logger.info(
+                        f"KVBM replicated mode enabled with NCCL broadcast "
+                        f"optimization. Rank {nccl_rank}/{nccl_world_size}: "
+                        f"only rank 0 will load from G2/G3 storage, then "
+                        f"broadcast to all GPUs via NCCL."
+                    )
+                except ImportError:
+                    # NCCL not compiled into wheel - fall back gracefully
+                    logger.warning(
+                        "DEP mode detected but KVBM was built without NCCL "
+                        "support. Worker-level replication will be used, "
+                        "where each GPU independently loads from G2/G3 "
+                        "storage. For optimal performance with broadcast-"
+                        "based replication (only rank 0 loads, then "
+                        "broadcasts to others), rebuild KVBM with the "
+                        "'nccl' feature: cargo build -p kvbm --features nccl"
+                    )
+                    # Reset to None to fall back to sharded mode
+                    nccl_rank = None
+                    nccl_world_size = None
+                    nccl_comm_ptr = None
             else:
                 logger.warning(
-                    "DEP mode enabled but MPI not available. "
-                    "KVBM will fall back to sharded mode."
+                    "DEP mode enabled but MPI not available for rank "
+                    "detection. KVBM will use sharded mode. For replicated "
+                    "mode, ensure MPI is initialized before creating the "
+                    "connector worker."
                 )
 
         self._connector = RustKvConnectorWorker(
