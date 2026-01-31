@@ -40,7 +40,7 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
-
+ARG CARGO_INCREMENTAL
 ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG PYTORCH_BASE_IMAGE_TAG="25.12-py3"
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -149,7 +149,7 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
-
+ARG CARGO_INCREMENTAL
 WORKDIR /workspace
 
 # Copy CUDA from base stage
@@ -158,6 +158,7 @@ COPY --from=dynamo_base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
 
 # Set environment variables first so they can be used in COPY commands
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
+    CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0} \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     CARGO_TARGET_DIR=/opt/dynamo/target \
