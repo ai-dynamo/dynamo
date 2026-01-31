@@ -49,8 +49,6 @@ from dynamo.vllm.multimodal_handlers import (
     VLLMEncodeWorkerHandler,
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
-from dynamo.vllm.omni import OmniHandler
-
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
