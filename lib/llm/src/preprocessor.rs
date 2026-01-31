@@ -940,6 +940,7 @@ impl
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations) = self.preprocess_request(&request).await?;
+        tracing::trace!(request = ?common_request, "Pre-processed request");
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = response_generator.tracker();
