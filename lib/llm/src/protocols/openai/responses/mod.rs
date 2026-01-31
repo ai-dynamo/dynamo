@@ -6,8 +6,8 @@ pub mod stream_converter;
 use dynamo_async_openai::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, InputContent, InputItem, InputParam,
     InputRole, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
-    OutputTextContent, Response, Role as ResponseRole, Status, Tool, ToolChoiceOptions,
-    ToolChoiceParam,
+    OutputTextContent, Response, ResponseTextParam, Role as ResponseRole, ServiceTier, Status,
+    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice, ChatCompletionRequestAssistantMessage,
@@ -584,7 +584,7 @@ fn make_text_message(id: String, text: String) -> OutputItem {
         content: vec![OutputMessageContent::OutputText(OutputTextContent {
             text,
             annotations: vec![],
-            logprobs: None,
+            logprobs: Some(vec![]),
         })],
     })
 }
@@ -656,37 +656,47 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             output.push(make_text_message(message_id, String::new()));
         }
 
+        let created_at = chat_resp.created as u64;
         let response = Response {
             id: response_id,
             object: "response".to_string(),
-            created_at: chat_resp.created as u64,
+            created_at,
+            completed_at: Some(created_at),
             model: chat_resp.model,
             status: Status::Completed,
             output,
-            background: None,
+            // Spec-required defaults (OpenResponses requires these as non-null)
+            background: Some(false),
+            frequency_penalty: Some(0.0),
+            metadata: Some(serde_json::Value::Object(Default::default())),
+            parallel_tool_calls: Some(true),
+            presence_penalty: Some(0.0),
+            store: Some(true),
+            temperature: Some(1.0),
+            text: Some(ResponseTextParam {
+                format: TextResponseFormatConfiguration::Text,
+                verbosity: None,
+            }),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            tools: Some(vec![]),
+            top_p: Some(1.0),
+            truncation: Some(Truncation::Disabled),
+            // Nullable but required to be present (null is valid)
             billing: None,
             conversation: None,
-            completed_at: None,
             error: None,
             incomplete_details: None,
             instructions: None,
             max_output_tokens: None,
-            metadata: None,
-            parallel_tool_calls: None,
+            max_tool_calls: None,
             previous_response_id: None,
             prompt: None,
             prompt_cache_key: None,
             prompt_cache_retention: None,
             reasoning: None,
             safety_identifier: None,
-            service_tier: None,
-            temperature: None,
-            text: None,
-            tool_choice: None,
-            tools: None,
-            top_logprobs: None,
-            top_p: None,
-            truncation: None,
+            service_tier: Some(ServiceTier::Auto),
+            top_logprobs: Some(0),
             usage: None,
         };
 

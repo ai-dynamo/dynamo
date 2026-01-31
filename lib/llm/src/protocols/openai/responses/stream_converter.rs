@@ -18,7 +18,8 @@ use dynamo_async_openai::types::responses::{
     ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, Status,
+    ResponseTextDoneEvent, ResponseTextParam, ServiceTier, Status,
+    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use uuid::Uuid;
 
@@ -78,37 +79,51 @@ impl ResponseStreamConverter {
     }
 
     fn make_response(&self, status: Status) -> Response {
+        let completed_at = if status == Status::Completed {
+            Some(self.created_at)
+        } else {
+            None
+        };
         Response {
             id: self.response_id.clone(),
             object: "response".to_string(),
             created_at: self.created_at,
+            completed_at,
             status,
             model: self.model.clone(),
             output: vec![],
-            background: None,
+            // Spec-required defaults
+            background: Some(false),
+            frequency_penalty: Some(0.0),
+            metadata: Some(serde_json::Value::Object(Default::default())),
+            parallel_tool_calls: Some(true),
+            presence_penalty: Some(0.0),
+            store: Some(true),
+            temperature: Some(1.0),
+            text: Some(ResponseTextParam {
+                format: TextResponseFormatConfiguration::Text,
+                verbosity: None,
+            }),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            tools: Some(vec![]),
+            top_p: Some(1.0),
+            truncation: Some(Truncation::Disabled),
+            // Nullable required fields
             billing: None,
             conversation: None,
-            completed_at: None,
             error: None,
             incomplete_details: None,
             instructions: None,
             max_output_tokens: None,
-            metadata: None,
-            parallel_tool_calls: None,
+            max_tool_calls: None,
             previous_response_id: None,
             prompt: None,
             prompt_cache_key: None,
             prompt_cache_retention: None,
             reasoning: None,
             safety_identifier: None,
-            service_tier: None,
-            temperature: None,
-            text: None,
-            tool_choice: None,
-            tools: None,
-            top_logprobs: None,
-            top_p: None,
-            truncation: None,
+            service_tier: Some(ServiceTier::Auto),
+            top_logprobs: Some(0),
             usage: None,
         }
     }
@@ -173,7 +188,7 @@ impl ResponseStreamConverter {
                                 part: OutputContent::OutputText(OutputTextContent {
                                     text: String::new(),
                                     annotations: vec![],
-                                    logprobs: None,
+                                    logprobs: Some(vec![]),
                                 }),
                             });
                         events.push(make_sse_event(&part_added));
@@ -188,7 +203,7 @@ impl ResponseStreamConverter {
                             output_index: 0,
                             content_index: 0,
                             delta: content.clone(),
-                            logprobs: None,
+                            logprobs: Some(vec![]),
                         });
                     events.push(make_sse_event(&text_delta));
                 }
@@ -290,7 +305,7 @@ impl ResponseStreamConverter {
                 output_index: 0,
                 content_index: 0,
                 text: self.accumulated_text.clone(),
-                logprobs: None,
+                logprobs: Some(vec![]),
             });
             events.push(make_sse_event(&text_done));
 
@@ -302,7 +317,7 @@ impl ResponseStreamConverter {
                 part: OutputContent::OutputText(OutputTextContent {
                     text: self.accumulated_text.clone(),
                     annotations: vec![],
-                    logprobs: None,
+                    logprobs: Some(vec![]),
                 }),
             });
             events.push(make_sse_event(&part_done));
@@ -315,7 +330,7 @@ impl ResponseStreamConverter {
                     content: vec![OutputMessageContent::OutputText(OutputTextContent {
                         text: self.accumulated_text.clone(),
                         annotations: vec![],
-                        logprobs: None,
+                        logprobs: Some(vec![]),
                     })],
                     role: AssistantRole::Assistant,
                     status: OutputStatus::Completed,
