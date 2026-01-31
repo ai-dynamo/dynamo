@@ -44,6 +44,7 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
+ARG ENABLE_MODELEXPRESS_P2P
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -843,6 +844,17 @@ RUN cd /usr/local/lib && \
     ldconfig
 
 USER dynamo
+
+# Install ModelExpress for P2P weight transfer (optional)
+ARG ENABLE_MODELEXPRESS_P2P
+ARG MODELEXPRESS_REF="v0.2.1"
+RUN echo "ENABLE_MODELEXPRESS_P2P=${ENABLE_MODELEXPRESS_P2P}" && \
+    if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
+        echo "Installing ModelExpress from ref: ${MODELEXPRESS_REF}" && \
+        uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
+    else \
+        echo "Skipping ModelExpress installation (ENABLE_MODELEXPRESS_P2P != true)"; \
+    fi
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA

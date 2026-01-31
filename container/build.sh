@@ -288,7 +288,7 @@ get_options() {
             ;;
         --build-arg)
             if [ "$2" ]; then
-                BUILD_ARGS+="--build-arg $2 "
+                BUILD_ARGS+=" --build-arg $2 "
                 shift
             else
                 missing_requirement "$1"
