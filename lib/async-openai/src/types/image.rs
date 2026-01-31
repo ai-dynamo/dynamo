@@ -96,15 +96,20 @@ pub enum ImageModeration {
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct CreateImageRequest {
-    /// A text description of the desired image(s). The maximum length is 1000 characters for `dall-e-2`
-    /// and 4000 characters for `dall-e-3`.
+    /// A text description of the desired image(s).
     pub prompt: String,
+
+    /// A text description of the undesired image(s).
+    pub negative_prompt: Option<String>,
 
     /// The model to use for image generation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ImageModel>,
 
-    /// The number of images to generate. Must be between 1 and 10. For `dall-e-3`, only `n=1` is supported.
+    /// The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference.
+    pub num_inference_steps: Option<u8>,
+
+    /// The number of images to generate. Must be between 1 and 10.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n: Option<u8>, // min:1 max:10 default:1
 
