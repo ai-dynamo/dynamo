@@ -130,6 +130,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Only applicable when ComponentType is "epp".
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
+
+	// Checkpoint configures container checkpointing for this service.
+	// When enabled, pods can be restored from a checkpoint files for faster cold start.
+	// +optional
+	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
 }
 
 type MultinodeSpec struct {

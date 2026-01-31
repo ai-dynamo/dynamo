@@ -244,6 +244,7 @@ Key customization points include:
 - **[Operator Documentation](/docs/kubernetes/dynamo_operator.md)** - How the platform works
 - **[Service Discovery](/docs/kubernetes/service_discovery.md)** - Discovery backends and configuration
 - **[Helm Charts](/deploy/helm/README.md)** - For advanced users
+- **[Checkpointing](/docs/kubernetes/chrek/README.md)** - Fast pod startup with checkpoint/restore
 - **[GitOps Deployment with FluxCD](/docs/kubernetes/fluxcd.md)** - For advanced users
 - **[Logging](/docs/kubernetes/observability/logging.md)** - For logging setup
 - **[Multinode Deployment](/docs/kubernetes/deployment/multinode-deployment.md)** - For multinode deployment
