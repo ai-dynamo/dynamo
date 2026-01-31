@@ -4,9 +4,10 @@
 pub mod stream_converter;
 
 use dynamo_async_openai::types::responses::{
-    Content, ContentType, FunctionCall as ResponseFunctionCall, Input, InputContent, InputItem,
-    OutputContent, OutputMessage, OutputStatus, OutputText, Response, Role as ResponseRole, Status,
-    ToolChoice as ResponseToolChoice, ToolChoiceMode, ToolDefinition,
+    AssistantRole, FunctionCallOutput, FunctionToolCall, InputContent, InputItem, InputParam,
+    InputRole, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    OutputTextContent, Response, Role as ResponseRole, Status, Tool, ToolChoiceOptions,
+    ToolChoiceParam,
 };
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice, ChatCompletionRequestAssistantMessage,
@@ -149,91 +150,85 @@ fn convert_image_detail(
     }
 }
 
-/// Convert InputContent to ChatCompletionRequestUserMessageContent.
+/// Convert a slice of InputContent to ChatCompletionRequestUserMessageContent.
 fn convert_input_content_to_user_content(
-    content: &InputContent,
+    content: &[InputContent],
 ) -> Result<ChatCompletionRequestUserMessageContent, anyhow::Error> {
-    match content {
-        InputContent::TextInput(text) => {
-            Ok(ChatCompletionRequestUserMessageContent::Text(text.clone()))
+    // If there's a single InputText, treat as simple text
+    if content.len() == 1 {
+        if let InputContent::InputText(t) = &content[0] {
+            return Ok(ChatCompletionRequestUserMessageContent::Text(t.text.clone()));
         }
-        InputContent::InputItemContentList(parts) => {
-            let mut chat_parts = Vec::with_capacity(parts.len());
-            for part in parts {
-                match part {
-                    ContentType::InputText(t) => {
-                        chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
-                            ChatCompletionRequestMessageContentPartText {
-                                text: t.text.clone(),
-                            },
-                        ));
-                    }
-                    ContentType::InputImage(img) => {
-                        let url_str = img.image_url.as_deref().unwrap_or_default();
-                        let url = url::Url::parse(url_str).map_err(|e| {
-                            anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e)
-                        })?;
-                        chat_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                            ChatCompletionRequestMessageContentPartImage {
-                                image_url: ImageUrl {
-                                    url,
-                                    detail: Some(convert_image_detail(&img.detail)),
-                                    uuid: None,
-                                },
-                            },
-                        ));
-                    }
-                    ContentType::InputVideo(vid) => {
-                        let url_str = vid.video_url.as_deref().unwrap_or_default();
-                        let url = url::Url::parse(url_str).map_err(|e| {
-                            anyhow::anyhow!("Invalid video URL '{}': {}", url_str, e)
-                        })?;
-                        chat_parts.push(ChatCompletionRequestUserMessageContentPart::VideoUrl(
-                            ChatCompletionRequestMessageContentPartVideo {
-                                video_url: VideoUrl {
-                                    url,
-                                    detail: Some(convert_image_detail(&vid.detail)),
-                                    uuid: None,
-                                },
-                            },
-                        ));
-                    }
-                    ContentType::InputAudio(_) => {
-                        return Err(anyhow::anyhow!(
-                            "Audio input content is not yet supported"
-                        ));
-                    }
-                    ContentType::InputFile(_) => {
-                        return Err(anyhow::anyhow!(
-                            "File input content is not yet supported"
-                        ));
-                    }
-                }
+    }
+
+    let mut chat_parts = Vec::with_capacity(content.len());
+    for part in content {
+        match part {
+            InputContent::InputText(t) => {
+                chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: t.text.clone(),
+                    },
+                ));
             }
-            Ok(ChatCompletionRequestUserMessageContent::Array(chat_parts))
+            InputContent::InputImage(img) => {
+                let url_str = img.image_url.as_deref().unwrap_or_default();
+                let url = url::Url::parse(url_str).map_err(|e| {
+                    anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e)
+                })?;
+                chat_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url,
+                            detail: Some(convert_image_detail(&img.detail)),
+                            uuid: None,
+                        },
+                    },
+                ));
+            }
+            InputContent::InputVideo(vid) => {
+                let url = url::Url::parse(&vid.video).map_err(|e| {
+                    anyhow::anyhow!("Invalid video URL '{}': {}", vid.video, e)
+                })?;
+                chat_parts.push(ChatCompletionRequestUserMessageContentPart::VideoUrl(
+                    ChatCompletionRequestMessageContentPartVideo {
+                        video_url: VideoUrl {
+                            url,
+                            detail: None,
+                            uuid: None,
+                        },
+                    },
+                ));
+            }
+            InputContent::InputAudio(_) => {
+                return Err(anyhow::anyhow!(
+                    "Audio input content is not yet supported"
+                ));
+            }
+            InputContent::InputFile(_) => {
+                return Err(anyhow::anyhow!(
+                    "File input content is not yet supported"
+                ));
+            }
         }
     }
+    Ok(ChatCompletionRequestUserMessageContent::Array(chat_parts))
 }
 
-/// Convert InputContent to a plain text string (for system/assistant messages).
-fn convert_input_content_to_text(content: &InputContent) -> String {
-    match content {
-        InputContent::TextInput(text) => text.clone(),
-        InputContent::InputItemContentList(parts) => {
-            // Concatenate all text parts; non-text parts are skipped.
-            parts
-                .iter()
-                .filter_map(|p| match p {
-                    ContentType::InputText(t) => Some(t.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
-        }
-    }
+/// Convert a slice of InputContent to a plain text string (for system/developer messages).
+fn convert_input_content_to_text(content: &[InputContent]) -> String {
+    // Concatenate all text parts; non-text parts are skipped.
+    content
+        .iter()
+        .filter_map(|p| match p {
+            InputContent::InputText(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
-/// Convert Input::Items to a Vec of ChatCompletionRequestMessages.
+/// Convert InputParam::Items to a Vec of ChatCompletionRequestMessages.
 fn convert_input_items_to_messages(
     items: &[InputItem],
 ) -> Result<Vec<ChatCompletionRequestMessage>, anyhow::Error> {
@@ -241,29 +236,46 @@ fn convert_input_items_to_messages(
 
     for item in items {
         match item {
-            InputItem::Message(msg) => {
-                let chat_msg = match msg.role {
-                    ResponseRole::System | ResponseRole::Developer => {
-                        let text = convert_input_content_to_text(&msg.content);
-                        ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                            content: ChatCompletionRequestSystemMessageContent::Text(text),
-                            name: None,
-                        })
+            InputItem::Item(inner_item) => match inner_item {
+                Item::Message(msg_item) => match msg_item {
+                    MessageItem::Input(msg) => {
+                        let chat_msg = match msg.role {
+                            InputRole::System | InputRole::Developer => {
+                                let text = convert_input_content_to_text(&msg.content);
+                                ChatCompletionRequestMessage::System(
+                                    ChatCompletionRequestSystemMessage {
+                                        content:
+                                            ChatCompletionRequestSystemMessageContent::Text(text),
+                                        name: None,
+                                    },
+                                )
+                            }
+                            InputRole::User => {
+                                let content =
+                                    convert_input_content_to_user_content(&msg.content)?;
+                                ChatCompletionRequestMessage::User(
+                                    ChatCompletionRequestUserMessage { content, name: None },
+                                )
+                            }
+                        };
+                        messages.push(chat_msg);
                     }
-                    ResponseRole::User => {
-                        let content = convert_input_content_to_user_content(&msg.content)?;
-                        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                            content,
-                            name: None,
-                        })
-                    }
-                    ResponseRole::Assistant => {
-                        let text = convert_input_content_to_text(&msg.content);
-                        ChatCompletionRequestMessage::Assistant(
+                    MessageItem::Output(out_msg) => {
+                        // Previous assistant output message -> assistant message
+                        let text = out_msg
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                OutputMessageContent::OutputText(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
+                        messages.push(ChatCompletionRequestMessage::Assistant(
                             ChatCompletionRequestAssistantMessage {
-                                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                    text,
-                                )),
+                                content: Some(
+                                    ChatCompletionRequestAssistantMessageContent::Text(text),
+                                ),
                                 refusal: None,
                                 name: None,
                                 audio: None,
@@ -271,45 +283,94 @@ fn convert_input_items_to_messages(
                                 #[allow(deprecated)]
                                 function_call: None,
                             },
+                        ));
+                    }
+                },
+                Item::FunctionCall(fc) => {
+                    // A function call from a previous assistant turn -> assistant message with tool_calls
+                    messages.push(ChatCompletionRequestMessage::Assistant(
+                        ChatCompletionRequestAssistantMessage {
+                            content: None,
+                            refusal: None,
+                            name: None,
+                            audio: None,
+                            tool_calls: Some(vec![ChatCompletionMessageToolCall {
+                                id: fc.call_id.clone(),
+                                r#type: ChatCompletionToolType::Function,
+                                function: dynamo_async_openai::types::FunctionCall {
+                                    name: fc.name.clone(),
+                                    arguments: fc.arguments.clone(),
+                                },
+                            }]),
+                            #[allow(deprecated)]
+                            function_call: None,
+                        },
+                    ));
+                }
+                Item::FunctionCallOutput(fco) => {
+                    // The output of a function call -> tool message
+                    let output_text = match &fco.output {
+                        FunctionCallOutput::Text(text) => text.clone(),
+                        FunctionCallOutput::Content(parts) => {
+                            convert_input_content_to_text(parts)
+                        }
+                    };
+                    messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: ChatCompletionRequestToolMessageContent::Text(output_text),
+                            tool_call_id: fco.call_id.clone(),
+                        },
+                    ));
+                }
+                _ => {
+                    // Skip other item types (file search, computer call, etc.)
+                }
+            },
+            InputItem::EasyMessage(easy) => {
+                // Handle easy input messages based on role
+                let content_text = match &easy.content {
+                    dynamo_async_openai::types::responses::EasyInputContent::Text(text) => {
+                        text.clone()
+                    }
+                    dynamo_async_openai::types::responses::EasyInputContent::ContentList(parts) => {
+                        convert_input_content_to_text(parts)
+                    }
+                };
+                let chat_msg = match easy.role {
+                    ResponseRole::System | ResponseRole::Developer => {
+                        ChatCompletionRequestMessage::System(
+                            ChatCompletionRequestSystemMessage {
+                                content: ChatCompletionRequestSystemMessageContent::Text(
+                                    content_text,
+                                ),
+                                name: None,
+                            },
                         )
                     }
+                    ResponseRole::User => ChatCompletionRequestMessage::User(
+                        ChatCompletionRequestUserMessage {
+                            content: ChatCompletionRequestUserMessageContent::Text(content_text),
+                            name: None,
+                        },
+                    ),
+                    ResponseRole::Assistant => ChatCompletionRequestMessage::Assistant(
+                        ChatCompletionRequestAssistantMessage {
+                            content: Some(
+                                ChatCompletionRequestAssistantMessageContent::Text(content_text),
+                            ),
+                            refusal: None,
+                            name: None,
+                            audio: None,
+                            tool_calls: None,
+                            #[allow(deprecated)]
+                            function_call: None,
+                        },
+                    ),
                 };
                 messages.push(chat_msg);
             }
-            InputItem::FunctionCall(fc) => {
-                // A function call from a previous assistant turn -> assistant message with tool_calls
-                messages.push(ChatCompletionRequestMessage::Assistant(
-                    ChatCompletionRequestAssistantMessage {
-                        content: None,
-                        refusal: None,
-                        name: None,
-                        audio: None,
-                        tool_calls: Some(vec![ChatCompletionMessageToolCall {
-                            id: fc.call_id.clone(),
-                            r#type: ChatCompletionToolType::Function,
-                            function: dynamo_async_openai::types::FunctionCall {
-                                name: fc.name.clone(),
-                                arguments: fc.arguments.clone(),
-                            },
-                        }]),
-                        #[allow(deprecated)]
-                        function_call: None,
-                    },
-                ));
-            }
-            InputItem::FunctionCallOutput(fco) => {
-                // The output of a function call -> tool message
-                messages.push(ChatCompletionRequestMessage::Tool(
-                    ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(
-                            fco.output.clone(),
-                        ),
-                        tool_call_id: fco.call_id.clone(),
-                    },
-                ));
-            }
-            InputItem::Custom(_) => {
-                // Skip custom/unrecognized items
+            InputItem::ItemReference(_) => {
+                // Skip item references
             }
         }
     }
@@ -317,18 +378,18 @@ fn convert_input_items_to_messages(
     Ok(messages)
 }
 
-/// Convert Responses API ToolDefinition to ChatCompletionTool.
-fn convert_tools(tools: &[ToolDefinition]) -> Vec<ChatCompletionTool> {
+/// Convert Responses API Tool to ChatCompletionTool.
+fn convert_tools(tools: &[Tool]) -> Vec<ChatCompletionTool> {
     tools
         .iter()
         .filter_map(|tool| match tool {
-            ToolDefinition::Function(f) => Some(ChatCompletionTool {
+            Tool::Function(f) => Some(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
                     name: f.name.clone(),
                     description: f.description.clone(),
-                    parameters: Some(f.parameters.clone()),
-                    strict: Some(f.strict),
+                    parameters: f.parameters.clone(),
+                    strict: f.strict,
                 },
             }),
             _ => None, // Only function tools are forwarded to chat completions
@@ -336,24 +397,28 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<ChatCompletionTool> {
         .collect()
 }
 
-/// Convert Responses API ToolChoice to ChatCompletionToolChoiceOption.
-fn convert_tool_choice(tc: &ResponseToolChoice) -> ChatCompletionToolChoiceOption {
+/// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
+fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
     match tc {
-        ResponseToolChoice::Mode(mode) => match mode {
-            ToolChoiceMode::None => ChatCompletionToolChoiceOption::None,
-            ToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
-            ToolChoiceMode::Required => ChatCompletionToolChoiceOption::Required,
+        ToolChoiceParam::Mode(mode) => match mode {
+            ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
+            ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
+            ToolChoiceOptions::Required => ChatCompletionToolChoiceOption::Required,
         },
-        ResponseToolChoice::Function { name } => {
+        ToolChoiceParam::Function(f) => {
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionName {
-                    name: name.clone(),
+                    name: f.name.clone(),
                 },
             })
         }
-        ResponseToolChoice::Hosted { .. } => {
+        ToolChoiceParam::Hosted(_) => {
             // Hosted tools are not forwarded to chat completions
+            ChatCompletionToolChoiceOption::Auto
+        }
+        _ => {
+            // Other tool choice types (AllowedTools, Mcp, Custom, etc.) default to auto
             ChatCompletionToolChoiceOption::Auto
         }
     }
@@ -379,7 +444,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
 
         // Convert input to messages
         match &resp.inner.input {
-            Input::Text(text) => {
+            InputParam::Text(text) => {
                 messages.push(ChatCompletionRequestMessage::User(
                     ChatCompletionRequestUserMessage {
                         content: ChatCompletionRequestUserMessageContent::Text(text.clone()),
@@ -387,7 +452,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                     },
                 ));
             }
-            Input::Items(items) => {
+            InputParam::Items(items) => {
                 let item_messages = convert_input_items_to_messages(items)?;
                 messages.extend(item_messages);
             }
@@ -412,7 +477,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         Ok(NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
                 messages,
-                model: resp.inner.model,
+                model: resp.inner.model.unwrap_or_default(),
                 temperature: resp.inner.temperature,
                 top_p: resp.inner.top_p,
                 max_completion_tokens: resp.inner.max_output_tokens,
@@ -432,8 +497,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
     }
 }
 
-fn convert_top_logprobs(input: Option<u32>) -> Option<u8> {
-    input.map(|x| x.min(20) as u8)
+fn convert_top_logprobs(input: Option<u8>) -> Option<u8> {
+    input.map(|x| x.min(20))
 }
 
 /// Parse `<tool_call>` blocks from model text output.
@@ -511,26 +576,27 @@ fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
 // ---------------------------------------------------------------------------
 
 /// Build an assistant text message output item.
-fn make_text_message(id: String, text: String) -> OutputContent {
-    OutputContent::Message(OutputMessage {
+fn make_text_message(id: String, text: String) -> OutputItem {
+    OutputItem::Message(OutputMessage {
         id,
-        role: ResponseRole::Assistant,
+        role: AssistantRole::Assistant,
         status: OutputStatus::Completed,
-        content: vec![Content::OutputText(OutputText {
+        content: vec![OutputMessageContent::OutputText(OutputTextContent {
             text,
             annotations: vec![],
+            logprobs: None,
         })],
     })
 }
 
 /// Build a function call output item with generated IDs.
-fn make_function_call(name: String, arguments: String) -> OutputContent {
-    OutputContent::FunctionCall(ResponseFunctionCall {
-        id: format!("fc_{}", Uuid::new_v4().simple()),
+fn make_function_call(name: String, arguments: String) -> OutputItem {
+    OutputItem::FunctionCall(FunctionToolCall {
+        arguments,
         call_id: format!("call_{}", Uuid::new_v4().simple()),
         name,
-        arguments,
-        status: OutputStatus::Completed,
+        id: Some(format!("fc_{}", Uuid::new_v4().simple())),
+        status: Some(OutputStatus::Completed),
     })
 }
 
@@ -550,12 +616,12 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             // Handle structured tool calls
             if let Some(tool_calls) = choice.message.tool_calls {
                 for tc in &tool_calls {
-                    output.push(OutputContent::FunctionCall(ResponseFunctionCall {
-                        id: format!("fc_{}", Uuid::new_v4().simple()),
+                    output.push(OutputItem::FunctionCall(FunctionToolCall {
+                        arguments: tc.function.arguments.clone(),
                         call_id: tc.id.clone(),
                         name: tc.function.name.clone(),
-                        arguments: tc.function.arguments.clone(),
-                        status: OutputStatus::Completed,
+                        id: Some(format!("fc_{}", Uuid::new_v4().simple())),
+                        status: Some(OutputStatus::Completed),
                     }));
                 }
             }
@@ -597,25 +663,31 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             model: chat_resp.model,
             status: Status::Completed,
             output,
-            output_text: None,
-            parallel_tool_calls: None,
-            reasoning: None,
-            service_tier: None,
-            store: None,
-            truncation: None,
-            temperature: None,
-            top_p: None,
-            tools: None,
-            metadata: None,
-            previous_response_id: None,
+            background: None,
+            billing: None,
+            conversation: None,
+            completed_at: None,
             error: None,
             incomplete_details: None,
             instructions: None,
             max_output_tokens: None,
+            metadata: None,
+            parallel_tool_calls: None,
+            previous_response_id: None,
+            prompt: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
+            reasoning: None,
+            safety_identifier: None,
+            service_tier: None,
+            temperature: None,
             text: None,
             tool_choice: None,
+            tools: None,
+            top_logprobs: None,
+            top_p: None,
+            truncation: None,
             usage: None,
-            user: None,
         };
 
         Ok(NvResponse {
@@ -628,13 +700,12 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
 #[cfg(test)]
 mod tests {
     use dynamo_async_openai::types::responses::{
-        ContentType as RContentType, CreateResponse, Function as RFunction, Input, InputContent,
-        InputFunctionCall, InputFunctionCallOutput, InputFunctionCallOutputType,
-        InputFunctionCallType, InputImage, InputItem, InputMessage, InputMessageType, InputText,
-        Role as RRole, ToolDefinition,
+        CreateResponse, FunctionCallOutput, FunctionCallOutputItemParam, FunctionTool,
+        FunctionToolCall, ImageDetail, InputContent, InputImageContent, InputItem, InputMessage,
+        InputParam, InputRole, InputTextContent, Item, MessageItem, Tool,
     };
     use dynamo_async_openai::types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent, ImageDetail,
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     };
 
     use super::*;
@@ -643,8 +714,8 @@ mod tests {
     fn make_response_with_input(text: &str) -> NvCreateResponse {
         NvCreateResponse {
             inner: CreateResponse {
-                input: Input::Text(text.into()),
-                model: "test-model".into(),
+                input: InputParam::Text(text.into()),
+                model: Some("test-model".into()),
                 max_output_tokens: Some(1024),
                 temperature: Some(0.5),
                 top_p: Some(0.9),
@@ -716,8 +787,8 @@ mod tests {
     fn test_instructions_prepended_as_system_message() {
         let req = NvCreateResponse {
             inner: CreateResponse {
-                input: Input::Text("hello".into()),
-                model: "test-model".into(),
+                input: InputParam::Text("hello".into()),
+                model: Some("test-model".into()),
                 instructions: Some("You are a helpful assistant.".into()),
                 ..Default::default()
             },
@@ -743,29 +814,40 @@ mod tests {
     fn test_input_items_multi_turn() {
         let req = NvCreateResponse {
             inner: CreateResponse {
-                input: Input::Items(vec![
-                    InputItem::Message(InputMessage {
-                        kind: InputMessageType::Message,
-                        role: RRole::System,
-                        content: InputContent::TextInput("Be concise.".into()),
-                    }),
-                    InputItem::Message(InputMessage {
-                        kind: InputMessageType::Message,
-                        role: RRole::User,
-                        content: InputContent::TextInput("What is 2+2?".into()),
-                    }),
-                    InputItem::Message(InputMessage {
-                        kind: InputMessageType::Message,
-                        role: RRole::Assistant,
-                        content: InputContent::TextInput("4".into()),
-                    }),
-                    InputItem::Message(InputMessage {
-                        kind: InputMessageType::Message,
-                        role: RRole::User,
-                        content: InputContent::TextInput("And 3+3?".into()),
-                    }),
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "Be concise.".into(),
+                        })],
+                        role: InputRole::System,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "What is 2+2?".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::Message(MessageItem::Output(OutputMessage {
+                        id: "msg_1".into(),
+                        role: AssistantRole::Assistant,
+                        status: OutputStatus::Completed,
+                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                            text: "4".into(),
+                            annotations: vec![],
+                            logprobs: None,
+                        })],
+                    }))),
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "And 3+3?".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
                 ]),
-                model: "test-model".into(),
+                model: Some("test-model".into()),
                 ..Default::default()
             },
             nvext: None,
@@ -784,21 +866,23 @@ mod tests {
     fn test_input_items_with_image() {
         let req = NvCreateResponse {
             inner: CreateResponse {
-                input: Input::Items(vec![InputItem::Message(InputMessage {
-                    kind: InputMessageType::Message,
-                    role: RRole::User,
-                    content: InputContent::InputItemContentList(vec![
-                        RContentType::InputText(InputText {
-                            text: "What is in this image?".into(),
-                        }),
-                        RContentType::InputImage(InputImage {
-                            detail: ImageDetail::Auto,
-                            file_id: None,
-                            image_url: Some("https://example.com/cat.jpg".into()),
-                        }),
-                    ]),
-                })]),
-                model: "test-model".into(),
+                input: InputParam::Items(vec![InputItem::Item(Item::Message(
+                    MessageItem::Input(InputMessage {
+                        content: vec![
+                            InputContent::InputText(InputTextContent {
+                                text: "What is in this image?".into(),
+                            }),
+                            InputContent::InputImage(InputImageContent {
+                                detail: ImageDetail::Auto,
+                                file_id: None,
+                                image_url: Some("https://example.com/cat.jpg".into()),
+                            }),
+                        ],
+                        role: InputRole::User,
+                        status: None,
+                    }),
+                ))]),
+                model: Some("test-model".into()),
                 ..Default::default()
             },
             nvext: None,
@@ -822,28 +906,29 @@ mod tests {
     fn test_function_call_input_items() {
         let req = NvCreateResponse {
             inner: CreateResponse {
-                input: Input::Items(vec![
-                    InputItem::Message(InputMessage {
-                        kind: InputMessageType::Message,
-                        role: RRole::User,
-                        content: InputContent::TextInput("What's the weather?".into()),
-                    }),
-                    InputItem::FunctionCall(InputFunctionCall {
-                        kind: InputFunctionCallType::FunctionCall,
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "What's the weather?".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: r#"{"location":"SF"}"#.into(),
                         call_id: "call_123".into(),
                         name: "get_weather".into(),
-                        arguments: r#"{"location":"SF"}"#.into(),
                         id: None,
                         status: None,
-                    }),
-                    InputItem::FunctionCallOutput(InputFunctionCallOutput {
-                        kind: InputFunctionCallOutputType::FunctionCallOutput,
+                    })),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
                         call_id: "call_123".into(),
-                        output: r#"{"temp":"72F"}"#.into(),
+                        output: FunctionCallOutput::Text(r#"{"temp":"72F"}"#.into()),
                         id: None,
-                    }),
+                        status: None,
+                    })),
                 ]),
-                model: "test-model".into(),
+                model: Some("test-model".into()),
                 ..Default::default()
             },
             nvext: None,
@@ -861,18 +946,18 @@ mod tests {
     fn test_tools_conversion() {
         let req = NvCreateResponse {
             inner: CreateResponse {
-                input: Input::Text("hello".into()),
-                model: "test-model".into(),
-                tools: Some(vec![ToolDefinition::Function(RFunction {
+                input: InputParam::Text("hello".into()),
+                model: Some("test-model".into()),
+                tools: Some(vec![Tool::Function(FunctionTool {
                     name: "get_weather".into(),
-                    parameters: serde_json::json!({
+                    parameters: Some(serde_json::json!({
                         "type": "object",
                         "properties": {
                             "location": {"type": "string"}
                         },
                         "required": ["location"]
-                    }),
-                    strict: true,
+                    })),
+                    strict: Some(true),
                     description: Some("Get weather info".into()),
                 })]),
                 ..Default::default()
@@ -925,13 +1010,13 @@ mod tests {
         assert!(wrapped.inner.id.starts_with("resp_"));
 
         let msg = match &wrapped.inner.output[0] {
-            OutputContent::Message(m) => m,
+            OutputItem::Message(m) => m,
             _ => panic!("Expected Message variant"),
         };
-        assert_eq!(msg.role, ResponseRole::Assistant);
+        assert_eq!(msg.role, AssistantRole::Assistant);
 
         match &msg.content[0] {
-            Content::OutputText(txt) => {
+            OutputMessageContent::OutputText(txt) => {
                 assert_eq!(txt.text, "This is a reply");
             }
             _ => panic!("Expected OutputText content"),
@@ -978,7 +1063,7 @@ mod tests {
         let wrapped: NvResponse = chat_resp.try_into().unwrap();
         assert_eq!(wrapped.inner.output.len(), 1);
         match &wrapped.inner.output[0] {
-            OutputContent::FunctionCall(fc) => {
+            OutputItem::FunctionCall(fc) => {
                 assert_eq!(fc.call_id, "call_abc");
                 assert_eq!(fc.name, "get_weather");
             }
@@ -990,7 +1075,7 @@ mod tests {
     fn test_convert_top_logprobs_clamped() {
         assert_eq!(convert_top_logprobs(Some(5)), Some(5));
         assert_eq!(convert_top_logprobs(Some(21)), Some(20));
-        assert_eq!(convert_top_logprobs(Some(1000)), Some(20));
+        assert_eq!(convert_top_logprobs(Some(255)), Some(20));
         assert_eq!(convert_top_logprobs(None), None);
     }
 

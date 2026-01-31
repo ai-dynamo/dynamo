@@ -1150,7 +1150,7 @@ async fn handler_responses(
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
-    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request_id = get_or_create_request_id(None, &headers);
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
@@ -1184,7 +1184,8 @@ async fn responses(
     check_ready(&state)?;
 
     // Create http_queue_guard early - tracks time waiting to be processed
-    let model = request.inner.model.clone();
+    // model is Option<String> in upstream; extract to String, defaulting to empty
+    let model = request.inner.model.clone().unwrap_or_default();
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
@@ -1196,8 +1197,8 @@ async fn responses(
 
     // Apply template values if present
     if let Some(template) = template {
-        if request.inner.model.is_empty() {
-            request.inner.model = template.model.clone();
+        if request.inner.model.as_deref().unwrap_or("").is_empty() {
+            request.inner.model = Some(template.model.clone());
         }
         if request.inner.temperature.unwrap_or(0.0) == 0.0 {
             request.inner.temperature = Some(template.temperature);
@@ -1411,12 +1412,6 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`truncation` is not supported.",
         ));
     }
-    if inner.user.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`user` is not supported.",
-        ));
-    }
-
     None
 }
 
@@ -1575,8 +1570,8 @@ mod tests {
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
     use dynamo_async_openai::types::responses::{
-        CreateResponse, Input, PromptConfig, ServiceTier, TextConfig, TextResponseFormat,
-        Truncation,
+        CreateResponse, IncludeEnum, Input, PromptConfig, ServiceTier, TextConfig,
+        TextResponseFormat, Truncation,
     };
     use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
@@ -1601,28 +1596,8 @@ mod tests {
         NvCreateResponse {
             inner: CreateResponse {
                 input: Input::Text("hello".into()),
-                model: "test-model".into(),
-                background: None,
-                include: None,
-                instructions: None,
-                max_output_tokens: None,
-                max_tool_calls: None,
-                metadata: None,
-                parallel_tool_calls: None,
-                previous_response_id: None,
-                prompt: None,
-                reasoning: None,
-                service_tier: None,
-                store: None,
-                stream: None,
-                text: None,
-                tool_choice: None,
-                tools: None,
-                truncation: None,
-                user: None,
-                temperature: None,
-                top_logprobs: None,
-                top_p: None,
+                model: Some("test-model".into()),
+                ..Default::default()
             },
             nvext: None,
         }
@@ -1707,7 +1682,7 @@ mod tests {
             ("background", Box::new(|r| r.background = Some(true))),
             (
                 "include",
-                Box::new(|r| r.include = Some(vec!["file_search_call.results".into()])),
+                Box::new(|r| r.include = Some(vec![IncludeEnum::FileSearchCallResults])),
             ),
             (
                 "previous_response_id",
@@ -1737,6 +1712,7 @@ mod tests {
                 Box::new(|r| {
                     r.text = Some(TextConfig {
                         format: TextResponseFormat::Text,
+                        verbosity: None,
                     })
                 }),
             ),
@@ -1744,7 +1720,6 @@ mod tests {
                 "truncation",
                 Box::new(|r| r.truncation = Some(Truncation::Auto)),
             ),
-            ("user", Box::new(|r| r.user = Some("user-id".into()))),
         ];
 
         for (field, set_field) in unsupported_cases {
