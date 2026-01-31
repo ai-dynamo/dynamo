@@ -5,12 +5,31 @@ import asyncio
 import logging
 from typing import List, Optional, Tuple
 
+from prometheus_client import CollectorRegistry
 from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
+from dynamo.common.utils.prometheus import DynamoComponentGauges, DynamoComponentMetrics
 from dynamo.llm import WorkerMetricsPublisher
+from dynamo.prometheus_names import labels
 from dynamo.runtime import Component
+
+# Create a dedicated registry for dynamo_component metrics
+# This ensures these metrics are isolated and can be exposed via their own callback
+DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
+
+# Gauges will be lazily initialized after PROMETHEUS_MULTIPROC_DIR is set
+DYNAMO_COMPONENT_GAUGES: DynamoComponentGauges | None = None
+
+
+def _ensure_gauges_initialized():
+    """Lazy initialization of gauges after PROMETHEUS_MULTIPROC_DIR is set."""
+    global DYNAMO_COMPONENT_GAUGES
+    if DYNAMO_COMPONENT_GAUGES is None:
+        DYNAMO_COMPONENT_GAUGES = DynamoComponentMetrics.create_all(
+            registry=DYNAMO_COMPONENT_REGISTRY
+        )  # pyright: ignore[reportConstantRedefinition]
 
 
 class NullStatLogger(StatLoggerBase):
@@ -68,11 +87,37 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         *args,
         **kwargs,
     ):
+        # Ensure gauges are initialized (deferred until after PROMETHEUS_MULTIPROC_DIR is set)
+        _ensure_gauges_initialized()
+
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
         self.inner.publish(self.dp_rank, active_decode_blocks)
 
+        dp_rank_str = str(self.dp_rank)
+        DYNAMO_COMPONENT_GAUGES.total_blocks.labels(
+            **{labels.DP_RANK: dp_rank_str}
+        ).set(self.num_gpu_block)
+
+        # Set GPU cache usage percentage directly from scheduler_stats
+        # Note: vLLM's scheduler_stats.kv_cache_usage returns very small values
+        # (e.g., 0.0000834 for ~0.08% usage), which Prometheus outputs in scientific
+        # notation (8.34e-05). This is the correct value and will be properly parsed.
+        DYNAMO_COMPONENT_GAUGES.gpu_cache_usage_percent.labels(
+            **{labels.DP_RANK: dp_rank_str}
+        ).set(scheduler_stats.kv_cache_usage)
+
     def init_publish(self):
+        # Ensure gauges are initialized (deferred until after PROMETHEUS_MULTIPROC_DIR is set)
+        _ensure_gauges_initialized()
+
         self.inner.publish(self.dp_rank, 0)
+        dp_rank_str = str(self.dp_rank)
+        DYNAMO_COMPONENT_GAUGES.total_blocks.labels(
+            **{labels.DP_RANK: dp_rank_str}
+        ).set(0)
+        DYNAMO_COMPONENT_GAUGES.gpu_cache_usage_percent.labels(
+            **{labels.DP_RANK: dp_rank_str}
+        ).set(0.0)
 
     def log_engine_initialized(self) -> None:
         pass
