@@ -219,9 +219,9 @@ var (
 
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
-	ffiComponent = getEnvOrDefault("DYN_COMPONENT", "backend")
+	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
 	ffiModel = getEnvOrDefault("DYN_MODEL", "Qwen/Qwen3-0.6B")
-	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", false)
+	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
 
 	kvBlockSizeStr := os.Getenv("DYN_KV_BLOCK_SIZE")
 	if kvBlockSizeStr == "" {
@@ -286,8 +286,8 @@ func initFFI() error {
 		routerHandlesMutex.Lock()
 		defer routerHandlesMutex.Unlock()
 
-		waitForPrefill := getEnvBoolOrDefault("DYNAMO_WAIT_FOR_PREFILL", false)
-		prefillTimeoutSecs := uint32(getEnvInt64OrDefault("DYNAMO_PREFILL_TIMEOUT_SECS", 30))
+		waitForPrefill := getEnvBoolOrDefault("DYN_WAIT_FOR_PREFILL", false)
+		prefillTimeoutSecs := uint32(getEnvInt64OrDefault("DYN_PREFILL_TIMEOUT_SEC", 300))
 
 		rc := C.create_routers(
 			ns,
@@ -329,7 +329,7 @@ func (k *KVAwareScorer) Score(
 			"tokenDataCount", len(tokenData),
 		)
 
-		// Store in request headers for the Lua filter at the gateway
+		// Store in request headers
 		if req.Headers == nil {
 			req.Headers = map[string]string{}
 		}
@@ -372,7 +372,7 @@ func (k *KVAwareScorer) Score(
 }
 
 // PreRequest is called after scheduling is finalized and before the request is sent to the worker.
-// This is the correct place to register the request with the Dynamo router's bookkeeping,
+// This is the place to register the request with the Dynamo router's bookkeeping,
 // as we know the request WILL be dispatched (avoiding phantom bookkeeping entries).
 func (k *KVAwareScorer) PreRequest(
 	ctx context.Context,
@@ -501,7 +501,7 @@ func (k *KVAwareScorer) callDynamoRouter(
 		return "", "", nil, fmt.Errorf("dynamo router handles not created")
 	}
 
-	// Build OpenAI-compatible JSON request from the new LLMRequest structure
+	// Build OpenAI-compatible JSON request from the GAIE LLMRequest structure
 	requestBody := buildOpenAIRequest(req)
 	requestJSON, jsonErr := json.Marshal(requestBody)
 	if jsonErr != nil {
@@ -523,13 +523,14 @@ func (k *KVAwareScorer) callDynamoRouter(
 	// Copy tokens into Go memory
 	count := int(result.token_count)
 	var tokens64 []int64
-	if count > 0 && result.token_ids != nil {
-		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
-		tokens64 = make([]int64, count)
-		for i := 0; i < count; i++ {
-			tokens64[i] = int64(src[i])
-		}
-	}
+	// TODO: Re-enable when tokens are enabled for request body passthrough
+	// if count > 0 && result.token_ids != nil {
+	// 	src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
+	// 	tokens64 = make([]int64, count)
+	// 	for i := 0; i < count; i++ {
+	// 		tokens64[i] = int64(src[i])
+	// 	}
+	// }
 
 	// Free the routing result
 	C.free_routing_result(&result)
@@ -547,37 +548,38 @@ func (k *KVAwareScorer) callDynamoRouter(
 	return workerIDStr, prefillWorkerIDStr, tokens64, nil
 }
 
-// buildOpenAIRequest constructs an OpenAI-compatible request from the new LLMRequest structure
+// buildOpenAIRequest constructs an OpenAI-compatible request from the GAIE LLMRequest structure.
+// Preserves message roles for correct chat template application and tokenization.
 func buildOpenAIRequest(req *schedtypes.LLMRequest) map[string]any {
 	requestBody := make(map[string]any)
 
-	// Extract prompt from the new Body structure
-	userText := "default prompt"
+	// Preserve the original message structure for correct chat template application
 	if req != nil && req.Body != nil {
 		if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
-			// Extract text from chat completions messages
-			var sb strings.Builder
+			messages := make([]map[string]any, 0, len(req.Body.ChatCompletions.Messages))
 			for _, msg := range req.Body.ChatCompletions.Messages {
-				sb.WriteString(msg.Content.PlainText())
-				sb.WriteString(" ")
+				messages = append(messages, map[string]any{
+					"role":    msg.Role,
+					"content": msg.Content.PlainText(),
+				})
 			}
-			userText = strings.TrimSpace(sb.String())
+			requestBody["messages"] = messages
 		} else if req.Body.Completions != nil && req.Body.Completions.Prompt != "" {
-			userText = req.Body.Completions.Prompt
+			// Legacy completions format - wrap as single user message
+			requestBody["messages"] = []map[string]any{
+				{"role": "user", "content": req.Body.Completions.Prompt},
+			}
+		} else {
+			requestBody["messages"] = []map[string]any{{"role": "user", "content": "default prompt"}}
 		}
+	} else {
+		requestBody["messages"] = []map[string]any{{"role": "user", "content": "default prompt"}}
 	}
 
-	requestBody["messages"] = []map[string]any{{"role": "user", "content": userText}}
 	if req != nil && strings.TrimSpace(req.TargetModel) != "" {
 		requestBody["model"] = req.TargetModel
 	} else {
 		requestBody["model"] = ffiModel
-	}
-	requestBody["max_tokens"] = 1
-	requestBody["temperature"] = 0.0
-	requestBody["stream"] = true
-	requestBody["nvext"] = map[string]any{
-		"annotations": []string{"query_instance_id"},
 	}
 	return requestBody
 }

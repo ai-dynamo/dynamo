@@ -90,7 +90,7 @@ spec:
               value: "128" # UPDATE to match the --block-size in your deploy.yaml engine command
             - name: USE_STREAMING
               value: "true"
-            - name: DYNAMO_ENFORCE_DISAGG
+            - name: DYN_ENFORCE_DISAGG
               value: "false"
             - name: DYN_DISCOVERY_BACKEND
               value: "kubernetes"
