@@ -62,6 +62,7 @@ impl SchedulerOutput {
         &mut self,
         request_id: String,
         resumed_from_preemption: bool,
+        resumed_req_ids: Vec<String>,
         new_token_ids: Vec<u32>,
         new_block_ids: Vec<BlockId>,
         num_computed_tokens: usize,
@@ -69,6 +70,7 @@ impl SchedulerOutput {
         self.cached_requests.push(CachedRequestData {
             request_id,
             resumed_from_preemption,
+            resumed_req_ids,
             new_token_ids,
             new_block_ids,
             num_computed_tokens,
@@ -116,6 +118,7 @@ impl std::fmt::Debug for NewRequestData {
 pub struct CachedRequestData {
     pub request_id: String,
     pub resumed_from_preemption: bool,
+    pub resumed_req_ids: Vec<String>,
     pub new_token_ids: Vec<u32>,
     pub new_block_ids: Vec<BlockId>,
     pub num_computed_tokens: usize,
@@ -126,6 +129,7 @@ impl std::fmt::Debug for CachedRequestData {
         f.debug_struct("CachedRequestData")
             .field("request_id", &self.request_id)
             .field("resumed_from_preemption", &self.resumed_from_preemption)
+            .field("resumed_req_ids", &self.resumed_req_ids.len())
             .field("num_new_tokens", &self.new_token_ids.len())
             .field("num_new_blocks", &self.new_block_ids.len())
             .field("num_computed_tokens", &self.num_computed_tokens)

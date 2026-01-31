@@ -172,12 +172,14 @@ class KvConnectorLeader:
         for (
             req_id,
             resumed_from_preemption,
+            resumed_req_ids,
             new_token_ids,
             new_block_ids,
             num_computed_tokens,
         ) in zip(
             scheduler_output.scheduled_cached_reqs.req_ids,
             scheduler_output.scheduled_cached_reqs.resumed_from_preemption,
+            scheduler_output.scheduled_cached_reqs.resumed_req_ids,
             scheduler_output.scheduled_cached_reqs.new_token_ids,
             scheduler_output.scheduled_cached_reqs.new_block_ids,
             scheduler_output.scheduled_cached_reqs.num_computed_tokens,
@@ -186,6 +188,7 @@ class KvConnectorLeader:
                 output.add_cached_request(
                     request_id=req_id,
                     resumed_from_preemption=resumed_from_preemption,
+                    resumed_req_ids=resumed_req_ids,
                     new_token_ids=new_token_ids,
                     new_block_ids=new_block_ids[0],
                     num_computed_tokens=num_computed_tokens,

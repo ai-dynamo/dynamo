@@ -417,7 +417,7 @@ impl Leader for KvConnectorLeader {
         for cached_req in &scheduler_output.cached_requests {
             let request_id = &cached_req.request_id;
 
-            if cached_req.resumed_from_preemption {
+            if cached_req.resumed_req_ids.contains(request_id) {
                 // we really do not know what to expect here:
                 // first let's try to get the slot, it might fail because maybe preemption put us thru
                 // a finished cycle -- who knows
