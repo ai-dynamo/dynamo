@@ -49,10 +49,15 @@ from dynamo.vllm.multimodal_handlers import (
     VLLMEncodeWorkerHandler,
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
+from dynamo.vllm.omni import OmniHandler
 
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .health_check import (
+    VllmHealthCheckPayload,
+    VllmOmniHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
@@ -1236,8 +1241,6 @@ async def init_omni(
     Uses vLLM-Omni's Omni class for single-stage text generation pipeline.
     For now, supports text-to-text only (no multimodal).
     """
-    from dynamo.vllm.omni import OmniHandler
-
     component = runtime.namespace(config.namespace).component(config.component)
     generate_endpoint = component.endpoint(config.endpoint)
 
@@ -1258,6 +1261,14 @@ async def init_omni(
 
     logger.info(f"Omni worker initialized for model: {config.model}")
 
+    # Set up metrics collection for vLLM and LMCache metrics
+    setup_metrics_collection(config, generate_endpoint, logger)
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
     # TODO: extend for multi-stage pipelines
     # Register as Chat endpoint for text-to-text generation
     # Use Tokens input since we're doing token-based processing
@@ -1272,11 +1283,17 @@ async def init_omni(
 
     logger.info("Starting to serve Omni worker endpoint...")
 
+    # Create health check payload (extracts BOS token from AsyncOmni)
+    health_check_payload = (
+        await VllmOmniHealthCheckPayload.create(handler.engine_client)
+    ).to_dict()
+
     try:
         await generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
             metrics_labels=[("model", config.served_model_name or config.model)],
+            health_check_payload=health_check_payload,
         )
     except Exception as e:
         logger.error(f"Failed to serve Omni endpoint: {e}")

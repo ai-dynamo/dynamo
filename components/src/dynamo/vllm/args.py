@@ -395,6 +395,13 @@ def parse_args() -> Config:
                 "Specify a shared storage path for encoder cache."
             )
 
+    # Validate omni worker requirements
+    if args.omni_worker and not args.stage_configs_path:
+        raise ValueError(
+            "--stage-configs-path is required when using --omni-worker. "
+            "Specify a YAML file containing stage configurations for the multi-stage pipeline."
+        )
+
     # Set component and endpoint based on worker type
     if args.multimodal_processor or args.ec_processor:
         config.component = "processor"
