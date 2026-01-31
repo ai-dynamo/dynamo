@@ -980,11 +980,17 @@ async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
     kv_router_config: Option<llm_rs::kv_router::KvRouterConfig>,
+    worker_type: &'static str,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let kv_router = model_manager
-        .kv_chooser_for(&endpoint.inner, block_size as u32, kv_router_config)
+        .kv_chooser_for(
+            &endpoint.inner,
+            block_size as u32,
+            kv_router_config,
+            worker_type,
+        )
         .await
         .map_err(to_pyerr)?;
 
@@ -1080,12 +1086,33 @@ impl KvPushRouter {
 
 #[pymethods]
 impl KvPushRouter {
+    /// Create a new KvPushRouter for KV-aware routing to workers.
+    ///
+    /// # Arguments
+    /// * `endpoint` - The endpoint to route requests to
+    /// * `block_size` - KV cache block size for routing decisions
+    /// * `kv_router_config` - Configuration for the KV router
+    /// * `worker_type` - Type of workers being routed to: "decode" (default) or "prefill"
     #[new]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, worker_type=None))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
+        worker_type: Option<&str>,
     ) -> PyResult<Self> {
+        // Determine worker_type, defaulting to "decode" for backward compatibility
+        let worker_type_static: &'static str = match worker_type {
+            Some("prefill") => llm_rs::discovery::WORKER_TYPE_PREFILL,
+            Some("decode") | None => llm_rs::discovery::WORKER_TYPE_DECODE,
+            Some(other) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid worker_type '{}'. Must be 'prefill' or 'decode'.",
+                    other
+                )));
+            }
+        };
+
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async move {
             let client = endpoint.inner.client().await.map_err(to_pyerr)?;
@@ -1108,6 +1135,7 @@ impl KvPushRouter {
                 endpoint,
                 block_size,
                 Some(kv_router_config.inner()),
+                worker_type_static,
             )
             .await?;
 

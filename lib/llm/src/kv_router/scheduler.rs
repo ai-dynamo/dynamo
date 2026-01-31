@@ -102,6 +102,7 @@ impl KvScheduler {
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_id: u64,
+        worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -120,6 +121,7 @@ impl KvScheduler {
                 initial_workers,
                 replica_sync,
                 router_id,
+                worker_type,
             )
             .await
             .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,

@@ -150,6 +150,22 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Active decode blocks (KV cache blocks) per worker
+    /// Gauge metric tracking current KV cache block utilization for each worker
+    pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";
+
+    /// Active prefill tokens per worker
+    /// Gauge metric tracking current queued prefill tokens for each worker
+    pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
+
+    /// Last observed time to first token per worker (in seconds)
+    /// Gauge metric tracking the most recent TTFT for each worker
+    pub const WORKER_LAST_TTFT_SECONDS: &str = "worker_last_ttft_seconds";
+
+    /// Last observed inter-token latency per worker (in seconds)
+    /// Gauge metric tracking the most recent ITL for each worker
+    pub const WORKER_LAST_ITL_SECONDS: &str = "worker_last_itl_seconds";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 

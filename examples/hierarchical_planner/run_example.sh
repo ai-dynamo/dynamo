@@ -27,8 +27,9 @@ python -m dynamo.global_router \
 # ============================================================================
 DYN_NAMESPACE=prefill_pool_0 python -m dynamo.router \
   --endpoint prefill_pool_0.worker.generate \
-  --block-size 16 & \
-  --no-track-active-blocks # prefill router does not need to track active blocks
+  --block-size 16 \
+  --worker-type prefill \
+  --no-track-active-blocks &  # prefill router does not need to track active blocks
 
 python -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
@@ -41,8 +42,9 @@ python -m dynamo.mocker \
 # ============================================================================
 DYN_NAMESPACE=prefill_pool_1 python -m dynamo.router \
   --endpoint prefill_pool_1.worker.generate \
-  --block-size 16 & \
-  --no-track-active-blocks # prefill router does not need to track active blocks
+  --block-size 16 \
+  --worker-type prefill \
+  --no-track-active-blocks &  # prefill router does not need to track active blocks
 
 python -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
@@ -55,8 +57,9 @@ python -m dynamo.mocker \
 # ============================================================================
 DYN_NAMESPACE=decode_pool_0 python -m dynamo.router \
   --endpoint decode_pool_0.worker.generate \
-  --block-size 16 & \
-  --kv-overlap-score-weight 0
+  --block-size 16 \
+  --worker-type decode \
+  --kv-overlap-score-weight 0 &
 
 python -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
