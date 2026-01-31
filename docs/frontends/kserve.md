@@ -20,6 +20,28 @@ To start the KServe frontend, run the below command
 python -m dynamo.frontend --kserve-grpc-server
 ```
 
+## gRPC Performance Tuning
+
+The gRPC server supports optional HTTP/2 flow control tuning via environment variables. These can be set before starting the server to optimize for high-throughput streaming workloads.
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE` | HTTP/2 connection-level flow control window size in bytes | tonic default (64KB) |
+| `DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE` | HTTP/2 per-stream flow control window size in bytes | tonic default (64KB) |
+
+### Example: High-ISL/OSL configuration for streaming workloads
+
+```bash
+# For 128 concurrent 15k-token requests
+export DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE=16777216  # 16MB
+export DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE=1048576      # 1MB
+python -m dynamo.frontend --kserve-grpc-server
+```
+
+If these variables are not set, the server uses tonic's default values.
+
+> **Note**: Tune these values based on your workload. Connection window should accommodate `concurrent_requests × request_size`. Memory overhead equals the connection window size (shared across all streams). See [gRPC performance best practices](https://grpc.io/docs/guides/performance/) and [gRPC channel arguments](https://grpc.github.io/grpc/core/group__grpc__arg__keys.html) for more details.
+
 ## Registering a Backend
 
 Similar to HTTP frontend, the registered backend will be auto-discovered and added to the frontend list of serving model. To register a backend, the same `register_llm()` API will be used. Currently the frontend support serving of the following model type and model input combination:

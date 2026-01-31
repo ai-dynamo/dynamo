@@ -5,6 +5,7 @@ import asyncio
 import base64
 import binascii
 import io
+import json
 import logging
 import os
 import tempfile
@@ -1260,11 +1261,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if self.use_vllm_tokenizer:
             # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
             async for chunk in self._generate_text_mode(request, context, request_id):
-                yield chunk
+                # Serialize to JSON string for Rust binding (reduces GIL contention)
+                yield json.dumps(chunk)
         else:
             # Token-in-token-out mode: internal protocol format
             async for chunk in self._generate_token_mode(request, context, request_id):
-                yield chunk
+                # Serialize to JSON string for Rust binding (reduces GIL contention)
+                yield json.dumps(chunk)
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
@@ -1472,7 +1475,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Token-in-token-out mode: internal protocol format
         async for chunk in self._generate_token_mode(request, context, request_id):
-            yield chunk
+            # Serialize to JSON string for Rust binding (reduces GIL contention)
+            yield json.dumps(chunk)
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
