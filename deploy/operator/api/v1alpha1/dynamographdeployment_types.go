@@ -22,6 +22,8 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -172,6 +174,9 @@ type ServiceReplicaStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgd
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Ready status of the graph deployment"
+// +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -185,6 +190,14 @@ type DynamoGraphDeployment struct {
 
 func (s *DynamoGraphDeployment) SetState(state string) {
 	s.Status.State = state
+}
+
+// GetState returns the current lifecycle state
+func (d *DynamoGraphDeployment) GetState() string {
+	if d.Status.State == "" {
+		return consts.ResourceStateUnknown
+	}
+	return d.Status.State
 }
 
 // +kubebuilder:object:root=true
@@ -237,4 +250,24 @@ func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 // GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
 func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
 	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
+}
+
+// HasEPPService returns true if any service in the DGD has EPP component type
+func (dgd *DynamoGraphDeployment) HasEPPService() bool {
+	for _, component := range dgd.Spec.Services {
+		if component != nil && component.ComponentType == consts.ComponentTypeEPP {
+			return true
+		}
+	}
+	return false
+}
+
+// GetEPPService returns the EPP service name and spec if present
+func (dgd *DynamoGraphDeployment) GetEPPService() (string, *DynamoComponentDeploymentSharedSpec, bool) {
+	for serviceName, component := range dgd.Spec.Services {
+		if component != nil && component.ComponentType == consts.ComponentTypeEPP {
+			return serviceName, component, true
+		}
+	}
+	return "", nil, false
 }

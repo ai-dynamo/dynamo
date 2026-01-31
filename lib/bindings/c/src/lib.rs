@@ -57,6 +57,18 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
+/// Default timeout for discovery sync (seconds).
+const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 10;
+
+/// Get discovery timeout from environment variable or use default.
+/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
+fn get_discovery_timeout_secs() -> u64 {
+    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SEC)
+}
+
 /// Wait for the discovery daemon to sync and return at least one instance.
 /// This ensures list() calls will have data available.
 /// Returns the number of instances found, or 0 if timed out.
@@ -120,7 +132,8 @@ pub unsafe extern "C" fn dynamo_llm_init(
                 // This is needed because dynamo_create_worker_selection_pipeline() is called
                 // immediately after, and it needs discovery.list() to return data
                 // the discovery daemon takes time to query K8s and returns async, so we need to wait.
-                let instance_count = wait_for_discovery_sync(drt, 10).await;
+                let timeout_secs = get_discovery_timeout_secs();
+                let instance_count = wait_for_discovery_sync(drt, timeout_secs).await;
                 if instance_count == 0 {
                     tracing::error!(
                         "Discovery sync failed: no worker instances found. Is the backend running?"
@@ -513,6 +526,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 Some(use_kv_events),
                 Some(router_replica_sync),
                 None, // track_active_blocks
+                None, // track_output_blocks
                 None, // assume_kv_reuse
                 None, // router_snapshot_threshold
                 None, // router_reset_states
@@ -930,7 +944,13 @@ pub unsafe extern "C" fn dynamo_router_add_request(
         };
 
         kv_router
-            .add_request(request_id_clone.clone(), &tokens, overlap_blocks, worker)
+            .add_request(
+                request_id_clone.clone(),
+                &tokens,
+                overlap_blocks,
+                None,
+                worker,
+            )
             .await;
 
         tracing::debug!(
@@ -945,7 +965,7 @@ pub unsafe extern "C" fn dynamo_router_add_request(
 }
 
 /// Mark prefill as completed for a request.
-/// Call this from GAIE hook when the first token is generated.
+/// Call this from the EPP extension point when the first token is generated.
 ///
 /// # Safety
 /// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
@@ -1125,76 +1145,14 @@ pub fn add_query_instance_id(
     set_kv_annotation(request, "query_instance_id".to_string(), "")
 }
 
-/// Set worker IDs directly on the NvExt fields for GAIE Stage 2
-///
-/// For disaggregated mode: sets `prefill_worker_id` and `decode_worker_id`
-/// For aggregated mode: sets `backend_instance_id` (when both IDs are the same)
-///
-/// Also sets `enable_local_updates: false` since the external caller (EPP/GAIE)
-/// will handle bookkeeping via C FFI functions.
-pub fn set_worker_ids_for_stage2(
-    request: &mut NvCreateChatCompletionRequest,
-    decode_worker_id: Option<i64>,
-    prefill_worker_id: Option<i64>,
-) -> &mut NvCreateChatCompletionRequest {
-    let nvext = request.nvext.get_or_insert_with(|| {
-        NvExt::builder()
-            .build()
-            .expect("NvExt builder should not fail")
-    });
-
-    // Disable local updates - external caller handles bookkeeping via C FFI
-    nvext.enable_local_updates = Some(false);
-
-    // Check if this is aggregated mode (same worker for both)
-    let is_aggregated = prefill_worker_id == decode_worker_id;
-
-    if is_aggregated {
-        // Aggregated: use backend_instance_id for direct routing
-        if let Some(id) = decode_worker_id {
-            nvext.backend_instance_id = Some(id as u64);
-            tracing::debug!(
-                backend_instance_id = id,
-                "GAIE Stage 2 Aggregated: Setting backend_instance_id"
-            );
-        }
-    } else {
-        // Disaggregated: use separate prefill and decode worker IDs
-        if let Some(id) = prefill_worker_id {
-            nvext.prefill_worker_id = Some(id as u64);
-        }
-        if let Some(id) = decode_worker_id {
-            nvext.decode_worker_id = Some(id as u64);
-        }
-        tracing::debug!(
-            prefill_worker_id = ?prefill_worker_id,
-            decode_worker_id = ?decode_worker_id,
-            "GAIE Stage 2 Disaggregated: Setting prefill and decode worker IDs"
-        );
-    }
-
-    request
-}
-
-/// Set token_data directly on the NvExt field for GAIE Stage 2
-pub fn set_token_data_for_stage2<'a>(
-    request: &'a mut NvCreateChatCompletionRequest,
-    tokens: &[u32],
-) -> &'a mut NvCreateChatCompletionRequest {
-    let nvext = request.nvext.get_or_insert_with(|| {
-        NvExt::builder()
-            .build()
-            .expect("NvExt builder should not fail")
-    });
-
-    nvext.token_data = Some(tokens.to_vec());
-    tracing::debug!(
-        token_count = tokens.len(),
-        "GAIE Stage 2: Setting token_data"
-    );
-
-    request
-}
+// Note: set_worker_ids_for_stage2 and set_token_data_for_stage2 have been removed.
+// The EPP now handles routing configuration via HTTP headers:
+// - `x-worker-instance-id`: decode worker ID
+// - `x-prefill-instance-id`: prefill worker ID (disaggregated mode only)
+// - `x-enable-local-updates`: set to "false" to disable router bookkeeping
+//
+// Body modifications are NOT sent to the inference engine (only headers are forwarded),
+// so these functions were ineffective.
 
 /// Ensure `nvext` exists and return a mutable slice of annotations.
 fn ensure_annotations(request: &mut NvCreateChatCompletionRequest) -> &mut Vec<String> {
@@ -1220,30 +1178,34 @@ fn set_kv_annotation(
     request
 }
 
-/// Wrapper function that queries worker selection and prepares the request for GAIE Stage 2
+/// Wrapper function that queries worker selection for GAIE Stage 1
 ///
 /// This function performs the complete GAIE Stage 1 flow:
 /// 1. Clones the original request and adds "query_instance_id:" (empty) annotation
 /// 2. Calls engine.generate() with the modified request
 /// 3. Extracts worker_id info and tokens from the response stream
-/// 4. Sets the appropriate NvExt fields on the original request for Stage 2:
-///    - Disaggregated: prefill_worker_id, decode_worker_id, token_data
-///    - Aggregated: backend_instance_id, token_data
-/// 5. Returns WorkerSelectionResult and the modified request ready for Stage 2
+/// 4. Returns WorkerSelectionResult and the original request
+///
+/// Note: The EPP (caller) is responsible for setting HTTP headers for Stage 2:
+/// - `x-worker-instance-id`: decode worker ID
+/// - `x-prefill-instance-id`: prefill worker ID (disaggregated mode only)
+/// - `x-enable-local-updates`: "false" to disable router bookkeeping
+///
+/// Body modifications are NOT forwarded to the inference engine, so this function
+/// does not modify the request body.
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
 /// - `original_request`: The original OpenAI request to process
 ///
 /// # Returns
-/// A tuple containing (WorkerSelectionResult, modified_original_request)
-/// where the modified_original_request is ready for GAIE Stage 2 execution
+/// A tuple containing (WorkerSelectionResult, original_request)
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
-    mut original_request: NvCreateChatCompletionRequest,
+    original_request: NvCreateChatCompletionRequest,
 ) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
     // GAIE Stage 1: Query for worker selection
     let mut query_request = original_request.clone();
@@ -1252,14 +1214,9 @@ pub async fn query_worker_selection_and_annotate(
     let response_stream = engine.generate(single_in).await?;
     let result = extract_worker_selection_from_stream(response_stream).await?;
 
-    // Prepare request for GAIE Stage 2: Set NvExt fields directly
-    set_worker_ids_for_stage2(
-        &mut original_request,
-        result.decode_worker_id,
-        result.prefill_worker_id,
-    );
-    set_token_data_for_stage2(&mut original_request, &result.tokens);
-
+    // Return the original request unchanged.
+    // The EPP sets routing headers (worker IDs, enable_local_updates) which the
+    // Dynamo frontend reads via apply_header_routing_overrides().
     Ok((result, original_request))
 }
 
@@ -1417,7 +1374,8 @@ pub async fn create_worker_selection_pipeline_chat(
     // Only wait for discovery sync if we just initialized the DRT
     // (dynamo_llm_init already does this when it initializes)
     if needs_sync {
-        let instance_count = wait_for_discovery_sync(distributed_runtime, 10).await;
+        let timeout_secs = get_discovery_timeout_secs();
+        let instance_count = wait_for_discovery_sync(distributed_runtime, timeout_secs).await;
         if instance_count == 0 {
             return Err(anyhow::anyhow!(
                 "Discovery sync failed: no worker instances found. Is the backend running?"

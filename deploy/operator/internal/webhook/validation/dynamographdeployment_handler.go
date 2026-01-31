@@ -22,6 +22,8 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,11 +40,15 @@ const (
 
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
 // It is a thin wrapper around DynamoGraphDeploymentValidator.
-type DynamoGraphDeploymentHandler struct{}
+type DynamoGraphDeploymentHandler struct {
+	mgr manager.Manager
+}
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-func NewDynamoGraphDeploymentHandler() *DynamoGraphDeploymentHandler {
-	return &DynamoGraphDeploymentHandler{}
+func NewDynamoGraphDeploymentHandler(mgr manager.Manager) *DynamoGraphDeploymentHandler {
+	return &DynamoGraphDeploymentHandler{
+		mgr: mgr,
+	}
 }
 
 // ValidateCreate validates a DynamoGraphDeployment create request.
@@ -56,9 +62,9 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
-	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentValidator(deployment)
-	return validator.Validate()
+	// Create validator with manager for API group detection and perform validation
+	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr)
+	return validator.Validate(ctx)
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
@@ -83,11 +89,11 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 		return nil, err
 	}
 
-	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentValidator(newDeployment)
+	// Create validator with manager for API group detection and perform validation
+	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr)
 
 	// Validate stateless rules
-	warnings, err := validator.Validate()
+	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err
 	}
@@ -134,13 +140,17 @@ func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj r
 }
 
 // RegisterWithManager registers the webhook with the manager.
-// The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic.
+// The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic
+// and ObservedValidator to add metrics collection.
 func (h *DynamoGraphDeploymentHandler) RegisterWithManager(mgr manager.Manager) error {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
-	validator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+
+	// Wrap with metrics collection
+	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeployment)
 
 	webhook := admission.
-		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, validator).
+		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, observedValidator).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dynamoGraphDeploymentWebhookPath, webhook)
 	return nil

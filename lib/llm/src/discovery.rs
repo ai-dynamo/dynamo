@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod model_manager;
-pub use model_manager::{ModelManager, ModelManagerError, RuntimeConfigsWithNotify};
+pub use model_manager::{ModelManager, ModelManagerError};
+
+pub(crate) mod runtime_configs;
+pub use runtime_configs::{RuntimeConfigs, RuntimeConfigsSubscriber};
 
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};

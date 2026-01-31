@@ -60,6 +60,7 @@
 
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
+   backends/sglang/diffusion-lm.md
    backends/sglang/profiling.md
    backends/sglang/sgl-hicache-example.md
    backends/sglang/sglang-disaggregation.md
@@ -80,6 +81,8 @@
    backends/vllm/speculative_decoding.md
 
    benchmarks/kv-router-ab-testing.md
+
+   mocker/mocker.md
 
    frontends/kserve.md
    _sections/frontends.rst

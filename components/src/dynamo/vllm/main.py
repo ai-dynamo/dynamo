@@ -48,7 +48,20 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def graceful_shutdown(runtime):
+async def _handle_non_leader_node(dp_rank: int) -> None:
+    """
+    Handle non-leader node (data_parallel_rank >= 1) in multi-node deployments.
+    Non-leader nodes run vLLM workers but don't serve Dynamo endpoints.
+    """
+    logger.info(
+        f"Non-leader node detected (data_parallel_rank={dp_rank}). "
+        "Skipping endpoint serving."
+    )
+    # Wait indefinitely - process terminated via signal handlers
+    await asyncio.Event().wait()
+
+
+async def graceful_shutdown(runtime, shutdown_event):
     """
     Shutdown dynamo distributed runtime.
     The endpoints will be immediately invalidated so no new requests will be accepted.
@@ -56,6 +69,7 @@ async def graceful_shutdown(runtime):
     For endpoints served with graceful_shutdown=False, the serving function will return immediately.
     """
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    shutdown_event.set()
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
 
@@ -66,14 +80,26 @@ async def worker():
     loop = asyncio.get_running_loop()
     overwrite_args(config)
 
-    # Enable NATS based on use_kv_events flag (derived from kv_events_config)
+    # Create shutdown event
+    shutdown_event = asyncio.Event()
+
+    # Set DYN_EVENT_PLANE environment variable based on config
+    os.environ["DYN_EVENT_PLANE"] = config.event_plane
+
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND use_kv_events is True
+    enable_nats = config.request_plane == "nats" or (
+        config.event_plane == "nats" and config.use_kv_events
+    )
+
     runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, config.use_kv_events
+        loop, config.store_kv, config.request_plane, enable_nats
     )
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
+        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
@@ -101,29 +127,29 @@ async def worker():
 
     # Route to appropriate initialization based on config flags
     if config.vllm_native_encoder_worker:
-        await init_vllm_native_encoder(runtime, config)
+        await init_vllm_native_encoder(runtime, config, shutdown_event)
         logger.debug("init_vllm_native_encoder completed")
     elif config.ec_processor:
-        await init_ec_processor(runtime, config)
+        await init_ec_processor(runtime, config, shutdown_event)
         logger.debug("init_ec_processor completed")
     elif config.multimodal_processor:
-        await init_multimodal_processor(runtime, config)
+        await init_multimodal_processor(runtime, config, shutdown_event)
         logger.debug("init_multimodal_processor completed")
     elif config.multimodal_encode_worker:
-        await init_multimodal_encode_worker(runtime, config)
+        await init_multimodal_encode_worker(runtime, config, shutdown_event)
         logger.debug("init_multimodal_encode_worker completed")
     elif (
         config.multimodal_worker
         or config.multimodal_decode_worker
         or config.multimodal_encode_prefill_worker
     ):
-        await init_multimodal_worker(runtime, config)
+        await init_multimodal_worker(runtime, config, shutdown_event)
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
-        await init_prefill(runtime, config)
+        await init_prefill(runtime, config, shutdown_event)
         logger.debug("init_prefill completed")
     else:
-        await init(runtime, config)
+        await init(runtime, config, shutdown_event)
         logger.debug("init completed")
 
     logger.debug("Worker function completed, exiting...")
@@ -291,6 +317,10 @@ def setup_vllm_engine(config, stat_logger=None):
             os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
         if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
             os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
+
+    if engine_args.load_format == "gms":
+        engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -389,7 +419,9 @@ async def register_vllm_model(
     )
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config):
+async def init_prefill(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Instantiate and serve
     """
@@ -415,6 +447,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         generate_endpoint=generate_endpoint,
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
+        shutdown_event=shutdown_event,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -447,20 +480,27 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
+    # Register sleep/wake_up engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake_up", handler.wake_up)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
     # Register prefill model with ModelType.Prefill
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-        await register_vllm_model(
-            model_input,
-            ModelType.Prefill,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            migration_limit=0,  # Prefill doesn't support migration
-        )
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+    await register_vllm_model(
+        model_input,
+        ModelType.Prefill,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+        migration_limit=0,  # Prefill doesn't support migration
+    )
 
     health_check_payload = VllmPrefillHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
@@ -494,7 +534,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Instantiate and serve
     """
@@ -521,7 +563,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
-    factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
 
     handler = DecodeWorkerHandler(
@@ -534,6 +575,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         generate_endpoint=generate_endpoint,
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
+        shutdown_event=shutdown_event,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -566,33 +608,38 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        # Parse endpoint types from --dyn-endpoint-types flag
-        model_type = parse_endpoint_types(config.dyn_endpoint_types)
-        logger.info(
-            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
+    # Register sleep/wake_up engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake_up", handler.wake_up)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
+    # Parse endpoint types from --dyn-endpoint-types flag
+    model_type = parse_endpoint_types(config.dyn_endpoint_types)
+    logger.info(f"Registering model with endpoint types: {config.dyn_endpoint_types}")
+
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+
+    # Warn if custom template provided but chat endpoint not enabled
+    if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+        logger.warning(
+            "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+            "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-
-        # Warn if custom template provided but chat endpoint not enabled
-        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
-            logger.warning(
-                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
-                "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
-            )
-
-        await register_vllm_model(
-            model_input,
-            model_type,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            migration_limit=config.migration_limit,
-        )
+    await register_vllm_model(
+        model_input,
+        model_type,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+        migration_limit=config.migration_limit,
+    )
 
     health_check_payload = VllmHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
@@ -662,7 +709,9 @@ def get_engine_cache_info(engine: AsyncLLM):
         raise
 
 
-async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_processor(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal processor component"""
     component = runtime.namespace(config.namespace).component(config.component)
 
@@ -717,7 +766,9 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         handler.cleanup()
 
 
-async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_encode_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal encode worker component"""
     component = runtime.namespace(config.namespace).component(config.component)
 
@@ -755,7 +806,9 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         handler.cleanup()
 
 
-async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
+async def init_vllm_native_encoder(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Initialize vLLM-native encoder worker component (ECConnector mode).
     In this mode, vLLM handles encoder execution, caching, and storage automatically.
@@ -816,7 +869,9 @@ async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_ec_processor(runtime: DistributedRuntime, config: Config):
+async def init_ec_processor(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Initialize ECConnector processor component.
 
@@ -861,9 +916,9 @@ async def init_ec_processor(runtime: DistributedRuntime, config: Config):
     await encoder_client.wait_for_instances()
     await pd_client.wait_for_instances()
 
-    # Register the endpoint as entrypoint to a model (same as regular processor)
+    # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
         ModelType.Chat,
         generate_endpoint,
         config.model,
@@ -886,7 +941,9 @@ async def init_ec_processor(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Initialize multimodal worker component.
 
@@ -946,11 +1003,16 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     # Choose handler based on worker type
     if config.multimodal_decode_worker:
         handler = MultimodalDecodeWorkerHandler(
-            runtime, component, engine_client, config
+            runtime, component, engine_client, config, shutdown_event
         )
     else:
         handler = MultimodalPDWorkerHandler(
-            runtime, component, engine_client, config, decode_worker_client
+            runtime,
+            component,
+            engine_client,
+            config,
+            decode_worker_client,
+            shutdown_event,
         )
     handler.add_temp_dir(prometheus_temp_dir)
 

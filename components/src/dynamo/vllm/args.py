@@ -40,6 +40,7 @@ class Config:
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
+    event_plane: str
     enable_local_indexer: bool = False
 
     # mirror vLLM
@@ -61,7 +62,7 @@ class Config:
 
     # multimodal options
     multimodal_processor: bool = False
-    # Emebdding Cache Processor is different from the regular processor
+    # Embedding Cache Processor is different from the regular processor
     # TODO: Have a single processor for all cases and adopting rust based processor
     ec_processor: bool = False
     multimodal_encode_worker: bool = False
@@ -102,10 +103,16 @@ class Config:
 
 @register_encoder(Config)
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
+    """Convert Config object to dictionary for encoding."""
     return config.__dict__
 
 
 def parse_args() -> Config:
+    """Parse command-line arguments for the vLLM backend.
+
+    Returns:
+        Config: Parsed configuration object.
+    """
     parser = FlexibleArgumentParser(
         description="vLLM server integrated with Dynamo LLM."
     )
@@ -243,7 +250,7 @@ def parse_args() -> Config:
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -251,6 +258,13 @@ def parse_args() -> Config:
         choices=["nats", "http", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
         "--enable-local-indexer",
@@ -395,6 +409,7 @@ def parse_args() -> Config:
     config.ec_consumer_mode = args.ec_consumer_mode
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.event_plane = args.event_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
     # use_kv_events is set later in overwrite_args() based on kv_events_config
@@ -572,6 +587,7 @@ def overwrite_args(config):
     defaults["kv_events_config"] = kv_cfg
     # Derive use_kv_events from whether kv_events_config is set AND enable_kv_cache_events is True
     config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
+
     logger.info(
         f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
         f"(use_kv_events={config.use_kv_events})"

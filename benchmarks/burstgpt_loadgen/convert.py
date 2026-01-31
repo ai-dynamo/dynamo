@@ -42,6 +42,12 @@ def parse_args():
         help="Limit the number of rows to output after filtering. If not specified, all rows are output.",
     )
     parser.add_argument(
+        "--skip-num-prompt",
+        type=int,
+        default=0,
+        help="Skip the first N rows after filtering (before applying --num-prompt). Default: 0",
+    )
+    parser.add_argument(
         "--speed-ratio",
         type=float,
         default=1.0,
@@ -80,7 +86,7 @@ def load_csv(filepath):
         return None
 
 
-def apply_filters(df, model=None, log_type=None, num_prompt=None):
+def apply_filters(df, model=None, log_type=None, skip_num_prompt=0, num_prompt=None):
     """
     Apply filters to the DataFrame.
 
@@ -88,6 +94,7 @@ def apply_filters(df, model=None, log_type=None, num_prompt=None):
         df: Input DataFrame
         model: Model to filter by (ChatGPT or GPT-4)
         log_type: Log type to filter by (Conversation log or API log)
+        skip_num_prompt: Number of rows to skip after filtering (before capping)
         num_prompt: Number of rows to keep after filtering
 
     Returns:
@@ -105,12 +112,18 @@ def apply_filters(df, model=None, log_type=None, num_prompt=None):
         filtered_df = filtered_df[filtered_df["Log Type"] == log_type]
         print(f"After log type filter ({log_type}): {len(filtered_df)} rows")
 
+    # Skip rows (before capping)
+    if skip_num_prompt and skip_num_prompt > 0:
+        filtered_df = filtered_df.iloc[skip_num_prompt:]
+        print(f"After skip_num_prompt ({skip_num_prompt}): {len(filtered_df)} rows")
+
     # Apply num_prompt limit
     if num_prompt is not None:
         filtered_df = filtered_df.head(num_prompt)
         print(f"After num_prompt limit ({num_prompt}): {len(filtered_df)} rows")
 
-    return filtered_df
+    # Reset index so downstream iterrows() uses a clean, deterministic range
+    return filtered_df.reset_index(drop=True)
 
 
 def apply_speed_ratio(df, speed_ratio):
@@ -139,6 +152,31 @@ def apply_speed_ratio(df, speed_ratio):
         f"Adjusted timestamps: {adjusted_df['Timestamp'].min():.2f} - {adjusted_df['Timestamp'].max():.2f}"
     )
 
+    return adjusted_df
+
+
+def offset_timestamps_to_zero(df):
+    """
+    Offset timestamps so the first request starts at t=0.
+
+    Args:
+        df: DataFrame with a "Timestamp" column in seconds
+
+    Returns:
+        DataFrame with timestamps shifted such that min Timestamp is 0
+    """
+    if "Timestamp" not in df.columns or len(df) == 0:
+        return df
+
+    min_ts = df["Timestamp"].min()
+    if pd.isna(min_ts) or min_ts == 0:
+        return df
+
+    adjusted_df = df.copy()
+    adjusted_df["Timestamp"] = adjusted_df["Timestamp"] - float(min_ts)
+    print(
+        f"Offset timestamps so first request starts at t=0 (subtracted {min_ts:.6f}s)"
+    )
     return adjusted_df
 
 
@@ -243,6 +281,46 @@ def print_statistics(df):
             print(f"  Total requests: {len(df)}")
             print(f"  Duration: {duration_s:.2f} seconds")
             print(f"  Average RPS: {avg_rps:.2f}")
+
+            # Request rate vs time (ASCII plot, 60-col width)
+            plot_width = 60
+
+            # Target ~20 bins; clamp to at least 1s bins for stability
+            target_bins = 20
+            bin_size_s = max(1.0, duration_s / target_bins)
+            num_bins = max(1, math.ceil(duration_s / bin_size_s))
+
+            counts = [0] * num_bins
+            # Compute per-bin counts using timestamps relative to start
+            for ts_ms in df["timestamp"].tolist():
+                rel_s = (ts_ms / 1000.0) - min_timestamp_s
+                idx = int(rel_s / bin_size_s)
+                if idx < 0:
+                    idx = 0
+                elif idx >= num_bins:
+                    idx = num_bins - 1
+                counts[idx] += 1
+
+            rates = [c / bin_size_s for c in counts]
+            peak_rps = max(rates) if rates else 0.0
+
+            print("\nRequest rate vs time:")
+            print(f"  Bin: {bin_size_s:.2f}s, Peak RPS: {peak_rps:.2f}")
+            if peak_rps > 0:
+                # Use dynamic, fixed-width labels so the bars align
+                max_time_s = max(0.0, duration_s)
+                digits = max(1, len(str(int(math.ceil(max_time_s)))))
+                label_width = (2 * digits) + 2  # "{start}-{end}s"
+                bar_width = max(1, plot_width - label_width - 3)  # " | "
+
+                for i, rps in enumerate(rates):
+                    start_s = i * bin_size_s
+                    end_s = min((i + 1) * bin_size_s, duration_s)
+                    bar_len = int(round((rps / peak_rps) * bar_width))
+                    bar = "#" * max(0, min(bar_width, bar_len))
+                    label = f"{start_s:>{digits}.0f}-{end_s:>{digits}.0f}s"
+                    line = f"{label} | {bar}"
+                    print(line[:plot_width])
         else:
             print("\nRequest Rate:")
             print(f"  Total requests: {len(df)}")
@@ -268,11 +346,16 @@ def main():
     print("\nApplying filters...")
     print(f"Initial rows: {len(df)}")
     filtered_df = apply_filters(
-        df, model=args.model, log_type=args.log_type, num_prompt=args.num_prompt
+        df,
+        model=args.model,
+        log_type=args.log_type,
+        skip_num_prompt=args.skip_num_prompt,
+        num_prompt=args.num_prompt,
     )
 
     # Apply Speedup
     adjusted_df = apply_speed_ratio(filtered_df, args.speed_ratio)
+    adjusted_df = offset_timestamps_to_zero(adjusted_df)
 
     # Convert to mooncake format
     print("\nConverting to mooncake format...")
