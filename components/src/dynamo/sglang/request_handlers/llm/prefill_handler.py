@@ -49,9 +49,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 task.cancel()
         self._consume_tasks.clear()
 
+        super().cleanup()
         self.engine.shutdown()
         logging.info("Prefill engine shutdown")
-        super().cleanup()
 
     async def generate(
         self, request: Dict[str, Any], context: Context

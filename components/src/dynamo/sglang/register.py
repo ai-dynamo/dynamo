@@ -163,6 +163,13 @@ async def _get_runtime_config(
     runtime_config.tool_call_parser = dynamo_args.tool_call_parser
     runtime_config.enable_local_indexer = dynamo_args.enable_local_indexer
 
+    # Set data_parallel_size for DP attention mode
+    # This enables the router to correctly track per-(worker_id, dp_rank) pairs
+    dp_size = getattr(server_args, "dp_size", 1) or 1
+    runtime_config.data_parallel_size = dp_size
+    if dp_size > 1:
+        logging.info(f"Registering with data_parallel_size={dp_size}")
+
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
     if bootstrap_host and bootstrap_port:
