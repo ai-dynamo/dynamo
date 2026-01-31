@@ -57,7 +57,6 @@ query_router_result_t create_routers(const char *namespace_c_str,
                                      uint32_t block_size,
                                      bool enforce_disagg,
                                      bool wait_for_prefill,
-                                     uint32_t prefill_timeout_secs,
                                      RouterHandles **out_handle);
 
 query_router_result_t route_request(RouterHandles *handle,
@@ -283,7 +282,6 @@ func initFFI() error {
 		defer routerHandlesMutex.Unlock()
 
 		waitForPrefill := getEnvBoolOrDefault("DYN_WAIT_FOR_PREFILL", false)
-		prefillTimeoutSecs := uint32(getEnvInt64OrDefault("DYN_PREFILL_TIMEOUT_SEC", 300))
 
 		rc := C.create_routers(
 			ns,
@@ -292,7 +290,6 @@ func initFFI() error {
 			C.uint32_t(ffiKvBlockSize),
 			C.bool(ffiEnforceDisagg),
 			C.bool(waitForPrefill),
-			C.uint32_t(prefillTimeoutSecs),
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {

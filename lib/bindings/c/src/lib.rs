@@ -343,12 +343,9 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
 
 // Default timeout for bookkeeping operations (30 seconds)
 const BOOKKEEPING_TIMEOUT_SEC: u64 = 30;
-// Default timeout for discovery sync (seconds).
-const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 10;
-/// Default timeout for waiting for worker discovery (seconds)
-const DISCOVERY_TIMEOUT_SECS: u64 = 30;
-/// Default timeout for waiting for prefill workers (seconds)
-const DEFAULT_PREFILL_TIMEOUT_SEC: u32 = 30;
+/// Default timeout for waiting for worker discovery (seconds).
+/// Can be overridden via DYN_DISCOVERY_TIMEOUT_SEC env var.
+const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 30 * 60;
 
 /// Get discovery timeout from environment variable or use default.
 /// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
@@ -504,8 +501,10 @@ pub enum QueryRouterResult {
 /// Create router handles for query-only routing
 ///
 /// This function waits for at least one decode worker to be discovered before returning.
-/// If `wait_for_prefill` is true, it also waits for prefill workers to be discovered
-/// (up to `prefill_timeout_secs`). This is recommended for disaggregated deployments.
+/// If `wait_for_prefill` is true, it also waits for prefill workers to be discovered.
+/// This is recommended for disaggregated deployments.
+///
+/// Timeout is controlled by `DYN_DISCOVERY_TIMEOUT_SEC` env var (default: 30 minutes).
 ///
 /// # Arguments
 /// - `namespace`: Namespace for the model
@@ -514,7 +513,6 @@ pub enum QueryRouterResult {
 /// - `block_size`: KV cache block size
 /// - `enforce_disagg`: If true, disaggregated mode is required
 /// - `wait_for_prefill`: If true, wait for prefill workers before returning
-/// - `prefill_timeout_secs`: How long to wait for prefill workers (0 = use default 30s)
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -528,7 +526,6 @@ pub unsafe extern "C" fn create_routers(
     block_size: u32,
     enforce_disagg: bool,
     wait_for_prefill: bool,
-    prefill_timeout_secs: u32,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     if namespace.is_null() || model_name.is_null() || out_handle.is_null() {
@@ -577,11 +574,12 @@ pub unsafe extern "C" fn create_routers(
 
         // Wait for at least one worker to be discovered before proceeding
         // This ensures the decode router can be created successfully
-        let instance_count = wait_for_discovery_sync(&drt, DISCOVERY_TIMEOUT_SECS).await;
+        let discovery_timeout = get_discovery_timeout_secs();
+        let instance_count = wait_for_discovery_sync(&drt, discovery_timeout).await;
         if instance_count == 0 {
             tracing::error!(
                 "Discovery sync failed: no worker instances found after {}s. Is the backend running?",
-                DISCOVERY_TIMEOUT_SECS
+                discovery_timeout
             );
             return Err(QueryRouterResult::ErrInitFailed);
         }
@@ -660,11 +658,7 @@ pub unsafe extern "C" fn create_routers(
 
         // Optionally wait for prefill workers to be discovered
         if wait_for_prefill {
-            let timeout_secs = if prefill_timeout_secs == 0 {
-                DEFAULT_PREFILL_TIMEOUT_SEC
-            } else {
-                prefill_timeout_secs
-            };
+            let timeout_secs = get_discovery_timeout_secs();
 
             tracing::info!(
                 timeout_secs = timeout_secs,
@@ -672,7 +666,7 @@ pub unsafe extern "C" fn create_routers(
             );
 
             let start = std::time::Instant::now();
-            let timeout = Duration::from_secs(timeout_secs as u64);
+            let timeout = Duration::from_secs(timeout_secs);
 
             loop {
                 if prefill_router.is_activated() {
@@ -778,7 +772,13 @@ pub unsafe extern "C" fn add_request(
             };
 
             decode_router
-                .add_request(request_id_owned.clone(), &tokens, overlap_blocks, None, worker)
+                .add_request(
+                    request_id_owned.clone(),
+                    &tokens,
+                    overlap_blocks,
+                    None,
+                    worker,
+                )
                 .await;
 
             tracing::debug!(
