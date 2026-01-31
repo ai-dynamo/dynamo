@@ -32,20 +32,15 @@ class OmniHandler(BaseWorkerHandler):
             f"Initializing OmniHandler for multi-stage pipelines with model: {config.model}"
         )
 
+        # Initialize AsyncOmni with stage configuration
+        # Note: stage_configs_path is validated as required in args.py
+        logger.info(f"Using stage config from: {config.stage_configs_path}")
+
         omni_kwargs = {
             "model": config.model,
             "trust_remote_code": True,
+            "stage_configs_path": config.stage_configs_path,
         }
-
-        # Pass stage_configs_path if provided
-        if config.stage_configs_path:
-            logger.info(f"Using stage config from: {config.stage_configs_path}")
-            omni_kwargs["stage_configs_path"] = config.stage_configs_path
-        else:
-            logger.warning(
-                "No stage_configs_path provided. AsyncOmni will try to auto-detect from model "
-                "or fall back to default diffusion config."
-            )
 
         self.engine_client = AsyncOmni(**omni_kwargs)
 
@@ -58,6 +53,7 @@ class OmniHandler(BaseWorkerHandler):
         self.default_sampling_params = default_sampling_params
         self.config = config
         self.model_max_len = config.engine_args.max_model_len
+        self.shutdown_event = shutdown_event
         logger.info("OmniHandler initialized successfully for text-to-text generation")
 
     async def generate(
