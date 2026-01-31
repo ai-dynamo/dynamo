@@ -494,10 +494,10 @@ func (k *KVAwareScorer) callDynamoRouter(
 	}
 
 	routerHandlesMutex.RLock()
-	currentRouter := routerHandles
+	router := routerHandles
 	routerHandlesMutex.RUnlock()
 
-	if currentRouter == nil {
+	if router == nil {
 		return "", "", nil, fmt.Errorf("dynamo router handles not created")
 	}
 
@@ -515,7 +515,7 @@ func (k *KVAwareScorer) callDynamoRouter(
 	var result C.CRoutingResult
 
 	// Call the router
-	rc := C.route_chat_request(currentRouter, cRequestJSON, &result)
+	rc := C.route_chat_request(router, cRequestJSON, &result)
 	if rc != C.QUERY_ROUTER_OK {
 		return "", "", nil, fmt.Errorf("route_chat_request failed with code %d", rc)
 	}
@@ -602,10 +602,10 @@ func (k *KVAwareScorer) callAddRequest(
 	}
 
 	routerHandlesMutex.RLock()
-	currentRouter := routerHandles
+	router := routerHandles
 	routerHandlesMutex.RUnlock()
 
-	if currentRouter == nil {
+	if router == nil {
 		return fmt.Errorf("dynamo router handles not created")
 	}
 
@@ -630,7 +630,7 @@ func (k *KVAwareScorer) callAddRequest(
 	}
 
 	rc := C.add_request(
-		currentRouter,
+		router,
 		cRequestID,
 		cTokens,
 		C.size_t(len(tokens)),
@@ -655,17 +655,17 @@ func CallMarkPrefillComplete(requestID string) error {
 	}
 
 	routerHandlesMutex.RLock()
-	currentRouter := routerHandles
+	router := routerHandles
 	routerHandlesMutex.RUnlock()
 
-	if currentRouter == nil {
+	if router == nil {
 		return fmt.Errorf("dynamo router handles not created")
 	}
 
 	cRequestID := C.CString(requestID)
 	defer C.free(unsafe.Pointer(cRequestID))
 
-	rc := C.mark_prefill_complete(currentRouter, cRequestID)
+	rc := C.mark_prefill_complete(router, cRequestID)
 	if rc != C.QUERY_ROUTER_OK {
 		return fmt.Errorf("mark_prefill_complete failed with code %d", rc)
 	}
@@ -679,17 +679,17 @@ func callFreeRequestInternal(requestID string) error {
 	}
 
 	routerHandlesMutex.RLock()
-	currentRouter := routerHandles
+	router := routerHandles
 	routerHandlesMutex.RUnlock()
 
-	if currentRouter == nil {
+	if router == nil {
 		return fmt.Errorf("dynamo router handles not created")
 	}
 
 	cRequestID := C.CString(requestID)
 	defer C.free(unsafe.Pointer(cRequestID))
 
-	rc := C.free_request(currentRouter, cRequestID)
+	rc := C.free_request(router, cRequestID)
 	if rc != C.QUERY_ROUTER_OK {
 		return fmt.Errorf("free_request failed with code %d", rc)
 	}
