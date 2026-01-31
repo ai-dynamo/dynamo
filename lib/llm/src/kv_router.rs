@@ -713,6 +713,8 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    /// If true, require worker IDs in request. Error if missing instead of using router selection.
+    require_worker_ids: bool,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -727,7 +729,17 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
+        KvPushRouter {
+            inner,
+            chooser,
+            require_worker_ids: false,
+        }
+    }
+
+    /// Enable require_worker_ids mode - error if worker IDs missing in requests
+    pub fn with_require_worker_ids(mut self, require_worker_ids: bool) -> Self {
+        self.require_worker_ids = require_worker_ids;
+        self
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -754,7 +766,17 @@ impl KvPushRouter {
             }
             RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
         }) else {
-            // No preselected worker - find the best match
+            // No preselected worker ID found
+            if self.require_worker_ids {
+                // require_worker_ids mode: worker IDs are required
+                anyhow::bail!(
+                    "Worker IDs required (--direct-route) but none found in request for phase {:?}. \
+                     Expected decode_worker_id, prefill_worker_id, or backend_instance_id to be set by external orchestrator (e.g., EPP).",
+                    phase
+                );
+            }
+
+            // Normal mode: find the best match using router
             // Don't update states if this is a query-only request
             let (best_worker, overlap_amount) = self
                 .chooser

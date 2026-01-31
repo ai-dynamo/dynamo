@@ -504,6 +504,7 @@ impl ModelWatcher {
                         tokenizer_hf.clone(),
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
+                        self.router_config.require_worker_ids,
                         self.metrics.clone(),
                     )
                     .await
@@ -539,6 +540,7 @@ impl ModelWatcher {
                     tokenizer_hf,
                     prefill_chooser,
                     self.router_config.enforce_disagg,
+                    self.router_config.require_worker_ids,
                     self.metrics.clone(),
                 )
                 .await
