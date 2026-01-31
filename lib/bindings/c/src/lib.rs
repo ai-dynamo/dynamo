@@ -5,7 +5,7 @@ use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;
 use once_cell::sync::OnceCell;
 use std::borrow::Cow;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -393,17 +393,6 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) ->
     }
 }
 
-/// Result of tokenization (C-compatible)
-#[repr(C)]
-pub struct CTokenizedResult {
-    /// Pointer to token IDs array (caller must free with free_tokenized)
-    pub token_ids: *mut u32,
-    /// Number of tokens
-    pub token_count: usize,
-    /// Formatted prompt string (caller must free with free_tokenized)
-    pub formatted_prompt: *mut c_char,
-}
-
 /// Complete routing result for a chat completion request (C-compatible)
 ///
 /// This is the result of `route_chat_request` which combines
@@ -432,16 +421,6 @@ impl Default for CRoutingResult {
             decode_worker_id: 0,
             token_ids: ptr::null_mut(),
             token_count: 0,
-        }
-    }
-}
-
-impl Default for CTokenizedResult {
-    fn default() -> Self {
-        Self {
-            token_ids: ptr::null_mut(),
-            token_count: 0,
-            formatted_prompt: ptr::null_mut(),
         }
     }
 }
@@ -744,20 +723,6 @@ pub unsafe extern "C" fn create_routers(
     }
 }
 
-/// Check if disaggregated mode is active
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn is_disaggregated(handle: RouterHandlesPtr) -> bool {
-    if handle.is_null() {
-        return false;
-    }
-
-    let handles = unsafe { &*handle };
-    handles.prefill_router.is_activated()
-}
-
 /// Add a request to the router's bookkeeping after worker selection.
 ///
 /// Do NOT call this function if you use update_states=true in query_decode!
@@ -971,217 +936,6 @@ pub unsafe extern "C" fn destroy(handle: RouterHandlesPtr) {
     if !handle.is_null() {
         drop(unsafe { Box::from_raw(handle) });
     }
-}
-
-/// Tokenize a chat completion request using the embedded preprocessor.
-///
-/// Takes a JSON request, applies the model's chat template, and tokenizes.
-/// The preprocessor is fetched via discovery during `create`.
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-/// - `request_json` must be a valid null-terminated C string containing JSON
-/// - `out_result` must be a valid pointer
-/// - Caller must free the result using `free_tokenized`
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tokenize_chat(
-    handle: RouterHandlesPtr,
-    request_json: *const c_char,
-    out_result: *mut CTokenizedResult,
-) -> QueryRouterResult {
-    if handle.is_null() || request_json.is_null() || out_result.is_null() {
-        return QueryRouterResult::ErrInvalidParam;
-    }
-
-    let handles = unsafe { &*handle };
-
-    let preprocessor = match &handles.preprocessor {
-        Some(p) => p,
-        None => {
-            tracing::error!(
-                "Preprocessor not available - model card may not have been fetched via discovery"
-            );
-            return QueryRouterResult::ErrInitFailed;
-        }
-    };
-
-    let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return QueryRouterResult::ErrInvalidParam,
-    };
-
-    // Parse JSON to NvCreateChatCompletionRequest
-    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-        match serde_json::from_str(json_str) {
-            Ok(req) => req,
-            Err(e) => {
-                tracing::error!(error = ?e, "Failed to parse request JSON");
-                return QueryRouterResult::ErrInvalidParam;
-            }
-        };
-
-    // Apply chat template
-    let formatted_prompt = match preprocessor.apply_template(&request) {
-        Ok(Some(prompt)) => prompt,
-        Ok(None) => String::new(),
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to apply chat template");
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    // Tokenize
-    let encoding = match preprocessor.tokenize(&formatted_prompt) {
-        Ok(enc) => enc,
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to tokenize");
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    // Allocate and copy token IDs
-    let token_ids = encoding.token_ids().to_vec();
-    let mut tokens = token_ids.into_boxed_slice();
-    let token_ptr = tokens.as_mut_ptr();
-    let token_count = tokens.len();
-    std::mem::forget(tokens);
-
-    // Allocate and copy formatted prompt
-    let prompt_cstring = match CString::new(formatted_prompt) {
-        Ok(s) => s,
-        Err(_) => {
-            drop(unsafe { Box::from_raw(std::slice::from_raw_parts_mut(token_ptr, token_count)) });
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    unsafe {
-        *out_result = CTokenizedResult {
-            token_ids: token_ptr,
-            token_count,
-            formatted_prompt: prompt_cstring.into_raw(),
-        };
-    }
-    QueryRouterResult::Ok
-}
-
-/// Tokenize a raw prompt string (for completions API).
-///
-/// Directly tokenizes the prompt without template application.
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-/// - `prompt` must be a valid null-terminated C string
-/// - `out_result` must be a valid pointer
-/// - Caller must free the result using `free_tokenized`
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tokenize_raw(
-    handle: RouterHandlesPtr,
-    prompt: *const c_char,
-    out_result: *mut CTokenizedResult,
-) -> QueryRouterResult {
-    if handle.is_null() || prompt.is_null() || out_result.is_null() {
-        return QueryRouterResult::ErrInvalidParam;
-    }
-
-    let handles = unsafe { &*handle };
-
-    let preprocessor = match &handles.preprocessor {
-        Some(p) => p,
-        None => {
-            tracing::error!(
-                "Preprocessor not available - model card may not have been fetched via discovery"
-            );
-            return QueryRouterResult::ErrInitFailed;
-        }
-    };
-
-    let prompt_str = match unsafe { CStr::from_ptr(prompt) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return QueryRouterResult::ErrInvalidParam,
-    };
-
-    // Tokenize
-    let encoding = match preprocessor.tokenize(prompt_str) {
-        Ok(enc) => enc,
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to tokenize");
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    // Allocate and copy token IDs
-    let token_ids = encoding.token_ids().to_vec();
-    let mut tokens = token_ids.into_boxed_slice();
-    let token_ptr = tokens.as_mut_ptr();
-    let token_count = tokens.len();
-    std::mem::forget(tokens);
-
-    // Allocate and copy prompt (same as input for raw tokenization)
-    let prompt_cstring = match CString::new(prompt_str) {
-        Ok(s) => s,
-        Err(_) => {
-            drop(unsafe { Box::from_raw(std::slice::from_raw_parts_mut(token_ptr, token_count)) });
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    unsafe {
-        *out_result = CTokenizedResult {
-            token_ids: token_ptr,
-            token_count,
-            formatted_prompt: prompt_cstring.into_raw(),
-        };
-    }
-    QueryRouterResult::Ok
-}
-
-/// Free a tokenized result.
-///
-/// # Safety
-/// - `result` must be a valid pointer to a CTokenizedResult previously returned by tokenize functions
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_tokenized(result: *mut CTokenizedResult) {
-    if result.is_null() {
-        return;
-    }
-
-    let res = unsafe { &mut *result };
-
-    // Free token IDs
-    if !res.token_ids.is_null() && res.token_count > 0 {
-        drop(unsafe {
-            Box::from_raw(std::slice::from_raw_parts_mut(
-                res.token_ids,
-                res.token_count,
-            ))
-        });
-        res.token_ids = ptr::null_mut();
-        res.token_count = 0;
-    }
-
-    // Free formatted prompt
-    if !res.formatted_prompt.is_null() {
-        drop(unsafe { CString::from_raw(res.formatted_prompt) });
-        res.formatted_prompt = ptr::null_mut();
-    }
-}
-
-/// Check if preprocessor is available for tokenization.
-///
-/// Returns true if the model card was successfully fetched via discovery
-/// and the preprocessor was created.
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn has_preprocessor(handle: RouterHandlesPtr) -> bool {
-    if handle.is_null() {
-        return false;
-    }
-
-    let handles = unsafe { &*handle };
-    handles.preprocessor.is_some()
 }
 
 /// Route a chat completion request in a single call.

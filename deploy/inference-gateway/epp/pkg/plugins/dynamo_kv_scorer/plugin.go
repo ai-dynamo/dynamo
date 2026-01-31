@@ -80,8 +80,6 @@ query_router_result_t free_request(RouterHandles *handle,
 void free_routing_result(CRoutingResult *result);
 
 void destroy(RouterHandles *handle);
-
-bool is_disaggregated(RouterHandles *handle);
 */
 import "C"
 
