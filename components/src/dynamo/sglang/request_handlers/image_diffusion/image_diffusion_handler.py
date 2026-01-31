@@ -249,8 +249,13 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
         full_path = f"{self.root_path}/{storage_path}"
 
+        # Ensure parent directories exist for local filesystem
+        if self.protocol == "file":
+            parent_dir = os.path.dirname(full_path)
+            os.makedirs(parent_dir, exist_ok=True)
+
         # Use pipe() for writing bytes (standard fsspec API)
-        await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
+        await asyncio.to_thread(self.fs.pipe, full_path, image_bytes)
 
         return self._generate_url(full_path, storage_path)
 

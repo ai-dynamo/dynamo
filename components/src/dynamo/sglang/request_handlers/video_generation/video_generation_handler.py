@@ -298,9 +298,6 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
     ) -> str:
         """Upload video to filesystem and return URL.
 
-        Uses per-user storage path:
-            users/{user_id}/generations/{request_id}/{video_uuid}.mp4
-
         Args:
             video_bytes: Video data as bytes.
             user_id: User identifier from request or context.
@@ -309,15 +306,16 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         Returns:
             Public URL for the uploaded video.
         """
-        video_uuid = str(uuid.uuid4())
-        video_filename = f"{video_uuid}.mp4"
-
-        # Per-user storage path
-        storage_path = f"users/{user_id}/generations/{request_id}/{video_filename}"
+        video_filename = f"{request_id}.mp4"
+        storage_path = video_filename
         full_path = f"{self.root_path}/{storage_path}"
 
+        # Ensure output directory exists for local filesystem
+        if self.protocol == "file":
+            os.makedirs(self.root_path, exist_ok=True)
+
         # Use pipe() for writing bytes (standard fsspec API)
-        await asyncio.to_thread(self.fs.pipe, storage_path, video_bytes)
+        await asyncio.to_thread(self.fs.pipe, full_path, video_bytes)
 
         return self._generate_url(full_path, storage_path)
 
