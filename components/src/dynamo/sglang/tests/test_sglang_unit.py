@@ -107,17 +107,16 @@ async def test_tool_call_parser_invalid_with_dynamo_tokenizer(mock_sglang_cli):
 
 
 @pytest.mark.asyncio
-async def test_tool_call_parser_invalid_with_sglang_tokenizer(mock_sglang_cli):
-    """Invalid Dynamo parser name is allowed when using SGLang's tokenizer."""
+async def test_tool_call_parser_both_flags_error(mock_sglang_cli):
+    """Setting both --dyn-tool-call-parser and --tool-call-parser exits with error."""
     mock_sglang_cli(
         "--model",
         "Qwen/Qwen3-0.6B",
         "--dyn-tool-call-parser",
-        "sglang_only_parser",
-        "--use-sglang-tokenizer",
+        "hermes",
+        "--tool-call-parser",
+        "qwen25",
     )
 
-    config = await parse_args(sys.argv[1:])
-
-    assert config.dynamo_args.tool_call_parser == "sglang_only_parser"
-    assert config.dynamo_args.use_sglang_tokenizer is True
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
