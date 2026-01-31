@@ -10,12 +10,12 @@ on:
         description: 'Framework name (vllm, sglang, trtllm)'
         required: true
         type: string
-      platforms:
-        description: 'Platforms to build (JSON array)'
+      platform:
+        description: 'Platform to build (amd64 or arm64)'
         required: true
         type: string
-      cuda_versions:
-        description: 'CUDA versions to build (JSON array): '
+      cuda_version:
+        description: 'CUDA version to build (e.g., 12.9, 13.0)'
         required: true
         type: string
       run_tests:
@@ -72,12 +72,9 @@ on:
       AWS_SECRET_ACCESS_KEY:
         required: false
     outputs:
-      image_tag_amd64:
-        description: 'AMD64 image tag in ACR'
-        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-amd64
-      image_tag_arm64:
-        description: 'ARM64 image tag in ACR'
-        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-arm64
+      image_tag:
+        description: 'Image tag in ACR'
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-${{ inputs.platform }}
 
 jobs:
   # ============================================================================
@@ -85,12 +82,7 @@ jobs:
   # ============================================================================
   build:
     if: inputs.build_image
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: ${{ fromJson(inputs.platforms) }}
-        cuda_version: ${{ fromJson(inputs.cuda_versions) }}
-    name: build ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform }}
+    name: build ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-builder-v2
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
@@ -107,7 +99,7 @@ jobs:
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
-          PLATFORM: ${{ matrix.platform }}
+          PLATFORM: ${{ inputs.platform }}
         run: |
           if [ -n "$EXTRA_TAGS" ]; then
             RESULT=""
@@ -136,7 +128,7 @@ jobs:
         id: calculate-target-tag
         shell: bash
         run: |
-          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
@@ -148,18 +140,18 @@ jobs:
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ inputs.framework }}
-          arch: ${{ matrix.platform }}
-          cuda_version: ${{ matrix.cuda_version }}
+          arch: ${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
 
 
       - name: Print Build Container inputs
         run: |
           echo "=== Build Container Inputs ==="
-          echo "image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform }}"
+          echo "image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}"
           echo "framework: ${{ inputs.framework }}"
           echo "target: runtime"
-          echo "platform: linux/${{ matrix.platform }}"
-          echo "cuda_version: ${{ matrix.cuda_version }}"
+          echo "platform: linux/${{ inputs.platform }}"
+          echo "cuda_version: ${{ inputs.cuda_version }}"
           echo "no_cache: ${{ inputs.no_cache }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ inputs.push_image }}"
@@ -169,11 +161,11 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform }}
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}
           framework: ${{ inputs.framework }}
           target: runtime
-          platform: linux/${{ matrix.platform }}
-          cuda_version: ${{ matrix.cuda_version }}
+          platform: linux/${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -203,16 +195,9 @@ jobs:
   # ============================================================================
   test:
     if: inputs.run_tests
-    strategy:
-      fail-fast: false # todo: evaluate this 
-      matrix:
-        platform:
-         - { arch: amd64, runner: prod-tester-amd-gpu-v1 }
-         - { arch: arm64, runner: prod-tester-arm-v1 }
-        cuda_version: ${{ fromJson(inputs.cuda_versions) }}
     needs: [build]
-    name: test ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
-    runs-on: ${{ matrix.platform.runner }}
+    name: test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
@@ -222,10 +207,10 @@ jobs:
         id: calculate-target-tag
         shell: bash
         run: |
-          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ matrix.platform.arch }}
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
           echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -267,14 +252,14 @@ jobs:
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
-        if: ${{ inputs.framework != 'trtllm' || matrix.platform.arch == 'amd64' }} # trtllm tests on arm64 are not supported
+        if: ${{ inputs.framework != 'trtllm' || inputs.platform == 'amd64' }} # trtllm tests on arm64 are not supported
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ format('pre_merge and {0} and gpu_0', inputs.framework) }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
-          platform_arch: ${{ matrix.platform.arch }}
+          platform_arch: ${{ inputs.platform }}
           enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
@@ -282,35 +267,31 @@ jobs:
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
-        if: ${{ matrix.platform.arch == 'amd64' && (inputs.framework != 'trtllm' || matrix.platform.arch == 'amd64') }}
+        if: ${{ inputs.platform == 'amd64' && (inputs.framework != 'trtllm' || inputs.platform == 'amd64') }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ format('pre_merge and {0} and gpu_1', inputs.framework) }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
-          platform_arch: ${{ matrix.platform.arch }}
+          platform_arch: ${{ inputs.platform }}
           enable_mypy: 'false' # already covered by CPU tests
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
 
- # ============================================================================
- # COPY TO ACR
- # ============================================================================
+# ============================================================================
+# COPY TO ACR
+# ============================================================================
   copy-to-acr:
     needs: [build, test]
-    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
+    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped) AND platform is amd64
     if: |
       always() &&
       inputs.copy_to_acr &&
+      inputs.platform == 'amd64' &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: ['amd64']
-        cuda_version: ${{ fromJson(inputs.cuda_versions) }}
-    name: copy ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.arch }}
+    name: copy ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-default-small-v2
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
@@ -322,10 +303,10 @@ jobs:
         id: calculate-target-tag
         shell: bash
         run: |
-          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ matrix.arch }}
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
           echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Copy image to target registry
@@ -333,10 +314,10 @@ jobs:
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           source_image: ai-dynamo/dynamo
-          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.arch }}
+          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.arch }}
+          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
