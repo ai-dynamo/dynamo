@@ -12,6 +12,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
 ]
 
 
