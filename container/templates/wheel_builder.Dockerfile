@@ -1,108 +1,3 @@
-# syntax=docker/dockerfile:1.10.0
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# NOTE FOR dynamo_base AND wheel_builder STAGES:
-#
-# All changes to dynamo_base and wheel_builder stages should be replicated across
-# Dockerfile and Dockerfile.<framework> images.:
-#   - Dockerfile
-#   - Dockerfile.vllm
-#   - Dockerfile.sglang
-#   - Dockerfile.trtllm
-# This duplication was introduced purposely to quickly enable Docker layer caching and
-# deduplication. Please ensure these stages stay in sync until the duplication can be
-# addressed.
-
-##################################
-########## Build Arguments ########
-##################################
-
-# This section contains build arguments that are common and shared across various
-# Dockerfile.<frameworks>, so they should NOT have a default. The source of truth is from build.sh.
-
-ARG BASE_IMAGE
-ARG BASE_IMAGE_TAG
-ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1"
-
-ARG PYTHON_VERSION
-ARG ENABLE_KVBM
-ARG ENABLE_GPU_MEMORY_SERVICE
-ARG ENABLE_MEDIA_NIXL
-ARG ENABLE_MEDIA_FFMPEG
-ARG CARGO_BUILD_JOBS
-
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
-#
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
-#
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
-
-# SCCACHE configuration
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET=""
-ARG SCCACHE_REGION=""
-
-# NIXL configuration
-ARG NIXL_UCX_REF
-ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF
-ARG NIXL_LIBFABRIC_REF
-
-##################################
-########## Base Image ############
-##################################
-
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
-
-ARG ARCH
-ARG ARCH_ALT
-
-USER root
-WORKDIR /opt/dynamo
-
-# Install uv package manager
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-# Install NATS server
-ENV NATS_VERSION="v2.10.28"
-RUN --mount=type=cache,target=/var/cache/apt \
-    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${ARCH}.deb && \
-    dpkg -i nats-server-${NATS_VERSION}-${ARCH}.deb && rm nats-server-${NATS_VERSION}-${ARCH}.deb
-
-# Install etcd
-ENV ETCD_VERSION="v3.5.21"
-RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
-    mkdir -p /usr/local/bin/etcd && \
-    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
-    rm /tmp/etcd.tar.gz
-ENV PATH=/usr/local/bin/etcd/:$PATH
-
-# Rust Setup
-# Rust environment setup
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.90.0
-
-# Define Rust target based on ARCH_ALT ARG
-ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
-
-# Install Rust
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
-
 ##################################
 ##### Wheel Build Image ##########
 ##################################
@@ -120,8 +15,8 @@ ARG CARGO_BUILD_JOBS
 WORKDIR /workspace
 
 # Copy CUDA from base stage
-COPY --from=base /usr/local/cuda /usr/local/cuda
-COPY --from=base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
+COPY --from=dynamo_base /usr/local/cuda /usr/local/cuda
+COPY --from=dynamo_base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
 
 # Set environment variables first so they can be used in COPY commands
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
@@ -131,8 +26,9 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
     PATH=/usr/local/cargo/bin:$PATH
 
 # Copy artifacts from base stage
-COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
-COPY --from=base $CARGO_HOME $CARGO_HOME
+COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
+
 # Install system dependencies
 RUN dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
@@ -170,7 +66,11 @@ RUN dnf install -y almalinux-release-synergy && \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel && \
+        hwloc-devel \
+        libcurl-devel \
+        openssl-devel \
+        libuuid-devel \
+        zlib-devel && \
     dnf clean all && rm -rf /var/cache/dnf/
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
@@ -237,7 +137,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 
 # Build FFmpeg from source
 # Do not delete the source tarball for legal reasons
-ARG FFMPEG_VERSION=7.1
+ARG FFMPEG_VERSION
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -343,7 +243,32 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
 
+{% if framework == "vllm" %}
+# Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
+ARG AWS_SDK_CPP_VERSION=1.11.581
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+        https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
+    mkdir -p /tmp/aws-sdk-cpp/build && \
+    cd /tmp/aws-sdk-cpp/build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_ONLY="s3" \
+        -DENABLE_TESTING=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=ON && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/aws-sdk-cpp && \
+    ldconfig && \
+    /tmp/use-sccache.sh show-stats "AWS SDK C++"
+{% endif %}
+
 # build and install nixl
+ARG CUDA_MAJOR
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
@@ -356,11 +281,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
     git checkout ${NIXL_REF} && \
-    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1) && \
-    if [ "$CUDA_MAJOR" -ne 12 ] && [ "$CUDA_MAJOR" -ne 13 ]; then \
-        echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'" && \
-        exit 1; \
-    fi && \
     PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
     ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
@@ -426,7 +346,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
+    if [ "$ENABLE_KVBM" == "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
         auditwheel repair \
@@ -440,215 +360,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         source ${VIRTUAL_ENV}/bin/activate && \
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
-
-##############################################
-########## Runtime image ##############
-##############################################
-
-FROM base AS runtime
-
-ARG ARCH_ALT
-ARG PYTHON_VERSION
-
-# Create dynamo user with group 0 for OpenShift compatibility
-RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
-    && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    # Non-recursive chown - only the directories themselves, not contents
-    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
-    # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
-    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
-    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
-    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
-
-# NIXL environment variables
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
-    CARGO_TARGET_DIR=/opt/dynamo/target
-
-# Copy ucx and nixl libs
-COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
-COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
-
-# Copy ffmpeg
-RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
-    true # in case ffmpeg not enabled
-
-# Copy built artifacts
-COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-
-# Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
-# This is needed to create venv and install dynamo packages
-ARG PYTHON_VERSION
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        python${PYTHON_VERSION}-dev \
-        python${PYTHON_VERSION}-venv && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
-
-# Switch to dynamo user and create virtual environment
-USER dynamo
-ENV HOME=/home/dynamo
-
-# Create and activate virtual environment
-# Use login shell to pick up umask 002 from /etc/profile.d/00-umask.sh for group-writable files
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-RUN uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-# Install dynamo wheels (runtime packages only, no test dependencies)
-ARG ENABLE_KVBM
-ARG ENABLE_GPU_MEMORY_SERVICE
-RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$GMS_WHEEL"; \
-    fi && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$KVBM_WHEEL"; \
-    fi
-
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
-
-##############################################
-########## Frontend entrypoint image #########
-##############################################
-FROM ${EPP_IMAGE} AS epp
-
-FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
-
-ARG PYTHON_VERSION
-RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-        # required for EPP
-        ca-certificates \
-        libstdc++6 \
-        # required for verification of GPG keys
-        gnupg2 \
-        # required for installing dependencies from git repositories
-        git \
-        git-lfs \
-        # Python runtime - required for virtual environment to work
-        python${PYTHON_VERSION}-dev \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-
-# Create dynamo user with group 0 for OpenShift compatibility
-RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
-    && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo /workspace \
-    && chown -R dynamo: /opt/dynamo /home/dynamo/.cache /workspace \
-    && chmod -R g+w /opt/dynamo /home/dynamo/.cache /workspace
-
-# Set HOME so ModelExpress can find the cache directory
-ENV HOME=/home/dynamo
-# Switch to dynamo user
-USER dynamo
-ENV DYNAMO_HOME=/opt/dynamo
-
-WORKDIR /
-COPY --chown=dynamo: --from=epp /epp /epp
-
-COPY --chown=dynamo: container/launch_message/frontend.txt /opt/dynamo/.launch_screen
-# Copy tests, benchmarks, deploy and components with correct ownership
-COPY --chown=dynamo: tests /workspace/tests
-COPY --chown=dynamo: examples /workspace/examples
-COPY --chown=dynamo: benchmarks /workspace/benchmarks
-COPY --chown=dynamo: deploy /workspace/deploy
-COPY --chown=dynamo: components/ /workspace/components/
-COPY --chown=dynamo: recipes/ /workspace/recipes/
-# Copy attribution files with correct ownership
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="/opt/dynamo/venv/bin:$PATH"
-
-# Copy uv and wheelhouse from runtime stage
-COPY --chown=dynamo: --from=runtime /bin/uv /bin/uvx /bin/
-COPY --chown=dynamo: --from=runtime /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-
-# Create virtual environment
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-# Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
-
-ARG ENABLE_KVBM
-ARG ENABLE_GPU_MEMORY_SERVICE
-RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$GMS_WHEEL"; \
-    fi && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$KVBM_WHEEL"; \
-    fi && \
-    cd /workspace/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache .
-
-# Setup environment for all users
-USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
-    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
-
-USER dynamo
-
-ENTRYPOINT ["/epp"]
-CMD ["/bin/bash"]
