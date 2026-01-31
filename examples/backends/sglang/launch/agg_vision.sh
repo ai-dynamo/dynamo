@@ -12,8 +12,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Default values
-MODEL="Qwen/Qwen2.5-VL-7B-Instruct"
-CHAT_TEMPLATE="qwen2-vl"
+MODEL="Qwen/Qwen3-VL-8B-Instruct"
+CHAT_TEMPLATE=""
 ENABLE_OTEL=false
 
 # Parse command line arguments
@@ -66,12 +66,18 @@ OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
-# run worker with vision model and chat template for multimodal support
+# Build chat template args (only if explicitly set)
+TEMPLATE_ARGS=()
+if [ -n "$CHAT_TEMPLATE" ]; then
+    TEMPLATE_ARGS+=(--chat-template "$CHAT_TEMPLATE")
+fi
+
+# run worker with vision model (SGLang auto-detects chat template from HF tokenizer)
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
-  --chat-template "$CHAT_TEMPLATE" \
+  "${TEMPLATE_ARGS[@]}" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \

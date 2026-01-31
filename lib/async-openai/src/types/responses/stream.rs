@@ -226,7 +226,6 @@ pub struct ResponseTextDeltaEvent {
     pub output_index: u32,
     pub content_index: u32,
     pub delta: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<Vec<ResponseLogProb>>,
 }
 
