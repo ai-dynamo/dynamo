@@ -873,14 +873,14 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-config"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -912,6 +912,7 @@ dependencies = [
  "libc",
  "local-ip-address",
  "log",
+ "lru",
  "nid",
  "nix",
  "notify",
@@ -932,6 +933,7 @@ dependencies = [
  "serde_json",
  "socket2 0.5.9",
  "thiserror 2.0.17",
+ "tmq",
  "tokio",
  "tokio-rayon",
  "tokio-stream",
@@ -945,6 +947,7 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
@@ -1364,7 +1367,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello_world"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -2073,6 +2076,15 @@ name = "log"
 version = "0.4.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+
+[[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.2",
+]
 
 [[package]]
 name = "lru-slab"
@@ -3463,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "service_metrics"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -3650,7 +3662,7 @@ dependencies = [
 
 [[package]]
 name = "system_metrics"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -3790,6 +3802,19 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tmq"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3f41ac3a42f65436eed7e1afe80dbe8a982dcac2ea4581bf61bc2d3dcfb19a1"
+dependencies = [
+ "futures",
+ "log",
+ "thiserror 1.0.69",
+ "tokio",
+ "zmq",
+]
 
 [[package]]
 name = "tokio"
