@@ -261,6 +261,9 @@ async def worker():
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
         logger.debug("init_multimodal_worker completed")
+    elif config.omni_worker:
+        await init_omni(runtime, config, shutdown_event)
+        logger.debug("init_omni completed")
     elif config.is_prefill_worker:
         await init_prefill(
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
@@ -1221,6 +1224,65 @@ async def init_multimodal_worker(
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        handler.cleanup()
+
+
+async def init_omni(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
+    """
+    Initialize Omni worker for text-to-text generation using vLLM-Omni orchestrator.
+
+    Uses vLLM-Omni's Omni class for single-stage text generation pipeline.
+    For now, supports text-to-text only (no multimodal).
+    """
+    from dynamo.vllm.omni import OmniHandler
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Load default sampling params from model config (same as other workers)
+    default_sampling_params = (
+        config.engine_args.create_model_config().get_diff_sampling_param()
+    )
+    logger.info(f"Loaded default sampling params: {default_sampling_params}")
+
+    # Initialize OmniHandler with Omni orchestrator
+    handler = OmniHandler(
+        runtime=runtime,
+        component=component,
+        config=config,
+        default_sampling_params=default_sampling_params,
+        shutdown_event=shutdown_event,
+    )
+
+    logger.info(f"Omni worker initialized for model: {config.model}")
+
+    # TODO: extend for multi-stage pipelines
+    # Register as Chat endpoint for text-to-text generation
+    # Use Tokens input since we're doing token-based processing
+    await register_llm(
+        ModelInput.Tokens,
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info("Starting to serve Omni worker endpoint...")
+
+    try:
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", config.served_model_name or config.model)],
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve Omni endpoint: {e}")
+        raise
+    finally:
+        logger.debug("Cleaning up Omni worker")
         handler.cleanup()
 
 
