@@ -1195,14 +1195,6 @@ async fn responses(
         return Ok(resp.into_response());
     }
 
-    // Handle non-text (image, audio, file) inputs - if Some(resp) is returned by
-    // validate_input_is_text_only, then we are handling something other than Input::Text(_).
-    // We will log an error message and early return a 501 NOT_IMPLEMENTED status code.
-    // Otherwise, proceeed.
-    if let Some(resp) = validate_response_input_is_text_only(&request) {
-        return Ok(resp.into_response());
-    }
-
     // Apply template values if present
     if let Some(template) = template {
         if request.inner.model.is_empty() {
@@ -1215,13 +1207,14 @@ async fn responses(
             request.inner.max_output_tokens = Some(template.max_completion_tokens);
         }
     }
-    tracing::trace!("Received chat completions request: {:?}", request.inner);
+    tracing::trace!("Received responses request: {:?}", request.inner);
 
+    let streaming = request.inner.stream.unwrap_or(false);
     let request_id = request.id().to_string();
-    let (request, context) = request.into_parts();
+    let (orig_request, context) = request.into_parts();
 
-    let mut request: NvCreateChatCompletionRequest =
-        request.try_into().map_err(|e: anyhow::Error| {
+    let mut chat_request: NvCreateChatCompletionRequest =
+        orig_request.try_into().map_err(|e: anyhow::Error| {
             tracing::error!(
                 request_id,
                 error = %e,
@@ -1229,15 +1222,18 @@ async fn responses(
             );
             ErrorMessage::not_implemented_error(
                 VALIDATION_PREFIX.to_string()
-                    + "Only Input::Text(_) is currently supported: "
+                    + "Failed to convert responses request: "
                     + &e.to_string(),
             )
         })?;
 
-    let request = context.map(|mut _req| {
-        request.inner.stream = Some(false);
-        request
-    });
+    // For non-streaming responses, we still use internal streaming for aggregation,
+    // but we set the chat completion stream flag appropriately.
+    if !streaming {
+        chat_request.inner.stream = Some(true); // Internal streaming for aggregation
+    }
+
+    let request = context.map(|mut _req| chat_request);
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
@@ -1250,10 +1246,10 @@ async fn responses(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    tracing::trace!("Issuing generate call for chat completions");
+    tracing::trace!("Issuing generate call for responses");
 
     // issue the generate call on the engine
-    let stream = engine
+    let engine_stream = engine
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
@@ -1262,59 +1258,105 @@ async fn responses(
     let mut inflight_guard =
         state
             .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Responses, false);
+            .create_inflight_guard(&model, Endpoint::Responses, streaming);
 
-    // Process stream to collect metrics and drop http_queue_guard on first token
-    let mut http_queue_guard = Some(http_queue_guard);
-    let stream = stream.inspect(move |response| {
-        // Calls observe_response() on each token - drops http_queue_guard on first token
-        process_response_and_observe_metrics(
-            response,
-            &mut response_collector,
-            &mut http_queue_guard,
-        );
-    });
+    if streaming {
+        // Streaming path: convert chat completion stream chunks to Responses API SSE events.
+        // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
+        // inner stream response data and convert it to Responses API events.
+        use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
 
-    // TODO: handle streaming, currently just unary
-    let response =
-        NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    request_id,
-                    "Failed to fold chat completions stream for: {:?}",
-                    e
+        let mut converter = ResponseStreamConverter::new(model.clone());
+        let start_events = converter.emit_start_events();
+
+        // Use std::sync::Mutex (not tokio) since process_chunk/emit_end_events are
+        // synchronous -- no .await while lock is held. Avoids async lock overhead per token.
+        let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
+        let converter_end = converter.clone();
+
+        let mut http_queue_guard = Some(http_queue_guard);
+
+        // Process each annotated chunk: extract the stream response data, convert to events
+        let event_stream = engine_stream
+            .inspect(move |response| {
+                process_response_and_observe_metrics(
+                    response,
+                    &mut response_collector,
+                    &mut http_queue_guard,
                 );
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold chat completions stream: {}",
-                    e
-                ))
-            })?;
+            })
+            .filter_map(move |annotated_chunk| {
+                let converter = converter.clone();
+                async move {
+                    let stream_resp = annotated_chunk.data?;
+                    let mut conv = converter.lock().expect("converter lock poisoned");
+                    let events = conv.process_chunk(&stream_resp);
+                    Some(stream::iter(events))
+                }
+            })
+            .flatten();
 
-    // Convert NvCreateChatCompletionResponse --> NvResponse
-    let response: NvResponse = response.try_into().map_err(|e| {
-        tracing::error!(
-            request_id,
-            "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
-            e
-        );
-        ErrorMessage::internal_server_error("Failed to convert internal response")
-    })?;
+        // Chain: start_events -> chunk_events -> end_events
+        let start_stream = stream::iter(start_events);
 
-    inflight_guard.mark_ok();
+        let done_stream = stream::once(async move {
+            let mut conv = converter_end.lock().expect("converter lock poisoned");
+            let end_events = conv.emit_end_events();
+            stream::iter(end_events)
+        })
+        .flatten();
 
-    Ok(Json(response).into_response())
-}
+        let full_stream = start_stream.chain(event_stream).chain(done_stream);
 
-pub fn validate_response_input_is_text_only(
-    request: &NvCreateResponse,
-) -> Option<impl IntoResponse> {
-    match &request.inner.input {
-        dynamo_async_openai::types::responses::Input::Text(_) => None,
-        _ => Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.",
-        )),
+        let full_stream = full_stream.map(|result| result.map_err(axum::Error::new));
+
+        inflight_guard.mark_ok();
+
+        let mut sse_stream = Sse::new(full_stream);
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
+    } else {
+        // Non-streaming path: aggregate stream into single response
+        let mut http_queue_guard = Some(http_queue_guard);
+        let stream = engine_stream.inspect(move |response| {
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
+        let response =
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        request_id,
+                        "Failed to fold chat completions stream for: {:?}",
+                        e
+                    );
+                    ErrorMessage::internal_server_error(&format!(
+                        "Failed to fold chat completions stream: {}",
+                        e
+                    ))
+                })?;
+
+        // Convert NvCreateChatCompletionResponse --> NvResponse
+        let response: NvResponse = response.try_into().map_err(|e| {
+            tracing::error!(
+                request_id,
+                "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
+                e
+            );
+            ErrorMessage::internal_server_error("Failed to convert internal response")
+        })?;
+
+        inflight_guard.mark_ok();
+
+        Ok(Json(response).into_response())
     }
 }
 
@@ -1333,16 +1375,6 @@ pub fn validate_response_unsupported_fields(
     if inner.include.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`include` is not supported.",
-        ));
-    }
-    if inner.instructions.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`instructions` is not supported.",
-        ));
-    }
-    if inner.max_tool_calls.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
         ));
     }
     if inner.previous_response_id.is_some() {
@@ -1370,24 +1402,9 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
         ));
     }
-    if inner.stream == Some(true) {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`stream: true` is not supported.",
-        ));
-    }
     if inner.text.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`text` is not supported.",
-        ));
-    }
-    if inner.tool_choice.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`tool_choice` is not supported.",
-        ));
-    }
-    if inner.tools.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`tools` is not supported.",
         ));
     }
     if inner.truncation.is_some() {
@@ -1652,9 +1669,8 @@ mod tests {
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
     use dynamo_async_openai::types::responses::{
-        CreateResponse, Input, InputContent, InputItem, InputMessage, PromptConfig,
-        Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
-        ToolChoiceMode, Truncation,
+        CreateResponse, Input, PromptConfig, ServiceTier, TextConfig, TextResponseFormat,
+        Truncation,
     };
     use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
@@ -1764,25 +1780,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_input_is_text_only_accepts_text() {
-        let request = make_base_request();
-        let result = validate_response_input_is_text_only(&request);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_validate_input_is_text_only_rejects_items() {
-        let mut request = make_base_request();
-        request.inner.input = Input::Items(vec![InputItem::Message(InputMessage {
-            kind: Default::default(),
-            role: ResponseRole::User,
-            content: InputContent::TextInput("structured".into()),
-        })]);
-        let result = validate_response_input_is_text_only(&request);
-        assert!(result.is_some());
-    }
-
-    #[test]
     fn test_validate_unsupported_fields_accepts_clean_request() {
         let request = make_base_request();
         let result = validate_response_unsupported_fields(&request);
@@ -1807,11 +1804,6 @@ mod tests {
                 Box::new(|r| r.include = Some(vec!["file_search_call.results".into()])),
             ),
             (
-                "instructions",
-                Box::new(|r| r.instructions = Some("System prompt".into())),
-            ),
-            ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(3))),
-            (
                 "previous_response_id",
                 Box::new(|r| r.previous_response_id = Some("prev-id".into())),
             ),
@@ -1834,7 +1826,6 @@ mod tests {
                 Box::new(|r| r.service_tier = Some(ServiceTier::Auto)),
             ),
             ("store", Box::new(|r| r.store = Some(true))),
-            ("stream", Box::new(|r| r.stream = Some(true))),
             (
                 "text",
                 Box::new(|r| {
@@ -1843,11 +1834,6 @@ mod tests {
                     })
                 }),
             ),
-            (
-                "tool_choice",
-                Box::new(|r| r.tool_choice = Some(ToolChoice::Mode(ToolChoiceMode::Required))),
-            ),
-            ("tools", Box::new(|r| r.tools = Some(vec![]))),
             (
                 "truncation",
                 Box::new(|r| r.truncation = Some(Truncation::Auto)),
