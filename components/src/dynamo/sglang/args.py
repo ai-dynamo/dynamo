@@ -45,14 +45,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--dyn-tool-call-parser"],
         "type": str,
         "default": None,
-        "choices": get_tool_parser_names(),
         "help": "Tool call parser name for the model.",
     },
     "reasoning-parser": {
         "flags": ["--dyn-reasoning-parser"],
         "type": str,
         "default": None,
-        "choices": get_reasoning_parser_names(),
         "help": "Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     },
     "custom-jinja-template": {
@@ -214,47 +212,18 @@ def _preprocess_for_encode_config(
     }
 
 
-def _set_parser(
-    sglang_str: Optional[str],
-    dynamo_str: Optional[str],
-    arg_name: str = "tool-call-parser",
-) -> Optional[str]:
-    """Resolve parser name from SGLang and Dynamo arguments.
-
-    Args:
-        sglang_str: Parser value from SGLang argument.
-        dynamo_str: Parser value from Dynamo argument.
-        arg_name: Name of the parser argument for logging.
-
-    Returns:
-        Resolved parser name, preferring Dynamo's value if both set.
-
-    Raises:
-        ValueError: If parser name is not valid.
-    """
-    # If both are present, give preference to dynamo_str
-    if sglang_str is not None and dynamo_str is not None:
-        logging.warning(
-            f"--dyn-{arg_name} and --{arg_name} are both set. Giving preference to --dyn-{arg_name}"
+def _validate_parser(
+    sglang_val: Optional[str], dynamo_val: Optional[str], name: str, valid: list
+) -> None:
+    """Validate --{name} (SGLang) and --dyn-{name} (Dynamo) parser flags."""
+    if sglang_val and dynamo_val:
+        logging.error(f"Cannot use both --{name} and --dyn-{name}.")
+        sys.exit(1)
+    if dynamo_val and dynamo_val not in valid:
+        logging.error(
+            f"--dyn-{name} '{dynamo_val}' is not supported. Valid choices: {valid}"
         )
-        return dynamo_str
-    # If dynamo_str is not set, use try to use sglang_str if it matches with the allowed parsers
-    elif sglang_str is not None:
-        logging.warning(f"--dyn-{arg_name} is not set. Using --{arg_name}.")
-        if arg_name == "tool-call-parser" and sglang_str not in get_tool_parser_names():
-            raise ValueError(
-                f"--{arg_name} is not a valid tool call parser. Valid parsers are: {get_tool_parser_names()}"
-            )
-        elif (
-            arg_name == "reasoning-parser"
-            and sglang_str not in get_reasoning_parser_names()
-        ):
-            raise ValueError(
-                f"--{arg_name} is not a valid reasoning parser. Valid parsers are: {get_reasoning_parser_names()}"
-            )
-        return sglang_str
-    else:
-        return dynamo_str
+        sys.exit(1)
 
 
 def _extract_config_section(
@@ -471,16 +440,23 @@ async def parse_args(args: list[str]) -> Config:
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
 
-    tool_call_parser = _set_parser(
+    # Validate parser flags: error if both --{name} and --dyn-{name} are set,
+    # and validate --dyn-{name} against Dynamo's supported parsers.
+    # SGLang's --{name} is validated by SGLang's own argparse choices.
+    _validate_parser(
         parsed_args.tool_call_parser,
         parsed_args.dyn_tool_call_parser,
         "tool-call-parser",
+        get_tool_parser_names(),
     )
-    reasoning_parser = _set_parser(
+    _validate_parser(
         parsed_args.reasoning_parser,
         parsed_args.dyn_reasoning_parser,
         "reasoning-parser",
+        get_reasoning_parser_names(),
     )
+    tool_call_parser = parsed_args.dyn_tool_call_parser
+    reasoning_parser = parsed_args.dyn_reasoning_parser
 
     if parsed_args.custom_jinja_template and parsed_args.use_sglang_tokenizer:
         logging.error(
