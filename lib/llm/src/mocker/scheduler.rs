@@ -257,10 +257,10 @@ impl Scheduler {
         component: Option<dynamo_runtime::component::Component>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
-        // Assert speedup_ratio is greater than 0 or is infinity
+        // Assert speedup_ratio is non-negative (0 means infinite speedup)
         assert!(
-            args.speedup_ratio > 0.0 || args.speedup_ratio.is_infinite(),
-            "speedup_ratio must be greater than 0 or infinity, got: {}",
+            args.speedup_ratio >= 0.0,
+            "speedup_ratio must be >= 0 (0 means infinite speedup), got: {}",
             args.speedup_ratio
         );
 
@@ -414,7 +414,7 @@ async fn simulate_prefill(
             break;
         }
     }
-    if speedup_ratio.is_finite() {
+    if speedup_ratio > 0.0 {
         let deadline =
             start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         tokio::time::sleep_until(deadline).await;
@@ -496,7 +496,7 @@ async fn simulate_decode(
             state.complete(&uuid);
         }
     }
-    if speedup_ratio.is_finite() {
+    if speedup_ratio > 0.0 {
         let deadline =
             start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         tokio::time::sleep_until(deadline).await;
