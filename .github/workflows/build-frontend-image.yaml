@@ -58,8 +58,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: prod-builder-amd-v1  }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout repository

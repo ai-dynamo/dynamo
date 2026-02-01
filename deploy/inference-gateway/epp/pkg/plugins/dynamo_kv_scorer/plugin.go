@@ -121,6 +121,9 @@ const (
 	WorkerIDHeader        = "x-worker-instance-id"
 	PrefillWorkerIDHeader = "x-prefill-instance-id"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
+	// EnableLocalUpdatesHeader controls router bookkeeping in the Dynamo frontend.
+	// Set to "false" for GAIE Stage 2 so the EPP handles bookkeeping via C FFI.
+	EnableLocalUpdatesHeader = "x-enable-local-updates"
 
 	// stateKey is the key used to store routing state in PluginState
 	stateKey = "dynamo-routing-state"
@@ -161,13 +164,15 @@ func (s *DynamoRoutingState) Clone() plugins.StateData {
 }
 
 type KVAwareScorer struct {
-	typedName   plugins.TypedName
-	pluginState *plugins.PluginState
+	typedName      plugins.TypedName
+	pluginState    *plugins.PluginState
+	firstTokenSeen sync.Map // map[requestID]bool - tracks which requests have received first token
 }
 
 var _ plugins.Plugin = (*KVAwareScorer)(nil)
 var _ framework.Scorer = (*KVAwareScorer)(nil)
 var _ rc.PreRequest = (*KVAwareScorer)(nil)
+var _ rc.ResponseStreaming = (*KVAwareScorer)(nil)
 var _ rc.ResponseComplete = (*KVAwareScorer)(nil)
 
 func NewKVAwareScorer(ctx context.Context) *KVAwareScorer {
@@ -226,31 +231,31 @@ var (
 )
 
 func loadDynamoConfig() {
-	ffiNamespace = getEnvOrDefault("DYNAMO_NAMESPACE", "vllm-agg")
-	ffiComponent = getEnvOrDefault("DYNAMO_COMPONENT", "backend")
-	ffiModel = getEnvOrDefault("DYNAMO_MODEL", "Qwen/Qwen3-0.6B")
+	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
+	ffiComponent = "backend" // The pipeline uses backend not DYN_COMPONENT which is epp
+	ffiModel = getEnvOrDefault("DYN_MODEL", "Qwen/Qwen3-0.6B")
 	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)
 	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", false)
 
 	ffiOverlapScoreWeight = getEnvFloatOrDefault("DYNAMO_OVERLAP_SCORE_WEIGHT", -1.0)
 	ffiRouterTemperature = getEnvFloatOrDefault("DYNAMO_ROUTER_TEMPERATURE", -1.0)
 
-	kvBlockSizeStr := os.Getenv("DYNAMO_KV_BLOCK_SIZE")
+	kvBlockSizeStr := os.Getenv("DYN_KV_BLOCK_SIZE")
 	if kvBlockSizeStr == "" {
-		panic("DYNAMO_KV_BLOCK_SIZE is required and must match the model card's kv_cache_block_size")
+		panic("DYN_KV_BLOCK_SIZE is required and must match the model card's kv_cache_block_size")
 	}
 	var tmp int64
 	if n, err := fmt.Sscanf(kvBlockSizeStr, "%d", &tmp); err != nil || n != 1 {
-		panic(fmt.Sprintf("DYNAMO_KV_BLOCK_SIZE='%s' is not a valid integer", kvBlockSizeStr))
+		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE='%s' is not a valid integer", kvBlockSizeStr))
 	}
 	ffiKvBlockSize = uint32(tmp)
 	if ffiKvBlockSize < 16 || ffiKvBlockSize > 8192 {
-		panic(fmt.Sprintf("DYNAMO_KV_BLOCK_SIZE=%d outside [16,8192]", ffiKvBlockSize))
+		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE=%d outside [16,8192]", ffiKvBlockSize))
 	}
 	if (ffiKvBlockSize & (ffiKvBlockSize - 1)) != 0 {
-		panic(fmt.Sprintf("DYNAMO_KV_BLOCK_SIZE=%d must be a power of 2", ffiKvBlockSize))
+		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE=%d must be a power of 2", ffiKvBlockSize))
 	}
-	fmt.Printf("Dynamo KV Scorer: Loaded DYNAMO_KV_BLOCK_SIZE=%d\n", ffiKvBlockSize)
+	fmt.Printf("Dynamo KV Scorer: Loaded DYN_KV_BLOCK_SIZE=%d\n", ffiKvBlockSize)
 }
 
 func getEnvOrDefault(key, def string) string {
@@ -324,7 +329,7 @@ func initFFI() error {
 			C.double(ffiOverlapScoreWeight),
 			C.double(ffiRouterTemperature),
 			C.bool(getEnvBoolOrDefault("DYNAMO_USE_KV_EVENTS", true)),
-			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", true)),
+			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", false)), // no need as long as we call the Router Book keeping operations from the EPP.
 			C.bool(ffiEnforceDisagg),
 			&pipeline,
 		)
@@ -362,6 +367,10 @@ func (k *KVAwareScorer) Score(
 			req.Headers = map[string]string{}
 		}
 		req.Headers[WorkerIDHeader] = workerID
+
+		// Disable local updates in the Dynamo frontend router.
+		// EPP handles bookkeeping via C FFI (add_request, mark_prefill_complete, free_request).
+		req.Headers[EnableLocalUpdatesHeader] = "false"
 
 		// Set routing mode and prefill worker ID based on disaggregated vs aggregated
 		if prefillWorkerID != "" && prefillWorkerID != workerID {
@@ -438,6 +447,33 @@ func (k *KVAwareScorer) PreRequest(
 	)
 }
 
+// ResponseStreaming is called for each chunk of a streaming response.
+// On the first token, it marks prefill as complete in the Dynamo router's bookkeeping.
+func (k *KVAwareScorer) ResponseStreaming(
+	ctx context.Context,
+	request *schedtypes.LLMRequest,
+	response *rc.Response,
+	targetPod *backend.Pod,
+) {
+	if request == nil || request.RequestId == "" {
+		return
+	}
+
+	// Check if we've already seen the first token for this request
+	// LoadOrStore returns (value, loaded) - if loaded is false, this is the first time
+	if _, alreadySeen := k.firstTokenSeen.LoadOrStore(request.RequestId, true); !alreadySeen {
+		// This is the first token - mark prefill as complete
+		logger := log.FromContext(ctx)
+		if err := CallMarkPrefillComplete(request.RequestId); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "ResponseStreaming: failed to mark prefill complete",
+				"requestID", request.RequestId)
+			return
+		}
+		logger.V(logutil.VERBOSE).Info("ResponseStreaming: marked prefill complete (first token received)",
+			"requestID", request.RequestId)
+	}
+}
+
 // ResponseComplete is called after the complete response is sent to the client.
 // It cleans up the router bookkeeping state for the completed request by calling
 // dynamo_router_free_request to release resources associated with the request.
@@ -459,6 +495,9 @@ func (k *KVAwareScorer) ResponseComplete(
 		logger.V(logutil.DEBUG).Info("ResponseComplete: no request ID, skipping cleanup")
 		return
 	}
+
+	// Clean up the first token tracking map
+	k.firstTokenSeen.Delete(requestID)
 
 	// Call the dynamo router to free the request bookkeeping
 	if err := callFreeRequestInternal(requestID); err != nil {

@@ -291,11 +291,10 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.drt().system_health().lock().update_uptime_gauge();
 
-    // Get all metrics from DistributedRuntime
-    // Note: In the new hierarchy-based architecture, metrics are automatically registered
-    // at all parent levels, so DRT's metrics include all metrics from children
-    // (Namespace, Component, Endpoint). The prometheus_expfmt() method also executes
-    // all update callbacks and expfmt callbacks before returning the metrics.
+    // Get all metrics from the DistributedRuntime.
+    //
+    // NOTE: We use a multi-registry model (e.g. one registry per endpoint) and merge at scrape time,
+    // so /metrics traverses registered child registries and produces a single combined output.
     let response = match state.drt().metrics().prometheus_expfmt() {
         Ok(r) => r,
         Err(e) => {

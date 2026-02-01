@@ -154,7 +154,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		validator := webhookvalidation.NewDynamoComponentDeploymentValidator(dynamoComponentDeployment)
-		if _, validationErr := validator.Validate(); validationErr != nil {
+		if _, validationErr := validator.Validate(ctx); validationErr != nil {
 			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
 
 			// Set validation error condition
@@ -738,6 +738,13 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Finalizing the DynamoComponentDeployment", "dynamoComponentDeployment", dynamoComponentDeployment)
+
+	// Only delete etcd keys if using etcd discovery backend
+	// When using Kubernetes discovery (the default), skip etcd cleanup to avoid hangs
+	if r.Config.DiscoveryBackend != "etcd" {
+		return nil
+	}
+
 	if dynamoComponentDeployment.Spec.ServiceName != "" && dynamoComponentDeployment.Spec.DynamoNamespace != nil && *dynamoComponentDeployment.Spec.DynamoNamespace != "" {
 		logger.Info("Deleting the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
 		err := r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *dynamoComponentDeployment.Spec.DynamoNamespace, dynamoComponentDeployment.Spec.ServiceName))
@@ -1336,14 +1343,24 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 
 	var servicePort corev1.ServicePort
-	if opt.dynamoComponentDeployment.IsFrontendComponent() {
+	switch opt.dynamoComponentDeployment.Spec.ComponentType {
+	case commonconsts.ComponentTypeFrontend:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoServicePortName,
 			Port:       commonconsts.DynamoServicePort,
 			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}
-	} else { // TODO: only for worker components
+	case commonconsts.ComponentTypeEPP:
+		// EPP exposes the gRPC endpoint for InferencePool communication
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.EPPGRPCPortName,
+			Port:       commonconsts.EPPGRPCPort,
+			TargetPort: intstr.FromInt(commonconsts.EPPGRPCPort),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	default:
+		// Worker and other components use the system port for metrics/health
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoSystemPortName,
 			Port:       commonconsts.DynamoSystemPort,

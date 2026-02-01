@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -11,46 +10,49 @@ use dynamo_runtime::pipeline::{
     SingleIn, async_trait, network::Ingress,
 };
 use dynamo_runtime::protocols::maybe_error::MaybeError;
-use tokio::sync::{OnceCell, watch};
+use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 
+use crate::discovery::RuntimeConfigsSubscriber;
 use crate::kv_router::WORKER_KV_INDEXER_QUERY_ENDPOINT;
 use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
 use crate::kv_router::protocols::WorkerId;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::stream;
 
 /// Router-side client for querying worker local KV indexers
 ///
 /// Performs request/reply communication with workers via request plane endpoint routing.
 /// (Only queries workers that have `enable_local_indexer=true` in their MDC user_data)
-/// The client is spawned by KvRouter; it watches same discovery stream as the router.
+/// The client is spawned by KvRouter; it uses a subscriber from RuntimeConfigs.
 pub struct WorkerQueryClient {
     component: Component,
-    /// Watch receiver for enable_local_indexer state per worker
-    model_runtime_config_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
+    /// Subscriber for runtime configs (includes shared configs DashMap)
+    subscriber: RuntimeConfigsSubscriber,
     router: OnceCell<Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
 }
 
 impl WorkerQueryClient {
-    /// Create a new WorkerQueryClient with a watch receiver for local indexer states
-    pub fn new(
-        component: Component,
-        model_runtime_config_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
-    ) -> Self {
+    /// Create a new WorkerQueryClient with a subscriber to runtime configs
+    pub fn new(component: Component, subscriber: RuntimeConfigsSubscriber) -> Self {
         Self {
             component,
-            model_runtime_config_rx,
+            subscriber,
             router: OnceCell::new(),
         }
     }
 
+    /// Wait until at least one worker has a known runtime config (Some).
+    /// Returns the list of worker IDs that have configs.
+    pub async fn wait_for_ready(&mut self) -> Vec<WorkerId> {
+        self.subscriber.wait_for_some().await
+    }
+
     /// Check if a worker has local indexer enabled
     pub fn has_local_indexer(&self, worker_id: WorkerId) -> bool {
-        self.model_runtime_config_rx
-            .borrow()
+        self.subscriber
+            .configs
             .get(&worker_id)
-            .map(|config| config.enable_local_indexer)
+            .and_then(|entry| entry.value().as_ref().map(|c| c.enable_local_indexer))
             .unwrap_or(false)
     }
 
