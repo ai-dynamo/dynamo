@@ -22,6 +22,8 @@ from typing import Dict, List, Optional, Tuple
 import pytest
 import requests
 
+from tests.utils.port_utils import allocate_port, deallocate_port
+
 # ============================================================================
 # Module Availability Checks
 # ============================================================================
@@ -156,16 +158,26 @@ def check_logs_for_patterns(
 
 
 class ApiTester:
-    """Base class for making API requests to LLM endpoints."""
+    """Base class for making API requests to LLM endpoints.
+
+    Note: base_url should be provided explicitly. The default fallback to localhost:8000
+    is deprecated and should not be relied upon for new tests.
+    """
 
     def __init__(
         self,
         base_url: Optional[str] = None,
         model_id: Optional[str] = None,
     ):
-        self.base_url = (
-            base_url or os.environ.get("DYNAMO_API_BASE_URL") or "http://localhost:8000"
-        )
+        if base_url is None:
+            # Fallback chain: env var or error (no hardcoded default)
+            base_url = os.environ.get("DYNAMO_API_BASE_URL")
+            if base_url is None:
+                raise ValueError(
+                    "base_url must be provided explicitly or set DYNAMO_API_BASE_URL environment variable. "
+                    "Hardcoded default ports are not supported for pytest-xdist compatibility."
+                )
+        self.base_url = base_url
         self.model_id = model_id or os.environ.get(
             "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
         )
@@ -498,7 +510,7 @@ def tester(llm_server):
 
 
 @pytest.fixture(scope="function")
-def llm_server_kvbm(request, runtime_services):
+def llm_server_kvbm(request, runtime_services_dynamic_ports):
     """Start LLM server with configurable cache sizes for KVBM testing.
 
     Usage in test files:
@@ -521,6 +533,9 @@ def llm_server_kvbm(request, runtime_services):
         os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
     )
 
+    # Unpack NATS and etcd processes from runtime_services_dynamic_ports
+    nats_process, etcd_process = runtime_services_dynamic_ports
+
     # Detect available server type
     if check_module_available("vllm"):
         server_type = ServerType.vllm
@@ -532,8 +547,15 @@ def llm_server_kvbm(request, runtime_services):
             "Neither vllm nor tensorrt_llm module is available in the current environment."
         )
 
+    # Use dynamic port allocation to avoid conflicts (pytest-xdist safe)
+    port = allocate_port(start_port=8000)
+    metrics_port = allocate_port(start_port=6880)
+    print(
+        f"Allocated dynamic ports - vLLM: {port}, Metrics: {metrics_port}, "
+        f"NATS: {nats_process.port}, etcd: {etcd_process.port}"
+    )
+
     # Build vLLM command
-    port = 8000
     command = [
         "vllm",
         "serve",
@@ -553,6 +575,7 @@ def llm_server_kvbm(request, runtime_services):
         command.extend(["--num-gpu-blocks-override", str(gpu_blocks)])
 
     # Set up environment
+    # Note: NATS_SERVER and ETCD_ENDPOINTS are already set by runtime_services_dynamic_ports fixture
     env = os.environ.copy()
     env.update(
         {
@@ -560,10 +583,9 @@ def llm_server_kvbm(request, runtime_services):
             "VLLM_SERVER_DEV_MODE": "1",
             "DYN_LOG": "debug",
             "DYN_KVBM_METRICS": "true",
-            "DYN_KVBM_METRICS_PORT": "6880",
-            # DynamoConnector connection settings
-            "NATS_SERVER": "nats://localhost:4222",
-            "ETCD_ENDPOINTS": "http://localhost:2379",
+            "DYN_KVBM_METRICS_PORT": str(metrics_port),
+            # DynamoConnector will use NATS_SERVER and ETCD_ENDPOINTS from environment
+            # (already set by runtime_services_dynamic_ports fixture)
         }
     )
 
@@ -578,7 +600,7 @@ def llm_server_kvbm(request, runtime_services):
     with ManagedProcess(
         command=command,
         env=env,
-        health_check_ports=[port, 6880],  # vLLM server + KVBM metrics
+        health_check_ports=[port, metrics_port],  # vLLM server + KVBM metrics
         timeout=timeout,
         display_output=True,
         terminate_existing=True,
@@ -600,9 +622,16 @@ def llm_server_kvbm(request, runtime_services):
                 self.cpu_cache_blocks = cpu_blocks
                 self.gpu_cache_blocks = gpu_blocks
                 self.port = port
+                self.metrics_port = metrics_port
                 self.proc = proc
 
-        yield ServerWrapper()
+        try:
+            yield ServerWrapper()
+        finally:
+            # Clean up allocated ports
+            deallocate_port(port)
+            deallocate_port(metrics_port)
+            print(f"Deallocated ports - vLLM: {port}, Metrics: {metrics_port}")
 
 
 class TestDeterminism:
@@ -1183,8 +1212,6 @@ class TestDeterminism:
 # ============================================================================
 # Note: KVBM fixtures are in conftest.py for automatic pytest discovery
 
-KVBM_METRICS_PORT = 6880
-
 
 def parse_kvbm_metrics(metrics_text: str) -> dict:
     """Parse KVBM metrics from Prometheus format.
@@ -1213,19 +1240,25 @@ def parse_kvbm_metrics(metrics_text: str) -> dict:
     return metrics
 
 
-def fetch_kvbm_metrics(port: int = KVBM_METRICS_PORT, timeout: int = 10) -> dict:
+def fetch_kvbm_metrics(port: Optional[int] = None, timeout: int = 10) -> dict:
     """Fetch and parse KVBM metrics from the metrics endpoint.
 
     Args:
-        port: Metrics server port (default: 6880)
+        port: Metrics server port (required for dynamic port allocation)
         timeout: Request timeout in seconds
 
     Returns:
         Dictionary of parsed metrics
 
     Raises:
+        ValueError: If port is not provided
         RuntimeError: If metrics endpoint is unreachable or returns error
     """
+    if port is None:
+        raise ValueError(
+            "port must be provided explicitly. "
+            "Hardcoded default port is not supported for pytest-xdist compatibility."
+        )
     response = requests.get(f"http://localhost:{port}/metrics", timeout=timeout)
     if response.status_code != 200:
         raise RuntimeError(
