@@ -145,8 +145,11 @@ impl KvScheduler {
                     }
                     result = change_rx.changed() => {
                         if result.is_err() {
-                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
-                            break;
+                            tracing::warn!("KvScheduler: config watch sender dropped, continuing with last known config");
+                            tokio::select! {
+                                _ = monitor_cancel_token.cancelled() => break,
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                            }
                         }
                     }
                 }
