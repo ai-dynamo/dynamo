@@ -57,7 +57,7 @@ jobs:
   build-frontend-image:
     name: Build Frontend Image (${{ matrix.arch }})
     needs: changed-files
-    if: needs.changed-files.outputs.frontend == 'true'
+    # if: needs.changed-files.outputs.frontend == 'true'
     strategy:
       fail-fast: false
       matrix:
