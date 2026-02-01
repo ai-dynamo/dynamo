@@ -506,12 +506,12 @@ impl NatsQueue {
 
             let client = client_options.connect().await?;
 
-            // messages older than a hour in the stream will be automatically purged
+            // messages older than 5 minutes in the stream will be automatically purged
             let max_age = std::env::var(env_nats::stream::DYN_NATS_STREAM_MAX_AGE)
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(time::Duration::from_secs)
-                .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
+                .unwrap_or_else(|| time::Duration::from_secs(300));
 
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
