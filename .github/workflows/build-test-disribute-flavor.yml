@@ -131,6 +131,8 @@ jobs:
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
+          DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
+          echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
 
@@ -147,7 +149,7 @@ jobs:
       - name: Print Build Container inputs
         run: |
           echo "=== Build Container Inputs ==="
-          echo "image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}"
+          echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
           echo "framework: ${{ inputs.framework }}"
           echo "target: runtime"
           echo "platform: linux/${{ inputs.platform }}"
@@ -161,7 +163,7 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}
+          image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
           framework: ${{ inputs.framework }}
           target: runtime
           platform: linux/${{ inputs.platform }}
@@ -176,18 +178,14 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: true
-      # - name: Show summary
-      #   shell: bash
-      #   run: |
-      #       IMAGE_URIS=(${{ inputs.extra_tags }} ${{ steps.build-image.outputs.image_tag }})
-      #       echo "IMAGE_URIS=${IMAGE_URIS}"
-      #       # echo "### 🐳 ${{ inputs.framework }} Container Images" >> $GITHUB_STEP_SUMMARY
-      #       # echo "" >> $GITHUB_STEP_SUMMARY
-      #       # echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-      #       # echo "|-----|" >> $GITHUB_STEP_SUMMARY
-      #       # for image_uri in "${IMAGE_URIS[@]}"; do
-      #       #   echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-      #       # done
+      - name: Show summary
+        shell: bash
+        run: |
+          echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image Uri" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
 
 
   # ============================================================================
