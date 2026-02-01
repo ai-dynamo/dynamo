@@ -102,6 +102,17 @@ image-load: image-build
 image-kind: image-load ## Build and load the image into kind cluster
 	kind load docker-image $(IMAGE_TAG) --name $(KIND_CLUSTER)
 
+##@ CI Build
+
+.PHONY: image-build-ci
+# We depend on 'dynamo-lib' to ensure the Rust/C artifacts are compiled before Docker starts
+image-build-ci: dynamo-lib ## Build & Push to CI registry (No new builder created). Usage: make image-build-ci REGISTRY=my.reg.com
+	@[ "${REGISTRY}" ] || ( echo "ERROR: REGISTRY variable is not set"; exit 1 )
+	$(MAKE) image-build \
+		PUSH=--push \
+		LOAD= \
+		IMAGE_TAG=$(REGISTRY)/$(IMAGE_REPO):$(GIT_TAG)
+
 ##@ Local Development with Buildx
 
 .PHONY: image-local-build

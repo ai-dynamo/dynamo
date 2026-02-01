@@ -68,6 +68,10 @@ inputs:
     description: 'Use SCCache for caching'
     required: false
     default: 'false'
+  ci:
+    description: 'CI mode: for frontend target, uses existing buildx builder and pushes EPP image to ECR'
+    required: false
+    default: 'false'
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -129,6 +133,12 @@ runs:
 
         echo "$EXTRA_ARGS"
         # Collect optional overrides provided by the workflow
+        
+        if [[ "${{ inputs.ci }}" == "true" ]]; then
+          # CI mode for frontend: use existing buildx builder, push EPP to registry
+          EXTRA_ARGS+=" --ci"
+        fi
+
         if [ -n "${{ inputs.base_image_tag }}" ]; then
           EXTRA_ARGS+="--base-image-tag ${{ inputs.base_image_tag }} "
         fi
