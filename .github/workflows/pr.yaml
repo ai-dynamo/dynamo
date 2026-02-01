@@ -245,9 +245,7 @@ jobs:
   deploy-operator:
     runs-on: prod-default-small-v2
     # if: needs.changed-files.outputs.core == 'true'
-    needs: [changed-files, operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
-    env:
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+    needs: [changed-files, operator]
     outputs:
       NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
     steps:
