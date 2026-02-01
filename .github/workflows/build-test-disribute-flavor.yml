@@ -181,7 +181,7 @@ jobs:
       - name: Show summary
         shell: bash
         run: |
-          echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image Uri" >> $GITHUB_STEP_SUMMARY
+          echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY

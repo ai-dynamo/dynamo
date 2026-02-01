@@ -6,71 +6,6 @@
 # route_buildkit.sh - Discover and route BuildKit pods for CI builds
 # =============================================================================
 #
-# DESCRIPTION:
-#   Discovers active BuildKit pods via Kubernetes DNS and assigns them to
-#   different framework flavors (vllm, trtllm, sglang, general) using a
-#   modulo-based routing strategy that accounts for CUDA version. Outputs are
-#   written to GITHUB_OUTPUT for use in GitHub Actions workflows.
-#
-# USAGE:
-#   ./route_buildkit.sh --arch amd64 --flavor vllm --cuda 12.9   # Route vllm CUDA 12 for AMD64
-#   ./route_buildkit.sh --arch arm64 --flavor trtllm --cuda 13.0 # Route trtllm CUDA 13 for ARM64
-#   ./route_buildkit.sh --arch all --flavor all --cuda 12.9      # Route all flavors for both architectures
-#   ./route_buildkit.sh --arch amd64 --flavor general            # Route general (no CUDA required)
-#
-# ARGUMENTS:
-#   --arch <arch>       Target architecture: amd64, arm64, or all
-#   --flavor <flavor>   Target flavor: vllm, trtllm, sglang, general, or all
-#   --cuda <version>    CUDA version: 12.9 or 13.0 (optional for "general" flavor)
-#
-# ENVIRONMENT VARIABLES:
-#   MAX_RETRIES   Max attempts to wait for pods (default: 8)
-#   RETRY_DELAY   Seconds between retry attempts (default: 30)
-#
-# OUTPUTS (written to GITHUB_OUTPUT):
-#   <flavor>_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
-#
-#   Examples:
-#     vllm_amd64=tcp://buildkit-amd64-0.buildkit-amd64-headless.buildkit.svc.cluster.local:1234
-#     trtllm_arm64=tcp://buildkit-arm64-1.buildkit-arm64-headless.buildkit.svc.cluster.local:1234
-#
-# ROUTING STRATEGY:
-#   Pods are assigned to flavors based on pod index modulo 3, with CUDA version
-#   determining the pool assignment:
-#
-#   Pool 0 (pod_index % 3 == 0) - Standard Heavy Lifters (CUDA 12):
-#     - vllm-cuda12, trtllm-cuda12
-#
-#   Pool 1 (pod_index % 3 == 1) - Next Gen Heavy Lifters (CUDA 13):
-#     - vllm-cuda13, trtllm-cuda13, sglang-cuda13
-#
-#   Pool 2 (pod_index % 3 == 2) - SGLang Isolation & General Tasks:
-#     - sglang-cuda12, general (any/no CUDA)
-#
-#   If no pods match a flavor's modulo, all available pods are used as fallback.
-#
-# REQUIREMENTS:
-#   - nslookup (from dnsutils or bind-tools)
-#   - Access to Kubernetes DNS (run inside cluster)
-#   - GITHUB_OUTPUT environment variable set (GitHub Actions)
-#
-# EXAMPLES:
-#   # In GitHub Actions workflow:
-#   - name: Route Buildkit Workers
-#     run: |
-#       .github/scripts/route_buildkit.sh --arch amd64 --flavor vllm --cuda 12.9
-#       .github/scripts/route_buildkit.sh --arch arm64 --flavor trtllm --cuda 13.0
-#
-#   # Route specific flavor for specific arch with CUDA version:
-#   - name: Route vllm CUDA 12 for AMD64
-#     run: .github/scripts/route_buildkit.sh --arch amd64 --flavor vllm --cuda 12.9
-#
-#   # Route general tasks (no CUDA required):
-#   - name: Route general
-#     run: .github/scripts/route_buildkit.sh --arch amd64 --flavor general
-#
-#   # Then use outputs:
-#   buildkit_worker_addresses: ${{ steps.route.outputs.vllm_amd64 }}
 #
 # =============================================================================
 
@@ -165,6 +100,7 @@ fi
 # --- CONFIGURATION ---
 NAMESPACE="buildkit"
 PORT="1234"
+MAX_POD_CHECK=3  # How many pod indices to probe (e.g., 0 to 3)
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
@@ -177,71 +113,78 @@ MAX_RETRIES=${MAX_RETRIES:-8}
 RETRY_DELAY=${RETRY_DELAY:-30}
 # ---------------------------
 
-# Function to count active IPs for a headless service
-get_pod_count() {
-  local service_name=$1
-  local ip_count
-  ip_count=$(nslookup ${service_name}.${NAMESPACE}.svc.cluster.local 2>/dev/null | grep -i "Address" | grep -v "#53" | wc -l)
-  echo $((ip_count))
+# Function to discover SPECIFIC active pod indices
+# This handles gaps (e.g., if pod-0 and pod-2 are up, but pod-1 is down)
+get_active_indices() {
+  local arch=$1
+  local service_name=$2
+  local active_indices=()
+
+  # Loop through theoretical indices to see which ones actually resolve via DNS.
+  for (( i=0; i<MAX_POD_CHECK; i++ )); do
+    local pod_dns="buildkit-${arch}-${i}.${service_name}.${NAMESPACE}.svc.cluster.local"
+    
+    # Check if this specific pod resolves
+    if nslookup "$pod_dns" >/dev/null 2>&1; then
+      active_indices+=("$i")
+    fi
+  done
+
+  echo "${active_indices[@]}"
 }
 
-# Function to get all pod indices for a flavor based on Modulo 3 and CUDA version
+# Function to route flavors to specific active indices based on Modulo 3
 get_target_indices() {
   local flavor=$1
   local cuda_version=$2
-  local count=$3
+  # Read remaining arguments as an array of available indices
+  local -a available_indices=("${@:3}")
 
-  # Normalize the CUDA version to a major version for easier grouping
-  # This turns "12.9" -> "12" and "13.0" -> "13", empty stays empty
+  if [ ${#available_indices[@]} -eq 0 ]; then
+    echo ""
+    return
+  fi
+
   local cuda_major=${cuda_version%%.*}
-
   local route_key="${flavor}-cuda${cuda_major}"
-
   local target_mod
 
   case "$route_key" in
-    # --- POOL 0: The "Standard" Heavy Lifters (CUDA 12) ---
+    # --- POOL 0: Standard Heavy Lifters (CUDA 12) ---
     vllm-cuda12|trtllm-cuda12)
       target_mod=0
       ;;
-
-    # --- POOL 1: The "Next Gen" Heavy Lifters (CUDA 13) ---
+    # --- POOL 1: Next Gen Heavy Lifters (CUDA 13) ---
     vllm-cuda13|trtllm-cuda13|sglang-cuda13)
       target_mod=1
       ;;
-
     # --- POOL 2: SGLang Isolation & General Tasks ---
-    # sglang-cuda12 is here to offload Worker 0
-    # general-* matches all general tasks regardless of CUDA version (including empty)
     sglang-cuda12|general-*)
       target_mod=2
       ;;
-
     # --- FALLBACK ---
     *)
-      # Unknown combinations default to pool 2
       target_mod=2
       ;;
   esac
 
-  # Debug print to help you verify logic in logs
-  echo "   [DEBUG] Routing Key: '$route_key' -> Worker Index Modulo: $target_mod" >&2
-  # Find all valid indices [0 ... count-1] that match the modulo
-  local candidates=()
-  for (( i=0; i<count; i++ )); do
-    if [ $(( i % 3 )) -eq "$target_mod" ]; then
-      candidates+=("$i")
+  echo "    [DEBUG] Routing Key: '$route_key' -> Worker Index Modulo: $target_mod" >&2
+  
+  local final_targets=()
+  
+  # Filter the AVAILABLE indices (not just 0..count)
+  for idx in "${available_indices[@]}"; do
+    if [ $(( idx % 3 )) -eq "$target_mod" ]; then
+      final_targets+=("$idx")
     fi
   done
 
-  # If no pods match the specific modulo, fallback to all pods
-  if [ "${#candidates[@]}" -eq "0" ]; then
-    for (( i=0; i<count; i++ )); do
-      candidates+=("$i")
-    done
+  # If no pods match the specific modulo, fallback to ALL available pods
+  if [ "${#final_targets[@]}" -eq "0" ]; then
+    echo "${available_indices[@]}"
+  else
+    echo "${final_targets[@]}"
   fi
-
-  echo "${candidates[@]}"
 }
 
 # Process each architecture
@@ -249,10 +192,11 @@ for ARCH in "${ARCHS[@]}"; do
   SERVICE_NAME="buildkit-${ARCH}-headless"
   POD_PREFIX="buildkit-${ARCH}"
 
-  echo "🔍 Discovering Buildkit pods for ${ARCH} via DNS..."
+  echo "🔍 Discovering active Buildkit pods for ${ARCH} via DNS (checking indices 0-$((MAX_POD_CHECK-1)))..."
 
-  # Initial count
-  COUNT=$(get_pod_count "$SERVICE_NAME")
+  # Get the actual list of alive indices (e.g., "0 2 5")
+  ACTIVE_INDICES=($(get_active_indices "$ARCH" "$SERVICE_NAME"))
+  COUNT=${#ACTIVE_INDICES[@]}
 
   # Retry loop if no pods found
   if [ "$COUNT" -eq "0" ]; then
@@ -262,20 +206,20 @@ for ARCH in "${ARCHS[@]}"; do
       echo "⏳ Waiting ${RETRY_DELAY}s for BuildKit pods to become available (attempt ${retry}/${MAX_RETRIES})..."
       sleep "$RETRY_DELAY"
 
-      COUNT=$(get_pod_count "$SERVICE_NAME")
+      # Re-probe for active indices
+      ACTIVE_INDICES=($(get_active_indices "$ARCH" "$SERVICE_NAME"))
+      COUNT=${#ACTIVE_INDICES[@]}
+      
       if [ "$COUNT" -gt "0" ]; then
         echo "✅ BuildKit pods for ${ARCH} are now available!"
         break
       fi
 
       if [ "$retry" -eq "$MAX_RETRIES" ]; then
-        echo "::warning::No remote BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts ($(( MAX_RETRIES * RETRY_DELAY ))s total). Falling back to Kubernetes buildkit driver."
-        echo "⚠️  Warning: No remote BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts."
-        echo "   Remote buildkit workers will NOT be used for this build."
-        echo "   The Kubernetes buildkit driver will be used as a fallback (slower due to pod startup time)."
-        echo "   If this persists, please contact the Ops team to check KEDA scaling and BuildKit deployment status."
+        echo "::warning::No remote BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts. Falling back to Kubernetes driver."
+        echo "⚠️  Warning: No remote BuildKit pods available for ${ARCH}."
+        
         for flavor in "${FLAVORS[@]}"; do
-          # Write empty output - bootstrap-buildkit action will fall back to k8s driver
           echo "${flavor}_${ARCH}=" >> "$GITHUB_OUTPUT"
         done
         exit 1
@@ -283,11 +227,12 @@ for ARCH in "${ARCHS[@]}"; do
     done
   fi
 
-  echo "✅ Found $COUNT active pod(s) in service $SERVICE_NAME."
+  echo "✅ Found $COUNT active pod(s) (Indices: ${ACTIVE_INDICES[*]})."
 
   # Iterate over flavors and set outputs
   for flavor in "${FLAVORS[@]}"; do
-    TARGET_INDICES=($(get_target_indices "$flavor" "$CUDA_VERSION" "$COUNT"))
+    # Pass the discovered ACTIVE_INDICES to the routing function
+    TARGET_INDICES=($(get_target_indices "$flavor" "$CUDA_VERSION" "${ACTIVE_INDICES[@]}"))
 
     ADDRS=""
     for idx in "${TARGET_INDICES[@]}"; do
@@ -300,7 +245,7 @@ for ARCH in "${ARCHS[@]}"; do
       fi
     done
 
-    echo "   -> Routing ${flavor}_${ARCH} to pod indices: ${TARGET_INDICES[*]}"
+    echo "    -> Routing ${flavor}_${ARCH} to pod indices: ${TARGET_INDICES[*]}"
 
     # Write to GitHub Output
     echo "${flavor}_${ARCH}=$ADDRS" >> "$GITHUB_OUTPUT"
