@@ -1,4 +1,4 @@
-#/bin/bash
+#!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -211,6 +211,10 @@ echo "Concurrency levels: ${concurrency_array[@]}"
 # Concurrency levels to test
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
+  
+  # Create subdirectory for this concurrency level to match plot_pareto.py expectations
+  concurrency_dir="${artifact_dir}/concurrency${concurrency}"
+  mkdir -p "${concurrency_dir}"
 
   # NOTE: For Dynamo HTTP OpenAI frontend, use `nvext` for fields like
   # `ignore_eos` since they are not in the official OpenAI spec.
@@ -234,7 +238,7 @@ for concurrency in "${concurrency_array[@]}"; do
     --warmup-request-count $(($concurrency*2)) \
     --num-dataset-entries $(($concurrency*12)) \
     --random-seed 100 \
-    --artifact-dir ${artifact_dir} \
+    --artifact-dir ${concurrency_dir} \
     --ui simple \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
