@@ -192,6 +192,7 @@ impl OpenAIPreprocessor {
             .with_context(|| "Failed to apply prompt template")?;
         let annotations = self
             .gather_tokens(request, &mut builder, formatted_prompt)
+            .await
             .with_context(|| "Failed to gather tokens")?;
         self.gather_multi_modal_data(request, &mut builder)
             .await
@@ -374,7 +375,7 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    pub fn gather_tokens<
+    pub async fn gather_tokens<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -444,12 +445,20 @@ impl OpenAIPreprocessor {
                                     tracing::warn!(
                                         "backend_instance_id provided but no token_data; tokenizing prompt"
                                     );
-                                    let encoding = self.tokenizer.encode(&prompt)?;
+                                    let tokenizer = self.tokenizer.clone();
+                                    let prompt_owned = prompt.clone();
+                                    let encoding = tokio::task::spawn_blocking(move || {
+                                        tokenizer.encode(&prompt_owned)
+                                    }).await??;
                                     (encoding.token_ids().to_vec(), false)
                                 }
                             } else {
                                 // No backend_instance_id provided, continue the normal flow.
-                                let encoding = self.tokenizer.encode(&prompt)?;
+                                let tokenizer = self.tokenizer.clone();
+                                let prompt_owned = prompt.clone();
+                                let encoding = tokio::task::spawn_blocking(move || {
+                                    tokenizer.encode(&prompt_owned)
+                                }).await??;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -466,7 +475,11 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.tokenizer.encode(&texts[0])?;
+                                let tokenizer = self.tokenizer.clone();
+                                let text_owned = texts[0].clone();
+                                let encoding = tokio::task::spawn_blocking(move || {
+                                    tokenizer.encode(&text_owned)
+                                }).await??;
                                 builder.token_ids(encoding.token_ids().to_vec());
                             } else {
                                 bail!(
@@ -497,7 +510,11 @@ impl OpenAIPreprocessor {
 
         let all_token_ids = match &request.inner.input {
             dynamo_async_openai::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
+                let tokenizer = self.tokenizer.clone();
+                let s_owned = s.clone();
+                let encoding = tokio::task::spawn_blocking(move || {
+                    tokenizer.encode(&s_owned)
+                }).await??;
                 vec![encoding.token_ids().to_vec()]
             }
             dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
@@ -1101,7 +1118,7 @@ impl
             HashMap::new()
         } else {
             // Normal path: tokenize the prompt
-            self.gather_tokens(&request, &mut builder, None)?
+            self.gather_tokens(&request, &mut builder, None).await?
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
