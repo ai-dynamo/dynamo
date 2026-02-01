@@ -213,7 +213,7 @@ for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
   
   # Create subdirectory for this concurrency level to match plot_pareto.py expectations
-  concurrency_dir="${artifact_dir}/-concurrency${concurrency}"
+  concurrency_dir="${artifact_dir}/concurrency-${concurrency}"
   mkdir -p "${concurrency_dir}"
 
   # NOTE: For Dynamo HTTP OpenAI frontend, use `nvext` for fields like
