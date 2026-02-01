@@ -148,7 +148,7 @@ runs:
           EXTRA_ARGS+=" --no-cache"
         fi
         if [ "${{ inputs.use_sccache }}" == "true" ]; then
-          EXTRA_ARGS+=" --build-arg CARGO_BUILD_JOBS=8 --use-sccache"
+          EXTRA_ARGS+=" --build-arg CARGO_BUILD_JOBS=4 --use-sccache"
         fi
         if [ "${{ inputs.push_image }}" == "true" ]; then
           EXTRA_ARGS+=" --push --no-load"
