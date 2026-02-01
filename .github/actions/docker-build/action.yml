@@ -64,6 +64,10 @@ inputs:
     description: 'Do not load the image into docker (useful for validation-only builds)'
     required: false
     default: 'true'
+  use_sccache:
+    description: 'Use SCCache for caching'
+    required: false
+    default: 'true'
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -143,6 +147,9 @@ runs:
         if [ "${{ inputs.no_cache }}" == "true" ]; then
           EXTRA_ARGS+=" --no-cache"
         fi
+        if [ "${{ inputs.use_sccache }}" == "true" ]; then
+          EXTRA_ARGS+=" --build-arg CARGO_BUILD_JOBS=8 --use-sccache"
+        fi
         if [ "${{ inputs.push_image }}" == "true" ]; then
           EXTRA_ARGS+=" --push --no-load"
         elif [ "${{ inputs.no_load }}" == "true" ]; then
@@ -166,7 +173,6 @@ runs:
           --no-tag-latest \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
-          --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION" \
           $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
