@@ -51,6 +51,7 @@ docker build -f container/rendered.Dockerfile -t dynamo:latest-vllm .
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | |
+| [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
 | [**Multimodal Support**](vllm-omni.md) | ✅ | Via vLLM-Omni integration |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
