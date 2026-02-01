@@ -105,6 +105,8 @@ jobs:
       needs.prepare-release.result == 'success' &&
       (github.event_name == 'push' || needs.manual-approval.result == 'success')
     uses: ./.github/workflows/build-frontend-image.yaml
+    with:
+      frontend_build: true
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
