@@ -297,7 +297,7 @@ def parse_args() -> Config:
     # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
     # blocking NIXL's add_remote_agent from completing. Using "mp" backend forces separate
     # processes, avoiding the GIL contention.
-    # Note: Only apply for NIXL - other connectors (kvbm, lmcache) work fine with UniProcExecutor
+    # Note: Only apply for NIXL - other connectors (kvbm, lmcache, flexkv) work fine with UniProcExecutor
     # and forcing mp can expose race conditions in vLLM's scheduler.
     # See: https://github.com/vllm-project/vllm/issues/29369
     connector_list = [c.lower() for c in args.connector] if args.connector else []

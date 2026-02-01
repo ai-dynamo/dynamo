@@ -42,6 +42,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
 | [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ |  |
 | [**LMCache**](./LMCache_Integration.md) | ✅ |  |
+| [**FlexKV**](./flexkv_integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
@@ -157,7 +158,7 @@ vLLM workers are configured through command-line arguments. Key parameters inclu
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
 - `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
-- `--connector`: Specify which kv_transfer_config you want vllm to use `[nixl, lmcache, kvbm, none]`. This is a helper flag which overwrites the engines KVTransferConfig.
+- `--connector`: Specify which kv_transfer_config you want vllm to use `[nixl, lmcache, flexkv, kvbm, none]`. This is a helper flag which overwrites the engines KVTransferConfig.
 - `--enable-prompt-embeds`: **Enable prompt embeddings feature** (opt-in, default: disabled)
   - **Required for:** Accepting pre-computed prompt embeddings via API
   - **Default behavior:** Prompt embeddings DISABLED - requests with `prompt_embeds` will fail

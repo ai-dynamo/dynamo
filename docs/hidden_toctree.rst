@@ -73,6 +73,7 @@
    design_docs/dynamo_flow.md
 
    backends/vllm/deepseek-r1.md
+   backends/vllm/flexkv_integration.md
    backends/vllm/gpt-oss.md
    backends/vllm/LMCache_Integration.md
    backends/vllm/multi-node.md
