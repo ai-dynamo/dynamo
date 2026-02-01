@@ -33,6 +33,7 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 | [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ |  |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
+| [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
@@ -151,7 +152,11 @@ vLLM workers are configured through command-line arguments. Key parameters inclu
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
 - `--disaggregation-mode <mode>`: Worker role for disaggregated serving. Accepted values: `prefill`, `decode`, `agg` (default)
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
+<<<<<<< HEAD:docs/pages/backends/vllm/README.md
 - `--kv-transfer-config`: JSON string specifying the vLLM KVTransferConfig (e.g., `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`). See vLLM documentation for details.
+=======
+- `--connector`: Specify which kv_transfer_config you want vllm to use `[nixl, lmcache, flexkv, kvbm, none]`. This is a helper flag which overwrites the engines KVTransferConfig.
+>>>>>>> 8452b7b72 (Add README and use cases for FlexKV):docs/backends/vllm/README.md
 - `--enable-prompt-embeds`: **Enable prompt embeddings feature** (opt-in, default: disabled)
   - **Required for:** Accepting pre-computed prompt embeddings via API
   - **Default behavior:** Prompt embeddings DISABLED - requests with `prompt_embeds` will fail
