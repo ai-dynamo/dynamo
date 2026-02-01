@@ -67,7 +67,7 @@ inputs:
   use_sccache:
     description: 'Use SCCache for caching'
     required: false
-    default: 'true'
+    default: 'false'
 outputs:
   image_tag:
     description: 'Image Tag'
