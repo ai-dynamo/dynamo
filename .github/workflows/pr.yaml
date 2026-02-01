@@ -70,8 +70,8 @@ jobs:
       framework: sglang
       # platforms: '["amd64", "arm64"]'
       platforms: '["amd64"]'
-      # cuda_versions: '["12.9", "13.0"]'
-      cuda_versions: '["12.9"]'
+      cuda_versions: '["12.9", "13.0"]'
+      # cuda_versions: '["12.9"]'
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: false
