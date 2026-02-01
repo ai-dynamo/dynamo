@@ -86,6 +86,7 @@ jobs:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
       operator_default_image_name: ${{ steps.build-and-push-image.outputs.operator_default_image_name }}
+      operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -150,6 +151,7 @@ jobs:
           fi
 
           echo "operator_default_image_name=${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${DEFAULT_TAG}" >> $GITHUB_OUTPUT
+          echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
@@ -243,7 +245,7 @@ jobs:
   deploy-operator:
     runs-on: prod-default-small-v2
     # if: needs.changed-files.outputs.core == 'true'
-    needs: [changed-files, operator ] #, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    needs: [changed-files, operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     outputs:
@@ -304,7 +306,7 @@ jobs:
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.operator.outputs.operator_default_tag }} \
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
@@ -318,8 +320,8 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config current-context
         # Descriptive header for the summary
-        echo "### ⚠️ Unhealthy Pods Report" >> $GITHUB_STEP_SUMMARY
-        echo "Operator deployment failed. Unhealthy pods:" >> $GITHUB_STEP_SUMMARY
+        echo "### ⚠️ OPERATOR DEPLOYMENT FAILED: Unhealthy Pods Report" >> $GITHUB_STEP_SUMMARY
+        echo "Unhealthy pods:" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
         # Get pods, exclude healthy ones, and format output

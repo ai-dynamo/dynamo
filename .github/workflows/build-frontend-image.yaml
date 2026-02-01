@@ -6,6 +6,7 @@ name: Build Frontend Image
 on:
   push:
     branches:
+    - ops-2572 # todo remove this after merge
     - main
     - "pull-request/[0-9]+"
     # Note: release/* branches are handled by release.yml which calls this workflow
@@ -72,25 +73,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Install system dependencies from apt
-          sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
-          # Install Rust (cargo + rustc)
-          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
-          # Make cargo available to later steps
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Install cbindgen
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install cbindgen
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -99,8 +81,6 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
@@ -126,7 +106,6 @@ jobs:
           extra_tags: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend-${{ matrix.arch }}
           push_image: true
           no_load: true
-
 
   frontend-status-check:
     runs-on: ubuntu-latest
