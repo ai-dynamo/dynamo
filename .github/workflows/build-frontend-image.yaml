@@ -44,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.changes.outputs.frontend }}
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -72,7 +73,9 @@ jobs:
     runs-on: prod-builder-v2
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
