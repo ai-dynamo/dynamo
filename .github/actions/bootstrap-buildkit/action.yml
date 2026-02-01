@@ -30,7 +30,7 @@ inputs:
   ephemeral_storage:
     description: 'Ephemeral storage request for Kubernetes driver'
     required: false
-    default: '200Gi'
+    default: '400Gi'
   namespace:
     description: 'Kubernetes namespace for buildkit pods'
     required: false
@@ -42,11 +42,11 @@ inputs:
   requests_cpu:
     description: 'CPU requests for buildkit pods'
     required: false
-    default: '14'
+    default: '12'
   requests_memory:
     description: 'Memory requests for buildkit pods'
     required: false
-    default: '28Gi'
+    default: '26Gi'
   limits_memory:
     description: 'Memory limits for buildkit pods'
     required: false
