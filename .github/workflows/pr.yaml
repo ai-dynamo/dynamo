@@ -333,7 +333,7 @@ jobs:
    # End-to-end tests for each framework with various deployment profiles
    # ============================================================================
   deploy-test-vllm:
-    # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     runs-on: prod-default-small-v2
     needs: [deploy-operator, vllm-pipeline]
     permissions:
@@ -375,7 +375,7 @@ jobs:
   # - Run rest of jobs only on push to main or manual trigger
   deploy-test-vllm-disagg-router:
     runs-on:  prod-default-small-v2
-    # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, vllm-pipeline]
     permissions:
       contents: read
@@ -407,7 +407,7 @@ jobs:
   deploy-test-sglang:
     runs-on: prod-default-small-v2
     # Run if push to main, or manually triggered
-    # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, sglang-pipeline]
     permissions:
       contents: read
@@ -440,7 +440,7 @@ jobs:
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
     # Run if push to main, or manually triggered
-    # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     permissions:
       contents: read
