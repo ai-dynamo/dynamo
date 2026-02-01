@@ -308,6 +308,19 @@ jobs:
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+    - name: 🔍 Report Unhealthy Pods
+      if: failure()
+      run: |
+        # Descriptive header for the summary
+        echo "### ⚠️ Unhealthy Pods Report" >> $GITHUB_STEP_SUMMARY
+        echo "Operator deployment failed. Unhealthy pods:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        # Get pods, exclude healthy ones, and format output
+        # If the namespace is empty or all pods are healthy, the grep/awk won't output anything, which is handled gracefully.
+        kubectl get pods -n ${{ needs.deploy-operator.outputs.NAMESPACE }} --no-headers \
+          | grep -v -E '(Running|Completed)' \
+          | awk '{print "- 🔴 **" $1 "** | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY || true
 
    # ============================================================================
    #
