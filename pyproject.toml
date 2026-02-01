@@ -247,7 +247,9 @@ markers = [
     "usefixtures: use fixtures",
     "parametrize: parameterized test",
     "filterwarnings: filter warnings",
-    "asyncio: asyncio test marker"
+    "asyncio: asyncio test marker",
+    # Third-party plugin markers
+    "timeout: test timeout in seconds (pytest-timeout plugin)",
 ]
 
 # Linting/formatting
