@@ -23,8 +23,9 @@ class VideoConfig:
     namespace: str = DYN_NAMESPACE
     component: str = "trtllm_diffusion"
     endpoint: str = "generate"
-    store_kv: str = ""
-    request_plane: str = ""
+    store_kv: str = "etcd"
+    request_plane: str = "nats"
+    event_plane: str = ""
 
     # Model config
     model_path: str = DEFAULT_MODEL_PATH
@@ -123,14 +124,23 @@ def parse_args() -> VideoConfig:
     parser.add_argument(
         "--store-kv",
         type=str,
-        default=os.environ.get("DYN_STORE_KV", ""),
-        help="etcd URL for discovery (e.g., etcd://localhost:2379)",
+        choices=["etcd", "file", "mem"],
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Key-value backend: etcd, mem, file. Etcd uses ETCD_* env vars for connection.",
     )
     parser.add_argument(
         "--request-plane",
         type=str,
-        default=os.environ.get("DYN_REQUEST_PLANE", ""),
-        help="NATS URL for request plane (e.g., nats://localhost:4222)",
+        choices=["nats", "http"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Request plane: nats or http. NATS uses NATS_* env vars for connection.",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "http", ""],
+        default=os.environ.get("DYN_EVENT_PLANE", ""),
+        help="Event plane: nats or http (default: same as request-plane)",
     )
 
     # Model args
@@ -271,6 +281,7 @@ def parse_args() -> VideoConfig:
         endpoint=endpoint_name,
         store_kv=args.store_kv,
         request_plane=args.request_plane,
+        event_plane=args.event_plane or args.request_plane,
         model_path=args.model_path,
         served_model_name=args.served_model_name,
         output_dir=args.output_dir,

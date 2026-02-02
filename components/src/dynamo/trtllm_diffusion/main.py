@@ -70,7 +70,7 @@ async def init_video_worker(
             "This may not work correctly with the HTTP frontend."
         )
 
-    logger.info(f"Registering model '{model_name}' with ModelType.{model_type.name}")
+    logger.info(f"Registering model '{model_name}' with ModelType={model_type}")
 
     await register_llm(
         ModelInput.Text,
@@ -115,12 +115,14 @@ async def worker() -> None:
     # Get the event loop
     loop = asyncio.get_running_loop()
 
+    # NATS should be enabled when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS (for KV events)
+    enable_nats = config.request_plane == "nats" or config.event_plane == "nats"
+
     # Create the distributed runtime
     runtime = DistributedRuntime(
-        loop,
-        config.store_kv,
-        config.request_plane,
-        enable_nats=False,
+        loop, config.store_kv, config.request_plane, enable_nats
     )
 
     # Create shutdown event
