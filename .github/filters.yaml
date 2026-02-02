@@ -31,7 +31,6 @@ examples:
   - 'recipes/**'
   - 'examples/**'
   - 'benchmarks/**'
-  - 'scripts/**'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
