@@ -1660,7 +1660,7 @@
             "items": {
               "$ref": "#/components/schemas/ChatCompletionTool"
             },
-            "description": "A list of tools the model may call. Currently, only functions are supported as a tool.\nUse this to provide a list of functions the model may generate JSON inputs for. A max of 1024 functions are supported."
+            "description": "A list of tools the model may call. Currently, only functions are supported as a tool.\nUse this to provide a list of functions the model may generate JSON inputs for. A max of 1536 functions are supported."
           },
           "top_logprobs": {
             "type": [
