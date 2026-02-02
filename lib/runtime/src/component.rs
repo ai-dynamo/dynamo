@@ -39,7 +39,8 @@ use crate::{
     service::ServiceSet,
 };
 
-use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, utils::Duration};
+use super::{DistributedRuntime, traits::*, transports::nats::Slug, utils::Duration};
+use crate::runtime::Runtime;
 
 use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
 use crate::protocols::EndpointId;

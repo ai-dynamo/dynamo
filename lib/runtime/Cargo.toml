@@ -19,6 +19,7 @@ testing-etcd = [] # Tests that require an active ETCD server
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
+loom-runtime = ["dep:loom-rs"] # Use loom-rs for unified runtime with adaptive MAB scheduling
 
 [dependencies]
 # Use workspace dependencies where available
@@ -86,6 +87,9 @@ regex = { version = "1" }
 socket2 = { version = "0.5.8" }
 tokio-rayon = { version = "2.1" }
 
+# Unified runtime with adaptive MAB scheduling
+loom-rs = { version = "0.3", optional = true }
+
 # Kubernetes discovery backend
 kube = { version = "2.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "aws-lc-rs"] }
 k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
@@ -106,4 +110,8 @@ harness = false
 
 [[bench]]
 name = "tcp_codec_perf"
+harness = false
+
+[[bench]]
+name = "loom_vs_current"
 harness = false

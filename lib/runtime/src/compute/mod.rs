@@ -11,6 +11,20 @@
 //! - Seamless async-to-sync bridging via tokio-rayon
 //! - Scope-based parallelism for complex computational graphs
 //! - Metrics and monitoring for compute operations
+//! - Unified compute offload API via [`spawn_compute`] and [`spawn_adaptive`]
+//!
+//! # Unified Compute Offload
+//!
+//! The [`spawn_compute`] and [`spawn_adaptive`] functions provide a unified API
+//! for offloading CPU-intensive work. When the `loom-runtime` feature is enabled,
+//! these use loom's thread-local runtime with adaptive MAB scheduling. Otherwise,
+//! they fall back to `tokio-rayon`.
+//!
+//! ```ignore
+//! use dynamo_runtime::compute::spawn_compute;
+//!
+//! let result = spawn_compute(|| expensive_computation()).await;
+//! ```
 //!
 #![doc = include_str!("../../docs/rayon-tokio-strategy.md")]
 
@@ -18,7 +32,6 @@ use anyhow::Result;
 use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 pub mod macros;
 pub mod metrics;
@@ -29,6 +42,129 @@ pub mod validation;
 
 pub use metrics::ComputeMetrics;
 pub use pool::{ComputeHandle, ComputePool, ComputePoolExt};
+
+// ============================================================================
+// Unified Compute Offload API
+// ============================================================================
+
+/// Spawn a CPU-intensive closure on the compute pool.
+///
+/// This function provides a unified API for compute offload:
+/// - With `loom-runtime` feature: Uses loom's thread-local runtime → `spawn_compute`
+/// - Without: Uses `tokio-rayon`
+///
+/// Use this for tasks that are known to be CPU-intensive (>1ms).
+///
+/// # Example
+///
+/// ```ignore
+/// use dynamo_runtime::compute::spawn_compute;
+///
+/// let result = spawn_compute(|| {
+///     // Expensive computation
+///     expensive_work()
+/// }).await;
+/// ```
+///
+/// # Panics
+///
+/// When `loom-runtime` is enabled, panics if called outside of a loom runtime context.
+#[cfg(feature = "loom-runtime")]
+pub async fn spawn_compute<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    // Use loom's thread-local runtime accessor
+    loom_rs::spawn_compute(f).await
+}
+
+/// Spawn a CPU-intensive closure on the compute pool.
+///
+/// This function provides a unified API for compute offload:
+/// - With `loom-runtime` feature: Uses loom's thread-local runtime → `spawn_compute`
+/// - Without: Uses `tokio-rayon`
+///
+/// Use this for tasks that are known to be CPU-intensive (>1ms).
+///
+/// # Example
+///
+/// ```ignore
+/// use dynamo_runtime::compute::spawn_compute;
+///
+/// let result = spawn_compute(|| {
+///     // Expensive computation
+///     expensive_work()
+/// }).await;
+/// ```
+#[cfg(not(feature = "loom-runtime"))]
+pub async fn spawn_compute<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tokio_rayon::spawn(f).await
+}
+
+/// Spawn a closure with adaptive MAB scheduling.
+///
+/// This function provides a unified API for adaptive compute offload:
+/// - With `loom-runtime` feature: Uses loom's MAB scheduler which learns whether
+///   to execute inline or offload to rayon based on observed latency
+/// - Without: Falls back to `tokio-rayon` (always offloads)
+///
+/// The MAB scheduler tracks execution time per closure type using Rust's type
+/// system, learning the optimal strategy over time.
+///
+/// # Example
+///
+/// ```ignore
+/// use dynamo_runtime::compute::spawn_adaptive;
+///
+/// // MAB will learn whether this is fast enough to run inline
+/// // or slow enough to benefit from offloading
+/// let result = spawn_adaptive(|| {
+///     tokenizer.encode_batch(&texts)
+/// }).await;
+/// ```
+///
+/// # Panics
+///
+/// When `loom-runtime` is enabled, panics if called outside of a loom runtime context.
+#[cfg(feature = "loom-runtime")]
+pub async fn spawn_adaptive<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    loom_rs::spawn_adaptive(f).await
+}
+
+/// Spawn a closure with adaptive MAB scheduling.
+///
+/// This function provides a unified API for adaptive compute offload:
+/// - With `loom-runtime` feature: Uses loom's MAB scheduler which learns whether
+///   to execute inline or offload to rayon based on observed latency
+/// - Without: Falls back to `tokio-rayon` (always offloads)
+///
+/// # Example
+///
+/// ```ignore
+/// use dynamo_runtime::compute::spawn_adaptive;
+///
+/// let result = spawn_adaptive(|| {
+///     tokenizer.encode_batch(&texts)
+/// }).await;
+/// ```
+#[cfg(not(feature = "loom-runtime"))]
+pub async fn spawn_adaptive<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    // Without loom, fall back to always offloading via tokio-rayon
+    tokio_rayon::spawn(f).await
+}
 
 /// Configuration for the compute thread pool
 #[derive(Debug, Clone)]

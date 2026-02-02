@@ -118,3 +118,11 @@ profiling_results*
 # Node.js
 node_modules/
 package-lock.json
+
+
+# START Ruler Generated Files
+/../../../.config/.cursor/instructions.md
+/../../../.config/.cursor/instructions.md.bak
+/../../../.config/CLAUDE.md
+/../../../.config/CLAUDE.md.bak
+# END Ruler Generated Files

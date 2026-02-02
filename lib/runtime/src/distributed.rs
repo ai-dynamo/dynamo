@@ -673,7 +673,7 @@ pub mod distributed_test_utils {
     pub async fn create_test_drt_async() -> super::DistributedRuntime {
         use crate::{storage::kv, transports::nats};
 
-        let rt = crate::Runtime::from_current().unwrap();
+        let rt = crate::runtime::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
             store_backend: kv::Selector::Memory,
             nats_config: Some(nats::ClientOptions::default()),
@@ -693,7 +693,7 @@ pub mod distributed_test_utils {
     ) -> super::DistributedRuntime {
         use crate::{storage::kv, transports::nats};
 
-        let rt = crate::Runtime::from_current().unwrap();
+        let rt = crate::runtime::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
             store_backend: kv::Selector::File(store_path.to_path_buf()),
             nats_config: Some(nats::ClientOptions::default()),

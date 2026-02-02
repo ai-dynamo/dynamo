@@ -3,8 +3,14 @@
 
 pub mod events;
 
-use super::{DistributedRuntime, Runtime};
-/// A trait for objects that proivde access to the [Runtime]
+use super::DistributedRuntime;
+use crate::runtime::Runtime;
+
+/// A trait for objects that provide access to the [Runtime].
+///
+/// Note: This always returns the standard runtime type, even when the `loom-runtime`
+/// feature is enabled. This ensures compatibility with code that stores the runtime
+/// directly. For loom-specific features, use the methods on the loom-wrapped runtime.
 pub trait RuntimeProvider {
     fn rt(&self) -> &Runtime;
 }

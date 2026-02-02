@@ -26,8 +26,9 @@ pub trait Decoder: Clone + Send + 'static {
     async fn decode_async(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         // light clone (only config params)
         let decoder = self.clone();
-        // compute heavy -> rayon
-        let result = tokio_rayon::spawn(move || decoder.decode(data)).await?;
+        // compute heavy -> unified offload (uses loom when available, tokio-rayon otherwise)
+        let result =
+            dynamo_runtime::compute::spawn_compute(move || decoder.decode(data)).await?;
         Ok(result)
     }
 }

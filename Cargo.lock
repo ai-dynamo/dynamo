@@ -1503,6 +1503,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_affinity"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
+dependencies = [
+ "libc",
+ "num_cpus",
+ "winapi 0.3.9",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2094,6 +2105,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "diatomic-waker"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab03c107fafeb3ee9f5925686dbb7a73bc76e3932abb0d2b365cb64b169cf04c"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2357,7 +2374,7 @@ dependencies = [
  "offset-allocator",
  "oneshot",
  "parking_lot",
- "prometheus",
+ "prometheus 0.14.0",
  "proptest",
  "prost 0.13.5",
  "rand 0.9.2",
@@ -2502,6 +2519,7 @@ dependencies = [
  "libc",
  "local-ip-address",
  "log",
+ "loom-rs",
  "nid",
  "nix 0.29.0",
  "notify",
@@ -2512,7 +2530,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parking_lot",
  "percent-encoding",
- "prometheus",
+ "prometheus 0.14.0",
  "rand 0.9.2",
  "rayon",
  "regex",
@@ -2915,6 +2933,7 @@ dependencies = [
  "pear",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "toml 0.8.23",
  "uncased",
@@ -4828,6 +4847,31 @@ name = "log"
 version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
+
+[[package]]
+name = "loom-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42bcf9202eb68459194f9bc718d4a16d34e74d099f04701b3e77f0beb0023719"
+dependencies = [
+ "clap 4.5.53",
+ "core_affinity",
+ "crossbeam-queue",
+ "diatomic-waker",
+ "figment",
+ "futures-core",
+ "parking_lot",
+ "pin-project-lite",
+ "prometheus 0.13.4",
+ "rand 0.8.5",
+ "rand_distr 0.4.3",
+ "rayon",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
 
 [[package]]
 name = "loop9"
@@ -6864,6 +6908,20 @@ checksum = "52717f9a02b6965224f95ca2a81e2e0c5c43baacd28ca057577988930b6c3d5b"
 dependencies = [
  "quote",
  "syn 2.0.111",
+]
+
+[[package]]
+name = "prometheus"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d33c28a30771f7f96db69893f78b857f7450d7e0237e9c8fc6427a81bae7ed1"
+dependencies = [
+ "cfg-if 1.0.4",
+ "fnv",
+ "lazy_static",
+ "memchr",
+ "parking_lot",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

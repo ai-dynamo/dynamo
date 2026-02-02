@@ -25,6 +25,7 @@ block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
+loom-runtime = ["dynamo-runtime/loom-runtime"]
 media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
 

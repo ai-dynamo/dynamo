@@ -277,7 +277,8 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use crate::{DistributedRuntime, distributed::DistributedConfig};
+    use crate::runtime::Runtime;
 
     /// Test that instances removed via report_instance_down are restored after
     /// the reconciliation interval elapses.

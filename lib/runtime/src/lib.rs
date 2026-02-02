@@ -38,6 +38,8 @@ pub mod prelude;
 pub mod protocols;
 pub mod runnable;
 pub mod runtime;
+#[cfg(feature = "loom-runtime")]
+pub mod loom_wrapper;
 pub mod service;
 pub mod slug;
 pub mod storage;
@@ -50,7 +52,18 @@ pub mod worker;
 pub use distributed::{DistributedRuntime, distributed_test_utils};
 pub use futures::stream;
 pub use metrics::MetricsRegistry;
+
+// Conditionally export the appropriate Runtime implementation
+#[cfg(not(feature = "loom-runtime"))]
 pub use runtime::Runtime;
+#[cfg(feature = "loom-runtime")]
+pub use loom_wrapper::Runtime;
+
+// When loom-runtime is enabled, also export the standard runtime as FallbackRuntime
+// for cases where explicit standard runtime access is needed
+#[cfg(feature = "loom-runtime")]
+pub use runtime::Runtime as StandardRuntime;
+
 pub use system_health::{HealthCheckTarget, SystemHealth};
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;

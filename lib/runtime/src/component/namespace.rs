@@ -99,7 +99,8 @@ impl MetricsHierarchy for Namespace {
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
-    use crate::{DistributedRuntime, Runtime};
+    use crate::DistributedRuntime;
+    use crate::runtime::Runtime;
 
     use super::*;
 
