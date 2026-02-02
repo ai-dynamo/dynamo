@@ -5,7 +5,6 @@ import asyncio
 import base64
 import io
 import logging
-import os
 import random
 import time
 import uuid
@@ -27,7 +26,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
     """Handler for diffusion image generation.
 
     Inherits from BaseGenerativeHandler for common infrastructure like
-    tracing, metrics publishing, and cancellation support.
+    tracing, metrics publishing
     """
 
     def __init__(
@@ -92,11 +91,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 
         try:
-            # # Check for cancellation before starting generation
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled before generation: {context.id()}")
-            #     return
-
             # Default to 50 steps if not provided
             request["num_inference_steps"] = request.get("num_inference_steps", 50)
 
@@ -104,11 +98,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
             # Parse size
             width, height = self._parse_size(req.size)
-
-            # Check for cancellation after parsing
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled during setup: {context.id()}")
-            #     return
 
             # Generate images (may batch multiple requests at same step)
             images = await self._generate_images(
@@ -120,11 +109,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 guidance_scale=req.guidance_scale,
                 seed=req.seed,
             )
-
-            # # Check for cancellation after generation
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled after generation: {context.id()}")
-            #     return
 
             # Upload to filesystem and get URLs
             # Use user ID from request if available, otherwise fallback to context ID
