@@ -1158,14 +1158,15 @@ async fn handler_responses(
     let (mut connection_handle, stream_handle) =
         create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
-    let response = tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
-        .await
-        .map_err(|e| {
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to await chat completions task: {:?}",
-                e,
-            ))
-        })?;
+    let response =
+        tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
+            .await
+            .map_err(|e| {
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to await chat completions task: {:?}",
+                    e,
+                ))
+            })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
