@@ -7,7 +7,7 @@ use std::{
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use tokio::sync::oneshot;
 
 use crate::discovery::KvWorkerMonitor;
@@ -70,10 +70,9 @@ pub struct ModelManager {
     // Prefill models don't have engines - they're only tracked for discovery/lifecycle
     prefill_engines: RwLock<ModelEngines<()>>,
 
-    // These are Mutex because we read and write rarely and equally
-    cards: Mutex<HashMap<String, ModelDeploymentCard>>,
-    kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
-    prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
+    cards: DashMap<String, ModelDeploymentCard>,
+    kv_choosers: DashMap<EndpointId, Arc<KvRouter>>,
+    prefill_router_activators: DashMap<String, PrefillActivationState>,
 
     /// Per-model worker monitors for dynamic KV cache load rejection.
     /// Key: model name, Value: cloneable monitor (all fields are Arc).
@@ -100,9 +99,9 @@ impl ModelManager {
             embeddings_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
             prefill_engines: RwLock::new(ModelEngines::default()),
-            cards: Mutex::new(HashMap::new()),
-            kv_choosers: Mutex::new(HashMap::new()),
-            prefill_router_activators: Mutex::new(HashMap::new()),
+            cards: DashMap::new(),
+            kv_choosers: DashMap::new(),
+            prefill_router_activators: DashMap::new(),
             worker_monitors: RwLock::new(HashMap::new()),
             runtime_configs: DashMap::new(),
         }
@@ -147,7 +146,7 @@ impl ModelManager {
     }
 
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
-        self.cards.lock().values().cloned().collect()
+        self.cards.iter().map(|r| r.value().clone()).collect()
     }
 
     /// Check if a decode model (chat or completions) is registered
@@ -318,13 +317,13 @@ impl ModelManager {
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
-        self.cards.lock().insert(key.to_string(), card);
+        self.cards.insert(key.to_string(), card);
         Ok(())
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
-        self.cards.lock().remove(key)
+        self.cards.remove(key).map(|(_, v)| v)
     }
 
     pub async fn kv_chooser_for(
@@ -384,14 +383,12 @@ impl ModelManager {
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
-        self.kv_choosers
-            .lock()
-            .insert(endpoint_id, new_kv_chooser.clone());
+        self.kv_choosers.insert(endpoint_id, new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 
     fn get_kv_chooser(&self, id: &EndpointId) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(id).cloned()
+        self.kv_choosers.get(id).map(|r| r.value().clone())
     }
 
     /// Register a prefill router for a decode model. Returns a receiver that will be
@@ -401,10 +398,8 @@ impl ModelManager {
         &self,
         model_name: String,
     ) -> Option<oneshot::Receiver<Endpoint>> {
-        let mut activators = self.prefill_router_activators.lock();
-
-        match activators.remove(&model_name) {
-            Some(PrefillActivationState::PrefillReady(rx)) => {
+        match self.prefill_router_activators.remove(&model_name) {
+            Some((_, PrefillActivationState::PrefillReady(rx))) => {
                 // Prefill endpoint already arrived - rx will immediately resolve
                 tracing::debug!(
                     model_name = %model_name,
@@ -412,19 +407,20 @@ impl ModelManager {
                 );
                 Some(rx)
             }
-            Some(PrefillActivationState::DecodeWaiting(tx)) => {
+            Some((key, PrefillActivationState::DecodeWaiting(tx))) => {
                 // Decode already registered - this shouldn't happen, restore state and return None
                 tracing::error!(
                     model_name = %model_name,
                     "Decode model already registered for this prefill router"
                 );
-                activators.insert(model_name, PrefillActivationState::DecodeWaiting(tx));
+                self.prefill_router_activators
+                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
                 None
             }
             None => {
                 // New registration: create tx/rx pair, store sender and return receiver
                 let (tx, rx) = oneshot::channel();
-                activators.insert(
+                self.prefill_router_activators.insert(
                     model_name.clone(),
                     PrefillActivationState::DecodeWaiting(tx),
                 );
@@ -444,10 +440,8 @@ impl ModelManager {
         model_name: &str,
         endpoint: Endpoint,
     ) -> anyhow::Result<()> {
-        let mut activators = self.prefill_router_activators.lock();
-
-        match activators.remove(model_name) {
-            Some(PrefillActivationState::DecodeWaiting(sender)) => {
+        match self.prefill_router_activators.remove(model_name) {
+            Some((_, PrefillActivationState::DecodeWaiting(sender))) => {
                 // Decode model already registered
                 sender.send(endpoint).map_err(|_| {
                     anyhow::anyhow!(
@@ -463,7 +457,7 @@ impl ModelManager {
 
                 Ok(())
             }
-            Some(PrefillActivationState::PrefillReady(_)) => {
+            Some((_, PrefillActivationState::PrefillReady(_))) => {
                 // Prefill already activated - this shouldn't happen
                 anyhow::bail!("Prefill router for model {} already activated", model_name);
             }
@@ -476,7 +470,7 @@ impl ModelManager {
                 })?;
 
                 // Store the receiver for when decode model registers
-                activators.insert(
+                self.prefill_router_activators.insert(
                     model_name.to_string(),
                     PrefillActivationState::PrefillReady(rx),
                 );
@@ -493,11 +487,9 @@ impl ModelManager {
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
         self.cards
-            .lock()
-            .values()
-            .find(|c| c.display_name == model)
-            .and_then(|c| c.runtime_config.tool_call_parser.as_ref())
-            .map(|parser| parser.to_string())
+            .iter()
+            .find(|r| r.value().display_name == model)
+            .and_then(|r| r.value().runtime_config.tool_call_parser.clone())
     }
 
     /// Creates parsing options with tool call parser and reasoning parser for the specified model.
