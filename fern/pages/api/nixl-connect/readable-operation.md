@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "dynamo.nixl_connect.ReadableOperation"
 ---
+
+# dynamo.nixl_connect.ReadableOperation
 
 An operation which enables a remote worker to read data from the local worker.
 

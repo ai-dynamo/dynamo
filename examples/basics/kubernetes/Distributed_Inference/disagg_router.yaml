@@ -42,7 +42,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 8
+            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 8 --is-decode-worker
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
