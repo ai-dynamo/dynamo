@@ -121,6 +121,7 @@ jobs:
           extra_tags: ${{ steps.calculate-target-tag.outputs.acr_target_image_uri }}
           push_image: true
           no_load: true
+          ci: true
       - name: Show summary
         shell: bash
         run: |
