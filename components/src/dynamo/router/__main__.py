@@ -36,13 +36,11 @@ class StandaloneRouterHandler:
         worker_endpoint_path: str,
         block_size: int,
         kv_router_config: KvRouterConfig,
-        worker_type: str = "decode",
     ):
         self.runtime = runtime
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
-        self.worker_type = worker_type
         self.kv_push_router: Optional[KvPushRouter] = None
         self.worker_client: Optional[Client] = None
 
@@ -68,11 +66,12 @@ class StandaloneRouterHandler:
             self.worker_client = await worker_endpoint.client()
 
             # Create KvPushRouter with specified configuration
+            # Note: worker_type is now derived from MDC (Model Deployment Card) at routing time,
+            # so we don't need to pass it here. Workers self-identify as prefill/decode in MDC.
             self.kv_push_router = KvPushRouter(
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
-                worker_type=self.worker_type,
             )
 
         except Exception as e:
@@ -259,17 +258,6 @@ def parse_args():
         help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-kv-events is set. Determines how aggressively to prune the tree (default: 0.8)",
     )
 
-    parser.add_argument(
-        "--worker-type",
-        type=str,
-        choices=["decode", "prefill"],
-        default="decode",
-        help=(
-            "Type of workers being routed to. Used for Prometheus metric labeling.\n"
-            "Use 'decode' for decode workers (default) or 'prefill' for prefill workers."
-        ),
-    )
-
     return parser.parse_args()
 
 
@@ -291,7 +279,6 @@ async def worker(runtime: DistributedRuntime):
     logger.info("Starting Standalone Router Service")
     logger.debug(
         f"Configuration: endpoint={args.endpoint}, block_size={args.block_size}, "
-        f"worker_type={args.worker_type}, "
         f"overlap_score_weight={args.kv_overlap_score_weight}, "
         f"router_temperature={args.router_temperature}, "
         f"use_kv_events={args.use_kv_events}, "
@@ -303,20 +290,6 @@ async def worker(runtime: DistributedRuntime):
         f"router_max_tree_size={args.router_max_tree_size}, "
         f"router_prune_target_ratio={args.router_prune_target_ratio}"
     )
-
-    # Warn about suboptimal configurations based on worker type
-    if args.worker_type == "decode" and args.kv_overlap_score_weight != 0.0:
-        logger.warning(
-            f"Decode router has --kv-overlap-score-weight={args.kv_overlap_score_weight}, "
-            "but 0.0 is recommended for decode workers to avoid KV cache affinity routing. "
-            "Use --kv-overlap-score-weight 0 for optimal load balancing."
-        )
-    if args.worker_type == "prefill" and args.router_track_active_blocks:
-        logger.warning(
-            "Prefill router has active block tracking enabled, but this is not recommended "
-            "for prefill workers since they don't maintain KV cache. "
-            "Use --no-track-active-blocks for prefill workers."
-        )
 
     # Create KvRouter configuration
     kv_router_config = KvRouterConfig(
@@ -338,7 +311,7 @@ async def worker(runtime: DistributedRuntime):
 
     # Create handler
     handler = StandaloneRouterHandler(
-        runtime, args.endpoint, args.block_size, kv_router_config, args.worker_type
+        runtime, args.endpoint, args.block_size, kv_router_config
     )
     await handler.initialize()
 

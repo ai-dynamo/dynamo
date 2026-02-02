@@ -78,12 +78,20 @@ pub struct LLMMetricAnnotation {
     /// Prefill worker DP rank
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_dp_rank: Option<u32>,
+    /// Prefill worker type ("prefill" or "decode") for Prometheus metric labeling.
+    /// Stored at routing time to avoid expensive MDC lookup when updating TTFT metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_type: Option<String>,
     /// Decode worker ID (for ITL attribution in disaggregated mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
     /// Decode worker DP rank
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_dp_rank: Option<u32>,
+    /// Decode worker type ("prefill" or "decode") for Prometheus metric labeling.
+    /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_type: Option<String>,
 }
 
 impl LLMMetricAnnotation {
@@ -653,12 +661,21 @@ impl OpenAIPreprocessor {
                             .map_err(|e| e.to_string())
                     });
 
-                    // Create LLM metrics annotation with prefill/decode worker info from tracker
+                    // Create LLM metrics annotation with prefill/decode worker info from tracker.
+                    // Worker types are stored at routing time to avoid expensive MDC lookup.
                     let tracker = inner.response_generator.tracker();
                     let prefill_worker_id = tracker.as_ref().and_then(|t| t.prefill_worker_id());
                     let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                    let prefill_worker_type = tracker
+                        .as_ref()
+                        .and_then(|t| t.prefill_worker_type())
+                        .map(String::from);
                     let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
                     let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                    let decode_worker_type = tracker
+                        .as_ref()
+                        .and_then(|t| t.decode_worker_type())
+                        .map(String::from);
                     let llm_metrics = LLMMetricAnnotation {
                         input_tokens: isl,
                         output_tokens: current_osl,
@@ -666,8 +683,10 @@ impl OpenAIPreprocessor {
                         cached_tokens: None,
                         prefill_worker_id,
                         prefill_dp_rank,
+                        prefill_worker_type,
                         decode_worker_id,
                         decode_dp_rank,
+                        decode_worker_type,
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -704,8 +723,16 @@ impl OpenAIPreprocessor {
                         let prefill_worker_id =
                             tracker.as_ref().and_then(|t| t.prefill_worker_id());
                         let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                        let prefill_worker_type = tracker
+                            .as_ref()
+                            .and_then(|t| t.prefill_worker_type())
+                            .map(String::from);
                         let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
                         let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                        let decode_worker_type = tracker
+                            .as_ref()
+                            .and_then(|t| t.decode_worker_type())
+                            .map(String::from);
                         let llm_metrics = LLMMetricAnnotation {
                             input_tokens: usage.prompt_tokens as usize,
                             output_tokens: usage.completion_tokens as usize,
@@ -716,8 +743,10 @@ impl OpenAIPreprocessor {
                                 .and_then(|d| d.cached_tokens.map(|c| c as usize)),
                             prefill_worker_id,
                             prefill_dp_rank,
+                            prefill_worker_type,
                             decode_worker_id,
                             decode_dp_rank,
+                            decode_worker_type,
                         };
 
                         // Create annotation string

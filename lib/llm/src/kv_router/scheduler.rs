@@ -347,6 +347,12 @@ impl KvScheduler {
         self.slots.free(&request_id.to_string()).await
     }
 
+    /// Get the worker type for this scheduler ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.slots.worker_type()
+    }
+
     pub async fn add_output_block(
         &self,
         request_id: &str,

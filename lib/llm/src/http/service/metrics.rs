@@ -309,9 +309,13 @@ pub struct ResponseMetricCollector {
     // Prefill worker info for TTFT attribution (set from LLMMetricAnnotation)
     prefill_worker_id: Option<u64>,
     prefill_dp_rank: Option<u32>,
+    // Prefill worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
+    prefill_worker_type: Option<String>,
     // Decode worker info for ITL attribution (set from LLMMetricAnnotation)
     decode_worker_id: Option<u64>,
     decode_dp_rank: Option<u32>,
+    // Decode worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
+    decode_worker_type: Option<String>,
 }
 
 impl Default for Metrics {
@@ -944,19 +948,24 @@ impl ResponseMetricCollector {
             cached_tokens_observed: false,
             prefill_worker_id: None,
             prefill_dp_rank: None,
+            prefill_worker_type: None,
             decode_worker_id: None,
             decode_dp_rank: None,
+            decode_worker_type: None,
         }
     }
 
     /// Set the worker info for per-worker TTFT/ITL metrics.
     /// In disaggregated mode, TTFT is attributed to prefill worker, ITL to decode worker.
+    /// Worker types are stored at routing time to avoid expensive MDC lookup when updating metrics.
     pub fn set_worker_info(
         &mut self,
         prefill_worker_id: Option<u64>,
         prefill_dp_rank: Option<u32>,
+        prefill_worker_type: Option<String>,
         decode_worker_id: Option<u64>,
         decode_dp_rank: Option<u32>,
+        decode_worker_type: Option<String>,
     ) {
         if self.prefill_worker_id.is_none() {
             self.prefill_worker_id = prefill_worker_id;
@@ -964,11 +973,17 @@ impl ResponseMetricCollector {
         if self.prefill_dp_rank.is_none() {
             self.prefill_dp_rank = prefill_dp_rank;
         }
+        if self.prefill_worker_type.is_none() {
+            self.prefill_worker_type = prefill_worker_type;
+        }
         if self.decode_worker_id.is_none() {
             self.decode_worker_id = decode_worker_id;
         }
         if self.decode_dp_rank.is_none() {
             self.decode_dp_rank = decode_dp_rank;
+        }
+        if self.decode_worker_type.is_none() {
+            self.decode_worker_type = decode_worker_type;
         }
     }
 
@@ -1019,18 +1034,20 @@ impl ResponseMetricCollector {
                 .with_label_values(&[&self.model])
                 .observe(ttft);
 
-            // Update per-worker TTFT gauge - attributed to prefill worker (worker_type=prefill)
+            // Update per-worker TTFT gauge - attributed to prefill worker.
+            // Use stored worker_type (from routing time) to avoid MDC lookup.
+            // Falls back to WORKER_TYPE_PREFILL if not available.
             if let Some(worker_id) = self.prefill_worker_id {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .prefill_dp_rank
                     .map_or("0".to_string(), |r| r.to_string());
+                let worker_type = self
+                    .prefill_worker_type
+                    .as_deref()
+                    .unwrap_or(WORKER_TYPE_PREFILL);
                 WORKER_LAST_TTFT_GAUGE
-                    .with_label_values(&[
-                        worker_id_str.as_str(),
-                        dp_rank_str.as_str(),
-                        WORKER_TYPE_PREFILL,
-                    ])
+                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
                     .set(ttft);
             }
 
@@ -1054,18 +1071,20 @@ impl ResponseMetricCollector {
                     .observe(itl);
             }
 
-            // Update per-worker ITL gauge - attributed to decode worker (worker_type=decode)
+            // Update per-worker ITL gauge - attributed to decode worker.
+            // Use stored worker_type (from routing time) to avoid MDC lookup.
+            // Falls back to WORKER_TYPE_DECODE if not available.
             if let Some(worker_id) = self.decode_worker_id {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
                     .map_or("0".to_string(), |r| r.to_string());
+                let worker_type = self
+                    .decode_worker_type
+                    .as_deref()
+                    .unwrap_or(WORKER_TYPE_DECODE);
                 WORKER_LAST_ITL_GAUGE
-                    .with_label_values(&[
-                        worker_id_str.as_str(),
-                        dp_rank_str.as_str(),
-                        WORKER_TYPE_DECODE,
-                    ])
+                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
                     .set(itl);
             }
         }
@@ -1103,8 +1122,10 @@ pub fn process_response_and_observe_metrics<T>(
         response_collector.set_worker_info(
             metrics.prefill_worker_id,
             metrics.prefill_dp_rank,
+            metrics.prefill_worker_type,
             metrics.decode_worker_id,
             metrics.decode_dp_rank,
+            metrics.decode_worker_type,
         );
 
         // Drop http_queue_guard on first token for non-streaming (same as streaming)
@@ -1150,8 +1171,10 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
         response_collector.set_worker_info(
             metrics.prefill_worker_id,
             metrics.prefill_dp_rank,
+            metrics.prefill_worker_type,
             metrics.decode_worker_id,
             metrics.decode_dp_rank,
+            metrics.decode_worker_type,
         );
 
         // Drop http_queue_guard on first token for streaming
@@ -1648,8 +1671,10 @@ mod tests {
             cached_tokens: Some(15),
             prefill_worker_id: None,
             prefill_dp_rank: None,
+            prefill_worker_type: None,
             decode_worker_id: None,
             decode_dp_rank: None,
+            decode_worker_type: None,
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -1711,8 +1736,10 @@ mod tests {
             cached_tokens: Some(15),
             prefill_worker_id: None,
             prefill_dp_rank: None,
+            prefill_worker_type: None,
             decode_worker_id: None,
             decode_dp_rank: None,
+            decode_worker_type: None,
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();

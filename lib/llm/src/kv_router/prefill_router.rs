@@ -20,11 +20,11 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    discovery::{ModelManager, WORKER_TYPE_PREFILL},
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, TrackedPushRouter},
+    discovery::ModelManager,
+    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
-    protocols::common::timing::{RequestPhase, RequestTracker},
+    protocols::common::timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
 };
 
 /// Errors that can occur during prefill routing
@@ -49,8 +49,10 @@ pub enum PrefillError {
 enum InnerPrefillRouter {
     /// KV-aware routing using KvPushRouter
     KvRouter(Arc<KvPushRouter>),
-    /// Simple routing (RoundRobin, Random, Direct) with metrics tracking
-    SimpleRouter(Arc<TrackedPushRouter>),
+    /// Simple routing (RoundRobin, Random, Direct)
+    /// Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
+    /// available in KV routing mode where the router has actual bookkeeping.
+    SimpleRouter(Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>),
 }
 
 impl InnerPrefillRouter {
@@ -238,6 +240,8 @@ impl PrefillRouter {
             }
 
             // Create simple push router with the frontend's router mode
+            // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
+            // available in KV routing mode where the router has actual bookkeeping.
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
                 client,
                 self.router_mode,
@@ -246,9 +250,7 @@ impl PrefillRouter {
             )
             .await?;
 
-            // Wrap in TrackedPushRouter for metrics (worker_type=prefill)
-            let tracked_router = TrackedPushRouter::new(push_router, WORKER_TYPE_PREFILL);
-            InnerPrefillRouter::SimpleRouter(Arc::new(tracked_router))
+            InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
         };
 
         // Set the router (ignore error if already set)
@@ -542,10 +544,12 @@ impl
                     router.select_next_worker();
                 }
 
-                // Record prefill worker on the main request's tracker for metrics
+                // Record prefill worker on the main request's tracker for metrics.
                 // (The cloned prefill_req has its own tracker, so we need to record here)
+                // Worker type is stored at routing time to avoid expensive MDC lookups when
+                // updating Prometheus TTFT metrics later in the response stream.
                 if let Some(ref tracker) = req.tracker {
-                    tracker.record_prefill_worker_with_rank(worker_id, dp_rank);
+                    tracker.record_prefill_worker_full(worker_id, dp_rank, WORKER_TYPE_PREFILL);
                 }
 
                 let routing = prefill_req.routing_mut();
@@ -574,13 +578,15 @@ impl
 
                 let result = self.call_prefill(prefill_context).await;
 
-                // Record prefill worker on the main request's tracker for metrics
+                // Record prefill worker on the main request's tracker for metrics.
                 // (call_prefill returns the worker_id from the prefill routing)
+                // Worker type is stored at routing time to avoid expensive MDC lookups when
+                // updating Prometheus TTFT metrics later in the response stream.
                 if let Ok((_, Some(worker_id))) = &result
                     && let Some(ref tracker) = req.tracker
                 {
                     // Use dp_rank=0 as we don't have it in this path
-                    tracker.record_prefill_worker_with_rank(*worker_id, 0);
+                    tracker.record_prefill_worker_full(*worker_id, 0, WORKER_TYPE_PREFILL);
                 }
 
                 result.map(|(result, worker_id)| (Some(result), worker_id, None))

@@ -11,8 +11,8 @@ use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::{DiscoveryQuery, EventTransportKind},
     pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
+        SingleIn, async_trait,
     },
     protocols::EndpointId,
     protocols::annotated::Annotated,
@@ -572,6 +572,12 @@ impl KvRouter {
         self.scheduler.free(request_id).await
     }
 
+    /// Get the worker type for this router ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.scheduler.worker_type()
+    }
+
     pub async fn add_output_block(
         &self,
         request_id: &str,
@@ -914,11 +920,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         }
 
-        // Record metrics in tracker: KV hit rate and worker ID based on phase
+        // Record metrics in tracker: KV hit rate, worker ID, and worker type based on phase.
+        // Worker type is stored at routing time to avoid expensive MDC lookups when
+        // updating Prometheus metrics (TTFT/ITL) later in the response stream.
         if let Some(ref tracker) = request.tracker {
             let isl_blocks = request.token_ids.len().div_ceil(block_size);
             tracker.record_kv_hit(overlap_amount, isl_blocks);
-            tracker.record_worker_with_rank(instance_id, dp_rank);
+            tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
         }
 
         // Handle query-only requests: early return with worker info
@@ -1048,239 +1056,4 @@ impl Drop for KvRouter {
         tracing::info!("Dropping KvRouter - cancelling background tasks");
         self.cancellation_token.cancel();
     }
-}
-
-/// A push router wrapper that tracks worker selection for non-KV routing modes.
-///
-/// This wrapper records worker_id (and dp_rank=0) in the request's tracker
-/// before routing, enabling per-worker metrics like TTFT and ITL for
-/// round-robin, random, and direct routing modes.
-///
-/// It also tracks active (in-flight) requests per worker via Prometheus gauges,
-/// using `active_prefill_tokens` to represent "active requests" count for non-KV modes.
-pub struct TrackedPushRouter {
-    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    /// For Direct routing mode, this stores the target instance_id
-    direct_instance_id: Option<u64>,
-    /// Worker type for Prometheus metrics labeling ("prefill" or "decode")
-    worker_type: &'static str,
-}
-
-impl TrackedPushRouter {
-    /// Create a TrackedPushRouter for Random or RoundRobin routing
-    pub fn new(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        worker_type: &'static str,
-    ) -> Self {
-        TrackedPushRouter {
-            inner,
-            direct_instance_id: None,
-            worker_type,
-        }
-    }
-
-    /// Create a TrackedPushRouter for Direct routing to a specific instance
-    pub fn new_direct(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        instance_id: u64,
-        worker_type: &'static str,
-    ) -> Self {
-        TrackedPushRouter {
-            inner,
-            direct_instance_id: Some(instance_id),
-            worker_type,
-        }
-    }
-
-    /// Select next worker (for non-direct routing modes)
-    /// This delegates to the inner router and also advances the routing state
-    pub fn select_next_worker(&self) -> Option<u64> {
-        self.inner.select_next_worker()
-    }
-
-    /// Peek next worker without incrementing state (for non-direct routing modes)
-    pub fn peek_next_worker(&self) -> Option<u64> {
-        self.inner.peek_next_worker()
-    }
-
-    /// Direct route to a specific worker with metrics tracking
-    pub async fn direct(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-        instance_id: u64,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        use crate::discovery::{
-            WORKER_ACTIVE_DECODE_BLOCKS_GAUGE, WORKER_ACTIVE_PREFILL_TOKENS_GAUGE,
-        };
-
-        // Record the worker info in the request's tracker
-        if let Some(ref tracker) = request.tracker {
-            tracker.record_worker_with_rank(instance_id, 0);
-        }
-
-        // Increment active request counters
-        let worker_id_str = instance_id.to_string();
-        WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-            .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-            .inc();
-        WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-            .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-            .inc();
-
-        // Route to the specified worker
-        let result = self.inner.direct(request, instance_id).await;
-
-        match result {
-            Ok(stream) => {
-                let guard = ActiveRequestGuard {
-                    worker_id: instance_id,
-                    worker_type: self.worker_type,
-                };
-                let wrapped = TrackedResponseStream {
-                    inner: stream,
-                    _guard: guard,
-                };
-                Ok(Box::pin(wrapped))
-            }
-            Err(e) => {
-                // On error, decrement the counters immediately
-                WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-                    .dec();
-                WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-                    .dec();
-                Err(e)
-            }
-        }
-    }
-}
-
-/// RAII guard that decrements the active request counter when dropped.
-/// Used by TrackedPushRouter to track when response streams complete.
-struct ActiveRequestGuard {
-    worker_id: u64,
-    worker_type: &'static str,
-}
-
-impl Drop for ActiveRequestGuard {
-    fn drop(&mut self) {
-        use crate::discovery::{
-            WORKER_ACTIVE_DECODE_BLOCKS_GAUGE, WORKER_ACTIVE_PREFILL_TOKENS_GAUGE,
-        };
-        let worker_id_str = self.worker_id.to_string();
-        // Decrement active request counters
-        WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-            .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-            .dec();
-        WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-            .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-            .dec();
-    }
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for TrackedPushRouter
-{
-    async fn generate(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        use crate::discovery::{
-            WORKER_ACTIVE_DECODE_BLOCKS_GAUGE, WORKER_ACTIVE_PREFILL_TOKENS_GAUGE,
-        };
-
-        // Get the target instance_id based on routing mode
-        let instance_id = if let Some(id) = self.direct_instance_id {
-            // Direct routing: use the specified instance_id
-            id
-        } else {
-            // Random/RoundRobin: select the next worker
-            self.inner
-                .select_next_worker()
-                .ok_or_else(|| anyhow::anyhow!("TrackedPushRouter: no workers available"))?
-        };
-
-        // Record the worker info in the request's tracker
-        // Use dp_rank=0 as default for non-KV routing (we don't have dp_rank info here)
-        if let Some(ref tracker) = request.tracker {
-            tracker.record_worker_with_rank(instance_id, 0);
-        }
-
-        // Increment active request counters (for non-KV routing, we track "active requests")
-        let worker_id_str = instance_id.to_string();
-        WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-            .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-            .inc();
-        WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-            .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-            .inc();
-
-        // Route to the selected worker
-        let result = self.inner.direct(request, instance_id).await;
-
-        // Wrap the stream with a guard that decrements counters on completion
-        match result {
-            Ok(stream) => {
-                let guard = ActiveRequestGuard {
-                    worker_id: instance_id,
-                    worker_type: self.worker_type,
-                };
-                // Wrap the stream so guard is dropped when stream completes
-                let wrapped = TrackedResponseStream {
-                    inner: stream,
-                    _guard: guard,
-                };
-                Ok(Box::pin(wrapped))
-            }
-            Err(e) => {
-                // On error, decrement the counters immediately
-                WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-                    .dec();
-                WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), "0", self.worker_type])
-                    .dec();
-                Err(e)
-            }
-        }
-    }
-}
-
-/// A wrapper stream that holds an ActiveRequestGuard until the stream completes.
-/// When the stream is dropped (either completed or cancelled), the guard decrements
-/// the active request counters.
-struct TrackedResponseStream {
-    inner: ManyOut<Annotated<LLMEngineOutput>>,
-    _guard: ActiveRequestGuard,
-}
-
-impl std::fmt::Debug for TrackedResponseStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TrackedResponseStream").finish()
-    }
-}
-
-impl futures::Stream for TrackedResponseStream {
-    type Item = Annotated<LLMEngineOutput>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx)
-    }
-}
-
-impl AsyncEngineContextProvider for TrackedResponseStream {
-    fn context(&self) -> Arc<dyn AsyncEngineContext> {
-        self.inner.context()
-    }
-}
-
-// Implement AsyncEngineStream for TrackedResponseStream
-impl dynamo_runtime::engine::AsyncEngineStream<Annotated<LLMEngineOutput>>
-    for TrackedResponseStream
-{
 }

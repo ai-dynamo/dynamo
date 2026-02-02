@@ -1037,6 +1037,12 @@ impl ActiveSequencesMultiWorker {
         self.senders.len()
     }
 
+    /// Get the worker type for this router ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.worker_type
+    }
+
     /// Generic method to query all workers with a given command
     async fn query_workers<T: Send + 'static>(
         &self,

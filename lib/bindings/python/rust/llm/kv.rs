@@ -975,21 +975,23 @@ impl KvRecorder {
 }
 
 /// Helper function to create a KV router from an endpoint using the ModelManager
-/// to ensure proper etcd registration
+/// to ensure proper etcd registration.
+/// Always uses "decode" worker type since standalone Python routers typically route to decode workers.
+/// For prefill routing in disaggregated mode, the Rust frontend handles it internally.
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
     kv_router_config: Option<llm_rs::kv_router::KvRouterConfig>,
-    worker_type: &'static str,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
+    // Use WORKER_TYPE_DECODE since Python standalone routers are typically for decode workers
     let kv_router = model_manager
         .kv_chooser_for(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
-            worker_type,
+            llm_rs::discovery::WORKER_TYPE_DECODE,
         )
         .await
         .map_err(to_pyerr)?;
@@ -1092,26 +1094,17 @@ impl KvPushRouter {
     /// * `endpoint` - The endpoint to route requests to
     /// * `block_size` - KV cache block size for routing decisions
     /// * `kv_router_config` - Configuration for the KV router
-    /// * `worker_type` - Type of workers being routed to: "decode" (default) or "prefill"
+    ///
+    /// Note: This router always uses "decode" worker type for Prometheus metrics.
+    /// For prefill routing in disaggregated mode, use the Rust frontend which handles
+    /// worker type determination internally via MDC (Model Deployment Card).
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, worker_type=None))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
-        worker_type: Option<&str>,
     ) -> PyResult<Self> {
-        // Determine worker_type, defaulting to "decode" for backward compatibility
-        let worker_type_static: &'static str = match worker_type {
-            Some("prefill") => llm_rs::discovery::WORKER_TYPE_PREFILL,
-            Some("decode") | None => llm_rs::discovery::WORKER_TYPE_DECODE,
-            Some(other) => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid worker_type '{}'. Must be 'prefill' or 'decode'.",
-                    other
-                )));
-            }
-        };
 
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async move {
@@ -1135,7 +1128,6 @@ impl KvPushRouter {
                 endpoint,
                 block_size,
                 Some(kv_router_config.inner()),
-                worker_type_static,
             )
             .await?;
 

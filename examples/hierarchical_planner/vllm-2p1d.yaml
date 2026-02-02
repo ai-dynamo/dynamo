@@ -143,8 +143,6 @@ spec:
           - ${K8S_NAMESPACE}-prefill-pool-0.prefill.generate
           - --block-size
           - "16"
-          - --worker-type
-          - prefill
           - --no-track-active-blocks
           command:
           - python
@@ -210,8 +208,6 @@ spec:
           - ${K8S_NAMESPACE}-prefill-pool-1.prefill.generate
           - --block-size
           - "16"
-          - --worker-type
-          - prefill
           - --no-track-active-blocks
           command:
           - python
@@ -277,8 +273,6 @@ spec:
           - ${K8S_NAMESPACE}-decode-pool-0.backend.generate
           - --block-size
           - "16"
-          - --worker-type
-          - decode
           - --kv-overlap-score-weight
           - "0"
           command:
