@@ -81,5 +81,5 @@ trtllm:
   sympy_version: 1.14.0
   pytorch_triton_ver: 3.5.1+gitbfeb0668.nv25.12
   flash_attn_version: 2.7.4.post1+25.12
-  flash_infer_python_ver: 0.6.1
+  flashinfer_python_ver: 0.6.1
   has_trtllm_context: "0"
