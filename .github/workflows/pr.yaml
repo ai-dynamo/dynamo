@@ -75,7 +75,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: true
+      no_cache: false
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: false
       copy_to_acr: false
@@ -92,7 +92,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: true
+      no_cache: false
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
       run_tests: false
@@ -114,7 +114,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: true
+      no_cache: false
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: false
       copy_to_acr: false
@@ -134,7 +134,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: true
+      no_cache: false
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: false
       copy_to_acr: false
@@ -152,7 +152,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: true
+      no_cache: false
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
       run_tests: false
@@ -174,7 +174,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: true
+      no_cache: false
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: false
       copy_to_acr: false
