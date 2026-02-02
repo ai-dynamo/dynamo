@@ -129,6 +129,12 @@ pub trait ResponseStore: Send + Sync {
 
 #### StoredResponse
 
+This is not part of the OpenResponses spec (which only defines the API contract and
+compliance tests, not storage). The struct is modeled after SGLang's `StoredResponse`
+in `data_connector/core.rs`, trimmed to the minimum fields needed for chain resolution.
+SGLang's version includes additional fields (`safety_identifier`, `tool_calls`,
+`conversation_id`, `raw_response`) that we can add later as needed.
+
 ```rust
 pub struct StoredResponse {
     pub id: String,                          // resp_<uuid>
