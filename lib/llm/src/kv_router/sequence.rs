@@ -1463,12 +1463,16 @@ mod tests {
     #[tokio::test]
     async fn test_get_active_count_for_lora_tracks_requests() -> Result<()> {
         dynamo_runtime::logging::init();
-        unsafe {
-            std::env::set_var("DYN_EVENT_PLANE", "zmq");
-        }
-
         let runtime = Runtime::from_current()?;
-        let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
+        let distributed = DistributedRuntime::new(
+            runtime.clone(),
+            dynamo_runtime::distributed::DistributedConfig {
+                store_backend: dynamo_runtime::storage::kv::Selector::Memory,
+                nats_config: None,
+                request_plane: dynamo_runtime::distributed::RequestPlaneMode::Tcp,
+            },
+        )
+        .await?;
         let namespace = distributed.namespace("test_lora_counts")?;
         let component = namespace.component("sequences")?;
 
