@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+import json
 import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Dict, List, Generator, Optional
 
 import pytest
 from filelock import FileLock
@@ -24,43 +26,63 @@ from tests.utils.port_utils import (
 _logger = logging.getLogger(__name__)
 
 
+EXECUTION_CADENCE_MARKERS = [
+    "pre_merge: marks tests to run before merging",
+    "post_merge: marks tests to run after merge",
+    "nightly: marks tests to run nightly",
+    "weekly: marks tests to run weekly",
+]
+
+GPU_SCALE_MARKERS = [
+    "gpu_0: marks tests that don't require GPU",
+    "gpu_1: marks tests to run on GPU",
+    "gpu_2: marks tests to run on 2GPUs",
+    "gpu_4: marks tests to run on 4GPUs",
+    "gpu_8: marks tests to run on 8GPUs",
+]
+
+TEST_SCOPE_MARKERS = [
+    "e2e: marks tests as end-to-end tests",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+TEST_TYPE_MARKERS = [
+    "stress: stress tests",
+    "performance: performance benchmarks",
+]
+
+FRAMEWORK_MARKERS = [
+    "vllm: marks tests as requiring vllm",
+    "trtllm: marks tests as requiring trtllm",
+    "sglang: marks tests as requiring sglang",
+]
+
+FEATURE_MARKERS = [
+    "multimodal: marks tests as multimodal (image/video) tests",
+    "router: marks tests for router component",
+    "planner: marks tests for planner component",
+    "kvbm: marks tests for KV behavior and model determinism",
+    "kvbm_v2: marks tests using KVBM V2",
+    "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
+    "fault_tolerance: marks tests as fault tolerance tests",
+]
+
+
 def pytest_configure(config):
     # Defining markers to avoid `<marker> not found in 'markers' configuration option`
     # errors when pyproject.toml is not available in the container (e.g. some CI jobs).
     # IMPORTANT: Keep this marker list in sync with [tool.pytest.ini_options].markers
     # in pyproject.toml. If you add or remove markers there, mirror the change here.
     markers = [
-        "pre_merge: marks tests to run before merging",
-        "post_merge: marks tests to run after merge",
         "parallel: marks tests that can run in parallel with pytest-xdist",
-        "nightly: marks tests to run nightly",
-        "weekly: marks tests to run weekly",
-        "gpu_0: marks tests that don't require GPU",
-        "gpu_1: marks tests to run on GPU",
-        "gpu_2: marks tests to run on 2GPUs",
-        "gpu_4: marks tests to run on 4GPUs",
-        "gpu_8: marks tests to run on 8GPUs",
-        "e2e: marks tests as end-to-end tests",
-        "integration: marks tests as integration tests",
-        "unit: marks tests as unit tests",
-        "stress: marks tests as stress tests",
-        "performance: marks tests as performance tests",
-        "vllm: marks tests as requiring vllm",
-        "trtllm: marks tests as requiring trtllm",
-        "sglang: marks tests as requiring sglang",
-        "multimodal: marks tests as multimodal (image/video) tests",
         "slow: marks tests as known to be slow",
         "h100: marks tests to run on H100",
-        "router: marks tests for router component",
-        "planner: marks tests for planner component",
-        "kvbm: marks tests for KV behavior and model determinism",
-        "kvbm_v2: marks tests using KVBM V2",
-        "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
         "model: model id used by a test or parameter",
         "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
         "k8s: marks tests as requiring Kubernetes",
-        "fault_tolerance: marks tests as fault tolerance tests",
     ]
+    markers.extend(EXECUTION_CADENCE_MARKERS + GPU_SCALE_MARKERS + TEST_SCOPE_MARKERS + TEST_TYPE_MARKERS + FRAMEWORK_MARKERS + FEATURE_MARKERS)
     for marker in markers:
         config.addinivalue_line("markers", marker)
 
@@ -73,6 +95,245 @@ logging.basicConfig(
     format=LOG_FORMAT,
     datefmt=DATE_FORMAT,  # ISO 8601 UTC format
 )
+
+
+
+# If True: only count tests that are marked as end-to-end.
+ONLY_E2E = False
+
+# Extract marker names without descriptions for matrix building
+FRAMEWORKS = [m.split(":")[0] for m in FRAMEWORK_MARKERS]
+FEATURES = [m.split(":")[0] for m in FEATURE_MARKERS]
+GPU_INFRA = [m.split(":")[0] for m in GPU_SCALE_MARKERS]
+
+
+# Reporting feature/framework test coverage by scanning markers
+FRAMEWORK_SET = set(FRAMEWORKS)
+FEATURE_SET = set(FEATURES)
+GPU_INFRA_SET = set(GPU_INFRA)
+
+# ---- Globals populated during collection ----
+_agg_matrix: Dict[str, Dict[str, bool]] | None = None
+_agg_tests: Dict[str, Dict[str, List[str]]] | None = None
+
+# 3D data: gpu -> feature -> framework -> {bool, tests}
+_per_gpu_matrix: Dict[str, Dict[str, Dict[str, bool]]] | None = None
+_per_gpu_tests: Dict[str, Dict[str, Dict[str, List[str]]]] | None = None
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """
+    This function is called to modify the list of tests to run.
+    Also builds the feature X framework coverage matrix.
+    """
+    global _agg_matrix, _agg_tests, _per_gpu_matrix, _per_gpu_tests
+    
+    # Collect models via explicit pytest mark from final filtered items only
+    models_to_download = set()
+    for item in items:
+        # Only collect from items that are not skipped
+        if any(
+            getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
+        ):
+            continue
+        model_mark = item.get_closest_marker("model")
+        if model_mark and model_mark.args:
+            models_to_download.add(model_mark.args[0])
+
+    # Store models to download in pytest config for fixtures to access
+    if models_to_download:
+        config.models_to_download = models_to_download
+    
+    # Build feature×framework coverage matrix
+    agg_matrix: Dict[str, Dict[str, bool]] = {
+        feat: {fw: False for fw in FRAMEWORKS} for feat in FEATURES
+    }
+    agg_tests: Dict[str, Dict[str, List[str]]] = {
+        feat: {fw: [] for fw in FRAMEWORKS} for feat in FEATURES
+    }
+
+    per_gpu_matrix: Dict[str, Dict[str, Dict[str, bool]]] = {
+        gpu: {feat: {fw: False for fw in FRAMEWORKS} for feat in FEATURES}
+        for gpu in GPU_INFRA
+    }
+    per_gpu_tests: Dict[str, Dict[str, Dict[str, List[str]]]] = {
+        gpu: {feat: {fw: [] for fw in FRAMEWORKS} for feat in FEATURES}
+        for gpu in GPU_INFRA
+    }
+
+    for item in items:
+        marker_names = {m.name for m in item.iter_markers()}
+
+        if ONLY_E2E and "e2e" not in marker_names:
+            continue
+
+        item_frameworks = marker_names & FRAMEWORK_SET
+        item_features = marker_names & FEATURE_SET
+        item_gpus = marker_names & GPU_INFRA_SET
+
+        if not item_frameworks or not item_features:
+            continue
+
+        nodeid = item.nodeid
+
+        for feat in item_features:
+            for fw in item_frameworks:
+                agg_matrix[feat][fw] = True
+                agg_tests[feat][fw].append(nodeid)
+
+        for gpu in item_gpus:
+            for feat in item_features:
+                for fw in item_frameworks:
+                    per_gpu_matrix[gpu][feat][fw] = True
+                    per_gpu_tests[gpu][feat][fw].append(nodeid)
+
+    _agg_matrix = agg_matrix
+    _agg_tests = agg_tests
+    _per_gpu_matrix = per_gpu_matrix
+    _per_gpu_tests = per_gpu_tests
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """
+    CLI options to control where we write machine-readable coverage reports.
+    """
+    group = parser.getgroup("feature-matrix")
+
+    group.addoption(
+        "--feature-matrix-json",
+        action="store",
+        dest="feature_matrix_json",
+        default=None,
+        help="Path to write feature×framework(+gpu) coverage matrix (JSON).",
+    )
+
+    group.addoption(
+        "--feature-matrix-md",
+        action="store",
+        dest="feature_matrix_md",
+        default=None,
+        help="Path to write aggregated feature×framework coverage matrix (Markdown).",
+    )
+
+def _render_terminal_matrix(tr, matrix: Dict[str, Dict[str, bool]]) -> None:
+    tr.write_line("")
+    tr.write_line("Feature × Framework test coverage (aggregated across gpu_*):")
+    tr.write_line("")
+
+    header = ["Feature"] + FRAMEWORKS
+    col_widths = [max(len(h), 14) for h in header]
+
+    def fmt_row(cells):
+        return "  ".join(str(c).ljust(w) for c, w in zip(cells, col_widths))
+
+    tr.write_line(fmt_row(header))
+    tr.write_line(fmt_row(["-" * w for w in col_widths]))
+
+    for feat in FEATURES:
+        row = [feat]
+        for fw in FRAMEWORKS:
+            row.append("✔" if matrix[feat][fw] else "·")
+        tr.write_line(fmt_row(row))
+
+    tr.write_line("")
+
+def _write_json_report(
+    path: str | None,
+    agg_matrix: Dict[str, Dict[str, bool]],
+    agg_tests: Dict[str, Dict[str, List[str]]],
+    per_gpu_matrix: Dict[str, Dict[str, Dict[str, bool]]],
+    per_gpu_tests: Dict[str, Dict[str, Dict[str, List[str]]]],
+) -> None:
+    if not path:
+        return
+
+    payload = {
+        "dimensions": {
+            "frameworks": FRAMEWORKS,
+            "features": FEATURES,
+            "gpu": GPU_INFRA,
+        },
+        "aggregated": {
+            feat: {
+                fw: {
+                    "has_test": agg_matrix[feat][fw],
+                    "tests": agg_tests[feat][fw],
+                }
+                for fw in FRAMEWORKS
+            }
+            for feat in FEATURES
+        },
+        "by_gpu": {
+            gpu: {
+                feat: {
+                    fw: {
+                        "has_test": per_gpu_matrix[gpu][feat][fw],
+                        "tests": per_gpu_tests[gpu][feat][fw],
+                    }
+                    for fw in FRAMEWORKS
+                }
+                for feat in FEATURES
+            }
+            for gpu in GPU_INFRA
+        },
+    }
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+def _write_markdown_report(
+    path: str | None,
+    agg_matrix: Dict[str, Dict[str, bool]],
+) -> None:
+    if not path:
+        return
+
+    lines: list[str] = []
+    lines.append("| Feature | " + " | ".join(FRAMEWORKS) + " |")
+    lines.append("|" + "|".join(["---"] * (1 + len(FRAMEWORKS))) + "|")
+
+    for feat in FEATURES:
+        row = [feat]
+        for fw in FRAMEWORKS:
+            row.append("✅" if agg_matrix[feat][fw] else "❌")
+        lines.append("| " + " | ".join(row) + " |")
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+def pytest_terminal_summary(
+    terminalreporter: pytest.TerminalReporter,
+    exitstatus: int,
+    config: pytest.Config,
+) -> None:
+    global _agg_matrix, _agg_tests, _per_gpu_matrix, _per_gpu_tests
+
+    if (
+        _agg_matrix is None
+        or _agg_tests is None
+        or _per_gpu_matrix is None
+        or _per_gpu_tests is None
+    ):
+        return
+
+    # Human-readable aggregated matrix
+    _render_terminal_matrix(terminalreporter, _agg_matrix)
+
+    # Machine-readable artifacts
+    json_path = config.getoption("feature_matrix_json")
+    md_path = config.getoption("feature_matrix_md")
+
+    _write_json_report(
+        json_path,
+        _agg_matrix,
+        _agg_tests,
+        _per_gpu_matrix,
+        _per_gpu_tests,
+    )
+    _write_markdown_report(md_path, _agg_matrix)
+
 
 
 @pytest.fixture()
@@ -200,28 +461,6 @@ def logger(request):
     yield
     handler.close()
     logger.removeHandler(handler)
-
-
-@pytest.hookimpl(trylast=True)
-def pytest_collection_modifyitems(config, items):
-    """
-    This function is called to modify the list of tests to run.
-    """
-    # Collect models via explicit pytest mark from final filtered items only
-    models_to_download = set()
-    for item in items:
-        # Only collect from items that are not skipped
-        if any(
-            getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
-        ):
-            continue
-        model_mark = item.get_closest_marker("model")
-        if model_mark and model_mark.args:
-            models_to_download.add(model_mark.args[0])
-
-    # Store models to download in pytest config for fixtures to access
-    if models_to_download:
-        config.models_to_download = models_to_download
 
 
 class EtcdServer(ManagedProcess):

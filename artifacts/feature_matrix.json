@@ -1,0 +1,635 @@
+{
+  "aggregated": {
+    "fault_tolerance": {
+      "sglang": {
+        "has_test": false,
+        "tests": []
+      },
+      "trtllm": {
+        "has_test": false,
+        "tests": []
+      },
+      "vllm": {
+        "has_test": false,
+        "tests": []
+      }
+    },
+    "kvbm": {
+      "sglang": {
+        "has_test": false,
+        "tests": []
+      },
+      "trtllm": {
+        "has_test": false,
+        "tests": []
+      },
+      "vllm": {
+        "has_test": true,
+        "tests": [
+          "kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]",
+          "kvbm_integration/test_kvbm.py::test_gpu_cache_eviction[llm_server_kvbm0]",
+          "kvbm_integration/test_kvbm.py::test_onboarding_determinism[llm_server_kvbm0]"
+        ]
+      }
+    },
+    "kvbm_concurrency": {
+      "sglang": {
+        "has_test": false,
+        "tests": []
+      },
+      "trtllm": {
+        "has_test": false,
+        "tests": []
+      },
+      "vllm": {
+        "has_test": false,
+        "tests": []
+      }
+    },
+    "kvbm_v2": {
+      "sglang": {
+        "has_test": false,
+        "tests": []
+      },
+      "trtllm": {
+        "has_test": false,
+        "tests": []
+      },
+      "vllm": {
+        "has_test": false,
+        "tests": []
+      }
+    },
+    "multimodal": {
+      "sglang": {
+        "has_test": false,
+        "tests": []
+      },
+      "trtllm": {
+        "has_test": false,
+        "tests": []
+      },
+      "vllm": {
+        "has_test": false,
+        "tests": []
+      }
+    },
+    "planner": {
+      "sglang": {
+        "has_test": false,
+        "tests": []
+      },
+      "trtllm": {
+        "has_test": false,
+        "tests": []
+      },
+      "vllm": {
+        "has_test": false,
+        "tests": []
+      }
+    },
+    "router": {
+      "sglang": {
+        "has_test": false,
+        "tests": []
+      },
+      "trtllm": {
+        "has_test": false,
+        "tests": []
+      },
+      "vllm": {
+        "has_test": false,
+        "tests": []
+      }
+    }
+  },
+  "by_gpu": {
+    "gpu_0": {
+      "fault_tolerance": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_concurrency": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_v2": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "multimodal": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "planner": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "router": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      }
+    },
+    "gpu_1": {
+      "fault_tolerance": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": true,
+          "tests": [
+            "kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]",
+            "kvbm_integration/test_kvbm.py::test_gpu_cache_eviction[llm_server_kvbm0]",
+            "kvbm_integration/test_kvbm.py::test_onboarding_determinism[llm_server_kvbm0]"
+          ]
+        }
+      },
+      "kvbm_concurrency": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_v2": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "multimodal": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "planner": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "router": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      }
+    },
+    "gpu_2": {
+      "fault_tolerance": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_concurrency": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_v2": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "multimodal": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "planner": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "router": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      }
+    },
+    "gpu_4": {
+      "fault_tolerance": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_concurrency": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_v2": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "multimodal": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "planner": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "router": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      }
+    },
+    "gpu_8": {
+      "fault_tolerance": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_concurrency": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "kvbm_v2": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "multimodal": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "planner": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      },
+      "router": {
+        "sglang": {
+          "has_test": false,
+          "tests": []
+        },
+        "trtllm": {
+          "has_test": false,
+          "tests": []
+        },
+        "vllm": {
+          "has_test": false,
+          "tests": []
+        }
+      }
+    }
+  },
+  "dimensions": {
+    "features": [
+      "multimodal",
+      "router",
+      "planner",
+      "kvbm",
+      "kvbm_v2",
+      "kvbm_concurrency",
+      "fault_tolerance"
+    ],
+    "frameworks": [
+      "vllm",
+      "trtllm",
+      "sglang"
+    ],
+    "gpu": [
+      "gpu_0",
+      "gpu_1",
+      "gpu_2",
+      "gpu_4",
+      "gpu_8"
+    ]
+  }
+}
