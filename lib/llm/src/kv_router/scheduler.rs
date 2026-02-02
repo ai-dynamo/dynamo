@@ -401,21 +401,6 @@ impl KvScheduler {
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.slots.get_active_lora_counts()
     }
-
-    /// Get the number of active requests for a specific LORA
-    pub fn get_active_count_for_lora(&self, lora_name: &str) -> usize {
-        self.slots.get_active_count_for_lora(lora_name)
-    }
-
-    /// Get the LORA name for a specific request
-    pub fn get_lora_for_request(&self, request_id: &str) -> Option<String> {
-        self.slots.get_lora_for_request(request_id)
-    }
-
-    /// Get all active LORAs (names only)
-    pub fn get_active_loras(&self) -> Vec<String> {
-        self.slots.get_active_loras()
-    }
 }
 
 // Helper function for softmax sampling

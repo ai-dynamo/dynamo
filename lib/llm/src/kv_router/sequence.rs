@@ -1215,34 +1215,6 @@ impl ActiveSequencesMultiWorker {
         }
         counts
     }
-
-    pub fn get_active_count_for_lora(&self, lora_name: &str) -> usize {
-        let lora_name = lora_name.trim();
-        if lora_name.is_empty() {
-            tracing::warn!("get_active_count_for_lora called with empty lora_name");
-            return 0;
-        }
-
-        self.request_to_lora
-            .iter()
-            .filter(|entry| entry.value() == lora_name)
-            .count()
-    }
-
-    pub fn get_lora_for_request(&self, request_id: &str) -> Option<String> {
-        self.request_to_lora
-            .get(request_id)
-            .map(|entry| entry.value().clone())
-    }
-
-    pub fn get_active_loras(&self) -> Vec<String> {
-        self.request_to_lora
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect()
-    }
 }
 
 impl Drop for ActiveSequencesMultiWorker {
@@ -1457,69 +1429,6 @@ mod tests {
                 worker.worker_id, worker.dp_rank
             );
         }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_active_count_for_lora_tracks_requests() -> Result<()> {
-        dynamo_runtime::logging::init();
-        let runtime = Runtime::from_current()?;
-        let distributed = DistributedRuntime::new(
-            runtime.clone(),
-            dynamo_runtime::distributed::DistributedConfig {
-                store_backend: dynamo_runtime::storage::kv::Selector::Memory,
-                nats_config: None,
-                request_plane: dynamo_runtime::distributed::RequestPlaneMode::Tcp,
-            },
-        )
-        .await?;
-        let namespace = distributed.namespace("test_lora_counts")?;
-        let component = namespace.component("sequences")?;
-
-        let mut workers_with_configs = HashMap::new();
-        workers_with_configs.insert(0, Some(ModelRuntimeConfig::new()));
-
-        let seq_manager =
-            ActiveSequencesMultiWorker::new(component, 4, workers_with_configs, false, 1).await?;
-
-        seq_manager
-            .add_request(
-                "req-1".to_string(),
-                Some(vec![1, 2]),
-                8,
-                0,
-                None,
-                WorkerWithDpRank::new(0, 0),
-                Some("lora-a".to_string()),
-            )
-            .await?;
-        seq_manager
-            .add_request(
-                "req-2".to_string(),
-                Some(vec![3, 4]),
-                8,
-                0,
-                None,
-                WorkerWithDpRank::new(0, 0),
-                Some("lora-a".to_string()),
-            )
-            .await?;
-        seq_manager
-            .add_request(
-                "req-3".to_string(),
-                Some(vec![5, 6]),
-                8,
-                0,
-                None,
-                WorkerWithDpRank::new(0, 0),
-                Some("lora-b".to_string()),
-            )
-            .await?;
-
-        assert_eq!(seq_manager.get_active_count_for_lora("lora-a"), 2);
-        assert_eq!(seq_manager.get_active_count_for_lora("lora-b"), 1);
-        assert_eq!(seq_manager.get_active_count_for_lora(""), 0);
 
         Ok(())
     }
