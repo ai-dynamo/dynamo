@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Running **Meta-Llama-3.1-8B-Instruct** with Speculative Decoding (Eagle3)"
 ---
+
+# Running **Meta-Llama-3.1-8B-Instruct** with Speculative Decoding (Eagle3)
 
 This guide walks through how to deploy **Meta-Llama-3.1-8B-Instruct** using **aggregated speculative decoding** with **Eagle3** on a single node.
 Since the model is only **8B parameters**, you can run it on **any GPU with at least 16GB VRAM**.

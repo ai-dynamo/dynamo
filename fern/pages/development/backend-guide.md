@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Writing Python Workers in Dynamo"
 ---
+
+# Writing Python Workers in Dynamo
 
 This guide explains how to create your own Python worker in Dynamo.
 
@@ -115,9 +116,8 @@ A Python worker may need to be shut down promptly, for example when the node run
 
 In such cases, you can signal incomplete responses by raising a `GeneratorExit` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
 
-<Warning>
-We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
-</Warning>
+> [!WARNING]
+> We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
 
 Here's an example of how to implement this in your `RequestHandler`:
 

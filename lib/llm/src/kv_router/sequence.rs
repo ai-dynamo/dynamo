@@ -22,7 +22,7 @@
 //! Each block is identified by a hash of its contents, allowing for deduplication when multiple
 //! requests share common prefixes (e.g., system prompts, few-shot examples).
 
-use crate::kv_router::indexer::OverlapScores;
+use crate::kv_router::protocols::OverlapScores;
 use anyhow::Result;
 use dashmap::DashMap;
 use derive_getters::Getters;

@@ -7,14 +7,15 @@ use std::{
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use parking_lot::{Mutex, RwLock};
-use tokio::sync::{Notify, oneshot};
+use parking_lot::RwLock;
+use tokio::sync::oneshot;
 
 use crate::discovery::KvWorkerMonitor;
+use crate::discovery::runtime_configs::RuntimeConfigs;
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
-    discovery::{DiscoveryQuery, DiscoverySpec, watch_and_extract_field},
+    discovery::DiscoverySpec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
@@ -24,7 +25,7 @@ use crate::{
         KvRouter, KvRouterConfig, protocols::WorkerId, router_endpoint_id,
         scheduler::DefaultWorkerSelector,
     },
-    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig},
+    local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
@@ -69,10 +70,9 @@ pub struct ModelManager {
     // Prefill models don't have engines - they're only tracked for discovery/lifecycle
     prefill_engines: RwLock<ModelEngines<()>>,
 
-    // These are Mutex because we read and write rarely and equally
-    cards: Mutex<HashMap<String, ModelDeploymentCard>>,
-    kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
-    prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
+    cards: DashMap<String, ModelDeploymentCard>,
+    kv_choosers: DashMap<EndpointId, Arc<KvRouter>>,
+    prefill_router_activators: DashMap<String, PrefillActivationState>,
 
     /// Per-model worker monitors for dynamic KV cache load rejection.
     /// Key: model name, Value: cloneable monitor (all fields are Arc).
@@ -81,14 +81,8 @@ pub struct ModelManager {
 
     /// Runtime configs per endpoint using DashMap for lock-free access.
     /// Outer DashMap: keyed by EndpointId
-    /// Inner RuntimeConfigsWithNotify: shared with KvScheduler
-    runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigsWithNotify>>,
-}
-
-/// Runtime configs for an endpoint with a notify for change notifications.
-pub struct RuntimeConfigsWithNotify {
-    pub configs: DashMap<WorkerId, Option<ModelRuntimeConfig>>,
-    pub notify: Notify,
+    /// Inner RuntimeConfigs: shared with KvScheduler
+    runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
 }
 
 impl Default for ModelManager {
@@ -105,9 +99,9 @@ impl ModelManager {
             embeddings_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
             prefill_engines: RwLock::new(ModelEngines::default()),
-            cards: Mutex::new(HashMap::new()),
-            kv_choosers: Mutex::new(HashMap::new()),
-            prefill_router_activators: Mutex::new(HashMap::new()),
+            cards: DashMap::new(),
+            kv_choosers: DashMap::new(),
+            prefill_router_activators: DashMap::new(),
             worker_monitors: RwLock::new(HashMap::new()),
             runtime_configs: DashMap::new(),
         }
@@ -152,7 +146,7 @@ impl ModelManager {
     }
 
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
-        self.cards.lock().values().cloned().collect()
+        self.cards.iter().map(|r| r.value().clone()).collect()
     }
 
     /// Check if a decode model (chat or completions) is registered
@@ -323,13 +317,13 @@ impl ModelManager {
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
-        self.cards.lock().insert(key.to_string(), card);
+        self.cards.insert(key.to_string(), card);
         Ok(())
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
-        self.cards.lock().remove(key)
+        self.cards.remove(key).map(|(_, v)| v)
     }
 
     pub async fn kv_chooser_for(
@@ -389,14 +383,12 @@ impl ModelManager {
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
-        self.kv_choosers
-            .lock()
-            .insert(endpoint_id, new_kv_chooser.clone());
+        self.kv_choosers.insert(endpoint_id, new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 
     fn get_kv_chooser(&self, id: &EndpointId) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(id).cloned()
+        self.kv_choosers.get(id).map(|r| r.value().clone())
     }
 
     /// Register a prefill router for a decode model. Returns a receiver that will be
@@ -406,10 +398,8 @@ impl ModelManager {
         &self,
         model_name: String,
     ) -> Option<oneshot::Receiver<Endpoint>> {
-        let mut activators = self.prefill_router_activators.lock();
-
-        match activators.remove(&model_name) {
-            Some(PrefillActivationState::PrefillReady(rx)) => {
+        match self.prefill_router_activators.remove(&model_name) {
+            Some((_, PrefillActivationState::PrefillReady(rx))) => {
                 // Prefill endpoint already arrived - rx will immediately resolve
                 tracing::debug!(
                     model_name = %model_name,
@@ -417,19 +407,20 @@ impl ModelManager {
                 );
                 Some(rx)
             }
-            Some(PrefillActivationState::DecodeWaiting(tx)) => {
+            Some((key, PrefillActivationState::DecodeWaiting(tx))) => {
                 // Decode already registered - this shouldn't happen, restore state and return None
                 tracing::error!(
                     model_name = %model_name,
                     "Decode model already registered for this prefill router"
                 );
-                activators.insert(model_name, PrefillActivationState::DecodeWaiting(tx));
+                self.prefill_router_activators
+                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
                 None
             }
             None => {
                 // New registration: create tx/rx pair, store sender and return receiver
                 let (tx, rx) = oneshot::channel();
-                activators.insert(
+                self.prefill_router_activators.insert(
                     model_name.clone(),
                     PrefillActivationState::DecodeWaiting(tx),
                 );
@@ -449,10 +440,8 @@ impl ModelManager {
         model_name: &str,
         endpoint: Endpoint,
     ) -> anyhow::Result<()> {
-        let mut activators = self.prefill_router_activators.lock();
-
-        match activators.remove(model_name) {
-            Some(PrefillActivationState::DecodeWaiting(sender)) => {
+        match self.prefill_router_activators.remove(model_name) {
+            Some((_, PrefillActivationState::DecodeWaiting(sender))) => {
                 // Decode model already registered
                 sender.send(endpoint).map_err(|_| {
                     anyhow::anyhow!(
@@ -468,7 +457,7 @@ impl ModelManager {
 
                 Ok(())
             }
-            Some(PrefillActivationState::PrefillReady(_)) => {
+            Some((_, PrefillActivationState::PrefillReady(_))) => {
                 // Prefill already activated - this shouldn't happen
                 anyhow::bail!("Prefill router for model {} already activated", model_name);
             }
@@ -481,7 +470,7 @@ impl ModelManager {
                 })?;
 
                 // Store the receiver for when decode model registers
-                activators.insert(
+                self.prefill_router_activators.insert(
                     model_name.to_string(),
                     PrefillActivationState::PrefillReady(rx),
                 );
@@ -498,11 +487,9 @@ impl ModelManager {
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
         self.cards
-            .lock()
-            .values()
-            .find(|c| c.display_name == model)
-            .and_then(|c| c.runtime_config.tool_call_parser.as_ref())
-            .map(|parser| parser.to_string())
+            .iter()
+            .find(|r| r.value().display_name == model)
+            .and_then(|r| r.value().runtime_config.tool_call_parser.clone())
     }
 
     /// Creates parsing options with tool call parser and reasoning parser for the specified model.
@@ -621,12 +608,12 @@ impl ModelManager {
     }
 
     /// Get or create a runtime config watcher for an endpoint.
-    /// Spawns a background task to watch DiscoveryQuery::EndpointModels.
-    /// Returns a shared RuntimeConfigsWithNotify that KvScheduler can use directly.
+    /// Spawns a background task to watch for worker config changes.
+    /// Returns a shared RuntimeConfigs that KvScheduler can use directly.
     pub async fn get_or_create_runtime_config_watcher(
         &self,
         endpoint: &Endpoint,
-    ) -> anyhow::Result<Arc<RuntimeConfigsWithNotify>> {
+    ) -> anyhow::Result<Arc<RuntimeConfigs>> {
         let endpoint_id = endpoint.id();
 
         // Fast path: return existing if present
@@ -635,10 +622,7 @@ impl ModelManager {
         }
 
         // Atomic get-or-insert to avoid TOCTOU race
-        let inner = Arc::new(RuntimeConfigsWithNotify {
-            configs: DashMap::new(),
-            notify: Notify::new(),
-        });
+        let inner = Arc::new(RuntimeConfigs::new());
         let (result, is_new) = match self.runtime_configs.entry(endpoint_id) {
             Entry::Occupied(e) => (e.get().clone(), false),
             Entry::Vacant(e) => {
@@ -649,8 +633,7 @@ impl ModelManager {
 
         // Only spawn watcher if we were the one who inserted
         if is_new {
-            self.spawn_runtime_config_watcher(endpoint, result.clone())
-                .await?;
+            result.start_watcher(endpoint).await?;
         }
 
         Ok(result)
@@ -666,126 +649,6 @@ impl ModelManager {
         let inner = self.runtime_configs.get(endpoint_id)?;
         let config_ref = inner.configs.get(&worker_id)?;
         config_ref.as_ref()?.disaggregated_endpoint.clone()
-    }
-
-    /// Spawn background task to watch runtime configs via discovery.
-    /// Blocks until at least one worker with a runtime config is available.
-    async fn spawn_runtime_config_watcher(
-        &self,
-        endpoint: &Endpoint,
-        inner: Arc<RuntimeConfigsWithNotify>,
-    ) -> anyhow::Result<()> {
-        let component = endpoint.component();
-        let cancellation_token = component.drt().primary_token();
-
-        // Set up discovery watch for EndpointModels
-        let discovery = component.drt().discovery();
-        let endpoint_id = endpoint.id();
-        let discovery_key = DiscoveryQuery::EndpointModels {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-        };
-        let discovery_stream = discovery
-            .list_and_watch(discovery_key.clone(), Some(cancellation_token.clone()))
-            .await?;
-
-        // Extract runtime_config from ModelDeploymentCard
-        let mut runtime_configs_rx =
-            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
-                card.runtime_config
-            });
-
-        // Also watch instance IDs
-        let client = endpoint.client().await?;
-        let mut instance_ids_rx = client.instance_avail_watcher();
-
-        // Wait for at least one worker with runtime config before proceeding.
-        // This ensures the DashMap is populated before KvScheduler starts.
-        tracing::info!("ModelManager: Waiting for at least one worker with runtime config...");
-        runtime_configs_rx
-            .changed()
-            .await
-            .map_err(|_| anyhow::anyhow!("runtime configs watch sender shutdown while waiting"))?;
-
-        // Populate initial state
-        {
-            let instance_ids = instance_ids_rx.borrow();
-            let configs = runtime_configs_rx.borrow();
-            for worker_id in instance_ids.iter() {
-                let config = configs.get(worker_id).cloned();
-                inner.configs.insert(*worker_id, config);
-            }
-            tracing::info!(
-                "ModelManager: Found {} workers, proceeding",
-                inner.configs.len()
-            );
-        }
-
-        // Spawn background task to update configs for future changes
-        let cancel_token = cancellation_token.clone();
-        tokio::spawn(async move {
-            tracing::trace!("ModelManager runtime config watcher started");
-            loop {
-                // Wait for either instances or configs to change
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::trace!("ModelManager runtime config watcher shutting down");
-                        break;
-                    }
-                    result = instance_ids_rx.changed() => {
-                        if result.is_err() {
-                            tracing::warn!("instance IDs watch sender shutdown in ModelManager");
-                            break;
-                        }
-                    }
-                    result = runtime_configs_rx.changed() => {
-                        if result.is_err() {
-                            tracing::warn!("runtime configs watch sender shutdown in ModelManager");
-                            break;
-                        }
-                    }
-                }
-
-                // Get the latest values from both channels
-                let new_instance_ids = instance_ids_rx.borrow_and_update().clone();
-                let new_configs = runtime_configs_rx.borrow_and_update().clone();
-
-                // Update the DashMap
-                // First, remove workers that no longer exist
-                let current_workers: HashSet<WorkerId> =
-                    inner.configs.iter().map(|r| *r.key()).collect();
-                let new_workers: HashSet<WorkerId> = new_instance_ids.iter().copied().collect();
-                for removed_worker in current_workers.difference(&new_workers) {
-                    inner.configs.remove(removed_worker);
-                }
-
-                // Then, add/update workers
-                for worker_id in &new_instance_ids {
-                    let config = new_configs.get(worker_id).cloned();
-                    if config.is_some() {
-                        let prev_config = inner.configs.get(worker_id);
-                        if prev_config.as_ref().map(|r| r.value()) != Some(&config) {
-                            tracing::info!(
-                                "ModelManager: Runtime config found for worker_id: {worker_id}"
-                            );
-                        }
-                    }
-                    inner.configs.insert(*worker_id, config);
-                }
-
-                // Notify waiters that configs have changed
-                inner.notify.notify_waiters();
-
-                tracing::trace!(
-                    "ModelManager: Updated runtime_configs with {} workers",
-                    inner.configs.len()
-                );
-            }
-            tracing::trace!("ModelManager runtime config watcher shutting down");
-        });
-
-        Ok(())
     }
 
     /// Lists all models that have worker monitors (and thus busy thresholds) configured.
