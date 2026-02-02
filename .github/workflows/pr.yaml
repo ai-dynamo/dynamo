@@ -88,7 +88,6 @@ jobs:
       framework: vllm
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      stress_test: '["1", "2"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
@@ -110,7 +109,6 @@ jobs:
       framework: sglang
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
-      stress_test: '["1", "2"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
@@ -120,65 +118,6 @@ jobs:
       copy_to_acr: false
     secrets: inherit
 
-  # ============================================================================
-  # TRTLLM PIPELINE
-  # ============================================================================
-  st-trtllm-pipeline-2:
-    needs: [changed-files, st-trtllm-pipeline]
-    uses: ./.github/workflows/flavor-matrix.yml
-    with:
-      framework: trtllm
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9"]'
-      stress_test: '["1", "2"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: false
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_tests: false
-      copy_to_acr: false
-    secrets: inherit
-
-
-  st-vllm-pipeline-2:
-    needs: [changed-files, st-vllm-pipeline]
-    uses: ./.github/workflows/flavor-matrix.yml
-    with:
-      framework: vllm
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      stress_test: '["1", "2"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: false
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_image: true
-      run_tests: false
-      copy_to_acr: false
-      push_image: true
-    secrets: inherit
-
-  # ============================================================================
-  # SGLANG PIPELINE
-  # ============================================================================
-  st-sglang-pipeline-2:
-    needs: [changed-files, st-sglang-pipeline]
-    uses: ./.github/workflows/flavor-matrix.yml
-    with:
-      framework: sglang
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      stress_test: '["1", "2"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: false
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_tests: false
-      copy_to_acr: false
-    secrets: inherit
 
 
 
