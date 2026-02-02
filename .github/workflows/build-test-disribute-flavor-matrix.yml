@@ -52,11 +52,6 @@ on:
         required: false
         type: boolean
         default: true
-      stress_test:
-        description: 'an input to use for stress testing'
-        required: false
-        type: string
-        default: '["1"]'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -86,7 +81,6 @@ jobs:
       matrix:
         platform: ${{ fromJson(inputs.platforms) }}
         cuda_version: ${{ fromJson(inputs.cuda_versions) }}
-        stress_test: ${{ fromJson(inputs.stress_test) }}
     name: ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform }}
     uses: ./.github/workflows/build-test-disribute-flavor.yml
     with:
