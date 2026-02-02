@@ -238,6 +238,12 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     )
                     multi_modal_data["video"].append(mm_data["video"])
                 else:
+                    # Qwen VL (mRoPE) decode worker needs image grid + embedding shape
+                    # to reconstruct multi_modal_data during decode.
+                    if is_qwen_vl_model(self.config.model):
+                        request.image_grid_thw = mi.image_grid_thw
+                        request.embeddings_shape = mi.embeddings_shape
+
                     mm_data = construct_mm_data(
                         self.config.model,
                         self.EMBEDDINGS_DTYPE,
