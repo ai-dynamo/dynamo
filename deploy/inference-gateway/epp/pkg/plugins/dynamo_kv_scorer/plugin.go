@@ -56,7 +56,6 @@ query_router_result_t create_routers(const char *namespace_c_str,
                                      const char *model_name_c_str,
                                      uint32_t block_size,
                                      bool enforce_disagg,
-                                     bool wait_for_prefill,
                                      RouterHandles **out_handle);
 
 query_router_result_t route_request(RouterHandles *handle,
@@ -281,15 +280,12 @@ func initFFI() error {
 		routerHandlesMutex.Lock()
 		defer routerHandlesMutex.Unlock()
 
-		waitForPrefill := getEnvBoolOrDefault("DYN_WAIT_FOR_PREFILL", false)
-
 		rc := C.create_routers(
 			ns,
 			cm,
 			model,
 			C.uint32_t(ffiKvBlockSize),
 			C.bool(ffiEnforceDisagg),
-			C.bool(waitForPrefill),
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {

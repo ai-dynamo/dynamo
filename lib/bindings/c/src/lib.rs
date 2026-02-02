@@ -501,8 +501,7 @@ pub enum QueryRouterResult {
 /// Create router handles for query-only routing
 ///
 /// This function waits for at least one decode worker to be discovered before returning.
-/// If `wait_for_prefill` is true, it also waits for prefill workers to be discovered.
-/// This is recommended for disaggregated deployments.
+/// It auto-detects disaggregated mode by checking if prefill workers are present.
 ///
 /// Timeout is controlled by `DYN_DISCOVERY_TIMEOUT_SEC` env var (default: 30 minutes).
 ///
@@ -511,8 +510,7 @@ pub enum QueryRouterResult {
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
 /// - `model_name`: Model name for prefill router registration
 /// - `block_size`: KV cache block size
-/// - `enforce_disagg`: If true, disaggregated mode is required
-/// - `wait_for_prefill`: If true, wait for prefill workers before returning
+/// - `enforce_disagg`: If true, disaggregated mode is required (fails if no prefill workers found)
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -525,7 +523,6 @@ pub unsafe extern "C" fn create_routers(
     model_name: *const c_char,
     block_size: u32,
     enforce_disagg: bool,
-    wait_for_prefill: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     if namespace.is_null() || model_name.is_null() || out_handle.is_null() {
@@ -618,40 +615,34 @@ pub unsafe extern "C" fn create_routers(
         };
 
         // Create PrefillRouter based on one-time discovery of prefill workers
-        let prefill_router = if wait_for_prefill {
-            match find_prefill_endpoint(&drt, &namespace_str).await {
-                Some(prefill_endpoint) => {
-                    tracing::info!("Prefill worker discovered, creating active prefill router");
-                    let mut prefill_config = kv_router_config.clone();
-                    prefill_config.router_track_active_blocks = false;
+        // Auto-detects disaggregated mode by checking if prefill workers are present
+        let prefill_router = match find_prefill_endpoint(&drt, &namespace_str).await {
+            Some(prefill_endpoint) => {
+                tracing::info!("Prefill worker found, running in disaggregated mode");
+                let mut prefill_config = kv_router_config.clone();
+                prefill_config.router_track_active_blocks = false;
 
-                    // Create immediately-resolved channel to activate router
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = tx.send(prefill_endpoint);
+                // Create immediately-resolved channel to activate router
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(prefill_endpoint);
 
-                    PrefillRouter::new(
-                        rx,
-                        model_manager.clone(),
-                        RouterMode::KV,
-                        block_size,
-                        Some(prefill_config),
-                        enforce_disagg,
-                    )
-                }
-                None if enforce_disagg => {
-                    tracing::error!(
-                        "Prefill workers required (enforce_disagg=true) but none found"
-                    );
-                    return Err(QueryRouterResult::ErrDisaggEnforced);
-                }
-                None => {
-                    tracing::info!("No prefill workers found, running in aggregated mode");
-                    PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
-                }
+                PrefillRouter::new(
+                    rx,
+                    model_manager.clone(),
+                    RouterMode::KV,
+                    block_size,
+                    Some(prefill_config),
+                    enforce_disagg,
+                )
             }
-        } else {
-            tracing::info!("Prefill discovery not requested, running in aggregated mode");
-            PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+            None if enforce_disagg => {
+                tracing::error!("Prefill workers required (enforce_disagg=true) but none found");
+                return Err(QueryRouterResult::ErrDisaggEnforced);
+            }
+            None => {
+                tracing::info!("No prefill workers found, running in aggregated mode");
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+            }
         };
 
         // Fetch model card via discovery and create preprocessor
