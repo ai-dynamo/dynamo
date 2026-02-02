@@ -175,6 +175,8 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     cache_stats: Arc<CacheStatsTracker>,
     /// KVBM metrics for exposing cache hit rates
     kvbm_metrics: KvbmMetrics,
+    /// Minimum priority threshold for host offload filtering (read once at init)
+    offload_min_priority: u32,
 }
 
 impl std::fmt::Debug for ConnectorSlotManager<String> {
@@ -191,6 +193,10 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         identifier: Option<String>,
     ) -> Self {
         let cache_stats = Arc::new(CacheStatsTracker::new(identifier));
+        let offload_min_priority = std::env::var("DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let kvbm_metrics_clone = kvbm_metrics.clone();
         let cache_stats_clone = cache_stats.clone();
 
@@ -246,6 +252,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             _transfer_engine_handle: Some(xfer_engine_task),
             cache_stats,
             kvbm_metrics: kvbm_metrics.clone(),
+            offload_min_priority,
         }
     }
 }
@@ -275,6 +282,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             self.block_manager.clone(),
             self.xfer_tx.clone(),
             self.cache_stats.clone(),
+            self.offload_min_priority,
         );
         self.slots
             .lock()
@@ -385,6 +393,7 @@ impl VllmConnectorSlot {
         block_manager: VllmBlockManager,
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
+        offload_min_priority: u32,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
@@ -412,10 +421,7 @@ impl VllmConnectorSlot {
             performed_cache_lookup: false,
             total_blocks_queried: 0,
             cache_stats,
-            offload_min_priority: std::env::var("DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
+            offload_min_priority,
             offload_terminated_at_block: None,
         }
     }
@@ -714,8 +720,12 @@ impl Slot for VllmConnectorSlot {
                     .copied()
                     .collect();
 
-                self.offload_blocks(&offload_block_ids, &offload_token_blocks, &offload_priorities)
-                    .expect("failed to offload blocks");
+                self.offload_blocks(
+                    &offload_block_ids,
+                    &offload_token_blocks,
+                    &offload_priorities,
+                )
+                .expect("failed to offload blocks");
             } else if self.offload_min_priority > 0 {
                 tracing::debug!(
                     "priority filtering: skipping all {} candidate blocks (threshold={})",

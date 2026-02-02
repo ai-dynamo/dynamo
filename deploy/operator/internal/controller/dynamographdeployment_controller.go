@@ -1046,9 +1046,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileK8sDiscoveryResources(ctx con
 	if !r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations) {
 		logger.Info("K8s discovery is not enabled")
 		return nil
-	} else {
-		logger.Info("K8s discovery is enabled")
 	}
+	logger.Info("K8s discovery is enabled")
 
 	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(dynamoDeployment.Name, dynamoDeployment.Namespace)
 	_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
