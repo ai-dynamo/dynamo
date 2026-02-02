@@ -26,6 +26,7 @@ Source: MR3_REFACTORED_ARCHITECTURE.md
 import logging
 import os
 import re
+import signal
 import time
 from typing import Dict
 
@@ -53,6 +54,7 @@ class NodePowerAgent:
     2. For each GPU: get running processes (via NVML)
     3. Map each process PID to its pod UID (via /proc/{pid}/cgroup)
     4. If pod has annotation: apply power limit via NVML
+    5. If GPU was previously throttled but pod is gone: restore to default TGP
     """
 
     def __init__(self):
@@ -78,6 +80,113 @@ class NodePowerAgent:
         except pynvml.NVMLError:
             logger.exception("Failed to initialize NVML")
             raise
+
+        # Cache default power limits for each GPU and track throttled GPUs
+        self.default_power_limits: Dict[int, int] = {}  # gpu_idx -> default_limit_watts
+        self.throttled_gpus: set = set()  # gpu_idx that have been throttled
+        self._cache_default_power_limits()
+
+        # Restore any GPUs left at reduced power from previous sessions
+        self._restore_orphaned_gpus_on_startup()
+
+    def _cache_default_power_limits(self):
+        """
+        Cache the default (maximum) power limit for each GPU at startup.
+        This is used to restore GPUs to full TGP when pods are removed.
+        """
+        for gpu_idx in range(self.device_count):
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+                # Get the default power management limit (TGP)
+                default_limit_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(
+                    handle
+                )
+                default_limit_w = default_limit_mw // 1000
+                self.default_power_limits[gpu_idx] = default_limit_w
+                logger.info(
+                    f"GPU {gpu_idx}: Default power limit (TGP) = {default_limit_w}W"
+                )
+            except pynvml.NVMLError:
+                logger.exception(f"Failed to get default power limit for GPU {gpu_idx}")
+                # Fallback: use a high value that won't accidentally throttle
+                self.default_power_limits[
+                    gpu_idx
+                ] = 700  # Conservative default for H200
+
+    def _restore_orphaned_gpus_on_startup(self):
+        """
+        On startup, check for GPUs that were left at reduced power limits from
+        a previous session (orphaned throttling). Restore any idle GPU that is
+        below its default TGP.
+
+        This handles the case where:
+        - A previous power-agent session throttled a GPU
+        - The pod was deleted but the power-agent crashed/restarted before restoring
+        - The GPU is now idle but still at reduced power
+        """
+        logger.info("Checking for orphaned throttled GPUs on startup...")
+        restored_count = 0
+
+        for gpu_idx in range(self.device_count):
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+
+                # Check if GPU has any running processes
+                procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+
+                if not procs:
+                    # No processes - check if power limit is below default
+                    current_limit = (
+                        pynvml.nvmlDeviceGetPowerManagementLimit(handle) // 1000
+                    )
+                    default_limit = self.default_power_limits.get(gpu_idx, 700)
+
+                    if current_limit < default_limit:
+                        logger.info(
+                            f"GPU {gpu_idx} ({uuid}): Found orphaned throttling - "
+                            f"restoring from {current_limit}W to {default_limit}W"
+                        )
+                        pynvml.nvmlDeviceSetPowerManagementLimit(
+                            handle, default_limit * 1000
+                        )
+                        restored_count += 1
+
+            except pynvml.NVMLError:
+                logger.exception(f"Failed to check/restore GPU {gpu_idx} on startup")
+
+        if restored_count > 0:
+            logger.info(
+                f"Restored {restored_count} orphaned throttled GPU(s) to default TGP"
+            )
+        else:
+            logger.info("No orphaned throttled GPUs found")
+
+    def _restore_gpu_to_default(self, gpu_idx: int, handle, uuid: str):
+        """
+        Restore a GPU to its default power limit (TGP).
+
+        Args:
+            gpu_idx: GPU index
+            handle: NVML device handle
+            uuid: GPU UUID for logging
+        """
+        default_limit = self.default_power_limits.get(gpu_idx, 700)
+        current_limit = pynvml.nvmlDeviceGetPowerManagementLimit(handle) // 1000
+
+        if current_limit < default_limit:
+            logger.info(
+                f"GPU {gpu_idx} ({uuid}): Restoring power limit to default {default_limit}W "
+                f"(was {current_limit}W) - pod removed or no longer annotated"
+            )
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_limit * 1000)
+            self.throttled_gpus.discard(gpu_idx)
+        elif gpu_idx in self.throttled_gpus:
+            # GPU was throttled but is now at default - clean up tracking
+            logger.debug(
+                f"GPU {gpu_idx} ({uuid}): Already at default {current_limit}W, clearing throttle tracking"
+            )
+            self.throttled_gpus.discard(gpu_idx)
 
     def get_local_pods(self) -> Dict[str, int]:
         """
@@ -176,13 +285,16 @@ class NodePowerAgent:
         1. Get running processes
         2. Map processes to pods
         3. If pod has power limit annotation: apply via NVML
+        4. If GPU was previously throttled but no longer needs throttling: restore to default TGP
         """
         desired_state = self.get_local_pods()
-        if not desired_state:
-            logger.debug("No pods with power limit annotations on this node")
-            return
 
-        logger.info(f"Enforcing limits for {len(desired_state)} pods: {desired_state}")
+        if desired_state:
+            logger.info(
+                f"Enforcing limits for {len(desired_state)} pods: {desired_state}"
+            )
+        else:
+            logger.debug("No pods with power limit annotations on this node")
 
         for gpu_idx in range(self.device_count):
             try:
@@ -194,7 +306,15 @@ class NodePowerAgent:
                 pids = [p.pid for p in procs]
 
                 if not pids:
-                    logger.debug(f"GPU {gpu_idx} ({uuid}): No processes running")
+                    # No processes running - check if GPU was previously throttled
+                    if gpu_idx in self.throttled_gpus:
+                        logger.info(
+                            f"GPU {gpu_idx} ({uuid}): No processes running, "
+                            "restoring previously throttled GPU to default"
+                        )
+                        self._restore_gpu_to_default(gpu_idx, handle, uuid)
+                    else:
+                        logger.debug(f"GPU {gpu_idx} ({uuid}): No processes running")
                     continue
 
                 logger.info(
@@ -231,33 +351,85 @@ class NodePowerAgent:
                         pynvml.nvmlDeviceSetPowerManagementLimit(
                             handle, target_limit * 1000
                         )
+                        # Track this GPU as throttled
+                        self.throttled_gpus.add(gpu_idx)
                     else:
                         logger.debug(
                             f"GPU {gpu_idx} ({uuid}): Power limit already at {target_limit}W"
                         )
+                        # Ensure tracking is correct
+                        self.throttled_gpus.add(gpu_idx)
                 else:
-                    logger.debug(
-                        f"GPU {gpu_idx} ({uuid}): No power limit annotation for running processes"
-                    )
+                    # No power limit annotation for processes on this GPU
+                    # Check if this GPU was previously throttled and needs restoration
+                    if gpu_idx in self.throttled_gpus:
+                        logger.info(
+                            f"GPU {gpu_idx} ({uuid}): Processes running but no power limit "
+                            "annotation - restoring previously throttled GPU to default"
+                        )
+                        self._restore_gpu_to_default(gpu_idx, handle, uuid)
+                    else:
+                        logger.debug(
+                            f"GPU {gpu_idx} ({uuid}): No power limit annotation for running processes"
+                        )
 
             except pynvml.NVMLError:
                 logger.exception(f"NVML error on GPU {gpu_idx}")
             except Exception:
                 logger.exception(f"Unexpected error on GPU {gpu_idx}")
 
+    def restore_all_gpus_to_default(self):
+        """
+        Restore all GPUs to their default power limits.
+        Called on shutdown or when cleaning up.
+        """
+        logger.info("Restoring all GPUs to default power limits...")
+        for gpu_idx in range(self.device_count):
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+                self._restore_gpu_to_default(gpu_idx, handle, uuid)
+            except pynvml.NVMLError:
+                logger.exception(f"Failed to restore GPU {gpu_idx} to default")
+        self.throttled_gpus.clear()
+        logger.info("All GPUs restored to default power limits")
+
     def run(self):
         """Main control loop."""
         logger.info(f"Starting Power Agent on node {self.node_name}")
         logger.info(f"Reconcile interval: {RECONCILE_INTERVAL}s")
         logger.info(f"Annotation key: {ANNOTATION_KEY}")
+        logger.info(f"Default power limits: {self.default_power_limits}")
 
-        while True:
-            try:
-                self.enforce_limits()
-            except Exception:
-                logger.exception("Error in reconciliation loop")
+        # Track if we should keep running
+        self._running = True
 
-            time.sleep(RECONCILE_INTERVAL)
+        def handle_shutdown(signum, frame):
+            """Handle SIGTERM/SIGINT for graceful shutdown."""
+            sig_name = signal.Signals(signum).name
+            logger.info(f"Received {sig_name}, initiating graceful shutdown...")
+            self._running = False
+
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, handle_shutdown)
+        signal.signal(signal.SIGINT, handle_shutdown)
+
+        try:
+            while self._running:
+                try:
+                    self.enforce_limits()
+                except Exception:
+                    logger.exception("Error in reconciliation loop")
+
+                # Use shorter sleep intervals to respond to shutdown faster
+                for _ in range(RECONCILE_INTERVAL):
+                    if not self._running:
+                        break
+                    time.sleep(1)
+        finally:
+            # Restore all GPUs to default on shutdown
+            self.restore_all_gpus_to_default()
+            logger.info("Power Agent shutdown complete")
 
 
 if __name__ == "__main__":
