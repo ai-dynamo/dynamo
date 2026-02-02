@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) -2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,10 +18,6 @@ Deployment tests for Kubernetes-based LLM deployments.
 
 These tests verify that deployments can be created, become ready, and respond
 to chat completion requests correctly.
-
-The test is source-agnostic - it works with any deployment target discovered
-by conftest.py, whether from examples/ or recipes/. The DeploymentTarget
-abstraction provides all the information needed to run the test.
 """
 
 import logging

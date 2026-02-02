@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,41 +17,22 @@
 Pytest configuration for deployment tests.
 
 This module provides dynamic test discovery and fixtures for running deployment tests
-against Kubernetes deployments. It supports discovering deployments from different
-sources (e.g., examples, recipes) through a pluggable discovery system.
+against Kubernetes deployments. It uses a pluggable discovery system to find deployment
+configurations from the examples directory.
 
 Architecture Overview
 ---------------------
 
 The test infrastructure is built around three key concepts:
 
-1. **DeploymentTarget**: A simple data class representing a single deployment
-   to test. Contains all information needed to locate and identify the deployment.
+1. **DeploymentTarget**: A data class representing a single deployment to test.
+   Contains all information needed to locate and identify the deployment.
 
 2. **Discovery Functions**: Functions that scan the filesystem and return a list
-   of DeploymentTarget objects. Each source type (examples, recipes) has its own
-   discovery function.
+   of DeploymentTarget objects.
 
-3. **Test Parametrization**: Tests are parametrized with DeploymentTarget objects,
-   making them source-agnostic. The test only cares about having a valid YAML path.
-
-Extension Points for Future Recipe Support
-------------------------------------------
-
-To add recipe support, you would:
-
-1. Create a new discovery function (e.g., `discover_recipe_targets()`) that scans
-   the `recipes/` directory and returns DeploymentTarget objects.
-
-2. Add new CLI options if needed (e.g., `--model`, `--source-type`).
-
-3. Update `_collect_all_targets()` to include recipe targets.
-
-4. Optionally add filtering logic in `pytest_generate_tests()` for recipe-specific
-   filtering (by model, mode, etc.).
-
-The test itself (`test_deploy.py`) should require no changes because it works
-with the DeploymentTarget abstraction, not specific source paths.
+3. **Test Parametrization**: Tests are parametrized with DeploymentTarget objects.
+   The test only cares about having a valid YAML path.
 """
 
 from dataclasses import dataclass
@@ -83,19 +64,11 @@ def _get_workspace_dir() -> Path:
 class DeploymentTarget:
     """Represents a deployment configuration to be tested.
 
-    This is the central abstraction that makes the test infrastructure
-    source-agnostic. Whether a deployment comes from examples/ or recipes/,
-    the test sees the same interface.
-
     Attributes:
         yaml_path: Absolute path to the deployment YAML file
         framework: The inference framework (vllm, sglang, trtllm, etc.)
         profile: The deployment profile name (agg, disagg, etc.)
-        source: Where this target came from (examples, recipes)
-
-    Future attributes for recipe support:
-        model: The model name (e.g., "llama-3-70b", "deepseek-r1")
-        mode: The deployment mode (e.g., "agg", "disagg-single-node")
+        source: Where this target came from (e.g., examples)
     """
 
     yaml_path: Path
@@ -167,78 +140,16 @@ def discover_example_targets(workspace: Optional[Path] = None) -> List[Deploymen
     return targets
 
 
-# Future: Add recipe discovery function here
-#
-# def discover_recipe_targets(
-#     workspace: Optional[Path] = None,
-#     model_filter: Optional[str] = None,
-# ) -> List[DeploymentTarget]:
-#     """Discover deployment targets from recipes/{model}/{framework}/{mode}/deploy.yaml.
-#
-#     Args:
-#         workspace: Workspace root directory. If None, auto-detected.
-#         model_filter: Optional filter to only include specific model recipes.
-#
-#     Returns:
-#         List of DeploymentTarget objects for each discovered recipe deployment.
-#     """
-#     if workspace is None:
-#         workspace = _get_workspace_dir()
-#
-#     recipes_dir = workspace / "recipes"
-#     targets: List[DeploymentTarget] = []
-#
-#     if not recipes_dir.exists():
-#         return targets
-#
-#     # Scan for deploy*.yaml files in recipe directories
-#     for deploy_yaml in recipes_dir.glob("**/deploy*.yaml"):
-#         # Parse path: recipes/{model}/{framework}/{mode}/deploy.yaml
-#         relative = deploy_yaml.relative_to(recipes_dir)
-#         parts = relative.parts
-#
-#         if len(parts) < 4:
-#             continue
-#
-#         model_name, framework, mode = parts[0], parts[1], parts[2]
-#
-#         if model_filter and model_name != model_filter:
-#             continue
-#
-#         # Construct a descriptive profile name from the path
-#         profile = f"{model_name}/{mode}"
-#         if deploy_yaml.stem != "deploy":
-#             # Handle variants like deploy_hopper_16gpu.yaml
-#             profile = f"{profile}-{deploy_yaml.stem.replace('deploy_', '')}"
-#
-#         targets.append(
-#             DeploymentTarget(
-#                 yaml_path=deploy_yaml,
-#                 framework=framework,
-#                 profile=profile,
-#                 source="recipes",
-#             )
-#         )
-#
-#     return targets
-
-
 def _collect_all_targets() -> List[DeploymentTarget]:
     """Collect deployment targets from all sources.
 
-    This is the single point where all discovery functions are aggregated.
-    To add a new source, add its discovery function call here.
-
     Returns:
-        Combined list of all deployment targets, sorted by test_id.
+        List of all deployment targets, sorted for consistent test ordering.
     """
     targets: List[DeploymentTarget] = []
 
     # Discover from examples
     targets.extend(discover_example_targets())
-
-    # Future: Uncomment to enable recipe discovery
-    # targets.extend(discover_recipe_targets())
 
     # Sort for consistent test ordering
     return sorted(targets, key=lambda t: (t.source, t.framework, t.profile))
@@ -314,20 +225,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Skip restarting NATS and etcd services before deployment (default: True). "
         "Use --no-skip-service-restart to restart services.",
     )
-    # Future: Add recipe-specific options here
-    # parser.addoption(
-    #     "--model",
-    #     type=str,
-    #     default=None,
-    #     help="Model name to test (for recipe deployments)",
-    # )
-    # parser.addoption(
-    #     "--source",
-    #     type=str,
-    #     default=None,
-    #     choices=["examples", "recipes"],
-    #     help="Source type to filter (examples or recipes)",
-    # )
 
 
 def _filter_targets(
@@ -336,9 +233,6 @@ def _filter_targets(
     profile: Optional[str] = None,
 ) -> List[DeploymentTarget]:
     """Filter deployment targets based on CLI options.
-
-    This centralizes filtering logic, making it easy to add new filters
-    for recipe support (e.g., model, source, mode).
 
     Args:
         targets: List of targets to filter
@@ -355,12 +249,6 @@ def _filter_targets(
 
     if profile:
         result = [t for t in result if t.profile == profile]
-
-    # Future: Add more filters here
-    # if model:
-    #     result = [t for t in result if getattr(t, 'model', None) == model]
-    # if source:
-    #     result = [t for t in result if t.source == source]
 
     return result
 
@@ -482,9 +370,6 @@ def deployment_spec(
     namespace: str,
 ) -> DeploymentSpec:
     """Create DeploymentSpec from YAML with optional image override.
-
-    This fixture is source-agnostic - it works the same way whether
-    the YAML comes from examples or recipes.
 
     Args:
         deployment_yaml: Path to the deployment YAML file
