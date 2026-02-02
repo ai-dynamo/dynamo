@@ -99,6 +99,37 @@ impl Default for DsmlParserConfig {
     }
 }
 
+/// Configuration for GLM-4.7 style tool call parser
+/// Format: <tool_call>function_name<arg_key>param</arg_key><arg_value>value</arg_value></tool_call>
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Glm47ParserConfig {
+    /// Start token for tool call block (e.g., "<tool_call>")
+    pub tool_call_start: String,
+    /// End token for tool call block (e.g., "</tool_call>")
+    pub tool_call_end: String,
+    /// Start token for argument key (e.g., "<arg_key>")
+    pub arg_key_start: String,
+    /// End token for argument key (e.g., "</arg_key>")
+    pub arg_key_end: String,
+    /// Start token for argument value (e.g., "<arg_value>")
+    pub arg_value_start: String,
+    /// End token for argument value (e.g., "</arg_value>")
+    pub arg_value_end: String,
+}
+
+impl Default for Glm47ParserConfig {
+    fn default() -> Self {
+        Self {
+            tool_call_start: "<tool_call>".to_string(),
+            tool_call_end: "</tool_call>".to_string(),
+            arg_key_start: "<arg_key>".to_string(),
+            arg_key_end: "</arg_key>".to_string(),
+            arg_value_start: "<arg_value>".to_string(),
+            arg_value_end: "</arg_value>".to_string(),
+        }
+    }
+}
+
 /// Parser-specific configuration
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -109,6 +140,7 @@ pub enum ParserConfig {
     Harmony(JsonParserConfig),
     Typescript,
     Dsml(DsmlParserConfig),
+    Glm47(Glm47ParserConfig),
 }
 
 impl ParserConfig {
@@ -122,6 +154,7 @@ impl ParserConfig {
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
             ParserConfig::Dsml(config) => vec![config.function_calls_start.clone()],
+            ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
         }
     }
 
@@ -135,6 +168,7 @@ impl ParserConfig {
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
             ParserConfig::Dsml(config) => vec![config.function_calls_end.clone()],
+            ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
         }
     }
 }
@@ -312,6 +346,15 @@ impl ToolCallConfig {
                 parameter_start_token: "<parameter name=".to_string(),
                 parameter_end_token: "</parameter>".to_string(),
             }),
+        }
+    }
+
+    pub fn glm47() -> Self {
+        // GLM-4.7 format:
+        // <tool_call>function_name<arg_key>param1</arg_key><arg_value>value1</arg_value></tool_call>
+        // Reference: https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
+        Self {
+            parser_config: ParserConfig::Glm47(Glm47ParserConfig::default()),
         }
     }
 }
