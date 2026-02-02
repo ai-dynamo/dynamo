@@ -219,11 +219,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Deployment profile to test (e.g., agg, disagg, disagg_router)",
     )
     parser.addoption(
-        "--skip-service-restart",
+        "--restart-services",
         action="store_true",
-        default=True,
-        help="Skip restarting NATS and etcd services before deployment (default: True). "
-        "Use --no-skip-service-restart to restart services.",
+        default=False,
+        help="Restart NATS and etcd services before deployment (default: skip restart)",
     )
 
 
@@ -333,8 +332,8 @@ def namespace(request: pytest.FixtureRequest) -> str:
 
 @pytest.fixture
 def skip_service_restart(request: pytest.FixtureRequest) -> bool:
-    """Get skip_service_restart flag from CLI option."""
-    return request.config.getoption("--skip-service-restart")
+    """Whether to skip restarting NATS and etcd services (default: True)."""
+    return not request.config.getoption("--restart-services")
 
 
 @pytest.fixture

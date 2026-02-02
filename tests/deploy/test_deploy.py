@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) -2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -56,6 +56,7 @@ def send_test_request(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     temperature: float = DEFAULT_TEMPERATURE,
     timeout: int = DEFAULT_REQUEST_TIMEOUT,
+    endpoint: str = "/v1/chat/completions",
 ) -> requests.Response:
     """Send a chat completion request to the model endpoint.
 
@@ -66,6 +67,7 @@ def send_test_request(
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         timeout: Request timeout in seconds
+        endpoint: API endpoint path (default: "/v1/chat/completions")
 
     Returns:
         Response object from the API
@@ -73,7 +75,7 @@ def send_test_request(
     Raises:
         requests.RequestException: If the request fails
     """
-    url = f"{base_url}/v1/chat/completions"
+    url = f"{base_url}{endpoint}"
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -120,7 +122,7 @@ def validate_chat_response(
     # Parse JSON
     try:
         data = response.json()
-    except requests.JSONDecodeError as e:
+    except ValueError as e:
         pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
 
     # Validate response structure
@@ -190,7 +192,8 @@ async def test_deployment(
         deployment_target: The deployment target containing path and metadata
         deployment_spec: Configured DeploymentSpec from fixture
         namespace: Kubernetes namespace for the deployment
-        skip_service_restart: Whether to skip restarting NATS/etcd services (default: True)
+        skip_service_restart: Whether to skip restarting NATS/etcd services (default: True).
+            Use --restart-services flag to restart services before deployment.
     """
     # Extract identifying information from the target
     framework = deployment_target.framework
@@ -262,6 +265,7 @@ async def test_deployment(
             prompt=TEST_PROMPT,
             max_tokens=DEFAULT_MAX_TOKENS,
             temperature=DEFAULT_TEMPERATURE,
+            endpoint=endpoint,
         )
 
         # Validate response
