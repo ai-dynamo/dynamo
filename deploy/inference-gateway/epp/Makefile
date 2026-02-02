@@ -106,12 +106,14 @@ image-kind: image-load ## Build and load the image into kind cluster
 
 .PHONY: image-build-ci
 # We depend on 'dynamo-lib' to ensure the Rust/C artifacts are compiled before Docker starts
-image-build-ci: dynamo-lib ## Build & Push to CI registry (No new builder created). Usage: make image-build-ci REGISTRY=my.reg.com
+# ARCH is appended to image tag as a patch until our Dockerfiles support multi-arch builds, even though the EPP's Dockerfile does support it.
+image-build-ci: dynamo-lib ## Build & Push to CI registry (No new builder created). Usage: make image-build-ci REGISTRY=my.reg.com ARCH=amd64
 	@[ "${REGISTRY}" ] || ( echo "ERROR: REGISTRY variable is not set"; exit 1 )
+	@[ "${ARCH}" ] || ( echo "ERROR: ARCH variable is not set"; exit 1 )
 	$(MAKE) image-build \
 		PUSH=--push \
 		LOAD= \
-		IMAGE_TAG=$(REGISTRY)/$(IMAGE_REPO):$(GIT_TAG)
+		IMAGE_TAG=$(REGISTRY)/$(IMAGE_REPO):$(GIT_TAG)-$(ARCH)
 
 ##@ Local Development with Buildx
 
