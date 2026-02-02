@@ -156,6 +156,10 @@ PUSH=""
 # or can be explicitly enabled via --enable-kvbm flag
 ENABLE_KVBM=false
 
+# KVBM NCCL - default enabled when KVBM is enabled, provides NCCL broadcast optimization
+# for replicated mode in DEP (enable_attention_dp) configurations
+ENABLE_KVBM_NCCL=true
+
 # GPU Memory Service - default disabled, enabled automatically for VLLM/SGLANG
 # or can be explicitly enabled via --enable-gpu-memory-service flag
 ENABLE_GPU_MEMORY_SERVICE=false
@@ -346,6 +350,12 @@ get_options() {
             ;;
         --enable-kvbm)
             ENABLE_KVBM=true
+            ;;
+        --enable-kvbm-nccl)
+            ENABLE_KVBM_NCCL=true
+            ;;
+        --disable-kvbm-nccl)
+            ENABLE_KVBM_NCCL=false
             ;;
         --enable-gpu-memory-service)
             ENABLE_GPU_MEMORY_SERVICE=true
@@ -546,6 +556,8 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Adds AWS EFA layer on top of the built image (works with any target)]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
+    echo "  [--enable-kvbm-nccl Enables NCCL support in KVBM for replicated mode (default: true)]"
+    echo "  [--disable-kvbm-nccl Disables NCCL support in KVBM]"
     echo "  [--enable-gpu-memory-service Enables GPU Memory Service support]"
     echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
@@ -837,6 +849,10 @@ fi
 if [[ ${ENABLE_KVBM} == "true" ]]; then
     echo "Enabling KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
+    if [[ ${ENABLE_KVBM_NCCL} == "true" ]]; then
+        echo "Enabling KVBM NCCL support for replicated mode broadcast optimization"
+        BUILD_ARGS+=" --build-arg ENABLE_KVBM_NCCL=${ENABLE_KVBM_NCCL} "
+    fi
 fi
 
 # ENABLE_GPU_MEMORY_SERVICE: Used in Dockerfiles for gpu_memory_service wheel.

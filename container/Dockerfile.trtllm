@@ -417,6 +417,7 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
 ARG ENABLE_KVBM
+ARG ENABLE_KVBM_NCCL=true
 ARG USE_SCCACHE
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -444,7 +445,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
-        maturin build --release --out target/wheels && \
+        KVBM_FEATURES=""; \
+        if [ "$ENABLE_KVBM_NCCL" = "true" ]; then \
+            KVBM_FEATURES="nccl"; \
+            echo "Building KVBM with NCCL support for replicated mode"; \
+        fi; \
+        if [ -n "$KVBM_FEATURES" ]; then \
+            maturin build --release --features "$KVBM_FEATURES" --out target/wheels; \
+        else \
+            maturin build --release --out target/wheels; \
+        fi && \
         auditwheel repair \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
