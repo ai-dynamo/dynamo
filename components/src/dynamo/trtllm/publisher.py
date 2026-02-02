@@ -312,6 +312,8 @@ class Publisher:
         self.partial_block_hashes: set[int] = set()
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
+        # Track the last engine event_id to assert consecutive event IDs from the engine
+        self._last_engine_event_id: Optional[int] = None
 
         # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
         if zmq_endpoint:
@@ -481,6 +483,16 @@ class Publisher:
             return
 
         event_id = event["event_id"]
+
+        # Check for consecutive event IDs from the engine
+        if self._last_engine_event_id is not None:
+            expected_id = self._last_engine_event_id + 1
+            if event_id != expected_id:
+                logging.warning(
+                    f"Non-consecutive engine event_id: expected {expected_id}, got {event_id}"
+                )
+        self._last_engine_event_id = event_id
+
         data = event["data"]
         if data["type"] == "stored":
             self.processing_initial_created_events = False
