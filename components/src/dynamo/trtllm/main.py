@@ -417,7 +417,7 @@ async def init(
                 # Filter out python_/process_ metrics and add trtllm_ prefix to remaining metrics
                 register_engine_metrics_callback(
                     endpoint=endpoint,
-                    registry=REGISTRY,
+                    registry=REGISTRY,  # TRTLLM uses a global prometheus.REGISTRY to register its metrics. We use the same registry to expose all metrics.
                     exclude_prefixes=["python_", "process_"],
                     add_prefix="trtllm_",
                 )
