@@ -13,13 +13,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_async_openai::types::responses::{
-    AssistantRole, FunctionToolCall, OutputContent, OutputItem, OutputMessage, OutputMessageContent,
-    OutputStatus, OutputTextContent, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseTextParam, ServiceTier, Status,
-    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    AssistantRole, FunctionToolCall, OutputContent, OutputItem, OutputMessage,
+    OutputMessageContent, OutputStatus, OutputTextContent, Response, ResponseCompletedEvent,
+    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
+    ResponseInProgressEvent, ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
+    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
+    ServiceTier, Status, TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam,
+    Truncation,
 };
 use uuid::Uuid;
 
@@ -165,56 +166,58 @@ impl ResponseStreamConverter {
             let delta = &choice.delta;
 
             // Handle text content deltas
-            if let Some(content) = &delta.content {
-                if !content.is_empty() {
-                    // Emit output_item.added + content_part.added on first text
-                    if !self.message_started {
-                        self.message_started = true;
-                        self.message_output_index = self.next_output_index;
-                        let output_index = self.message_output_index;
-                        self.next_output_index += 1;
+            if let Some(content) = &delta.content
+                && !content.is_empty()
+            {
+                // Emit output_item.added + content_part.added on first text
+                if !self.message_started {
+                    self.message_started = true;
+                    self.message_output_index = self.next_output_index;
+                    let output_index = self.message_output_index;
+                    self.next_output_index += 1;
 
-                        let item_added =
-                            ResponseStreamEvent::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
-                                sequence_number: self.next_seq(),
-                                output_index,
-                                item: OutputItem::Message(OutputMessage {
-                                    id: self.message_item_id.clone(),
-                                    content: vec![],
-                                    role: AssistantRole::Assistant,
-                                    status: OutputStatus::InProgress,
-                                }),
-                            });
-                        events.push(make_sse_event(&item_added));
+                    let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
+                        ResponseOutputItemAddedEvent {
+                            sequence_number: self.next_seq(),
+                            output_index,
+                            item: OutputItem::Message(OutputMessage {
+                                id: self.message_item_id.clone(),
+                                content: vec![],
+                                role: AssistantRole::Assistant,
+                                status: OutputStatus::InProgress,
+                            }),
+                        },
+                    );
+                    events.push(make_sse_event(&item_added));
 
-                        let part_added =
-                            ResponseStreamEvent::ResponseContentPartAdded(ResponseContentPartAddedEvent {
-                                sequence_number: self.next_seq(),
-                                item_id: self.message_item_id.clone(),
-                                output_index,
-                                content_index: 0,
-                                part: OutputContent::OutputText(OutputTextContent {
-                                    text: String::new(),
-                                    annotations: vec![],
-                                    logprobs: Some(vec![]),
-                                }),
-                            });
-                        events.push(make_sse_event(&part_added));
-                    }
-
-                    // Emit text delta
-                    self.accumulated_text.push_str(content);
-                    let text_delta =
-                        ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
+                    let part_added = ResponseStreamEvent::ResponseContentPartAdded(
+                        ResponseContentPartAddedEvent {
                             sequence_number: self.next_seq(),
                             item_id: self.message_item_id.clone(),
-                            output_index: self.message_output_index,
+                            output_index,
                             content_index: 0,
-                            delta: content.clone(),
-                            logprobs: Some(vec![]),
-                        });
-                    events.push(make_sse_event(&text_delta));
+                            part: OutputContent::OutputText(OutputTextContent {
+                                text: String::new(),
+                                annotations: vec![],
+                                logprobs: Some(vec![]),
+                            }),
+                        },
+                    );
+                    events.push(make_sse_event(&part_added));
                 }
+
+                // Emit text delta
+                self.accumulated_text.push_str(content);
+                let text_delta =
+                    ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
+                        sequence_number: self.next_seq(),
+                        item_id: self.message_item_id.clone(),
+                        output_index: self.message_output_index,
+                        content_index: 0,
+                        delta: content.clone(),
+                        logprobs: Some(vec![]),
+                    });
+                events.push(make_sse_event(&text_delta));
             }
 
             // Handle tool call deltas
@@ -248,14 +251,10 @@ impl ResponseStreamConverter {
                             // Emit output_item.added on first delta for this function call
                             if !self.function_call_items[tc_index].started {
                                 self.function_call_items[tc_index].started = true;
-                                let item_id =
-                                    self.function_call_items[tc_index].item_id.clone();
-                                let call_id =
-                                    self.function_call_items[tc_index].call_id.clone();
-                                let fc_name =
-                                    self.function_call_items[tc_index].name.clone();
-                                let output_index =
-                                    self.function_call_items[tc_index].output_index;
+                                let item_id = self.function_call_items[tc_index].item_id.clone();
+                                let call_id = self.function_call_items[tc_index].call_id.clone();
+                                let fc_name = self.function_call_items[tc_index].name.clone();
+                                let output_index = self.function_call_items[tc_index].output_index;
                                 let seq = self.next_seq();
                                 let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
                                     ResponseOutputItemAddedEvent {
@@ -276,19 +275,18 @@ impl ResponseStreamConverter {
                             self.function_call_items[tc_index]
                                 .accumulated_args
                                 .push_str(args);
-                            let item_id =
-                                self.function_call_items[tc_index].item_id.clone();
-                            let output_index =
-                                self.function_call_items[tc_index].output_index;
+                            let item_id = self.function_call_items[tc_index].item_id.clone();
+                            let output_index = self.function_call_items[tc_index].output_index;
                             let seq = self.next_seq();
-                            let args_delta = ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
-                                ResponseFunctionCallArgumentsDeltaEvent {
-                                    sequence_number: seq,
-                                    item_id,
-                                    output_index,
-                                    delta: args.clone(),
-                                },
-                            );
+                            let args_delta =
+                                ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
+                                    ResponseFunctionCallArgumentsDeltaEvent {
+                                        sequence_number: seq,
+                                        item_id,
+                                        output_index,
+                                        delta: args.clone(),
+                                    },
+                                );
                             events.push(make_sse_event(&args_delta));
                         }
                     }
@@ -317,33 +315,35 @@ impl ResponseStreamConverter {
             });
             events.push(make_sse_event(&text_done));
 
-            let part_done = ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
-                sequence_number: self.next_seq(),
-                item_id: self.message_item_id.clone(),
-                output_index: self.message_output_index,
-                content_index: 0,
-                part: OutputContent::OutputText(OutputTextContent {
-                    text: self.accumulated_text.clone(),
-                    annotations: vec![],
-                    logprobs: Some(vec![]),
-                }),
-            });
-            events.push(make_sse_event(&part_done));
-
-            let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
-                sequence_number: self.next_seq(),
-                output_index: self.message_output_index,
-                item: OutputItem::Message(OutputMessage {
-                    id: self.message_item_id.clone(),
-                    content: vec![OutputMessageContent::OutputText(OutputTextContent {
+            let part_done =
+                ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
+                    sequence_number: self.next_seq(),
+                    item_id: self.message_item_id.clone(),
+                    output_index: self.message_output_index,
+                    content_index: 0,
+                    part: OutputContent::OutputText(OutputTextContent {
                         text: self.accumulated_text.clone(),
                         annotations: vec![],
                         logprobs: Some(vec![]),
-                    })],
-                    role: AssistantRole::Assistant,
-                    status: OutputStatus::Completed,
-                }),
-            });
+                    }),
+                });
+            events.push(make_sse_event(&part_done));
+
+            let item_done =
+                ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+                    sequence_number: self.next_seq(),
+                    output_index: self.message_output_index,
+                    item: OutputItem::Message(OutputMessage {
+                        id: self.message_item_id.clone(),
+                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                            text: self.accumulated_text.clone(),
+                            annotations: vec![],
+                            logprobs: Some(vec![]),
+                        })],
+                        role: AssistantRole::Assistant,
+                        status: OutputStatus::Completed,
+                    }),
+                });
             events.push(make_sse_event(&item_done));
         }
 
@@ -374,17 +374,18 @@ impl ResponseStreamConverter {
             );
             events.push(make_sse_event(&args_done));
 
-            let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
-                sequence_number: self.next_seq(),
-                output_index,
-                item: OutputItem::FunctionCall(FunctionToolCall {
-                    id: Some(item_id),
-                    call_id,
-                    name: fc_name,
-                    arguments: accumulated_args,
-                    status: Some(OutputStatus::Completed),
-                }),
-            });
+            let item_done =
+                ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+                    sequence_number: self.next_seq(),
+                    output_index,
+                    item: OutputItem::FunctionCall(FunctionToolCall {
+                        id: Some(item_id),
+                        call_id,
+                        name: fc_name,
+                        arguments: accumulated_args,
+                        status: Some(OutputStatus::Completed),
+                    }),
+                });
             events.push(make_sse_event(&item_done));
         }
 
