@@ -337,6 +337,23 @@ class TrtllmConfigModifier(BaseConfigModifier):
         # 4. Enable attention DP (replicates KV heads, partitions requests)
         override_dict["enable_attention_dp"] = True
 
+        # 5. Use WIDEEP MoE backend for DEP
+        if "moe_config" not in override_dict:
+            override_dict["moe_config"] = {}
+        override_dict["moe_config"]["backend"] = "WIDEEP"
+
+        # Add required environment variables for WIDEEP
+        if cfg.spec.envs is None:
+            cfg.spec.envs = []
+        wideep_envs = [
+            {"name": "TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER", "value": "1"},
+            {"name": "TRTLLM_ENABLE_PDL", "value": "1"},
+        ]
+        existing_env_names = {e.get("name") or e.name for e in cfg.spec.envs}
+        for env in wideep_envs:
+            if env["name"] not in existing_env_names:
+                cfg.spec.envs.append(env)
+
         # Serialize JSON and append to args
         override_str = json.dumps(override_dict)
         args = append_argument(args, ["--override-engine-args", override_str])
