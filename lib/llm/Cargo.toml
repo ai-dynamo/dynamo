@@ -24,7 +24,7 @@ testing-etcd = []
 # Forward the NVTX feature to dynamo-runtime (build with --features nvtx or dynamo-llm/nvtx)
 nvtx = ["dynamo-runtime/nvtx"]
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec", "dep:dynamo-memory"]
-nccl = ["dep:cudarc"]  # Enable NCCL collective operations
+nccl = ["dep:cudarc", "cudarc/nccl"]  # Enable NCCL collective operations
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]

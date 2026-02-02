@@ -104,10 +104,10 @@ impl NcclBootstrap {
         );
 
         let mut unique_id = ncclUniqueId { internal: [0; 128] };
-        // Cast u8 slice to i8 for the internal array (same binary representation)
-        let internal_slice: &[i8] =
-            unsafe { std::slice::from_raw_parts(bytes[8..136].as_ptr() as *const i8, 128) };
-        unique_id.internal.copy_from_slice(internal_slice);
+        // Copy bytes directly using transmute to handle both i8 and u8 internal arrays
+        // (ARM64 uses u8, x86_64 uses i8 - same binary representation)
+        let internal_bytes: &[u8; 128] = bytes[8..136].try_into().unwrap();
+        unique_id.internal = unsafe { std::mem::transmute(*internal_bytes) };
 
         Ok(Self {
             unique_id,
@@ -190,9 +190,12 @@ mod tests {
     #[test]
     fn test_serialize_deserialize() {
         // We can test serialization without actually calling NCCL
+        // Use transmute to create the internal array in a platform-agnostic way
+        // (ARM64 uses [u8; 128], x86_64 uses [i8; 128])
+        let internal_bytes: [u8; 128] = [42u8; 128];
         let bootstrap = NcclBootstrap {
             unique_id: ncclUniqueId {
-                internal: [42i8; 128],
+                internal: unsafe { std::mem::transmute(internal_bytes) },
             },
             world_size: 4,
         };
@@ -202,7 +205,9 @@ mod tests {
 
         let restored = NcclBootstrap::deserialize(&bytes).unwrap();
         assert_eq!(restored.world_size, 4);
-        assert_eq!(restored.unique_id.internal, [42i8; 128]);
+        // Compare as bytes to be platform-agnostic
+        let restored_bytes: [u8; 128] = unsafe { std::mem::transmute(restored.unique_id.internal) };
+        assert_eq!(restored_bytes, [42u8; 128]);
     }
 
     #[test]
