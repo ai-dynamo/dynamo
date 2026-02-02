@@ -20,7 +20,11 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import setup_prometheus_registry, setup_sgl_metrics
+from dynamo.sglang.publisher import (
+    DynamoSglangPublisher,
+    setup_prometheus_registry,
+    setup_sgl_metrics,
+)
 from dynamo.sglang.register import register_llm_with_readiness_gate
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
@@ -38,32 +42,38 @@ configure_dynamo_logging()
 
 async def _handle_non_leader_node(
     engine: sgl.Engine,
-    generate_endpoint,
+    publisher: DynamoSglangPublisher,
+    metrics_task: asyncio.Task,
 ) -> None:
     """
     Handle non-leader node (node_rank >= 1) in multi-node deployments.
 
-    Non-leader nodes only run scheduler processes and don't handle requests,
-    but they should still expose metrics via Dynamo's metrics endpoint.
+    Non-leader nodes run scheduler processes but don't handle requests directly.
+    They still need:
+    - KV event publishing (subscribe to local DP ranks, forward to NATS)
+    - Metrics collection from local schedulers
+    - Prometheus metrics exposure
 
     Args:
         engine: The SGLang engine instance.
-        config: SGLang configuration including server args.
-        component: The Dynamo runtime component.
-        generate_endpoint: The Dynamo endpoint for generation requests.
+        publisher: The DynamoSglangPublisher for metrics and KV events.
+        metrics_task: The asyncio task running the metrics loop.
     """
     logging.info(
-        f"Non-leader node detected (node_rank={engine.server_args.node_rank})."
+        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
+        "Running with metrics and KV event publishing for local DP ranks."
     )
 
-    # Only setup Prometheus registry to expose SGLang metrics from shared memory
-    # Non-leader nodes don't need Dynamo metrics publishing or KV events
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-        logging.info("Prometheus metrics registry configured for non-leader node")
-
-    # Wait indefinitely - the process will be terminated via signal handlers
-    await asyncio.Event().wait()
+    try:
+        # Wait indefinitely - the process will be terminated via signal handlers
+        await asyncio.Event().wait()
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            pass
+        publisher.cleanup()
 
 
 async def worker():
@@ -137,13 +147,8 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Handle non-leader nodes (multi-node parallelism)
-    # Non-leader nodes only run scheduler processes and expose metrics
-    if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, generate_endpoint)
-        return
-
-    # publisher instantiates the metrics and kv event publishers
+    # Setup metrics and KV events for ALL nodes (including non-leader)
+    # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
@@ -151,6 +156,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
+
+    # Handle non-leader nodes (multi-node parallelism)
+    # Non-leader nodes run schedulers and publish KV events, but don't serve requests
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, publisher, metrics_task)
+        return
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -160,7 +171,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     handler.register_engine_routes(runtime)
 
-    print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
@@ -224,17 +234,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Handle non-leader nodes (multi-node tensor parallelism)
-    # Non-leader nodes only run scheduler processes and expose metrics
-    if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, generate_endpoint)
-        return
-
-    # Perform dummy warmup for prefill worker to avoid initial TTFT hit
-    # Only needed on leader node that handles requests
-    await _warmup_prefill_engine(engine, server_args)
-
-    # publisher instantiates the metrics and kv event publishers
+    # Setup metrics and KV events for ALL nodes (including non-leader)
+    # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
@@ -242,6 +243,16 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
+
+    # Handle non-leader nodes (multi-node parallelism)
+    # Non-leader nodes run schedulers and publish KV events, but don't serve requests
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, publisher, metrics_task)
+        return
+
+    # Perform dummy warmup for prefill worker to avoid initial TTFT hit
+    # Only needed on leader node that handles requests
+    await _warmup_prefill_engine(engine, server_args)
 
     handler = PrefillWorkerHandler(
         component, engine, config, publisher, generate_endpoint
@@ -310,12 +321,8 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Handle non-leader nodes (multi-node parallelism)
-    if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, generate_endpoint)
-        return
-
-    # Setup metrics publisher
+    # Setup metrics and KV events for ALL nodes (including non-leader)
+    # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
@@ -323,6 +330,12 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
+
+    # Handle non-leader nodes (multi-node parallelism)
+    # Non-leader nodes run schedulers and publish KV events, but don't serve requests
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, publisher, metrics_task)
+        return
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
