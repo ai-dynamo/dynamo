@@ -64,6 +64,23 @@ jobs:
 
 
 
+  st-trtllm-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/flavor-matrix.yml
+    with:
+      framework: trtllm
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9"]'
+      stress_test: '["1", "2"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+      no_cache: true
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
   st-vllm-pipeline:
     needs: [changed-files]
     uses: ./.github/workflows/flavor-matrix.yml
@@ -75,7 +92,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
       run_tests: false
@@ -97,7 +114,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: false
       copy_to_acr: false
@@ -117,7 +134,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: false
       copy_to_acr: false
@@ -135,7 +152,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
       run_tests: false
@@ -157,7 +174,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: false
       copy_to_acr: false
