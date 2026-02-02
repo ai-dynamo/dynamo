@@ -737,9 +737,22 @@ impl ActiveSequencesMultiWorker {
             }
             self.handles.remove(worker);
 
+            // Collect request_ids to remove from request_to_lora
+            let requests_to_remove: Vec<RequestId> = self
+                .request_to_worker
+                .iter()
+                .filter(|entry| entry.value() == worker)
+                .map(|entry| entry.key().clone())
+                .collect();
+
             // Clean up request_to_worker mappings for this worker
             self.request_to_worker
                 .retain(|_request_id, mapped_worker| mapped_worker != worker);
+
+            // Clean up request_to_lora mappings for removed requests
+            for request_id in requests_to_remove {
+                self.request_to_lora.remove(&request_id);
+            }
         }
 
         // Add new workers
