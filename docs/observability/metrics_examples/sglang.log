@@ -1,0 +1,331 @@
+# HELP dynamo_component_inflight_requests Number of requests currently being processed by work handler
+# TYPE dynamo_component_inflight_requests gauge
+dynamo_component_inflight_requests{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B"} 0
+# HELP dynamo_component_kvstats_active_blocks Number of active KV cache blocks currently in use
+# TYPE dynamo_component_kvstats_active_blocks gauge
+dynamo_component_kvstats_active_blocks{dynamo_component="backend",dynamo_namespace="dynamo"} 0
+# HELP dynamo_component_kvstats_gpu_cache_usage_percent GPU cache usage as a percentage (0.0-1.0)
+# TYPE dynamo_component_kvstats_gpu_cache_usage_percent gauge
+dynamo_component_kvstats_gpu_cache_usage_percent{dynamo_component="backend",dynamo_namespace="dynamo"} 0
+# HELP dynamo_component_kvstats_gpu_prefix_cache_hit_rate GPU prefix cache hit rate as a percentage (0.0-1.0)
+# TYPE dynamo_component_kvstats_gpu_prefix_cache_hit_rate gauge
+dynamo_component_kvstats_gpu_prefix_cache_hit_rate{dynamo_component="backend",dynamo_namespace="dynamo"} 0
+# HELP dynamo_component_kvstats_total_blocks Total number of KV cache blocks available
+# TYPE dynamo_component_kvstats_total_blocks gauge
+dynamo_component_kvstats_total_blocks{dynamo_component="backend",dynamo_namespace="dynamo"} 0
+# HELP dynamo_component_request_bytes_total Total number of bytes received in requests by work handler
+# TYPE dynamo_component_request_bytes_total counter
+dynamo_component_request_bytes_total{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B"} 1256
+# HELP dynamo_component_request_duration_seconds Time spent processing requests by work handler
+# TYPE dynamo_component_request_duration_seconds histogram
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="0.005"} 0
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="0.01"} 0
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="0.025"} 0
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="0.05"} 0
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="0.1"} 0
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="0.25"} 0
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="0.5"} 0
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="1"} 0
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="2.5"} 1
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="5"} 1
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="10"} 1
+dynamo_component_request_duration_seconds_bucket{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B",le="+Inf"} 1
+dynamo_component_request_duration_seconds_sum{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B"} 2.173054741
+dynamo_component_request_duration_seconds_count{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B"} 1
+# HELP dynamo_component_requests_total Total number of requests processed by work handler
+# TYPE dynamo_component_requests_total counter
+dynamo_component_requests_total{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B"} 1
+# HELP dynamo_component_response_bytes_total Total number of bytes sent in responses by work handler
+# TYPE dynamo_component_response_bytes_total counter
+dynamo_component_response_bytes_total{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo",model="Qwen/Qwen3-0.6B"} 18329
+# HELP dynamo_component_uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE dynamo_component_uptime_seconds gauge
+dynamo_component_uptime_seconds 110.243679307
+# HELP sglang:per_stage_req_latency_seconds The latency of each stage of requests.
+# TYPE sglang:per_stage_req_latency_seconds histogram
+sglang:per_stage_req_latency_seconds_sum{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 0.00017487071454524994
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.001",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.0016200000000000001",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.0026244000000000007",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.004251528",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.006887475360000002",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.011157710083200004",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.018075490334784006",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.029282294342350097",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.047437316834607154",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.07684845327206359",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.12449449430074302",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.20168108076720373",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.3267233508428701",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.5292918283654495",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="0.8574527619520282",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="1.389073474362286",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="2.2502990284669036",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="3.6454844261163837",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="5.905684770308542",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="9.567209327899839",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="15.49887911119774",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="25.10818416014034",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="40.67525833942735",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="65.89391850987231",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="106.74814798599316",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="172.93199973730896",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="280.1498395744405",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="453.84274011059364",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="735.2252389791618",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="1191.064887146242",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_bucket{engine_type="unified",le="+Inf",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+sglang:per_stage_req_latency_seconds_count{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",stage="prefill_waiting",tp_rank="0"} 1.0
+# HELP sglang:queue_time_seconds Histogram of queueing time in seconds.
+# TYPE sglang:queue_time_seconds histogram
+sglang:queue_time_seconds_sum{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0018392642959952354
+sglang:queue_time_seconds_bucket{engine_type="unified",le="0.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="0.1",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="0.2",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="0.5",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="1.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="2.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="3.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="4.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="5.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="10.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="15.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="20.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="30.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="40.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="50.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="60.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="70.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="80.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="90.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="100.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="200.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="300.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="400.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="500.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="600.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="700.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="800.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="900.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="1000.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="1200.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="1400.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="1600.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="1800.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="2000.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="2500.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="3000.0",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_bucket{engine_type="unified",le="+Inf",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+sglang:queue_time_seconds_count{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+# HELP sglang:realtime_tokens_total Total number of tokens processed (updated on each log interval).
+# TYPE sglang:realtime_tokens_total counter
+sglang:realtime_tokens_total{engine_type="unified",mode="prefill_compute",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 33.0
+sglang:realtime_tokens_total{engine_type="unified",mode="prefill_cache",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+sglang:realtime_tokens_total{engine_type="unified",mode="decode",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 300.0
+# HELP sglang:cuda_graph_passes_total Total number of forward passes categorized by CUDA graph.
+# TYPE sglang:cuda_graph_passes_total counter
+sglang:cuda_graph_passes_total{engine_type="unified",mode="decode_cuda_graph",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 300.0
+# HELP sglang:num_retracted_reqs The number of retracted requests.
+# TYPE sglang:num_retracted_reqs gauge
+sglang:num_retracted_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pid="697544",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_paused_reqs The number of paused requests by async weight sync.
+# TYPE sglang:num_paused_reqs gauge
+sglang:num_paused_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pid="697544",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_running_reqs The number of running requests.
+# TYPE sglang:num_running_reqs gauge
+sglang:num_running_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_used_tokens The number of used tokens.
+# TYPE sglang:num_used_tokens gauge
+sglang:num_used_tokens{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:token_usage The token usage.
+# TYPE sglang:token_usage gauge
+sglang:token_usage{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:pending_prealloc_token_usage The token usage for pending preallocated tokens (not preallocated yet).
+# TYPE sglang:pending_prealloc_token_usage gauge
+sglang:pending_prealloc_token_usage{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:swa_token_usage The token usage for SWA layers.
+# TYPE sglang:swa_token_usage gauge
+sglang:swa_token_usage{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:mamba_usage The token usage for Mamba layers.
+# TYPE sglang:mamba_usage gauge
+sglang:mamba_usage{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:decode_sum_seq_lens The sum of all sequence lengths in decode.
+# TYPE sglang:decode_sum_seq_lens gauge
+sglang:decode_sum_seq_lens{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 313.0
+# HELP sglang:gen_throughput The generation throughput (token/s).
+# TYPE sglang:gen_throughput gauge
+sglang:gen_throughput{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_queue_reqs The number of requests in the waiting queue.
+# TYPE sglang:num_queue_reqs gauge
+sglang:num_queue_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_grammar_queue_reqs The number of requests in the grammar waiting queue.
+# TYPE sglang:num_grammar_queue_reqs gauge
+sglang:num_grammar_queue_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_running_reqs_offline_batch The number of running low-priority offline batch requests(label is 'batch').
+# TYPE sglang:num_running_reqs_offline_batch gauge
+sglang:num_running_reqs_offline_batch{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:cache_hit_rate The prefix cache hit rate.
+# TYPE sglang:cache_hit_rate gauge
+sglang:cache_hit_rate{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:max_total_num_tokens Maximum total number of tokens in the KV cache pool.
+# TYPE sglang:max_total_num_tokens gauge
+sglang:max_total_num_tokens{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 92962.0
+# HELP sglang:spec_accept_length The average acceptance length of speculative decoding.
+# TYPE sglang:spec_accept_length gauge
+sglang:spec_accept_length{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:spec_accept_rate The average acceptance rate of speculative decoding (`accepted tokens / total draft tokens` in batch).
+# TYPE sglang:spec_accept_rate gauge
+sglang:spec_accept_rate{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_prefill_prealloc_queue_reqs The number of requests in the prefill prealloc queue.
+# TYPE sglang:num_prefill_prealloc_queue_reqs gauge
+sglang:num_prefill_prealloc_queue_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_prefill_inflight_queue_reqs The number of requests in the prefill inflight queue.
+# TYPE sglang:num_prefill_inflight_queue_reqs gauge
+sglang:num_prefill_inflight_queue_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_decode_prealloc_queue_reqs The number of requests in the decode prealloc queue.
+# TYPE sglang:num_decode_prealloc_queue_reqs gauge
+sglang:num_decode_prealloc_queue_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:num_decode_transfer_queue_reqs The number of requests in the decode transfer queue.
+# TYPE sglang:num_decode_transfer_queue_reqs gauge
+sglang:num_decode_transfer_queue_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:kv_transfer_speed_gb_s The transfer speed of the KV cache in GB/s.
+# TYPE sglang:kv_transfer_speed_gb_s gauge
+sglang:kv_transfer_speed_gb_s{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:kv_transfer_latency_ms The transfer latency of the KV cache in ms.
+# TYPE sglang:kv_transfer_latency_ms gauge
+sglang:kv_transfer_latency_ms{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:kv_transfer_bootstrap_ms The bootstrap time of the KV transfer in ms.
+# TYPE sglang:kv_transfer_bootstrap_ms gauge
+sglang:kv_transfer_bootstrap_ms{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:kv_transfer_alloc_ms The allocation waiting time of the KV transfer in ms.
+# TYPE sglang:kv_transfer_alloc_ms gauge
+sglang:kv_transfer_alloc_ms{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:kv_transfer_total_mb The total number of tokens transferred in the KV cache.
+# TYPE sglang:kv_transfer_total_mb gauge
+sglang:kv_transfer_total_mb{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:utilization The utilization.
+# TYPE sglang:utilization gauge
+sglang:utilization{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:engine_startup_time The time taken for the engine to start up.
+# TYPE sglang:engine_startup_time gauge
+sglang:engine_startup_time{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:engine_load_weights_time The time taken for the engine to load weights.
+# TYPE sglang:engine_load_weights_time gauge
+sglang:engine_load_weights_time{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:new_token_ratio The new token ratio.
+# TYPE sglang:new_token_ratio gauge
+sglang:new_token_ratio{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.7
+# HELP sglang:is_cuda_graph Whether the batch is using CUDA graph.
+# TYPE sglang:is_cuda_graph gauge
+sglang:is_cuda_graph{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:time_to_first_token_seconds Histogram of time to first token in seconds.
+# TYPE sglang:time_to_first_token_seconds histogram
+sglang:time_to_first_token_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 1.5573770999908447
+sglang:time_to_first_token_seconds_bucket{le="0.1",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:time_to_first_token_seconds_bucket{le="0.2",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:time_to_first_token_seconds_bucket{le="0.4",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:time_to_first_token_seconds_bucket{le="0.6",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:time_to_first_token_seconds_bucket{le="0.8",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:time_to_first_token_seconds_bucket{le="1.0",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:time_to_first_token_seconds_bucket{le="2.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="4.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="6.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="8.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="10.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="20.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="40.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="60.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="80.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="100.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="200.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="400.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_bucket{le="+Inf",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:time_to_first_token_seconds_count{model_name="Qwen/Qwen3-0.6B"} 1.0
+# HELP sglang:inter_token_latency_seconds Histogram of inter-token latency in seconds.
+# TYPE sglang:inter_token_latency_seconds histogram
+sglang:inter_token_latency_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 0.6138594150543213
+sglang:inter_token_latency_seconds_bucket{le="0.002",model_name="Qwen/Qwen3-0.6B"} 57.0
+sglang:inter_token_latency_seconds_bucket{le="0.004",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.006",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.008",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.01",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.015",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.02",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.025",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.03",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.035",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.04",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.06",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.08",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.1",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.2",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.4",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.6",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="0.8",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="1.0",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="2.0",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="4.0",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="6.0",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="8.0",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_bucket{le="+Inf",model_name="Qwen/Qwen3-0.6B"} 299.0
+sglang:inter_token_latency_seconds_count{model_name="Qwen/Qwen3-0.6B"} 299.0
+# HELP sglang:e2e_request_latency_seconds Histogram of End-to-end request latency in seconds
+# TYPE sglang:e2e_request_latency_seconds histogram
+sglang:e2e_request_latency_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 2.171226978302002
+sglang:e2e_request_latency_seconds_bucket{le="0.1",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:e2e_request_latency_seconds_bucket{le="0.2",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:e2e_request_latency_seconds_bucket{le="0.4",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:e2e_request_latency_seconds_bucket{le="0.6",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:e2e_request_latency_seconds_bucket{le="0.8",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:e2e_request_latency_seconds_bucket{le="1.0",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:e2e_request_latency_seconds_bucket{le="2.0",model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:e2e_request_latency_seconds_bucket{le="4.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="6.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="8.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="10.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="20.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="40.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="60.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="80.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="100.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="200.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="400.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="600.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="1200.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="1800.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="2400.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_bucket{le="+Inf",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:e2e_request_latency_seconds_count{model_name="Qwen/Qwen3-0.6B"} 1.0
+# HELP sglang:num_retractions Histogram of retraction counts per request.
+# TYPE sglang:num_retractions histogram
+sglang:num_retractions_sum{model_name="Qwen/Qwen3-0.6B"} 0.0
+sglang:num_retractions_bucket{le="0.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="1.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="2.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="3.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="4.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="5.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="6.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="7.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="8.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="9.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="10.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="15.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="20.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="25.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="30.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="40.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="50.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="75.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="100.0",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_bucket{le="+Inf",model_name="Qwen/Qwen3-0.6B"} 1.0
+sglang:num_retractions_count{model_name="Qwen/Qwen3-0.6B"} 1.0
+# HELP sglang:prompt_tokens_total Number of prefill tokens processed.
+# TYPE sglang:prompt_tokens_total counter
+sglang:prompt_tokens_total{model_name="Qwen/Qwen3-0.6B"} 33.0
+# HELP sglang:generation_tokens_total Number of generation tokens processed.
+# TYPE sglang:generation_tokens_total counter
+sglang:generation_tokens_total{model_name="Qwen/Qwen3-0.6B"} 300.0
+# HELP sglang:num_requests_total Number of requests processed.
+# TYPE sglang:num_requests_total counter
+sglang:num_requests_total{model_name="Qwen/Qwen3-0.6B"} 1.0
