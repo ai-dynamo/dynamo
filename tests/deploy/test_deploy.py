@@ -21,7 +21,6 @@ to chat completion requests correctly.
 """
 
 import logging
-import tempfile
 from typing import Any, Dict, Optional
 
 import pytest
@@ -133,9 +132,9 @@ def validate_chat_response(
     assert "message" in choice, f"Choice missing 'message' field: {choice}"
 
     message = choice["message"]
-    assert message.get("role") == "assistant", (
-        f"Expected role 'assistant', got '{message.get('role')}'"
-    )
+    assert (
+        message.get("role") == "assistant"
+    ), f"Expected role 'assistant', got '{message.get('role')}'"
     assert "content" in message, f"Message missing 'content' field: {message}"
 
     content = message["content"]
@@ -146,9 +145,9 @@ def validate_chat_response(
 
     # Validate model name
     assert "model" in data, f"Response missing 'model' field: {data}"
-    assert data["model"] == expected_model, (
-        f"Expected model '{expected_model}', got '{data['model']}'"
-    )
+    assert (
+        data["model"] == expected_model
+    ), f"Expected model '{expected_model}', got '{data['model']}'"
 
     logger.info(
         f"Response validation passed: model={data['model']}, "
@@ -177,6 +176,7 @@ async def test_deployment(
     deployment_spec: DeploymentSpec,
     namespace: str,
     skip_service_restart: bool,
+    log_dir: str,
 ) -> None:
     """Test Kubernetes deployment end-to-end.
 
@@ -194,6 +194,7 @@ async def test_deployment(
         namespace: Kubernetes namespace for the deployment
         skip_service_restart: Whether to skip restarting NATS/etcd services (default: True).
             Use --restart-services flag to restart services before deployment.
+        log_dir: Temporary directory for test logs (cleaned up on success, preserved on failure)
     """
     # Extract identifying information from the target
     framework = deployment_target.framework
@@ -211,9 +212,6 @@ async def test_deployment(
         f"Starting deployment test for {deployment_target.test_id} "
         f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
     )
-
-    # Create temporary directory for logs
-    log_dir = tempfile.mkdtemp(prefix=f"deploy_test_{framework}_{profile}_")
     logger.info(f"Log directory: {log_dir}")
 
     # Deploy and test
@@ -227,9 +225,9 @@ async def test_deployment(
         frontend_pods = deployment.get_pods([deployment.frontend_service_name])
         frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
 
-        assert len(frontend_pod_list) > 0, (
-            f"No frontend pods found for deployment {deployment_spec.name}"
-        )
+        assert (
+            len(frontend_pod_list) > 0
+        ), f"No frontend pods found for deployment {deployment_spec.name}"
 
         frontend_pod = frontend_pod_list[0]
         logger.info(f"Found frontend pod: {frontend_pod.name}")
@@ -237,9 +235,9 @@ async def test_deployment(
         # Setup port forwarding
         port = deployment_spec.port
         port_forward = deployment.port_forward(frontend_pod, port)
-        assert port_forward is not None, (
-            f"Failed to establish port forward to {frontend_pod.name}:{port}"
-        )
+        assert (
+            port_forward is not None
+        ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
 
         base_url = f"http://localhost:{port_forward.local_port}"
         logger.info(f"Port forwarding established: {base_url}")
@@ -254,9 +252,9 @@ async def test_deployment(
             max_attempts=30,
         )
 
-        assert model_ready, (
-            f"Model '{model}' did not become available within the timeout period"
-        )
+        assert (
+            model_ready
+        ), f"Model '{model}' did not become available within the timeout period"
 
         # Send test request
         response = send_test_request(

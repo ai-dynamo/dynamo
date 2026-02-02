@@ -91,7 +91,9 @@ class DeploymentTarget:
 # -----------------------------------------------------------------------------
 
 
-def discover_example_targets(workspace: Optional[Path] = None) -> List[DeploymentTarget]:
+def discover_example_targets(
+    workspace: Optional[Path] = None,
+) -> List[DeploymentTarget]:
     """Discover deployment targets from examples/backends/{framework}/deploy/*.yaml.
 
     This function scans the examples directory for deployment YAML files.
