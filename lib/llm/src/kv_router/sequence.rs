@@ -1461,6 +1461,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_active_count_for_lora_tracks_requests() -> Result<()> {
+        dynamo_runtime::logging::init();
+        unsafe {
+            std::env::set_var("DYN_EVENT_PLANE", "zmq");
+        }
+
+        let runtime = Runtime::from_current()?;
+        let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
+        let namespace = distributed.namespace("test_lora_counts")?;
+        let component = namespace.component("sequences")?;
+
+        let mut workers_with_configs = HashMap::new();
+        workers_with_configs.insert(0, Some(ModelRuntimeConfig::new()));
+
+        let seq_manager =
+            ActiveSequencesMultiWorker::new(component, 4, workers_with_configs, false, 1).await?;
+
+        seq_manager
+            .add_request(
+                "req-1".to_string(),
+                Some(vec![1, 2]),
+                8,
+                0,
+                None,
+                WorkerWithDpRank::new(0, 0),
+                Some("lora-a".to_string()),
+            )
+            .await?;
+        seq_manager
+            .add_request(
+                "req-2".to_string(),
+                Some(vec![3, 4]),
+                8,
+                0,
+                None,
+                WorkerWithDpRank::new(0, 0),
+                Some("lora-a".to_string()),
+            )
+            .await?;
+        seq_manager
+            .add_request(
+                "req-3".to_string(),
+                Some(vec![5, 6]),
+                8,
+                0,
+                None,
+                WorkerWithDpRank::new(0, 0),
+                Some("lora-b".to_string()),
+            )
+            .await?;
+
+        assert_eq!(seq_manager.get_active_count_for_lora("lora-a"), 2);
+        assert_eq!(seq_manager.get_active_count_for_lora("lora-b"), 1);
+        assert_eq!(seq_manager.get_active_count_for_lora(""), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     #[ignore]
     async fn test_multi_worker_no_token_sequence_sync() -> Result<()> {
         // Initialize logging once
