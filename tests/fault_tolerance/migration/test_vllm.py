@@ -171,6 +171,7 @@ class DynamoWorkerProcess(ManagedProcess):
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
+            display_name=worker_id,
         )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
