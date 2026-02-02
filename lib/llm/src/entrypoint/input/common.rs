@@ -9,7 +9,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
+    kv_router::{DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
@@ -180,7 +180,6 @@ pub async fn build_routed_pipeline<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
-    require_worker_ids: bool,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -209,7 +208,6 @@ where
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
-        require_worker_ids,
         metrics,
     )
     .await
@@ -227,7 +225,6 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
-    require_worker_ids: bool,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -273,15 +270,20 @@ where
         .await?;
 
     let service_backend = match router_mode {
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+        // Direct routing - reads worker IDs from requests, external orchestrator handles selection
+        RouterMode::Direct => {
+            ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
+        }
+        // Normal non-KV routing (round-robin, random)
+        RouterMode::Random | RouterMode::RoundRobin => {
             ServiceBackend::from_engine(Arc::new(router))
         }
+        // KV-aware routing with scoring
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router =
-                KvPushRouter::new(router, chooser).with_require_worker_ids(require_worker_ids);
+            let kv_push_router = KvPushRouter::new(router, chooser);
             ServiceBackend::from_engine(Arc::new(kv_push_router))
         }
     };

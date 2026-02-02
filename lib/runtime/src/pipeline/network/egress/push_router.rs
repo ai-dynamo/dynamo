@@ -77,14 +77,21 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
-    Direct(u64),
-    // Marker value, KV routing itself is in dynamo-llm
+    /// KV-aware routing (scoring based on KV cache overlap)
     KV,
+    /// Direct routing - reads worker ID from each request's routing hints.
+    /// Used when an external orchestrator (e.g., EPP) handles worker selection.
+    /// Mutually exclusive with KV and other routing modes.
+    Direct,
 }
 
 impl RouterMode {
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
+    }
+
+    pub fn is_direct_routing(&self) -> bool {
+        *self == RouterMode::Direct
     }
 }
 
@@ -374,9 +381,11 @@ where
         match self.router_mode {
             RouterMode::Random => self.random(request).await,
             RouterMode::RoundRobin => self.round_robin(request).await,
-            RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
             RouterMode::KV => {
                 anyhow::bail!("KV routing should not call generate on PushRouter");
+            }
+            RouterMode::Direct => {
+                anyhow::bail!("Direct routing should use DirectRoutingRouter, not PushRouter");
             }
         }
     }

@@ -134,9 +134,9 @@ def parse_args():
     parser.add_argument(
         "--router-mode",
         type=str,
-        choices=["round-robin", "random", "kv"],
+        choices=["round-robin", "random", "kv", "direct"],
         default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
-        help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
+        help="How to route the request. Can be set via DYN_ROUTER_MODE env var. Use 'direct' when an external orchestrator (e.g., EPP) handles worker selection.",
     )
     parser.add_argument(
         "--kv-overlap-score-weight",
@@ -228,12 +228,6 @@ def parse_args():
         action="store_true",
         default=False,
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
-    )
-    parser.add_argument(
-        "--direct-route",
-        action="store_true",
-        default=False,
-        help="Require worker IDs in requests. When set, requests without decode_worker_id/prefill_worker_id will error instead of using router selection. Used when worker selection is done externally.",
     )
     parser.add_argument(
         "--active-decode-blocks-threshold",
@@ -401,6 +395,9 @@ async def async_main():
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random
         kv_router_config = None
+    elif flags.router_mode == "direct":
+        router_mode = RouterMode.Direct
+        kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
@@ -415,7 +412,6 @@ async def async_main():
             active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
             active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
             enforce_disagg=flags.enforce_disagg,
-            require_worker_ids=flags.direct_route,
         ),
     }
 

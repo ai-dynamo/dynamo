@@ -88,13 +88,6 @@ pub struct Flags {
     #[arg(long)]
     pub router_track_active_blocks: Option<bool>,
 
-    /// Require worker IDs in requests (for EPP integration).
-    /// When enabled, requests MUST include worker IDs (decode_worker_id, prefill_worker_id).
-    /// Requests without worker IDs will error instead of using router selection.
-    /// Use this when an external orchestrator (EPP) handles worker selection.
-    #[arg(long = "direct-route")]
-    pub require_worker_ids: bool,
-
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
     /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
@@ -203,7 +196,6 @@ impl Flags {
                 None,
             ),
         )
-        .with_require_worker_ids(self.require_worker_ids)
     }
 
     /// Load extra engine arguments from a JSON file
@@ -238,6 +230,11 @@ pub enum RouterMode {
     Random,
     #[value(name = "kv")]
     KV,
+    /// Direct routing - reads worker ID from each request's routing hints.
+    /// Used when an external orchestrator (e.g., EPP) handles worker selection.
+    /// Mutually exclusive with KV routing.
+    #[value(name = "direct")]
+    Direct,
 }
 
 impl From<RouterMode> for RuntimeRouterMode {
@@ -246,6 +243,7 @@ impl From<RouterMode> for RuntimeRouterMode {
             RouterMode::RoundRobin => RuntimeRouterMode::RoundRobin,
             RouterMode::Random => RuntimeRouterMode::Random,
             RouterMode::KV => RuntimeRouterMode::KV,
+            RouterMode::Direct => RuntimeRouterMode::Direct,
         }
     }
 }

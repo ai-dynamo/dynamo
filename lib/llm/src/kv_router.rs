@@ -713,8 +713,6 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    /// If true, require worker IDs in request. Error if missing instead of using router selection.
-    require_worker_ids: bool,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -729,24 +727,12 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter {
-            inner,
-            chooser,
-            require_worker_ids: false,
-        }
-    }
-
-    /// Enable require_worker_ids mode - error if worker IDs missing in requests
-    pub fn with_require_worker_ids(mut self, require_worker_ids: bool) -> Self {
-        self.require_worker_ids = require_worker_ids;
-        self
+        KvPushRouter { inner, chooser }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
     ///
-    /// When `is_query_only` is false and `require_worker_ids` is false, this also registers
-    /// the request with the scheduler via `add_request`. In direct routing mode
-    /// (`require_worker_ids=true`), an external orchestrator handles bookkeeping.
+    /// When `is_query_only` is false, this also registers the request with the scheduler via `add_request`.
     async fn select_worker(
         &self,
         context_id: &str,
@@ -766,17 +752,7 @@ impl KvPushRouter {
             }
             RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
         }) else {
-            // No preselected worker ID found
-            if self.require_worker_ids {
-                // require_worker_ids mode: worker IDs are required
-                anyhow::bail!(
-                    "Worker IDs required (--direct-route) but none found in request for phase {:?}. \
-                     Expected decode_worker_id, prefill_worker_id, or backend_instance_id to be set by external orchestrator (e.g., EPP).",
-                    phase
-                );
-            }
-
-            // Normal mode: find the best match using router
+            // No preselected worker ID - use KV router to find best match
             // Don't update states if this is a query-only request
             let (best_worker, overlap_amount) = self
                 .chooser
@@ -817,9 +793,8 @@ impl KvPushRouter {
             .as_ref()
             .and_then(|r| r.expected_output_tokens);
 
-        // Perform add_request unless this is a query-only request or direct routing mode
-        // In direct routing mode (require_worker_ids=true), external orchestrator handles bookkeeping
-        if !is_query_only && !self.require_worker_ids {
+        // Perform add_request unless this is a query-only request
+        if !is_query_only {
             self.chooser
                 .add_request(
                     context_id.to_string(),
@@ -834,7 +809,7 @@ impl KvPushRouter {
                 request_id = %context_id,
                 worker_id = id,
                 dp_rank = dp_rank,
-                "Skipping add_request - query or direct routing mode"
+                "Skipping add_request - query-only mode"
             );
         }
 
@@ -878,10 +853,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-
-        // In direct routing mode (require_worker_ids=true), an external orchestrator (e.g., EPP)
-        // handles bookkeeping via C FFI. Otherwise, the router manages bookkeeping locally.
-        let direct_routing = self.require_worker_ids;
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
@@ -962,8 +933,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .routing
             .as_ref()
             .and_then(|r| r.expected_output_tokens);
-        let track_output_blocks =
-            self.chooser.kv_router_config.router_track_output_blocks && !direct_routing;
+        let track_output_blocks = self.chooser.kv_router_config.router_track_output_blocks;
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
@@ -997,7 +967,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         };
 
-                        if !direct_routing && !prefill_marked {
+                        if !prefill_marked {
                             // Only mark prefill completed when we receive actual tokens,
                             // not empty bootstrap info (token_ids: []) from disaggregated prefill
                             let has_tokens = item.data.as_ref()
@@ -1039,11 +1009,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            // Only call free() if not in direct routing mode.
-            // In direct routing mode, external caller handles cleanup via C FFI.
-            if !direct_routing
-                && let Err(e) = chooser.free(&context_id).await
-            {
+            // Clean up request state
+            if let Err(e) = chooser.free(&context_id).await {
                 tracing::warn!("Failed to free request {context_id}: {e}");
             }
         });
@@ -1055,5 +1022,53 @@ impl Drop for KvRouter {
     fn drop(&mut self) {
         tracing::info!("Dropping KvRouter - cancelling background tasks");
         self.cancellation_token.cancel();
+    }
+}
+
+/// A simple direct routing wrapper for `RouterMode::Direct`.
+///
+/// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
+/// then routes directly to the specified worker. Used when an external orchestrator
+/// (e.g., EPP) handles worker selection.
+///
+/// Unlike `KvPushRouter`, this does not require a `KvRouter` and does not perform
+/// KV scoring, bookkeeping, or metrics tracking. It simply routes to specified workers.
+pub struct DirectRoutingRouter {
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+}
+
+impl DirectRoutingRouter {
+    pub fn new(inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>) -> Self {
+        DirectRoutingRouter { inner }
+    }
+
+    /// Extract worker ID from request routing hints.
+    /// Returns an error if no worker ID is found (required in direct routing mode).
+    fn get_worker_id(request: &PreprocessedRequest) -> Result<u64, Error> {
+        let routing = request.routing.as_ref();
+        let worker_id = routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id));
+
+        worker_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Worker ID required (--direct-route) but none found in request. \
+                 Expected decode_worker_id or backend_instance_id to be set by external orchestrator (e.g., EPP)."
+            )
+        })
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for DirectRoutingRouter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let worker_id = Self::get_worker_id(&request)?;
+
+        tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");
+
+        self.inner.direct(request, worker_id).await
     }
 }
