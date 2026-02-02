@@ -8,13 +8,12 @@ import argparse
 import asyncio
 import json
 import random
-import time
 import statistics
-from dataclasses import dataclass, field
-from typing import List, Optional
+import time
+from dataclasses import dataclass
+from typing import List
 
 import aiohttp
-
 
 IMAGE_URLS = [
     "https://huggingface.co/datasets/Sayali9141/traffic_signal_images/resolve/main/61.jpg",
@@ -34,7 +33,9 @@ class RequestResult:
     response_text: str = ""  # Captured response for quality check
 
 
-def build_request_payload(image_url: str, model: str, max_tokens: int, stream: bool) -> dict:
+def build_request_payload(
+    image_url: str, model: str, max_tokens: int, stream: bool
+) -> dict:
     return {
         "model": model,
         "messages": [
@@ -125,8 +126,10 @@ async def send_request(
                 data = await response.json()
                 # Extract response text from non-streaming response
                 if "choices" in data and len(data["choices"]) > 0:
-                    response_text = data["choices"][0].get("message", {}).get("content", "")
-                
+                    response_text = (
+                        data["choices"][0].get("message", {}).get("content", "")
+                    )
+
                 total_time = time.perf_counter() - start_time
                 return RequestResult(
                     request_id=request_id,
@@ -212,30 +215,32 @@ def calculate_percentile(data: List[float], percentile: float) -> float:
 def print_sample_responses(results: List[RequestResult], num_samples: int = 3):
     """Print random sample responses for quality verification."""
     successful = [r for r in results if r.success and r.response_text]
-    
+
     if not successful:
         print("\nNo successful responses with text to display.")
         return
-    
+
     # Randomly select samples (or all if fewer than num_samples)
     samples = random.sample(successful, min(num_samples, len(successful)))
-    
+
     print("\n" + "=" * 60)
     print(f"SAMPLE RESPONSES ({len(samples)} random samples)")
     print("=" * 60)
-    
+
     for i, result in enumerate(samples, 1):
         image_name = result.image_url.split("/")[-1]
         print(f"\n--- Sample {i} (Request #{result.request_id}) ---")
         print(f"Image: {image_name}")
-        print(f"TTFT: {result.ttft * 1000:.0f}ms | Total: {result.total_time * 1000:.0f}ms")
+        print(
+            f"TTFT: {result.ttft * 1000:.0f}ms | Total: {result.total_time * 1000:.0f}ms"
+        )
         print(f"Response ({len(result.response_text)} chars):")
         # Truncate long responses for readability
         response_preview = result.response_text[:500]
         if len(result.response_text) > 500:
             response_preview += "... [truncated]"
         print(f"  {response_preview}")
-    
+
     print("\n" + "-" * 60)
 
 
@@ -277,7 +282,7 @@ def print_results(results: List[RequestResult], stream: bool, total_elapsed: flo
         print(f"  p99:              {calculate_percentile(ttft_values, 99):>10.2f}")
 
         if stream:
-            print(f"\nTotal Response Time Statistics (ms):")
+            print("\nTotal Response Time Statistics (ms):")
             print("-" * 40)
             print(f"  Min:              {min(total_times):>10.2f}")
             print(f"  Max:              {max(total_times):>10.2f}")
@@ -392,7 +397,7 @@ def main():
 
     print(f"Benchmark completed in {elapsed:.2f}s")
     print_results(results, stream, elapsed)
-    
+
     # Show sample responses for quality verification
     if args.show_responses > 0:
         print_sample_responses(results, args.show_responses)
