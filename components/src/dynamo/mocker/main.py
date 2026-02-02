@@ -37,26 +37,22 @@ async def graceful_shutdown(runtimes: list):
     logger.info("DistributedRuntime shutdown complete")
 
 
-async def prefetch_model(model_path: str) -> str:
-    """Pre-fetch model from HuggingFace to avoid rate limiting with many workers.
-    Returns the local path to the cached model (or original path if already local).
-    """
+async def prefetch_model(model_path: str) -> None:
+    """Pre-fetch model from HuggingFace to avoid rate limiting with many workers."""
 
     if Path(model_path).exists():
         logger.info(f"Using local model path: {model_path}")
-        return model_path
+        return
 
     logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
     try:
         local_path = await fetch_llm(model_path, ignore_weights=True)
         logger.info(f"Model cached at: {local_path}")
-        return local_path
     except Exception as e:
         logger.warning(
             f"Failed to pre-fetch model: {e}. "
             "Workers will attempt individual downloads (may cause rate limiting)."
         )
-        return model_path
 
 
 async def worker():
@@ -83,7 +79,7 @@ async def worker():
 
     # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
     if args.num_workers > 1 and args.model_path:
-        args.model_path = await prefetch_model(args.model_path)
+        await prefetch_model(args.model_path)
 
     try:
         logger.info(
