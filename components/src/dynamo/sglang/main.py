@@ -11,8 +11,8 @@ import sglang as sgl
 import uvloop
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.storage import get_fs
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging

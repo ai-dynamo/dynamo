@@ -33,7 +33,6 @@ S3:
 
 """
 import fsspec
-
 from fsspec.implementations.dirfs import DirFileSystem
 
 
@@ -62,6 +61,6 @@ def get_fs(fs_url: str) -> DirFileSystem:
     fs_opts = {}
     if protocol in "file":
         # create directory for local filesystem
-        fs_opts = { "auto_mkdir": True }
+        fs_opts = {"auto_mkdir": True}
 
     return DirFileSystem(fs=fsspec.filesystem(protocol, **fs_opts), path=root_path)
