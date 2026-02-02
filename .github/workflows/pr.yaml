@@ -91,18 +91,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Bootstrap buildkit
-        uses: ./.github/actions/bootstrap-buildkit
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          buildkit_worker_addresses: ''
-
-      # - name: Initialize Dynamo Builder
-      #   uses: ./.github/actions/init-dynamo-builder
-      #   with:
-      #     builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      #     flavor: general
-      #     all_arch: 'true'
+          flavor: general
+          all_arch: 'true'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
