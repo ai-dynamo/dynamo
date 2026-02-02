@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::discovery::RuntimeConfigsWithNotify;
+use crate::discovery::RuntimeConfigs;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
@@ -17,8 +17,7 @@ use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
-use super::indexer::OverlapScores;
-use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
 use dynamo_tokens::SequenceHash;
@@ -44,9 +43,6 @@ pub struct PotentialLoad {
 pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
-
-    #[error("all workers busy")]
-    AllWorkersBusy,
 
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
@@ -99,7 +95,7 @@ impl KvScheduler {
     pub async fn start(
         component: Component,
         block_size: u32,
-        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
+        workers_with_configs: Arc<RuntimeConfigs>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_id: u64,
@@ -107,7 +103,7 @@ impl KvScheduler {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
         // Get initial workers from DashMap for slot initialization.
-        // ModelManager guarantees at least one worker is present before KvRouter::new() is called.
+        // Caller must ensure at least one worker is present (via wait_for_some).
         let initial_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_with_configs
             .configs
             .iter()
@@ -127,9 +123,11 @@ impl KvScheduler {
         );
 
         // Spawn background task to sync slots with DashMap when notified of changes.
-        // ModelManager's watcher updates the DashMap and notifies; we wait on notify here.
+        // ModelManager's watcher updates the DashMap and notifies; we wait on watch receiver here.
         let slots_monitor = slots.clone();
-        let workers_monitor = workers_with_configs.clone();
+        let subscriber = workers_with_configs.subscribe();
+        let configs_monitor = subscriber.configs;
+        let mut change_rx = subscriber.change_rx;
         let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("KvScheduler workers monitoring task started");
@@ -142,13 +140,17 @@ impl KvScheduler {
                         tracing::trace!("KvScheduler workers monitoring task shutting down");
                         break;
                     }
-                    _ = workers_monitor.notify.notified() => {}
+                    result = change_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                            break;
+                        }
+                    }
                 }
 
                 // Get current workers from DashMap
                 let current_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> =
-                    workers_monitor
-                        .configs
+                    configs_monitor
                         .iter()
                         .map(|r| (*r.key(), r.value().clone()))
                         .collect();
@@ -254,12 +256,6 @@ impl KvScheduler {
                     }
                     Err(KvSchedulerError::NoEndpoints) => {
                         tracing::trace!("no endpoints available; waiting for endpoints update");
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        continue;
-                    }
-                    // TODO: this is not actually hooked up
-                    Err(KvSchedulerError::AllWorkersBusy) => {
-                        tracing::trace!("all workers busy; waiting for more capacity");
                         tokio::time::sleep(Duration::from_millis(5)).await;
                         continue;
                     }
@@ -493,6 +489,13 @@ impl WorkerSelector for DefaultWorkerSelector {
 
         let mut worker_logits = HashMap::new();
 
+        // Use override if provided, otherwise use default config
+        let overlap_weight = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.overlap_score_weight)
+            .unwrap_or(self.kv_router_config.overlap_score_weight);
+
         // Calculate logits for each worker with dp_rank
         // Outer loop: iterate over all workers from runtime config
         // Inner loop: iterate over all dp_ranks for each worker
@@ -517,13 +520,6 @@ impl WorkerSelector for DefaultWorkerSelector {
                     .get(&worker)
                     .unwrap_or(&(potential_prefill_block.floor() as usize))
                     as f64;
-
-                // Use override if provided, otherwise use default config
-                let overlap_weight = request
-                    .router_config_override
-                    .as_ref()
-                    .and_then(|cfg| cfg.overlap_score_weight)
-                    .unwrap_or(self.kv_router_config.overlap_score_weight);
 
                 // Calculate logit (lower is better)
                 let logit = overlap_weight * potential_prefill_block + decode_block;
