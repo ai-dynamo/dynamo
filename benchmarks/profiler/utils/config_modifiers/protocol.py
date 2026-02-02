@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, Tuple
 
 from benchmarks.profiler.utils.config import (
     Config,
@@ -69,7 +69,7 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def get_model_name(cls, config: dict) -> str:
+    def get_model_name(cls, config: dict) -> Tuple[str, str]:
         ...
 
     @classmethod
