@@ -171,8 +171,6 @@ pub(crate) struct EntrypointArgs {
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     namespace: Option<String>,
-    custom_backend_metrics_endpoint: Option<String>,
-    custom_backend_metrics_polling_interval: Option<f64>,
     is_prefill: bool,
     engine_factory: Option<PyEngineFactory>,
 }
@@ -181,7 +179,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false, engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -199,8 +197,6 @@ impl EntrypointArgs {
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
         namespace: Option<String>,
-        custom_backend_metrics_endpoint: Option<String>,
-        custom_backend_metrics_polling_interval: Option<f64>,
         is_prefill: bool,
         engine_factory: Option<PyObject>,
     ) -> PyResult<Self> {
@@ -245,8 +241,6 @@ impl EntrypointArgs {
             tls_key_path,
             extra_engine_args,
             namespace,
-            custom_backend_metrics_endpoint,
-            custom_backend_metrics_polling_interval,
             is_prefill,
             engine_factory,
         })
@@ -287,9 +281,7 @@ pub fn make_engine<'p>(
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
-        .namespace(args.namespace.clone())
-        .custom_backend_metrics_endpoint(args.custom_backend_metrics_endpoint.clone())
-        .custom_backend_metrics_polling_interval(args.custom_backend_metrics_polling_interval);
+        .namespace(args.namespace.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         if let Some(model_path) = args.model_path.clone() {
             let local_path = if model_path.exists() {
