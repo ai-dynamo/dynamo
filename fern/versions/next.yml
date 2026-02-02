@@ -26,6 +26,10 @@ navigation:
         path: ../pages/getting-started/installation.md
       - page: Support Matrix
         path: ../pages/reference/support-matrix.md
+      - page: Feature Matrix
+        path: ../pages/reference/feature-matrix.md
+      - page: Release Artifacts
+        path: ../pages/reference/release-artifacts.md
       - page: Examples
         path: ../pages/getting-started/examples.md
 
@@ -44,10 +48,18 @@ navigation:
             path: ../pages/kubernetes/deployment/minikube-setup.md
           - page: Managing Models with DynamoModel
             path: ../pages/kubernetes/deployment/dynamomodel-guide.md
+          - page: Service Discovery
+            path: ../pages/kubernetes/service-discovery.md
+          - page: Webhooks
+            path: ../pages/kubernetes/webhooks.md
+          - page: Autoscaling
+            path: ../pages/kubernetes/autoscaling.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
             path: ../pages/kubernetes/observability/metrics.md
+          - page: Operator Metrics
+            path: ../pages/kubernetes/observability/operator-metrics.md
           - page: Logging
             path: ../pages/kubernetes/observability/logging.md
       - section: Multinode
@@ -71,7 +83,7 @@ navigation:
       - page: Tuning Disaggregated Performance
         path: ../pages/performance/tuning.md
       - page: Writing Python Workers in Dynamo
-        path: ../pages/development/runtime-guide.md
+        path: ../pages/development/backend-guide.md
       - section: Observability (Local)
         contents:
           - page: Overview
@@ -116,6 +128,10 @@ navigation:
             path: ../pages/backends/sglang/README.md
           - page: TensorRT-LLM
             path: ../pages/backends/trtllm/README.md
+      - section: Frontends
+        contents:
+          - page: KServe
+            path: ../pages/frontends/kserve.md
       - page: Router
         path: ../pages/router/README.md
       - section: Planner
@@ -162,6 +178,8 @@ navigation:
         path: ../pages/design-docs/disagg-serving.md
       - page: Distributed Runtime
         path: ../pages/design-docs/distributed-runtime.md
+      - page: Request Plane
+        path: ../pages/guides/request-plane.md
       - page: Event Plane
         path: ../pages/design-docs/event-plane.md
 
