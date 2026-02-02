@@ -98,9 +98,7 @@ def send_request(
         if method_upper == "GET":
             response = requests.get(url, params=payload, timeout=timeout)
         elif method_upper == "POST":
-            response = requests.post(
-                url, json=payload, timeout=timeout, stream=stream
-            )
+            response = requests.post(url, json=payload, timeout=timeout, stream=stream)
         else:
             # Fallback for other methods if needed
             response = requests.request(
