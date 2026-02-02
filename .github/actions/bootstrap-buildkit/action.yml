@@ -58,7 +58,7 @@ inputs:
   tolerations:
     description: 'Tolerations for buildkit pods'
     required: false
-    default: "key=buildkit-fallback-workervalue=true,operator=Equal,effect=NoSchedule"
+    default: "key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"
   skip_bootstrap:
     description: 'Skip the bootstrap step (only create the builder)'
     required: false
