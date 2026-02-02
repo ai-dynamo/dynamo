@@ -13,6 +13,14 @@ boto3==1.42.4
 boto3-stubs[s3]==1.42.9  # Type stubs for boto3 S3 client
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
+# For Kubernetes operations in deploy tests
+kr8s==0.20.13
+kubernetes==32.0.1
+kubernetes_asyncio==34.3.3
+pyyaml==6.0.3
+requests==2.32.5
+tabulate==0.9.0
+websocket-client==1.9.0
 # For NATS object store verification in router tests
 nats-py==2.12.0
 psutil<=7.0.0  # System package, may vary by platform (was >=5.0.0)

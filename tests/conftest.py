@@ -60,6 +60,7 @@ def pytest_configure(config):
         "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
         "k8s: marks tests as requiring Kubernetes",
         "fault_tolerance: marks tests as fault tolerance tests",
+        "deploy: marks tests as deployment tests",
         # Third-party plugin markers
         "timeout: test timeout in seconds (pytest-timeout plugin)",
     ]
@@ -278,7 +279,7 @@ class EtcdServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
+            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
             health_check_ports=[port],
             data_dir=data_dir,
             log_dir=request.node.name,
@@ -325,7 +326,7 @@ class NatsServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
+            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
             data_dir=data_dir,
             health_check_ports=[port],
             health_check_funcs=[self._nats_ready],

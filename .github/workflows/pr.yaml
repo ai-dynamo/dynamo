@@ -346,9 +346,9 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
-          model_name: "Qwen/Qwen3-0.6B"
-          test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+          platform_arch: amd64
 
 
 
@@ -384,9 +384,9 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
-          model_name: "Qwen/Qwen3-0.6B"
-          test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+          platform_arch: amd64
 
 
   deploy-test-sglang:
@@ -417,10 +417,9 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
-          model_name: "Qwen/Qwen3-0.6B"
-          test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
-
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
+          platform_arch: amd64
 
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
@@ -452,9 +451,10 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
-          model_name: "Qwen/Qwen3-0.6B"
-          test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
+          platform_arch: amd64
+          
 
   # ============================================================================
   # CLEANUP JOBS
