@@ -5,7 +5,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from transformers import AutoTokenizer
 
@@ -17,6 +17,7 @@ from dynamo.sglang.multimodal_utils import (
 )
 from dynamo.sglang.protocol import (
     MultiModalInput,
+    MultiModalInputGroup,
     MultiModalRequest,
     SglangMultimodalRequest,
 )
@@ -58,6 +59,9 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
         """
         Process multimodal request and forward to encode worker.
 
+        Supports multiple images in a single request. Each image is collected
+        into a MultiModalInputGroup for individual processing by the encode worker.
+
         Args:
             raw_request: Raw multimodal request to process.
             context: Context object for cancellation handling.
@@ -66,21 +70,45 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
             # If the request is not MultiModalRequest, convert it to MultiModalRequest
             raw_request = MultiModalRequest.model_validate(raw_request)
 
-        multimodal_input = MultiModalInput()
+        # Collect all multimodal inputs from the request
+        # Each image/video gets its own MultiModalInputGroup for individual encoding
+        multimodal_inputs: List[MultiModalInputGroup] = []
+        has_video = False
 
         for message in raw_request.messages:
             for item in message.content:
                 if item.type == "image_url":
-                    multimodal_input.image_url = item.image_url.url
+                    if has_video:
+                        raise ValueError(
+                            "Cannot mix images and videos in the same request"
+                        )
+                    multimodal_inputs.append(
+                        MultiModalInputGroup(
+                            multimodal_input=MultiModalInput(
+                                image_url=item.image_url.url
+                            )
+                        )
+                    )
                 elif item.type == "video_url":
-                    if multimodal_input.image_url is not None:
-                        raise ValueError("Cannot provide both image and video URLs")
-                    multimodal_input.video_url = item.video_url.url
+                    if multimodal_inputs:
+                        raise ValueError(
+                            "Cannot mix images and videos in the same request"
+                        )
+                    has_video = True
+                    multimodal_inputs.append(
+                        MultiModalInputGroup(
+                            multimodal_input=MultiModalInput(
+                                video_url=item.video_url.url
+                            )
+                        )
+                    )
 
-        if multimodal_input.image_url is None and multimodal_input.video_url is None:
-            raise ValueError("Either image URL or video URL is required")
+        if not multimodal_inputs:
+            raise ValueError("At least one image URL or video URL is required")
 
-        async for response in self._generate(raw_request, multimodal_input):
+        logger.debug(f"Collected {len(multimodal_inputs)} multimodal input(s)")
+
+        async for response in self._generate(raw_request, multimodal_inputs):
             logger.debug(
                 f"Generated response type {type(response)}, content: {response}"
             )
@@ -89,7 +117,7 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
     async def _generate(
         self,
         raw_request: MultiModalRequest,
-        multimodal_input: MultiModalInput,
+        multimodal_inputs: List[MultiModalInputGroup],
     ):
         # Generate a unique request ID for tracking
         request_id = str(uuid.uuid4().hex)
@@ -102,7 +130,7 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
 
         worker_request = SglangMultimodalRequest(
             request=sglang_request,
-            multimodal_input=multimodal_input,
+            multimodal_inputs=multimodal_inputs,
         )
 
         # Send to encoder worker

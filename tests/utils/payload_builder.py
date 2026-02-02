@@ -171,6 +171,128 @@ def multimodal_payload_default(
     )
 
 
+def multimodal_multi_image_payload(
+    image_urls: List[str],
+    text: str = "Compare and describe these images",
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 300,
+    temperature: Optional[float] = None,
+    stream: bool = False,
+) -> ChatPayload:
+    """Create a multimodal chat payload with multiple images.
+
+    Supports DIS-1266: Multiple images in a single request for SGLang EPD.
+
+    Args:
+        image_urls: List of URLs of images to include in the request
+        text: Text prompt to accompany the images
+        repeat_count: Number of times to repeat the request
+        expected_response: List of strings expected in the response
+        expected_log: List of regex patterns expected in logs
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (optional)
+        stream: Whether to stream the response
+
+    Returns:
+        ChatPayload configured for multimodal requests with multiple images
+
+    Example:
+        payload = multimodal_multi_image_payload(
+            image_urls=[
+                "http://example.com/cat.jpg",
+                "http://example.com/dog.jpg",
+            ],
+            text="Which animal is shown in each image?",
+        )
+    """
+    content: List[Dict[str, Any]] = []
+
+    # Add images first, then text (common pattern for VLMs)
+    for url in image_urls:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": url},
+            }
+        )
+
+    content.append({"type": "text", "text": text})
+
+    return chat_payload(
+        content=content,
+        repeat_count=repeat_count,
+        expected_response=expected_response or ["image"],
+        expected_log=expected_log or [],
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stream=stream,
+    )
+
+
+def multimodal_interleaved_payload(
+    items: List[Dict[str, str]],
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 300,
+    temperature: Optional[float] = None,
+    stream: bool = False,
+) -> ChatPayload:
+    """Create a multimodal chat payload with interleaved text and images.
+
+    Supports DIS-1266: Multiple images with interleaved text for SGLang EPD.
+
+    Args:
+        items: List of dicts with either {"text": "..."} or {"image_url": "..."}
+        repeat_count: Number of times to repeat the request
+        expected_response: List of strings expected in the response
+        expected_log: List of regex patterns expected in logs
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (optional)
+        stream: Whether to stream the response
+
+    Returns:
+        ChatPayload configured for multimodal requests with interleaved content
+
+    Example:
+        payload = multimodal_interleaved_payload(
+            items=[
+                {"text": "First image:"},
+                {"image_url": "http://example.com/cat.jpg"},
+                {"text": "Second image:"},
+                {"image_url": "http://example.com/dog.jpg"},
+                {"text": "Which one is a cat?"},
+            ],
+        )
+    """
+    content: List[Dict[str, Any]] = []
+
+    for item in items:
+        if "text" in item:
+            content.append({"type": "text", "text": item["text"]})
+        elif "image_url" in item:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": item["image_url"]},
+                }
+            )
+        else:
+            raise ValueError(f"Invalid item in multimodal content: {item}")
+
+    return chat_payload(
+        content=content,
+        repeat_count=repeat_count,
+        expected_response=expected_response or ["image"],
+        expected_log=expected_log or [],
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stream=stream,
+    )
+
+
 def metric_payload_default(
     min_num_requests: int,
     repeat_count: int = 1,

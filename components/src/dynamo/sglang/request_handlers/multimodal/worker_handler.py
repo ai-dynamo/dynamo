@@ -4,7 +4,7 @@
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, List
 
 import sglang as sgl
 import torch
@@ -14,6 +14,7 @@ from dynamo._core import Client, Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
+    MultiModalInputGroup,
     SglangMultimodalRequest,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -78,17 +79,26 @@ class EmbeddingsProcessor:
         """Initialize the connector for embeddings processing"""
         self._connector = connect.Connector()
 
-    async def process_embeddings(self, request: SglangMultimodalRequest):
-        """Process embeddings from serialized request"""
+    async def process_embeddings_from_group(
+        self, mm_group: MultiModalInputGroup
+    ) -> tuple[torch.Tensor, connect.Descriptor]:
+        """
+        Process embeddings from a single MultiModalInputGroup.
 
-        logger.debug(f"Processing embeddings with shape: {request.embeddings_shape}")
+        Args:
+            mm_group: A multimodal input group containing embeddings metadata
+
+        Returns:
+            Tuple of (embeddings tensor, descriptor)
+        """
+        logger.debug(f"Processing embeddings with shape: {mm_group.embeddings_shape}")
 
         # Validate embeddings shape
-        if request.embeddings_shape is None or len(request.embeddings_shape) < 2:
-            raise ValueError(f"Invalid embeddings shape: {request.embeddings_shape}")
+        if mm_group.embeddings_shape is None or len(mm_group.embeddings_shape) < 2:
+            raise ValueError(f"Invalid embeddings shape: {mm_group.embeddings_shape}")
 
         embeddings = torch.empty(
-            request.embeddings_shape,
+            mm_group.embeddings_shape,
             dtype=MultimodalConfig.EMBEDDINGS_DTYPE,
             device=MultimodalConfig.EMBEDDINGS_DEVICE,
         )
@@ -104,20 +114,47 @@ class EmbeddingsProcessor:
             self._connector = connect.Connector()
 
         read_op = await self._connector.begin_read(
-            request.serialized_request, descriptor
+            mm_group.serialized_request, descriptor
         )
         await read_op.wait_for_completion()
 
         return embeddings, descriptor
 
+    async def process_all_embeddings(
+        self, multimodal_inputs: List[MultiModalInputGroup]
+    ) -> List[tuple[torch.Tensor, connect.Descriptor]]:
+        """
+        Process embeddings from all multimodal input groups.
+
+        Args:
+            multimodal_inputs: List of multimodal input groups
+
+        Returns:
+            List of (embeddings tensor, descriptor) tuples
+        """
+        results = []
+        for idx, mm_group in enumerate(multimodal_inputs):
+            logger.debug(f"Processing embeddings for image {idx}")
+            embeddings, descriptor = await self.process_embeddings_from_group(mm_group)
+            results.append((embeddings, descriptor))
+        return results
+
     @staticmethod
     def create_multimodal_item(
-        embeddings: torch.Tensor, request: SglangMultimodalRequest
+        embeddings: torch.Tensor, mm_group: MultiModalInputGroup
     ) -> dict:
-        """Create multimodal item for SGLang generation"""
+        """
+        Create multimodal item for SGLang generation from a single input group.
 
+        Args:
+            embeddings: The embeddings tensor
+            mm_group: The multimodal input group containing grid info
+
+        Returns:
+            Dictionary suitable for SGLang's image_data parameter
+        """
         precomputed_embeddings = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
-        grid_thw_tensor = torch.tensor(request.image_grid_thw)
+        grid_thw_tensor = torch.tensor(mm_group.image_grid_thw)
 
         mm_item = dict(
             modality="IMAGE",
@@ -126,6 +163,30 @@ class EmbeddingsProcessor:
         )
 
         return mm_item
+
+    def create_all_multimodal_items(
+        self,
+        embeddings_results: List[tuple[torch.Tensor, connect.Descriptor]],
+        multimodal_inputs: List[MultiModalInputGroup],
+    ) -> List[dict]:
+        """
+        Create multimodal items for all images.
+
+        Args:
+            embeddings_results: List of (embeddings, descriptor) tuples
+            multimodal_inputs: List of multimodal input groups
+
+        Returns:
+            List of multimodal items for SGLang
+        """
+        mm_items = []
+        for (embeddings, _), mm_group in zip(embeddings_results, multimodal_inputs):
+            mm_item = self.create_multimodal_item(embeddings, mm_group)
+            mm_items.append(mm_item)
+            logger.debug(
+                f"Created multimodal item with embeddings shape: {embeddings.shape}"
+            )
+        return mm_items
 
 
 class StreamProcessor:
@@ -326,30 +387,35 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
     async def _generate_aggregated(
         self, request: SglangMultimodalRequest
     ) -> AsyncIterator[str]:
-        """Handle aggregated mode generation"""
+        """Handle aggregated mode generation with support for multiple images"""
         input_ids = request.request.token_ids
         if not input_ids:
             raise ValueError("input_ids is required")
 
+        if not request.multimodal_inputs:
+            raise ValueError("multimodal_inputs is required")
+
         try:
             sampling_params = SglangUtils.build_sampling_params(request)
-            embeddings, descriptor = await self.embeddings_processor.process_embeddings(
-                request
+
+            # Process embeddings for all images
+            embeddings_results = await self.embeddings_processor.process_all_embeddings(
+                request.multimodal_inputs
             )
 
-            # Create multimodal item
-            mm_item = self.embeddings_processor.create_multimodal_item(
-                embeddings, request
+            # Create multimodal items for all images
+            mm_items = self.embeddings_processor.create_all_multimodal_items(
+                embeddings_results, request.multimodal_inputs
             )
 
             logger.debug(
-                f"Generated multimodal item with embeddings shape: {embeddings.shape}"
+                f"Generated {len(mm_items)} multimodal item(s) for {len(request.multimodal_inputs)} image(s)"
             )
             logger.debug(f"Input token sequence length: {len(input_ids)}")
 
             agg_stream = await self.engine.async_generate(
                 input_ids=input_ids,
-                image_data=[mm_item],
+                image_data=mm_items,
                 sampling_params=sampling_params,
                 stream=True,
             )
@@ -363,12 +429,18 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                     "Shape mismatch error - this likely indicates a tokenization/embedding alignment issue"
                 )
                 logger.error(f"Request token IDs length: {len(input_ids)}")
-                logger.error(f"Embeddings shape: {request.embeddings_shape}")
+                logger.error(
+                    f"Number of multimodal inputs: {len(request.multimodal_inputs)}"
+                )
+                for idx, mm_group in enumerate(request.multimodal_inputs):
+                    logger.error(
+                        f"  Image {idx} embeddings shape: {mm_group.embeddings_shape}"
+                    )
                 logger.error(f"Token sequence preview: {input_ids[:20]}...")
                 error_msg = (
                     f"Multimodal embedding alignment error: {str(e)}. "
                     f"This usually happens when the tokenization changes between requests. "
-                    f"Token count: {len(input_ids)}, Embedding shape: {request.embeddings_shape}"
+                    f"Token count: {len(input_ids)}, Num images: {len(request.multimodal_inputs)}"
                 )
                 yield ErrorResponseBuilder.build_error_response(RuntimeError(error_msg))
             else:
@@ -481,24 +553,33 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
     async def _process_prefill_generation(
         self, disagg_request: DisaggSglangMultimodalRequest, bootstrap_room: int
     ):
-        """Process multimodal input and start prefill generation"""
+        """Process multimodal inputs and start prefill generation with multiple images"""
         # Get the SglangMultimodalRequest from the DisaggSglangMultimodalRequest
         request = disagg_request.request
         input_ids = request.request.token_ids
         sampling_params = disagg_request.sampling_params
 
-        # Process embeddings from encode worker using our embeddings processor
-        embeddings, descriptor = await self.embeddings_processor.process_embeddings(
-            request
+        if not request.multimodal_inputs:
+            raise ValueError("multimodal_inputs is required")
+
+        # Process embeddings from encode worker for all images
+        embeddings_results = await self.embeddings_processor.process_all_embeddings(
+            request.multimodal_inputs
         )
 
-        # Create multimodal item for prefill generation
-        mm_item = self.embeddings_processor.create_multimodal_item(embeddings, request)
+        # Create multimodal items for all images
+        mm_items = self.embeddings_processor.create_all_multimodal_items(
+            embeddings_results, request.multimodal_inputs
+        )
+
+        logger.debug(
+            f"Prefill: Generated {len(mm_items)} multimodal item(s) for {len(request.multimodal_inputs)} image(s)"
+        )
 
         # Start SGLang prefill generation (like regular SGLang)
         results = await self.engine.async_generate(
             input_ids=input_ids,
-            image_data=[mm_item],
+            image_data=mm_items,
             sampling_params=sampling_params,
             stream=True,
             bootstrap_host=self.bootstrap_host,

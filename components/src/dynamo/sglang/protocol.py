@@ -116,15 +116,36 @@ class MultiModalInput(BaseModel):
     video_url: Optional[str] = None
 
 
-class SglangMultimodalRequest(BaseModel):
+class MultiModalInputGroup(BaseModel):
+    """
+    A group containing a single multimodal input (image or video) along with
+    its computed metadata after encoding. Similar to vLLM's MultiModalGroup.
+
+    This allows handling multiple images in a single request by maintaining
+    a list of these groups, where each group tracks its own embeddings shape,
+    grid information, and NIXL transfer metadata.
+    """
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    request: PreprocessedRequest
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
+
+
+class SglangMultimodalRequest(BaseModel):
+    """
+    Request format for SGLang multimodal processing.
+
+    Supports multiple images via the multimodal_inputs list, where each
+    MultiModalInputGroup contains one image/video and its associated metadata.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    request: PreprocessedRequest
+    multimodal_inputs: List[MultiModalInputGroup] = Field(default_factory=list)
 
 
 class DisaggSglangMultimodalRequest(BaseModel):

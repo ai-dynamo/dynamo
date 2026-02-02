@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, List, Tuple
 
 import torch
 from sglang.srt.parser.conversation import chat_templates
@@ -13,7 +13,7 @@ from dynamo._core import Client, Component, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.multimodal_utils import ImageLoader, encode_image_embeddings
-from dynamo.sglang.protocol import SglangMultimodalRequest
+from dynamo.sglang.protocol import MultiModalInputGroup, SglangMultimodalRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             self.image_token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
 
         self.min_workers = 1
+        self.readables = []  # Store NIXL readables (matches vLLM pattern)
 
     def cleanup(self):
         pass
@@ -95,7 +96,10 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         self, request: SglangMultimodalRequest, context: Context
     ) -> AsyncIterator[str]:
         """
-        Generate precomputed embeddings for multimodal input.
+        Generate precomputed embeddings for multimodal inputs.
+
+        Supports multiple images in a single request. Each image is processed
+        individually, and tokens are expanded for each image's embeddings.
 
         Args:
             request: Multimodal request with image/video data.
@@ -107,20 +111,39 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             else:
                 request = SglangMultimodalRequest.model_validate(request)
 
-        # The following steps encode the requested image for SGLang:
-        # 1. Open the image from the provided URL.
-        # 2. Process the image using the processor (which handles tokenization).
-        # 3. Extract input_ids and image data from processed result.
-        # 4. Run the image through the vision model to get precomputed embeddings.
-        # 5. Create SGLang-specific multimodal data format.
-        # 6. Create a descriptor for the embeddings and send to downstream worker.
+        # The following steps encode the requested images for SGLang:
+        # 1. Open each image from the provided URLs.
+        # 2. Process each image using the processor.
+        # 3. Run each image through the vision model to get precomputed embeddings.
+        # 4. Find all image token positions and expand them based on embedding shapes.
+        # 5. Create NIXL descriptors for each embedding and send to downstream worker.
 
-        try:
-            if not request.multimodal_input.image_url:
-                raise ValueError("image_url is required for the encode worker.")
+        if not request.multimodal_inputs:
+            raise ValueError("At least one multimodal input is required.")
+
+        # Find all image token positions in the token sequence
+        token_ids = request.request.token_ids
+        image_token_positions = [
+            i for i, t in enumerate(token_ids) if t == self.image_token_id
+        ]
+
+        num_images = len(request.multimodal_inputs)
+        if len(image_token_positions) != num_images:
+            raise ValueError(
+                f"Mismatch: found {len(image_token_positions)} image tokens "
+                f"but {num_images} multimodal inputs"
+            )
+
+        logger.debug(f"Processing {num_images} image(s)")
+
+        # Process each image and compute embeddings
+        embeddings_list: List[Tuple[torch.Tensor, MultiModalInputGroup]] = []
+        for idx, mm_group in enumerate(request.multimodal_inputs):
+            if not mm_group.multimodal_input or not mm_group.multimodal_input.image_url:
+                raise ValueError(f"image_url is required for multimodal input {idx}.")
 
             image = await self.image_loader.load_image(
-                request.multimodal_input.image_url
+                mm_group.multimodal_input.image_url
             )
 
             image_embeds = self.image_processor(images=image, return_tensors="pt")
@@ -137,47 +160,39 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 else None
             )
 
-            # Store the image data info in the request for downstream
-            request.image_grid_thw = image_grid_thw
-            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            # Update group with computed metadata
+            mm_group.image_grid_thw = image_grid_thw
+            mm_group.embeddings_shape = tuple(precomputed_embeddings.shape)
+            embeddings_list.append((precomputed_embeddings, mm_group))
 
-            # Replace the single image token with multiple image tokens based on embedding shape
-            image_token_id_index = request.request.token_ids.index(self.image_token_id)
-
-            num_image_tokens = precomputed_embeddings.shape[
-                1
-            ]  # Number of image patches
-            # Replace single image token with multiple image tokens
-            request.request.token_ids = (
-                request.request.token_ids[:image_token_id_index]
-                + [self.image_token_id] * num_image_tokens
-                + request.request.token_ids[
-                    image_token_id_index + 1 :
-                ]  # Skip the original token
+        # Expand image tokens in reverse order to preserve earlier indices
+        for idx in range(num_images - 1, -1, -1):
+            pos = image_token_positions[idx]
+            num_patches = embeddings_list[idx][0].shape[1]
+            token_ids = (
+                token_ids[:pos]
+                + [self.image_token_id] * num_patches
+                + token_ids[pos + 1 :]
             )
 
-            # Create descriptor for the multimodal data
-            descriptor = connect.Descriptor(precomputed_embeddings)
+        request.request.token_ids = token_ids
 
-            with await self._connector.create_readable(descriptor) as readable:
-                request.serialized_request = readable.metadata()
+        # Create NIXL readables for each embedding (matches vLLM multi-image pattern)
+        for embeddings, mm_group in embeddings_list:
+            # Move embeddings to CPU for NIXL transfer (RDMA requires host memory)
+            embeddings_cpu = embeddings.cpu()
+            descriptor = connect.Descriptor(embeddings_cpu)
+            self.readables.append(await self._connector.create_readable(descriptor))
+            mm_group.serialized_request = self.readables[-1].metadata()
 
-                logger.debug(f"Request: {request.model_dump_json()}")
+        # Send request to downstream worker
+        response_generator = await self.pd_worker_client.round_robin(
+            request.model_dump_json()
+        )
 
-                # Get the response generator from downstream worker
-                response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json()
-                )
-                await readable.wait_for_completion()
-
-                async for response in response_generator:
-                    yield response.data() if hasattr(response, "data") else str(
-                        response
-                    )
-
-        except Exception as e:
-            logger.error(f"Error processing request: {e}")
-            raise
+        # Yield responses
+        async for response in response_generator:
+            yield response.data() if hasattr(response, "data") else str(response)
 
     async def async_init(self, runtime: DistributedRuntime):
         logger.info("Startup started.")
