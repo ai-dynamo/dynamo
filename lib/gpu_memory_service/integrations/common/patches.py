@@ -44,3 +44,4 @@ def patch_empty_cache() -> None:
     torch.cuda.empty_cache = safe_empty_cache
     _empty_cache_patched = True
     logger.info("[GMS] Patched torch.cuda.empty_cache")
+
