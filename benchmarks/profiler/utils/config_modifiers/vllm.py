@@ -291,6 +291,12 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             return DEFAULT_MODEL_NAME
 
         args = break_arguments(args)
+        # Check for --served-model-name first (API model name)
+        for i, arg in enumerate(args):
+            if arg == "--served-model-name" and i + 1 < len(args):
+                return args[i + 1]
+
+        # Fall back to --model only if --served-model-name not found
         for i, arg in enumerate(args):
             if arg == "--model" and i + 1 < len(args):
                 return args[i + 1]
