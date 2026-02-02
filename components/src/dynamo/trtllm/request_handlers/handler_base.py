@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import asyncio
-import copy
+import dataclasses
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -198,11 +198,12 @@ class HandlerBase:
             )
 
             # Abort the generation
-            # Temporary: Disabled on DECODE workers to prevent engine hangs in
-            # disaggregated setups where abort() may cause the engine to get stuck
-            if self.disaggregation_mode != DisaggregationMode.DECODE:
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
+            # Temporary:
+            #   Disable calling abort() on the engine, which may get stuck if a
+            #   sufficiently large number of concurrent requests is cancelled.
+            # Note to restore:
+            #   call `generation_result.abort()`; and then
+            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
 
             # Clean up any remaining background task
             for task in pending:
@@ -615,13 +616,9 @@ class HandlerBase:
 
         num_output_tokens_so_far = 0
 
-        sampling_params = copy.deepcopy(self.default_sampling_params)
-
-        for key, value in request["sampling_options"].items():
-            if not value:
-                continue
-            if hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        sampling_params = self._override_sampling_params(
+            self.default_sampling_params, request
+        )
 
         # Additional sampling params in output options
         output_options = request.get("output_options", {})
@@ -818,3 +815,16 @@ class HandlerBase:
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+
+    @staticmethod
+    def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
+        overrides = {
+            key: value
+            for key, value in request["sampling_options"].items()
+            if value is not None
+        }
+
+        # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
+        # 1. it catches unsupported fields / attributes.
+        # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
+        return dataclasses.replace(sampling_params, **overrides)

@@ -14,24 +14,38 @@ This document provides the support matrix for Dynamo, including hardware, softwa
 
 The following table shows the backend framework versions included with each Dynamo release:
 
-| **Dependency** | **main (ToT)** | **v0.8.1.post1** | **v0.8.1 (latest)** | **v0.8.0** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
-| :------------- | :------------- | :--------------- | :------------------ | :--------- | :--------- | :--------------- | :--------- |
-| vLLM           | `0.14.1`       | `0.12.0`         | `0.12.0`            | `0.12.0`   | `0.11.0`   | `0.11.0`         | `0.11.0`   |
-| SGLang         | `0.5.8`        | `0.5.6.post2`    | `0.5.6.post2`       | `0.5.6.post2` | `0.5.3.post4` | `0.5.3.post4` | `0.5.3.post4` |
-| TensorRT-LLM   | `1.3.0rc1`     | `1.2.0rc6.post2` | `1.2.0rc6.post1`  | `1.2.0rc6.post1` | `1.2.0rc3` | `1.2.0rc3`     | `1.2.0rc2` |
-| NIXL           | `0.9.0`        | `0.8.0`          | `0.8.0`             | `0.8.0`    | `0.8.0`    | `0.8.0`          | `0.8.0`    |
+| **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **NIXL** |
+| :--- | :--- | :--- | :--- | :--- |
+| **main (ToT)** | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
+| **v0.8.1.post2** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
+| **v0.8.1.post1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post2` | `0.8.0` |
+| **v0.8.1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
+| **v0.8.0** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
+| **v0.7.1** | `0.11.0` | `0.5.4.post3` | `1.2.0rc3` | `0.8.0` |
+| **v0.7.0.post1** | `0.11.0` | `0.5.4.post3` | `1.2.0rc3` | `0.8.0` |
+| **v0.7.0** | `0.11.0` | `0.5.4.post3` | `1.2.0rc2` | `0.8.0` |
+| **v0.6.1.post1** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
+| **v0.6.1** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
+| **v0.6.0** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
 
-**main (ToT)** reflects the current development branch. **v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only (no GitHub release).
+> [!Important]
+> These are the only backend versions tested and supported with each Dynamo release. Using other backend versions is not recommended and compatibility is not guaranteed.
+
+**main (ToT)** reflects the current development branch. Patch versions (e.g., v0.8.1.post1) inherit backend versions from their base release unless otherwise noted.
 
 > [!Important]
 > Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] Python wheel will fail.
 
-| **Dynamo Version** | **SGLang**                | **TensorRT-LLM** | **vLLM**                 |
-| :----------------- | :------------------------ | :--------------- | :----------------------- |
-| **Dynamo 0.8.1**   | CUDA 12.9, CUDA 13.0 (🧪) | CUDA 13.0        | CUDA 12.9, CUDA 13.0 (🧪) |
-| **Dynamo 0.8.0**   | CUDA 12.9, CUDA 13.0 (🧪) | CUDA 13.0        | CUDA 12.9, CUDA 13.0 (🧪) |
-| **Dynamo 0.7.1**   | CUDA 12.8                 | CUDA 13.0        | CUDA 12.9                |
-| **Dynamo 0.7.0**   | CUDA 12.9                 | CUDA 13.0        | CUDA 12.8                |
+### CUDA Versions by Backend
+
+| **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **Notes** |
+| :--- | :--- | :--- | :--- | :--- |
+| **v0.8.1** | `12.9`, `13.0` | `12.9`, `13.0` | `13.0` | Experimental vLLM/SGLang CUDA 13 support |
+| **v0.8.0** | `12.9`, `13.0` | `12.9`, `13.0` | `13.0` | Experimental vLLM/SGLang CUDA 13 support |
+| **v0.7.1** | `12.9` | `12.8` | `13.0` | |
+| **v0.7.0** | `12.8` | `12.9` | `13.0` | TensorRT-LLM CUDA 13 support - CUDA 12.9 deprecated |
+| **v0.6.1** | `12.8` | `12.9` | `12.9` | |
+| **v0.6.0** | `12.8` | `12.8` | `12.9` | |
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
 
