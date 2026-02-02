@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 def setup_engine_factory(
     runtime: DistributedRuntime,
     router_mode: RouterMode,
-    kv_cache_block_size: int | None,
+    flags: argparse.Namespace,
 ):  # Returns EngineFactory:
     """
     When using vllm pre and post processor, create the EngineFactory that
@@ -58,7 +58,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_mode, kv_cache_block_size).engine_factory
+    return EngineFactory(runtime, router_mode, flags).engine_factory
 
 
 def validate_model_name(value):
@@ -472,9 +472,7 @@ async def async_main():
     if flags.processor == "vllm":
         # TODO: Do we also need to tell the engine factory when the model is removed,
         # so it can "stop" vllm?
-        kwargs["engine_factory"] = setup_engine_factory(
-            runtime, router_config, flags.kv_cache_block_size
-        )
+        kwargs["engine_factory"] = setup_engine_factory(runtime, router_config, flags)
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

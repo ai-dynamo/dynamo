@@ -10,11 +10,14 @@ import logging
 import os
 import time
 import uuid
+from argparse import Namespace
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaToolCall
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
@@ -43,14 +46,16 @@ class VllmProcessor:
         self,
         tokenizer: TokenizerLike,
         input_processor: InputProcessor,
-        output_processor: OutputProcessor,
         router,  # Client or KvPushRouter
+        output_processor: OutputProcessor,
+        tool_parser_class: type[ToolParser],
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
-        self.output_processor = output_processor
         self.router = router
         self.is_kv_router = isinstance(router, KvPushRouter)
+        self.output_processor = output_processor
+        self.tool_parser_class = tool_parser_class
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -69,19 +74,20 @@ class VllmProcessor:
             # This is not the type the source code declares.
             tokens = self.tokenizer.apply_chat_template(
                 conversation=request["messages"],
+                tools=request["tools"],
                 tokenize=True,
             )
         except TypeError:
             # tokenizer is an impl of TokenizerLike. This is the declared type.
 
-            # mistral-common only allows 'role' and 'content', nothing else or pydantic validation breaks
+            # For "role":"user" messages, mistral-common only allows 'role' and 'content', nothing else or pydantic validation breaks.
             # This deletes the optional 'name' field.
             filtered_messages = [
-                {k: v for k, v in d.items() if k == "content" or k == "role"}
-                for d in request["messages"]
+                {k: v for k, v in d.items() if k != "name"} for d in request["messages"]
             ]
             tokens = self.tokenizer.apply_chat_template(
                 messages=filtered_messages,
+                tools=request["tools"],
                 tokenize=True,
             )
 
@@ -175,6 +181,12 @@ class VllmProcessor:
             # Round robin or random, depending on cmd line flag
             dynamo_stream = await self.router.generate(dynamo_preproc)
 
+        # tool parser is stateful, each request needs a fresh one
+        tool_parser = self.tool_parser_class(self.tokenizer)
+        previous_text = ""
+        previous_token_ids = []
+        in_progress_tool_call: DeltaToolCall | None = None
+
         # dynamo_response: Annotated
         async for dynamo_response in dynamo_stream:
             # dynamo_response looks like this for regular router:
@@ -219,17 +231,81 @@ class VllmProcessor:
             # Vec<ChatChoiceStream>
             choices = []
             for output in vllm_out.request_outputs[0].outputs:
-                choices.append(
-                    {
-                        "index": output.index,
-                        # ChatCompletionStreamResponseDelta
-                        "delta": {"content": output.text, "role": "assistant"},
-                        # TODO: These three likely need converting
-                        "finish_reason": output.finish_reason,
-                        "stop_reason": output.stop_reason,
-                        "logprobs": output.logprobs,
-                    }
+                current_text = previous_text + output.text
+                current_token_ids = previous_token_ids + output.token_ids
+
+                delta_message = tool_parser.extract_tool_calls_streaming(
+                    previous_text=previous_text,
+                    current_text=current_text,
+                    delta_text=output.text,
+                    previous_token_ids=previous_token_ids,
+                    current_token_ids=current_token_ids,
+                    delta_token_ids=output.token_ids,
+                    request=ChatCompletionRequest(**request),
                 )
+
+                if delta_message is None:
+                    # tokens being held back, might be tool call marker
+                    pass
+
+                elif delta_message.tool_calls:
+                    if delta_message.tool_calls[0].function:
+                        # delta_message.tool_calls = DeltaToolCall objects to stream
+                        if in_progress_tool_call is None:
+                            in_progress_tool_call = delta_message.tool_calls[0]
+                        else:
+                            delta_arg = delta_message.tool_calls[0]
+                            in_progress_tool_call.function.arguments += (
+                                delta_arg.function.arguments
+                            )
+                    else:
+                        logger.warn(
+                            f"Unknown tool call type in: {delta_message.tool_calls[0]}. Only type 'function' supported."
+                        )
+
+                elif delta_message.content:
+                    # Stream content to user
+                    # ChatCompletionStreamResponseDelta
+                    delta = {"content": delta_message.content, "role": "assistant"}
+                    if in_progress_tool_call:
+                        delta["tool_calls"] = [
+                            in_progress_tool_call.model_dump(exclude_none=True)
+                        ]
+                        in_progress_tool_call = None
+                    choices.append(
+                        {
+                            "index": output.index,
+                            "delta": delta,
+                            # TODO: These three likely need converting
+                            "finish_reason": output.finish_reason,
+                            "stop_reason": output.stop_reason,
+                            "logprobs": output.logprobs,
+                        }
+                    )
+
+                elif in_progress_tool_call:
+                    # No content of any kind. Send any outstanding tool calls.
+                    choices.append(
+                        {
+                            "index": output.index,
+                            # ChatCompletionStreamResponseDelta
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    in_progress_tool_call.model_dump(exclude_none=True)
+                                ],
+                            },
+                            # TODO: These three likely need converting
+                            "finish_reason": output.finish_reason,
+                            "stop_reason": output.stop_reason,
+                            "logprobs": output.logprobs,
+                        }
+                    )
+                    in_progress_tool_call = None
+
+                previous_text = current_text
+                previous_token_ids = current_token_ids
+
             # dynamo_out: NvCreateChatCompletionStreamResponse
             dynamo_out = {
                 "id": request_id,
@@ -248,11 +324,11 @@ class EngineFactory:
         self,
         runtime: DistributedRuntime,
         router_config: RouterConfig,
-        kv_cache_block_size: int | None,
+        flags: Namespace,
     ):
         self.runtime = runtime
         self.router_config = router_config
-        self.kv_cache_block_size = kv_cache_block_size
+        self.flags = flags
 
     async def engine_factory(
         self,
@@ -262,7 +338,7 @@ class EngineFactory:
         """
         Called by Rust when a model is discovered.
         """
-        logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()}")
+        logger.debug(f"Engine_factory called with MDC: {mdc.to_json_str()}")
         loop = asyncio.get_running_loop()
 
         source_path = mdc.source_path()
@@ -287,6 +363,10 @@ class EngineFactory:
             stream_interval=1,
         )
 
+        tool_parser_class = ToolParserManager.get_tool_parser(
+            self.flags.tool_call_parser or "auto"
+        )
+
         (namespace_name, component_name, endpoint_name) = instance_id.triple()
         generate_endpoint = (
             self.runtime.namespace(namespace_name)
@@ -297,12 +377,14 @@ class EngineFactory:
         if self.router_config.router_mode == RouterMode.KV:
             router = KvPushRouter(
                 endpoint=generate_endpoint,
-                block_size=self.kv_cache_block_size or 16,
+                block_size=self.flags.kv_cache_block_size or 16,
                 kv_router_config=self.router_config.kv_router_config,
             )
         else:
             router = await generate_endpoint.client2(self.router_config.router_mode)
 
-        gen = VllmProcessor(tokenizer, input_processor, output_processor, router)
+        gen = VllmProcessor(
+            tokenizer, input_processor, router, output_processor, tool_parser_class
+        )
 
         return PythonAsyncEngine(gen.generator, loop)
