@@ -109,6 +109,13 @@ def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
     if stagger_delay >= 0:
         return stagger_delay
 
+    if stagger_delay != -1:
+        raise ValueError(
+            f"Invalid --stagger-delay value: {stagger_delay}. "
+            "Use -1 for auto mode, 0 to disable, or a positive value for explicit delay."
+        )
+
+    # Auto mode: stagger based on worker count
     if num_workers <= 32:
         return 0.0
     elif num_workers <= 128:

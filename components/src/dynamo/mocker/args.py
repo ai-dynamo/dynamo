@@ -322,7 +322,7 @@ def parse_args():
         help=(
             "Delay in seconds between launching each worker to avoid overwhelming "
             "etcd/NATS/frontend with many workers. Set to 0 to disable staggering. "
-            "Any negative value enables auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
+            "Use -1 for auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
             "Default: -1 (auto)"
         ),
     )

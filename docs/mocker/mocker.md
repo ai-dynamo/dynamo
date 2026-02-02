@@ -87,7 +87,7 @@ python -m dynamo.mocker \
 | `--startup-time` | None | Simulated startup delay (seconds) |
 | `--planner-profile-data` | None | Path to NPZ file with timing data |
 | `--num-workers` | 1 | Workers per process |
-| `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, negative enables auto mode |
+| `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--is-prefill-worker` | False | Prefill-only mode |
 | `--is-decode-worker` | False | Decode-only mode |
 | `--enable-local-indexer` | False | Enable local KV indexer |
