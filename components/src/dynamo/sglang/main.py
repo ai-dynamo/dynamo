@@ -19,8 +19,8 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
+    SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
-    SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
@@ -180,9 +180,18 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
-    ).to_dict()
+    print(f"Config: {config}")
+    # Use different health check payloads based on serving mode:
+    # - DECODE (disaggregated): requires bootstrap_info with FAKE_BOOTSTRAP_HOST
+    # - AGGREGATED: standard health check without bootstrap_info
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
 
     logging.info(
         f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
@@ -268,7 +277,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -647,7 +656,13 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     await handler.async_init()
 
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    # Use different health check payloads based on serving mode:
+    # - DECODE (disaggregated): requires bootstrap_info with FAKE_BOOTSTRAP_HOST
+    # - AGGREGATED: standard health check without bootstrap_info
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(engine).to_dict()
     ready_event = asyncio.Event()
 
     try:
@@ -699,7 +714,7 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     handler = MultimodalPrefillWorkerHandler(component, engine, config)
     await handler.async_init()
 
-    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
 
     try:
         # Prefill Worker is an internal component, should not register with Frontend
