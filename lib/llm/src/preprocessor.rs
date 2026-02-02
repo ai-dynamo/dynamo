@@ -723,7 +723,7 @@ impl OpenAIPreprocessor {
                 }
             }
         })
-        .fuse();
+        .fuse()
     }
 
     /// Transform engine embedding output stream to OpenAI embedding response stream
@@ -890,7 +890,7 @@ impl OpenAIPreprocessor {
                 None
             }
         })
-        .fuse();
+        .fuse()
     }
 }
 
