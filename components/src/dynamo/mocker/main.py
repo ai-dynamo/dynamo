@@ -48,7 +48,7 @@ async def prefetch_model(model_path: str) -> str:
 
     logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
     try:
-        local_path = await fetch_llm(model_path)
+        local_path = await fetch_llm(model_path, ignore_weights=True)
         logger.info(f"Model cached at: {local_path}")
         return local_path
     except Exception as e:
@@ -136,7 +136,7 @@ async def launch_workers(args, extra_engine_args_path):
     batch_pause = 2.0
 
     if stagger_delay > 0:
-        total_time = stagger_delay * args.num_workers
+        total_time = (args.num_workers - 1) * stagger_delay
         if args.num_workers > batch_size:
             num_batches = (args.num_workers + batch_size - 1) // batch_size
             total_time += batch_pause * (num_batches - 1)
