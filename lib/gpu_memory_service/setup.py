@@ -65,6 +65,7 @@ setup(
     # Package directory mapping: the current directory IS the gpu_memory_service package
     packages=[
         "gpu_memory_service",
+        "gpu_memory_service.cli",
         "gpu_memory_service.common",
         "gpu_memory_service.common.protocol",
         "gpu_memory_service.server",
@@ -75,6 +76,7 @@ setup(
     ],
     package_dir={
         "gpu_memory_service": ".",
+        "gpu_memory_service.cli": "cli",
         "gpu_memory_service.common": "common",
         "gpu_memory_service.common.protocol": "common/protocol",
         "gpu_memory_service.server": "server",

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Reusable CI Test Suite Workflow
@@ -284,6 +284,81 @@ jobs:
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+
+  # Operator build (both architectures)
+  build-operator:
+    name: Build Operator (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: prod-builder-amd-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: v0.14.1
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Linter
+        shell: bash
+        run: |
+          cd deploy/operator
+          docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        shell: bash
+        run: |
+          cd deploy/operator
+          docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.25'
+      - name: Check for uncommitted changes
+        shell: bash
+        run: |
+          sudo apt-get update && sudo apt-get install -y make
+          cd deploy/operator
+          make check
+      - name: Build Container
+        id: build-image
+        shell: bash
+        run: |
+          cd deploy/operator
+          docker buildx build --load \
+              --platform linux/${{ matrix.platform.arch }} \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              -f Dockerfile \
+              -t dynamo-operator:latest .
+      - name: Tag and Push Operator Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: dynamo-operator:latest
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-operator-${{ matrix.platform.arch }}
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-operator-${{ matrix.platform.arch }}-run-${{ github.run_id }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -1018,7 +1093,7 @@ jobs:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-amd64, build-arm64, build-cuda13-amd64, build-cuda13-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    needs: [build-amd64, build-arm64, build-cuda13-amd64, build-cuda13-arm64, build-operator, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

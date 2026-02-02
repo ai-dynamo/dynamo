@@ -16,9 +16,9 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dependency** | **main (ToT)** | **v0.8.1.post1** | **v0.8.1 (latest)** | **v0.8.0** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
 | :------------- | :------------- | :--------------- | :------------------ | :--------- | :--------- | :--------------- | :--------- |
-| vLLM           | `0.14.0`       | `0.12.0`         | `0.12.0`            | `0.12.0`   | `0.11.0`   | `0.11.0`         | `0.11.0`   |
+| vLLM           | `0.14.1`       | `0.12.0`         | `0.12.0`            | `0.12.0`   | `0.11.0`   | `0.11.0`         | `0.11.0`   |
 | SGLang         | `0.5.8`        | `0.5.6.post2`    | `0.5.6.post2`       | `0.5.6.post2` | `0.5.3.post4` | `0.5.3.post4` | `0.5.3.post4` |
-| TensorRT-LLM   | `1.2.0rc6.post2` | `1.2.0rc6.post2` | `1.2.0rc6.post1`  | `1.2.0rc6.post1` | `1.2.0rc3` | `1.2.0rc3`     | `1.2.0rc2` |
+| TensorRT-LLM   | `1.3.0rc1`     | `1.2.0rc6.post2` | `1.2.0rc6.post1`  | `1.2.0rc6.post1` | `1.2.0rc3` | `1.2.0rc3`     | `1.2.0rc2` |
 | NIXL           | `0.9.0`        | `0.8.0`          | `0.8.0`             | `0.8.0`    | `0.8.0`    | `0.8.0`          | `0.8.0`    |
 
 **main (ToT)** reflects the current development branch. **v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only (no GitHub release).

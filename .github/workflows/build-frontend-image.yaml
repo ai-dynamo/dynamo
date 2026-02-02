@@ -10,6 +10,12 @@ on:
     - "pull-request/[0-9]+"
     # Note: release/* branches are handled by release.yml which calls this workflow
   workflow_call:
+    inputs:
+      frontend_build:
+        description: 'Force build even if no frontend files changed'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -38,7 +44,7 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      frontend: ${{ steps.changes.outputs.frontend }}
+      frontend: ${{ steps.set-output.outputs.frontend }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -46,14 +52,25 @@ jobs:
           fetch-depth: 0
       - name: Check for changes
         id: changes
+        if: inputs.frontend_build != true
         uses: ./.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
+      - name: Set output
+        id: set-output
+        run: |
+          if [[ "${{ inputs.frontend_build }}" == "true" ]]; then
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "Frontend build forced (release mode)"
+          else
+            echo "frontend=${{ steps.changes.outputs.frontend }}" >> $GITHUB_OUTPUT
+            echo "Frontend build based on changed files: ${{ steps.changes.outputs.frontend }}"
+          fi
 
   build-frontend-image:
     name: Build Frontend Image (${{ matrix.platform.arch }})
     needs: changed-files
-    if: needs.changed-files.outputs.frontend == 'true'
+    if: inputs.frontend_build == true || needs.changed-files.outputs.frontend == 'true'
     strategy:
       fail-fast: false
       matrix:
