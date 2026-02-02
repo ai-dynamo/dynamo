@@ -10,16 +10,16 @@ use dynamo_async_openai::types::responses::{
     TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_async_openai::types::{
-    ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice, ChatCompletionRequestAssistantMessage,
-    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
-    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
-    ChatCompletionRequestMessageContentPartVideo, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    CreateChatCompletionRequest, FunctionName, FunctionObject, ImageDetail as ChatImageDetail,
-    ImageUrl, VideoUrl,
+    ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
+    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartVideo,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
+    ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
+    FunctionName, FunctionObject, ImageDetail as ChatImageDetail, ImageUrl, VideoUrl,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -155,10 +155,12 @@ fn convert_input_content_to_user_content(
     content: &[InputContent],
 ) -> Result<ChatCompletionRequestUserMessageContent, anyhow::Error> {
     // If there's a single InputText, treat as simple text
-    if content.len() == 1 {
-        if let InputContent::InputText(t) = &content[0] {
-            return Ok(ChatCompletionRequestUserMessageContent::Text(t.text.clone()));
-        }
+    if content.len() == 1
+        && let InputContent::InputText(t) = &content[0]
+    {
+        return Ok(ChatCompletionRequestUserMessageContent::Text(
+            t.text.clone(),
+        ));
     }
 
     let mut chat_parts = Vec::with_capacity(content.len());
@@ -173,9 +175,8 @@ fn convert_input_content_to_user_content(
             }
             InputContent::InputImage(img) => {
                 let url_str = img.image_url.as_deref().unwrap_or_default();
-                let url = url::Url::parse(url_str).map_err(|e| {
-                    anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e)
-                })?;
+                let url = url::Url::parse(url_str)
+                    .map_err(|e| anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e))?;
                 chat_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
                         image_url: ImageUrl {
@@ -187,9 +188,8 @@ fn convert_input_content_to_user_content(
                 ));
             }
             InputContent::InputVideo(vid) => {
-                let url = url::Url::parse(&vid.video).map_err(|e| {
-                    anyhow::anyhow!("Invalid video URL '{}': {}", vid.video, e)
-                })?;
+                let url = url::Url::parse(&vid.video)
+                    .map_err(|e| anyhow::anyhow!("Invalid video URL '{}': {}", vid.video, e))?;
                 chat_parts.push(ChatCompletionRequestUserMessageContentPart::VideoUrl(
                     ChatCompletionRequestMessageContentPartVideo {
                         video_url: VideoUrl {
@@ -201,14 +201,10 @@ fn convert_input_content_to_user_content(
                 ));
             }
             InputContent::InputAudio(_) => {
-                return Err(anyhow::anyhow!(
-                    "Audio input content is not yet supported"
-                ));
+                return Err(anyhow::anyhow!("Audio input content is not yet supported"));
             }
             InputContent::InputFile(_) => {
-                return Err(anyhow::anyhow!(
-                    "File input content is not yet supported"
-                ));
+                return Err(anyhow::anyhow!("File input content is not yet supported"));
             }
         }
     }
@@ -244,17 +240,20 @@ fn convert_input_items_to_messages(
                                 let text = convert_input_content_to_text(&msg.content);
                                 ChatCompletionRequestMessage::System(
                                     ChatCompletionRequestSystemMessage {
-                                        content:
-                                            ChatCompletionRequestSystemMessageContent::Text(text),
+                                        content: ChatCompletionRequestSystemMessageContent::Text(
+                                            text,
+                                        ),
                                         name: None,
                                     },
                                 )
                             }
                             InputRole::User => {
-                                let content =
-                                    convert_input_content_to_user_content(&msg.content)?;
+                                let content = convert_input_content_to_user_content(&msg.content)?;
                                 ChatCompletionRequestMessage::User(
-                                    ChatCompletionRequestUserMessage { content, name: None },
+                                    ChatCompletionRequestUserMessage {
+                                        content,
+                                        name: None,
+                                    },
                                 )
                             }
                         };
@@ -273,9 +272,9 @@ fn convert_input_items_to_messages(
                             .join("");
                         messages.push(ChatCompletionRequestMessage::Assistant(
                             ChatCompletionRequestAssistantMessage {
-                                content: Some(
-                                    ChatCompletionRequestAssistantMessageContent::Text(text),
-                                ),
+                                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                                    text,
+                                )),
                                 refusal: None,
                                 name: None,
                                 audio: None,
@@ -311,9 +310,7 @@ fn convert_input_items_to_messages(
                     // The output of a function call -> tool message
                     let output_text = match &fco.output {
                         FunctionCallOutput::Text(text) => text.clone(),
-                        FunctionCallOutput::Content(parts) => {
-                            convert_input_content_to_text(parts)
-                        }
+                        FunctionCallOutput::Content(parts) => convert_input_content_to_text(parts),
                     };
                     messages.push(ChatCompletionRequestMessage::Tool(
                         ChatCompletionRequestToolMessage {
@@ -338,26 +335,22 @@ fn convert_input_items_to_messages(
                 };
                 let chat_msg = match easy.role {
                     ResponseRole::System | ResponseRole::Developer => {
-                        ChatCompletionRequestMessage::System(
-                            ChatCompletionRequestSystemMessage {
-                                content: ChatCompletionRequestSystemMessageContent::Text(
-                                    content_text,
-                                ),
-                                name: None,
-                            },
-                        )
+                        ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                            content: ChatCompletionRequestSystemMessageContent::Text(content_text),
+                            name: None,
+                        })
                     }
-                    ResponseRole::User => ChatCompletionRequestMessage::User(
-                        ChatCompletionRequestUserMessage {
+                    ResponseRole::User => {
+                        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                             content: ChatCompletionRequestUserMessageContent::Text(content_text),
                             name: None,
-                        },
-                    ),
+                        })
+                    }
                     ResponseRole::Assistant => ChatCompletionRequestMessage::Assistant(
                         ChatCompletionRequestAssistantMessage {
-                            content: Some(
-                                ChatCompletionRequestAssistantMessageContent::Text(content_text),
-                            ),
+                            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                                content_text,
+                            )),
                             refusal: None,
                             name: None,
                             audio: None,
@@ -434,9 +427,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         if let Some(instructions) = &resp.inner.instructions {
             messages.push(ChatCompletionRequestMessage::System(
                 ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(
-                        instructions.clone(),
-                    ),
+                    content: ChatCompletionRequestSystemMessageContent::Text(instructions.clone()),
                     name: None,
                 },
             ));
@@ -628,23 +619,23 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
 
             // Handle text content -- also parse <tool_call> blocks from models
             // that emit tool calls as text (e.g. Qwen3)
-            if let Some(content_text) = choice.message.content {
-                if !content_text.is_empty() {
-                    let parsed_calls = parse_tool_call_text(&content_text);
-                    if !parsed_calls.is_empty() {
-                        for (name, arguments) in parsed_calls {
-                            output.push(make_function_call(name, arguments));
-                        }
-                        let remaining = strip_tool_call_text(&content_text);
-                        if !remaining.trim().is_empty() {
-                            output.push(make_text_message(
-                                message_id.clone(),
-                                remaining.into_owned(),
-                            ));
-                        }
-                    } else {
-                        output.push(make_text_message(message_id.clone(), content_text));
+            if let Some(content_text) = choice.message.content
+                && !content_text.is_empty()
+            {
+                let parsed_calls = parse_tool_call_text(&content_text);
+                if !parsed_calls.is_empty() {
+                    for (name, arguments) in parsed_calls {
+                        output.push(make_function_call(name, arguments));
                     }
+                    let remaining = strip_tool_call_text(&content_text);
+                    if !remaining.trim().is_empty() {
+                        output.push(make_text_message(
+                            message_id.clone(),
+                            remaining.into_owned(),
+                        ));
+                    }
+                } else {
+                    output.push(make_text_message(message_id.clone(), content_text));
                 }
             }
 
@@ -866,9 +857,15 @@ mod tests {
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
         assert_eq!(messages.len(), 4);
-        assert!(matches!(messages[0], ChatCompletionRequestMessage::System(_)));
+        assert!(matches!(
+            messages[0],
+            ChatCompletionRequestMessage::System(_)
+        ));
         assert!(matches!(messages[1], ChatCompletionRequestMessage::User(_)));
-        assert!(matches!(messages[2], ChatCompletionRequestMessage::Assistant(_)));
+        assert!(matches!(
+            messages[2],
+            ChatCompletionRequestMessage::Assistant(_)
+        ));
         assert!(matches!(messages[3], ChatCompletionRequestMessage::User(_)));
     }
 
@@ -876,8 +873,8 @@ mod tests {
     fn test_input_items_with_image() {
         let req = NvCreateResponse {
             inner: CreateResponse {
-                input: InputParam::Items(vec![InputItem::Item(Item::Message(
-                    MessageItem::Input(InputMessage {
+                input: InputParam::Items(vec![InputItem::Item(Item::Message(MessageItem::Input(
+                    InputMessage {
                         content: vec![
                             InputContent::InputText(InputTextContent {
                                 text: "What is in this image?".into(),
@@ -890,8 +887,8 @@ mod tests {
                         ],
                         role: InputRole::User,
                         status: None,
-                    }),
-                ))]),
+                    },
+                )))]),
                 model: Some("test-model".into()),
                 ..Default::default()
             },
@@ -948,7 +945,10 @@ mod tests {
         let messages = &chat_req.inner.messages;
         assert_eq!(messages.len(), 3);
         assert!(matches!(messages[0], ChatCompletionRequestMessage::User(_)));
-        assert!(matches!(messages[1], ChatCompletionRequestMessage::Assistant(_)));
+        assert!(matches!(
+            messages[1],
+            ChatCompletionRequestMessage::Assistant(_)
+        ));
         assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
     }
 
