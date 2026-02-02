@@ -269,7 +269,7 @@ impl PrefillRouter {
             match async {
                 kv_router
                     .chooser
-                    .find_best_match(None, &req.token_ids, None, false)
+                    .find_best_match(None, &req.token_ids, None, false, None)
                     .await
             }
             .instrument(tracing::info_span!("kv_find_best_match"))

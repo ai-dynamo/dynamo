@@ -247,6 +247,7 @@ impl OpenAIPreprocessor {
                 dp_rank: None, // dp_rank is set later in the pipeline
                 enable_local_updates: nvext.enable_local_updates,
                 expected_output_tokens: nvext.expected_output_tokens,
+                lora_name: None, // TODO: Extract from request.model or nvext
             };
             builder.routing(Some(routing));
         }

@@ -486,12 +486,14 @@ impl KvRouter {
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
     /// Now also takes optional context_id for request tracking
+    #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
+        lora_name: Option<String>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         // Validate that context_id is provided when update_states is true
         if update_states && context_id.is_none() {
@@ -517,6 +519,7 @@ impl KvRouter {
                 overlap_scores.clone(),
                 router_config_override,
                 update_states,
+                lora_name,
             )
             .await?;
 
@@ -531,6 +534,7 @@ impl KvRouter {
         Ok((best_worker, overlap_amount))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_request(
         &self,
         request_id: String,
@@ -538,6 +542,7 @@ impl KvRouter {
         overlap_blocks: u32,
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
+        lora_name: Option<String>,
     ) {
         let isl_tokens = tokens.len();
 
@@ -554,6 +559,7 @@ impl KvRouter {
                 overlap_blocks,
                 expected_output_tokens,
                 worker,
+                lora_name,
             )
             .await
         {
@@ -687,7 +693,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = match request {
             RouterRequest::New { tokens } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true)
+                    .find_best_match(Some(&context_id), &tokens, None, true, None)
                     .await?;
 
                 RouterResponse::New {
@@ -744,6 +750,9 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
 
+        // Extract LORA name from routing hints
+        let lora_name = routing.and_then(|r| r.lora_name.clone());
+
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
         let Some(id) = (match phase {
             RequestPhase::Prefill => {
@@ -763,6 +772,7 @@ impl KvPushRouter {
                     &request.token_ids,
                     request.router_config_override.as_ref(),
                     !is_query_only,
+                    lora_name,
                 )
                 .await?;
 
@@ -804,6 +814,7 @@ impl KvPushRouter {
                     overlap_blocks,
                     expected_output_tokens,
                     worker,
+                    lora_name,
                 )
                 .await;
         } else {
