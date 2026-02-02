@@ -54,10 +54,10 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
         self.fs_url = config.dynamo_args.image_diffusion_fs_url
-        self.url_base = config.dynamo_args.image_diffusion_url_base
+        self.base_url = config.dynamo_args.image_diffusion_base_url
 
         logger.info(
-            f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.url_base}"
+            f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.base_url}"
         )
 
     def cleanup(self) -> None:
@@ -247,7 +247,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # send image to filesystem
         await self.fs.pipe(storage_path, image_bytes)
 
-        return f"{self.url_base}/{storage_path}"
+        return f"{self.base_url}/{storage_path}"
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""

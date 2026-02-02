@@ -488,7 +488,7 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
 
     # Initialize primary filesystem
     if not fs_url:
-        raise ValueError("--diffusion-fs-url is required for diffusion workers")
+        raise ValueError("--image-diffusion-fs-url is required for diffusion workers")
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
