@@ -13,7 +13,7 @@ use crate::Component;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
 use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
-use rs::traits::events::EventSubscriber;
+use rs::transports::event_plane::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
@@ -361,7 +361,7 @@ impl KvEventPublisher {
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct OverlapScores {
-    inner: llm_rs::kv_router::indexer::OverlapScores,
+    inner: llm_rs::kv_router::protocols::OverlapScores,
 }
 
 #[pymethods]
@@ -387,7 +387,7 @@ enum RadixTreeRequest {
     FindMatches {
         local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash>,
         early_exit: bool,
-        response_tx: mpsc::SyncSender<llm_rs::kv_router::indexer::OverlapScores>,
+        response_tx: mpsc::SyncSender<llm_rs::kv_router::protocols::OverlapScores>,
     },
     ApplyEvent {
         worker_id: WorkerId,
@@ -403,7 +403,7 @@ enum RadixTreeRequest {
         response_tx: mpsc::SyncSender<()>,
     },
     DumpTreeAsEvents {
-        response_tx: mpsc::SyncSender<Vec<llm_rs::kv_router::indexer::RouterEvent>>,
+        response_tx: mpsc::SyncSender<Vec<llm_rs::kv_router::protocols::RouterEvent>>,
     },
     Shutdown,
 }
@@ -617,8 +617,10 @@ impl RadixTree {
                 >(&kv_cache_event_bytes)
                 {
                     Ok(kv_cache_event) => {
-                        let router_event =
-                            llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
+                        let router_event = llm_rs::kv_router::protocols::RouterEvent::new(
+                            worker_id,
+                            kv_cache_event,
+                        );
                         match radix_tree.apply_event(router_event) {
                             Ok(_) => Ok(()),
                             Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -889,24 +891,32 @@ impl KvRecorder {
             .map_err(to_pyerr)?;
 
             // Subscribe to KV events
-            let mut kv_events_rx = component
-                .inner
-                .subscribe(llm_rs::kv_router::KV_EVENT_SUBJECT)
-                .await
-                .map_err(to_pyerr)?;
+            let mut kv_events_rx = EventSubscriber::for_component(
+                &component.inner,
+                llm_rs::kv_router::KV_EVENT_SUBJECT,
+            )
+            .await
+            .map_err(to_pyerr)?
+            .typed::<llm_rs::kv_router::protocols::RouterEvent>();
             let event_tx = inner.event_sender();
 
             // Spawn a task to forward events to the recorder
             tokio::spawn(async move {
-                while let Some(event) = kv_events_rx.next().await {
-                    let event: llm_rs::kv_router::indexer::RouterEvent =
-                        serde_json::from_slice(&event.payload).unwrap();
+                while let Some(result) = kv_events_rx.next().await {
+                    let event = match result {
+                        Ok((_envelope, event)) => event,
+                        Err(e) => {
+                            tracing::warn!("KvRecorder failed to decode kv event: {:?}", e);
+                            continue;
+                        }
+                    };
                     tracing::debug!("KvRecorder received kv event: {:?}", event);
                     if let Err(e) = event_tx.send(event).await {
                         tracing::trace!(
                             "KvRecorder failed to send kv event; shutting down: {:?}",
                             e
                         );
+                        break;
                     }
                 }
             });

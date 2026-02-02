@@ -1,12 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "SLA-Driven Profiling with DynamoGraphDeploymentRequest"
 ---
 
-<Tip>
-**New to DGDR and SLA-Driven Profiling?** Start with the [SLA-Driven Profiling and Planner Deployment Quick Start Guide](../planner/sla-planner-quickstart.md) for step-by-step instructions. This document provides deeper technical details about the profiling process.
-</Tip>
+# SLA-Driven Profiling with DynamoGraphDeploymentRequest
+
+> [!TIP]
+> **New to DGDR and SLA-Driven Profiling?** Start with the [SLA-Driven Profiling and Planner Deployment Quick Start Guide](../planner/sla-planner-quickstart.md) for step-by-step instructions. This document provides deeper technical details about the profiling process.
 
 ## Overview
 
@@ -39,9 +39,8 @@ Specifically, the profiler sweeps over the following parallelization mapping for
 | GQA+MoE (Qwen3MoeForCausalLM) | TP, TEP, DEP | TP, TEP, DEP |
 | Other Models | TP | TP |
 
-<Note>
-- Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
-</Note>
+> [!NOTE]
+> - Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
 
 ## Using DGDR for Profiling (Recommended)
 
@@ -344,9 +343,8 @@ profilingConfig:
 - **num_gpus_per_node**: Determine the upper bound of number of GPUs per node for dense models and configure Grove for multi-node MoE engines.
 - **gpu_type**: Informational, auto-detected by controller
 
-<Tip>
-If you don't specify hardware constraints, the controller auto-detects based on your model size and available cluster resources.
-</Tip>
+> [!TIP]
+> If you don't specify hardware constraints, the controller auto-detects based on your model size and available cluster resources.
 
 ### Sweep Configuration (Optional)
 
@@ -395,9 +393,8 @@ profilingConfig:
       planner_load_predictor: linear             # Load prediction method
 ```
 
-<Note>
-Planner arguments use `planner_` prefix. See planner documentation for full list.
-</Note>
+> [!NOTE]
+> Planner arguments use `planner_` prefix. See planner documentation for full list.
 
 ### Engine Configuration (Auto-configured)
 

@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "High Level Architecture"
 ---
+
+# High Level Architecture
 
 Dynamo is NVIDIA's high-throughput, low-latency inference framework that's designed to serve generative AI and reasoning models in multi-node distributed environments. It's inference engine agnostic, supporting TRT-LLM, vLLM, SGLang and others, while capturing essential LLM capabilities:
 
