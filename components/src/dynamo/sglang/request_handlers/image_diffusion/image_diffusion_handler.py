@@ -200,10 +200,12 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         return image_bytes_list
 
-    def _parse_size(self, size_str: str) -> tuple[int, int]:
+    def _parse_size(self, size_str: Optional[str]) -> tuple[int, int]:
         """Parse '1024x1024' -> (1024, 1024)"""
+        if size_str is None:
+            return 1024, 1024
+
         w, h = size_str.split("x")
-        # TODO: allowed sizes, max 1024? configurable?
         return int(w), int(h)
 
     async def _upload_to_fs(
