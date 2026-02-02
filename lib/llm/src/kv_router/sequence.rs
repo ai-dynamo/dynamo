@@ -841,6 +841,7 @@ impl ActiveSequencesMultiWorker {
         // Remove expired requests from request_to_worker mapping
         for expired_id in &removed_requests {
             self.request_to_worker.remove(expired_id);
+            self.request_to_lora.remove(expired_id);
         }
 
         // Publish ActiveLoad metrics for this worker
