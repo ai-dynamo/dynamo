@@ -23,6 +23,8 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     metric_payload_default,
+    responses_payload_default,
+    responses_stream_payload_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,8 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            responses_payload_default(),
+            responses_stream_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
