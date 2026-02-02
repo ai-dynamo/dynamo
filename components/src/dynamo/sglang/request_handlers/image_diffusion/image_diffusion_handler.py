@@ -245,7 +245,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
 
         # send image to filesystem
-        await self.fs.pipe(storage_path, image_bytes)
+        await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
 
         return f"{self.base_url}/{storage_path}"
 
