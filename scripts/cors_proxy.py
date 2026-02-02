@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Tiny CORS reverse-proxy for browser-based compliance testing.
 
 Forwards all requests to the Dynamo backend on localhost:8000,
@@ -9,9 +11,9 @@ Usage:
 """
 
 import argparse
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import urllib.request
 import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 class CORSProxy(BaseHTTPRequestHandler):
@@ -19,7 +21,9 @@ class CORSProxy(BaseHTTPRequestHandler):
 
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+        self.send_header(
+            "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        )
         self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Access-Control-Expose-Headers", "*")
         self.send_header("Access-Control-Max-Age", "86400")
@@ -51,7 +55,10 @@ class CORSProxy(BaseHTTPRequestHandler):
                 self.send_response(resp.status)
                 self._cors_headers()
                 for key, val in resp.getheaders():
-                    if key.lower() not in ("transfer-encoding", "access-control-allow-origin"):
+                    if key.lower() not in (
+                        "transfer-encoding",
+                        "access-control-allow-origin",
+                    ):
                         self.send_header(key, val)
                 self.end_headers()
                 self.wfile.write(resp_body)
@@ -59,7 +66,9 @@ class CORSProxy(BaseHTTPRequestHandler):
             resp_body = e.read()
             self.send_response(e.code)
             self._cors_headers()
-            self.send_header("Content-Type", e.headers.get("Content-Type", "application/json"))
+            self.send_header(
+                "Content-Type", e.headers.get("Content-Type", "application/json")
+            )
             self.end_headers()
             self.wfile.write(resp_body)
 
