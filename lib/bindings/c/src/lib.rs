@@ -341,9 +341,10 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
  *  Router Bindings for GAIE EPP
  * ------------------------------------------------------------------------ */
 
-// Default timeout for bookkeeping operations (30 seconds)
-const BOOKKEEPING_TIMEOUT_SEC: u64 = 30;
+// Default timeout for bookkeeping operations
+const BOOKKEEPING_TIMEOUT_SEC: u64 = 5;
 /// Default timeout for waiting for worker discovery (seconds).
+/// This may take while for large models.
 /// Can be overridden via DYN_DISCOVERY_TIMEOUT_SEC env var.
 const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 30 * 60;
 
