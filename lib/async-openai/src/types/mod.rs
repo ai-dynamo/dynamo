@@ -24,6 +24,7 @@ mod file;
 mod fine_tuning;
 mod image;
 mod invites;
+pub mod mcp;
 mod message;
 mod model;
 mod moderation;
@@ -34,10 +35,9 @@ mod projects;
 #[cfg_attr(docsrs, doc(cfg(feature = "realtime")))]
 #[cfg(feature = "realtime")]
 pub mod realtime;
-pub mod mcp;
 pub mod responses;
-pub mod shared;
 mod run;
+pub mod shared;
 mod step;
 mod thread;
 mod upload;

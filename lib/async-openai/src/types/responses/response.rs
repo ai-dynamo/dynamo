@@ -9,8 +9,8 @@ use crate::types::responses::{
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use std::collections::HashMap;
+use utoipa::ToSchema;
 
 /// Role of messages in the API.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Default, ToSchema)]
