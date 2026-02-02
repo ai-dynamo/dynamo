@@ -55,9 +55,9 @@ class EmbeddingRequest(BaseModel):
     model: str
     input: EmbeddingInput
     user: Optional[str] = None
-    dimensions: Optional[
-        int
-    ] = None  # only supported in text-embedding-3 and later models from OpenAI
+    dimensions: Optional[int] = (
+        None  # only supported in text-embedding-3 and later models from OpenAI
+    )
 
 
 class DisaggPreprocessedRequest(BaseModel):
@@ -144,14 +144,15 @@ class CreateImageRequest(BaseModel):
     prompt: str
     model: str  # e.g. "stabilityai/stable-diffusion-3.5-medium"
     n: int = 1  # Number of images
-    negative_prompt: Optional[str] = None
     size: Optional[str] = "1024x1024"  # "WxH" format
     quality: Optional[str] = "standard"  # standard, hd
     response_format: Optional[str] = "url"  # url or b64_json
+    user: Optional[str] = None
+
+    negative_prompt: Optional[str] = None
     num_inference_steps: Optional[int] = 50  # Denoising steps
     guidance_scale: float = 7.5  # CFG scale
     seed: Optional[int] = None
-    user: Optional[str] = None
 
 
 class ImageData(BaseModel):

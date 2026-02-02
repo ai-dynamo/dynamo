@@ -20,6 +20,26 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
+
+    /// A text description of the undesired image(s).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub negative_prompt: Option<String>,
+
+    /// The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub num_inference_steps: Option<u8>,
+
+    /// The CFG scale. Higher values usually lead to more coherent images.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guidance_scale: Option<f32>,
+
+    /// The seed for the random number generator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub seed: Option<u32>,
 }
 
 impl Default for NvExt {
