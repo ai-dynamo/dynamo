@@ -47,6 +47,8 @@ class BasePayload:
     # Optional additional ports used by specialized payloads (e.g. LoRA system/control-plane APIs).
     # This is intentionally empty by default to preserve prior semantics.
     system_ports: list[int] = field(default_factory=list)
+    # When True, the HTTP request is made with stream=True (for SSE responses).
+    http_stream: bool = False
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
@@ -483,6 +485,134 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
                 )
+
+
+@dataclass
+class ResponsesPayload(BasePayload):
+    """Payload for the Responses API endpoint (/v1/responses).
+
+    For full compliance testing, use the OpenResponses bun CLI:
+      bun run test:compliance --base-url http://localhost:<port>/v1 --api-key test --model <model>
+    See https://www.openresponses.org/compliance
+    """
+
+    endpoint: str = "/v1/responses"
+
+    @staticmethod
+    def extract_content(response):
+        """Extract text content from a Responses API response."""
+        response.raise_for_status()
+        result = response.json()
+
+        assert result.get("object") == "response", (
+            f"Expected object='response', got {result.get('object')}"
+        )
+        assert result.get("id", "").startswith("resp_"), (
+            f"Expected id to start with 'resp_', got {result.get('id')}"
+        )
+        assert result.get("status") == "completed", (
+            f"Expected status='completed', got {result.get('status')}"
+        )
+
+        output = result.get("output", [])
+        assert len(output) > 0, "Response output is empty"
+
+        msg = output[0]
+        assert msg.get("type") == "message", (
+            f"Expected output[0].type='message', got {msg.get('type')}"
+        )
+        assert msg.get("role") == "assistant", (
+            f"Expected role='assistant', got {msg.get('role')}"
+        )
+
+        content_parts = msg.get("content", [])
+        assert len(content_parts) > 0, "Message content is empty"
+        assert content_parts[0].get("type") == "output_text", (
+            f"Expected content[0].type='output_text', got {content_parts[0].get('type')}"
+        )
+
+        return content_parts[0].get("text", "")
+
+    def response_handler(self, response: Any) -> str:
+        return ResponsesPayload.extract_content(response)
+
+
+@dataclass
+class ResponsesStreamPayload(BasePayload):
+    """Streaming payload for the Responses API endpoint (/v1/responses).
+
+    Validates SSE event structure and lifecycle ordering.
+    """
+
+    endpoint: str = "/v1/responses"
+    http_stream: bool = True
+
+    def with_model(self, model):
+        p = deepcopy(self)
+        if "model" not in p.body:
+            p.body = {**p.body, "model": model}
+        return p
+
+    @staticmethod
+    def extract_content(response):
+        """Parse SSE stream and validate event structure."""
+        import json
+
+        response.raise_for_status()
+
+        events = []
+        event_type = ""
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                event_type = line[len("event: "):]
+            elif line.startswith("data: "):
+                data_str = line[len("data: "):]
+                if data_str == "[DONE]":
+                    events.append(("done", None))
+                else:
+                    events.append((event_type, json.loads(data_str)))
+
+        event_types = [e[0] for e in events]
+
+        # Validate lifecycle event ordering
+        assert len(event_types) >= 2, f"Too few events: {event_types}"
+        assert event_types[0] == "response.created", (
+            f"First event should be response.created, got {event_types[0]}"
+        )
+        assert event_types[1] == "response.in_progress", (
+            f"Second event should be response.in_progress, got {event_types[1]}"
+        )
+
+        non_done = [e for e in event_types if e != "done"]
+        assert non_done[-1] == "response.completed", (
+            f"Last real event should be response.completed, got {non_done[-1]}"
+        )
+
+        # Validate text content events
+        assert "response.output_item.added" in event_types, "Missing output_item.added"
+        assert "response.content_part.added" in event_types, "Missing content_part.added"
+        assert "response.output_text.delta" in event_types, "Missing output_text.delta"
+        assert "response.output_text.done" in event_types, "Missing output_text.done"
+        assert "response.content_part.done" in event_types, "Missing content_part.done"
+        assert "response.output_item.done" in event_types, "Missing output_item.done"
+
+        # Verify text deltas concatenate to the final text
+        deltas = [
+            e[1]["delta"] for e in events if e[0] == "response.output_text.delta"
+        ]
+        done_events = [e for e in events if e[0] == "response.output_text.done"]
+        assert len(done_events) == 1, f"Expected 1 output_text.done, got {len(done_events)}"
+        full_text = "".join(deltas)
+        assert done_events[0][1]["text"] == full_text, (
+            "Concatenated deltas don't match output_text.done text"
+        )
+
+        return full_text
+
+    def response_handler(self, response: Any) -> str:
+        return ResponsesStreamPayload.extract_content(response)
 
 
 @dataclass
