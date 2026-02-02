@@ -21,6 +21,8 @@ the audio_chunker and asr_inference workers.
 """
 
 import base64
+from enum import Enum
+from typing import Optional
 
 import numpy as np
 from pydantic import BaseModel
@@ -62,3 +64,90 @@ class ASRResponse(BaseModel):
 
     text: str
     is_final: bool
+
+
+# ============================================================================
+# Streaming Audio Protocol (for real-time microphone streaming)
+# ============================================================================
+
+
+class StreamingMessageType(str, Enum):
+    """Types of messages in the streaming protocol."""
+
+    START = "start"  # Start a new streaming session
+    AUDIO = "audio"  # Audio chunk data
+    END = "end"  # End the streaming session
+
+
+class StreamingConfig(BaseModel):
+    """Configuration for a streaming ASR session."""
+
+    sample_rate: int = 16000
+    chunk_duration_ms: int = 100  # How often the client sends audio chunks
+    encoding: str = "pcm_f32le"  # Audio encoding format
+
+
+class StreamingAudioChunk(BaseModel):
+    """A chunk of streaming audio data."""
+
+    message_type: StreamingMessageType
+    session_id: str
+    sequence_number: int = 0
+    audio_b64: Optional[str] = None  # base64-encoded audio bytes
+    config: Optional[StreamingConfig] = None  # Only for START message
+    timestamp_ms: Optional[int] = None  # Client-side timestamp
+
+    @classmethod
+    def start_session(cls, session_id: str, config: StreamingConfig) -> "StreamingAudioChunk":
+        """Create a START message to begin a streaming session."""
+        return cls(
+            message_type=StreamingMessageType.START,
+            session_id=session_id,
+            config=config,
+        )
+
+    @classmethod
+    def audio_chunk(
+        cls,
+        session_id: str,
+        audio: np.ndarray,
+        sequence_number: int,
+        timestamp_ms: Optional[int] = None,
+    ) -> "StreamingAudioChunk":
+        """Create an AUDIO message with audio data."""
+        audio_bytes = audio.astype(np.float32).tobytes()
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        return cls(
+            message_type=StreamingMessageType.AUDIO,
+            session_id=session_id,
+            sequence_number=sequence_number,
+            audio_b64=audio_b64,
+            timestamp_ms=timestamp_ms,
+        )
+
+    @classmethod
+    def end_session(cls, session_id: str, sequence_number: int) -> "StreamingAudioChunk":
+        """Create an END message to close a streaming session."""
+        return cls(
+            message_type=StreamingMessageType.END,
+            session_id=session_id,
+            sequence_number=sequence_number,
+        )
+
+    def decode_audio(self) -> Optional[np.ndarray]:
+        """Decode the base64 audio back to a numpy array."""
+        if self.audio_b64 is None:
+            return None
+        audio_bytes = base64.b64decode(self.audio_b64)
+        return np.frombuffer(audio_bytes, dtype=np.float32)
+
+
+class StreamingASRResponse(BaseModel):
+    """Response from the streaming ASR service."""
+
+    session_id: str
+    sequence_number: int
+    text: str
+    is_partial: bool  # True for partial/interim results
+    is_final: bool  # True when session ends
+    latency_ms: Optional[float] = None  # Processing latency

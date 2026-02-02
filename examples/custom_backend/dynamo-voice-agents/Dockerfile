@@ -4,16 +4,29 @@
 # Dockerfile for Streaming ASR Voice Agents
 #
 # This image runs the streaming ASR pipeline with NVIDIA Parakeet RNNT model
-# using the Dynamo distributed runtime.
+# using the Dynamo distributed runtime. Supports both file-based transcription
+# and real-time microphone streaming from remote clients.
 #
 # Build:
 #   docker build -t dynamo-voice-agents .
 #
-# Run:
+# Run (local file transcription):
 #   docker run --gpus '"device=0"' \
 #       -e ASR_CUDA_DEVICE=0 \
-#       -e WORKER_LOG_LEVEL=INFO \
 #       dynamo-voice-agents
+#
+# Run (remote microphone streaming):
+#   docker run --gpus '"device=0"' \
+#       -p 2379:2379 \
+#       -e ASR_CUDA_DEVICE=0 \
+#       -e ENABLE_REMOTE_ACCESS=true \
+#       dynamo-voice-agents
+#
+# Then connect from a remote machine:
+#   export DYN_STORE_KV=etcd
+#   export ETCD_ENDPOINTS=http://<SERVER_IP>:2379
+#   export DYN_REQUEST_PLANE=tcp
+#   python3 mic_client.py
 
 # Use Triton Server image as base (includes PyTorch and CUDA)
 ARG BASE_IMAGE=nvcr.io/nvidia/tritonserver
@@ -32,6 +45,9 @@ ENV PYTHONUNBUFFERED=1 \
     # Dynamo runtime configuration
     DYN_STORE_KV=file \
     DYN_REQUEST_PLANE=tcp \
+    # Remote access: set to 'true' to enable remote microphone clients
+    # This auto-detects server IP and uses etcd for service discovery
+    ENABLE_REMOTE_ACCESS=false \
     # ASR configuration
     ASR_CUDA_DEVICE=0 \
     ASR_MODEL_NAME=nvidia/parakeet-rnnt-1.1b \
