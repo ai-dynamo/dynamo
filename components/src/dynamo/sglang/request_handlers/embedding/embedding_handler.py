@@ -25,9 +25,9 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         logging.info("Embedding worker handler initialized")
 
     def cleanup(self):
+        super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
-        super().cleanup()
 
     async def generate(self, request: dict, context: Context):
         """
