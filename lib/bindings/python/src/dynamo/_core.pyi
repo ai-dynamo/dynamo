@@ -753,7 +753,6 @@ class KvEventPublisher:
 
     def publish_stored(
         self,
-        event_id: int,
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
@@ -763,8 +762,9 @@ class KvEventPublisher:
         """
         Publish a KV stored event.
 
+        Event IDs are managed internally by the publisher using a monotonic counter.
+
         Args:
-            event_id: The event ID
             token_ids: List of token IDs
             num_block_tokens: Number of tokens per block
             block_hashes: List of block hashes (signed 64-bit integers)
@@ -773,12 +773,13 @@ class KvEventPublisher:
         """
         ...
 
-    def publish_removed(self, event_id: int, block_hashes: List[int]) -> None:
+    def publish_removed(self, block_hashes: List[int]) -> None:
         """
         Publish a KV removed event.
 
+        Event IDs are managed internally by the publisher using a monotonic counter.
+
         Args:
-            event_id: The event ID
             block_hashes: List of block hashes to remove (signed 64-bit integers)
         """
         ...
@@ -790,7 +791,8 @@ class ZmqKvEventPublisherConfig:
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
         zmq_topic: str = "",
-        enable_local_indexer: bool = False
+        enable_local_indexer: bool = False,
+        dp_rank: int = 0
     ) -> None:
         """
         Configuration for the ZmqKvEventPublisher.
@@ -800,6 +802,7 @@ class ZmqKvEventPublisherConfig:
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
         :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
+        :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
         """
         ...
 

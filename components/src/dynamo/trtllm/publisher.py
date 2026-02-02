@@ -102,14 +102,16 @@ class ZmqKvEventPublisher:
 
     def publish_stored(
         self,
-        event_id: int,
         token_ids: list[int],
         num_block_tokens: list[int],
         block_hashes: list[int],
         lora_id: int = 0,
         parent_hash: Optional[int] = None,
     ):
-        """Publish a BlockStored event."""
+        """Publish a BlockStored event.
+
+        Note: event_id is managed internally via self.sequence counter.
+        """
         # Convert block hashes to signed i64 format
         block_hashes_signed = [_to_signed_i64(h) for h in block_hashes]
         parent_hash_signed = (
@@ -129,8 +131,11 @@ class ZmqKvEventPublisher:
 
         self._publish_event(event)
 
-    def publish_removed(self, event_id: int, block_hashes: list[int]):
-        """Publish a BlockRemoved event."""
+    def publish_removed(self, block_hashes: list[int]):
+        """Publish a BlockRemoved event.
+
+        Note: event_id is managed internally via self.sequence counter.
+        """
         # Convert block hashes to signed i64 format (vLLM compatibility)
         block_hashes_signed = [_to_signed_i64(h) for h in block_hashes]
 
@@ -513,13 +518,13 @@ class Publisher:
             lora_id = data.get("lora_id", 0)
 
             logging.debug(
-                f"publish stored event: event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
+                f"publish stored event: engine_event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
+            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
             if self.zmq_kv_event_publisher:
                 # Consolidator enabled: publish to ZMQ only
                 self.zmq_kv_event_publisher.publish_stored(
-                    event_id,
                     token_ids,
                     num_block_tokens,
                     block_hashes,
@@ -529,7 +534,6 @@ class Publisher:
             elif self.kv_event_publisher:
                 # No consolidator: publish to NATS (router subscribes directly)
                 self.kv_event_publisher.publish_stored(
-                    event_id,
                     token_ids,
                     num_block_tokens,
                     block_hashes,
@@ -552,17 +556,16 @@ class Publisher:
                 removed_block_hashes.append(block_hash)
 
             logging.debug(
-                f"publish removed event: event_id: {event_id}, block_hashes: {removed_block_hashes}"
+                f"publish removed event: engine_event_id: {event_id}, block_hashes: {removed_block_hashes}"
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
+            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
             if self.zmq_kv_event_publisher:
                 # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_removed(
-                    event_id, removed_block_hashes
-                )
+                self.zmq_kv_event_publisher.publish_removed(removed_block_hashes)
             elif self.kv_event_publisher:
                 # No consolidator: publish to NATS (router subscribes directly)
-                self.kv_event_publisher.publish_removed(event_id, removed_block_hashes)
+                self.kv_event_publisher.publish_removed(removed_block_hashes)
         elif data["type"] == "created" and self.processing_initial_created_events:
             self.update_max_window_size(event)
 
