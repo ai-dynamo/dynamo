@@ -38,7 +38,7 @@ class OmniHandler(BaseWorkerHandler):
 
         omni_kwargs = {
             "model": config.model,
-            "trust_remote_code": True,
+            "trust_remote_code": config.engine_args.trust_remote_code,
             "stage_configs_path": config.stage_configs_path,
         }
 
