@@ -266,7 +266,7 @@ async def worker():
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
         logger.debug("init_multimodal_worker completed")
-    elif config.omni_worker:
+    elif config.omni:
         await init_omni(runtime, config, shutdown_event)
         logger.debug("init_omni completed")
     elif config.is_prefill_worker:

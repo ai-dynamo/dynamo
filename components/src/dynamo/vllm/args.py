@@ -81,7 +81,7 @@ class Config:
     ec_consumer_mode: bool = False
 
     # vLLM-Omni worker for multi-stage pipelines
-    omni_worker: bool = False
+    omni: bool = False
     # Path to vLLM-Omni stage configuration YAML
     stage_configs_path: Optional[str] = None
 
@@ -264,7 +264,7 @@ def parse_args() -> Config:
         help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
     )
     parser.add_argument(
-        "--omni-worker",
+        "--omni",
         action="store_true",
         help="Run as vLLM-Omni worker for multi-stage pipelines (supports text-to-text, text-to-image, etc.)",
     )
@@ -272,7 +272,7 @@ def parse_args() -> Config:
         "--stage-configs-path",
         type=str,
         default=None,
-        help="Path to vLLM-Omni stage configuration YAML file. Required for --omni-worker.",
+        help="Path to vLLM-Omni stage configuration YAML file. Required for --omni.",
     )
     parser.add_argument(
         "--store-kv",
@@ -396,9 +396,9 @@ def parse_args() -> Config:
             )
 
     # Validate omni worker requirements
-    if args.omni_worker and not args.stage_configs_path:
+    if args.omni and not args.stage_configs_path:
         raise ValueError(
-            "--stage-configs-path is required when using --omni-worker. "
+            "--stage-configs-path is required when using --omni. "
             "Specify a YAML file containing stage configurations for the multi-stage pipeline."
         )
 
@@ -422,7 +422,7 @@ def parse_args() -> Config:
         # Multimodal prefill worker stays as "backend" to maintain encoder connection
         config.component = "backend"
         config.endpoint = "generate"
-    elif args.omni_worker:
+    elif args.omni:
         # Omni worker uses "backend" component for multi-stage pipeline orchestration
         config.component = "backend"
         config.endpoint = "generate"
@@ -455,7 +455,7 @@ def parse_args() -> Config:
     config.ec_storage_path = args.ec_storage_path
     config.ec_extra_config = args.ec_extra_config
     config.ec_consumer_mode = args.ec_consumer_mode
-    config.omni_worker = args.omni_worker
+    config.omni = args.omni
     config.stage_configs_path = args.stage_configs_path
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
