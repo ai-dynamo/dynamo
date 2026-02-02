@@ -33,6 +33,7 @@ Tracing:
 
 import asyncio
 import os
+from dataclasses import dataclass
 
 # Configure Dynamo runtime to use file-based KV store and TCP request plane
 os.environ.setdefault("DYN_STORE_KV", "file")
@@ -46,6 +47,27 @@ import uvloop
 from omegaconf import OmegaConf
 from protocol import ASRRequest, ASRResponse
 from tracing import get_tracer, setup_tracing, shutdown_tracing
+
+
+# Fallback ContextSize for newer NeMo versions where it may have been removed
+@dataclass
+class ContextSize:
+    """Context size configuration for streaming ASR."""
+    left: int
+    chunk: int
+    right: int
+
+    def total(self) -> int:
+        """Return total context size (left + chunk + right)."""
+        return self.left + self.chunk + self.right
+
+    def subsample(self, factor: int) -> "ContextSize":
+        """Return a new ContextSize with each dimension divided by factor."""
+        return ContextSize(
+            left=self.left // factor,
+            chunk=self.chunk // factor,
+            right=self.right // factor,
+        )
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -125,9 +147,11 @@ class ASRInferenceHandler:
             OmegaConf.set_struct(model_cfg.preprocessor, True)
 
             # Configure decoding for greedy_batch with label looping
+            # Disable CUDA graphs to avoid compilation issues with some CUDA/driver versions
             decoding_cfg = RNNTDecodingConfig()
             decoding_cfg.strategy = "greedy_batch"
             decoding_cfg.greedy.loop_labels = True
+            decoding_cfg.greedy.use_cuda_graph_decoder = False  # Disable CUDA graphs
             decoding_cfg.preserve_alignments = False
             decoding_cfg.fused_batch_size = -1
             self.model.change_decoding_strategy(decoding_cfg)
@@ -141,7 +165,14 @@ class ASRInferenceHandler:
             self.model.eval()
 
             # Get decoding computer for stateful decoding
-            self.decoding_computer = self.model.decoding.decoding.decoding_computer
+            # Note: In newer NeMo versions, this is a private attribute
+            decoding_obj = self.model.decoding.decoding
+            if hasattr(decoding_obj, 'decoding_computer'):
+                self.decoding_computer = decoding_obj.decoding_computer
+            elif hasattr(decoding_obj, '_decoding_computer'):
+                self.decoding_computer = decoding_obj._decoding_computer
+            else:
+                raise AttributeError("Cannot find decoding_computer attribute on decoding object")
 
             # Extract audio processing parameters
             self.audio_sample_rate = model_cfg.preprocessor["sample_rate"]
@@ -175,9 +206,9 @@ class ASRInferenceHandler:
                 batched_hyps_to_hypotheses,
             )
             from nemo.collections.asr.parts.utils.streaming_utils import (
-                ContextSize,
                 StreamingBatchedAudioBuffer,
             )
+            # Note: ContextSize is defined at module level as a fallback
 
             # Parse and decode request
             with self.tracer.start_as_current_span("decode_request") as span:

@@ -237,9 +237,23 @@ async def worker(runtime: DistributedRuntime):
     )
     asr_client = await asr_endpoint.client()
 
+    # Wait for ASR inference worker with retries
+    max_retries = 30
+    retry_delay = 5  # seconds
     logger.info("Waiting for ASR inference worker...")
-    await asr_client.wait_for_instances()
-    logger.info("ASR inference worker connected")
+    
+    for attempt in range(max_retries):
+        try:
+            await asr_client.wait_for_instances()
+            logger.info("ASR inference worker connected")
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"ASR worker not ready (attempt {attempt + 1}/{max_retries}): {e}")
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"Failed to connect to ASR worker after {max_retries} attempts")
+                raise
 
     # Create and serve chunker endpoint
     component = runtime.namespace(namespace_name).component("chunker")

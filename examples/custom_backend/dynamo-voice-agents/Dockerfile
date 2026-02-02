@@ -15,14 +15,11 @@
 #       -e WORKER_LOG_LEVEL=INFO \
 #       dynamo-voice-agents
 
-# Use NVIDIA NeMo container as base (includes NeMo toolkit with ASR models)
-ARG BASE_IMAGE=nvcr.io/nvidia/nemo
-ARG BASE_IMAGE_TAG=25.04
+# Use Triton Server image as base (includes PyTorch and CUDA)
+ARG BASE_IMAGE=nvcr.io/nvidia/tritonserver
+ARG BASE_IMAGE_TAG=24.12-py3
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
-
-# Build arguments
-ARG PYTHON_VERSION=3.12
 
 # Labels
 LABEL maintainer="NVIDIA Corporation"
@@ -46,17 +43,54 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install uv package manager for fast dependency installation
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Install build tools, etcd, and dependencies for NeMo
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    g++ \
+    wget \
+    git \
+    libsndfile1 \
+    sox \
+    libsox-dev \
+    ffmpeg \
+    libavcodec-extra \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create virtual environment
-RUN uv venv /opt/venv --python ${PYTHON_VERSION}
-ENV VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:${PATH}"
+# Install etcd (required by Dynamo runtime for endpoint registration)
+ARG ETCD_VERSION=v3.5.12
+RUN wget -qO- https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-amd64.tar.gz | \
+    tar -xz -C /tmp && \
+    mv /tmp/etcd-${ETCD_VERSION}-linux-amd64/etcd /usr/local/bin/ && \
+    mv /tmp/etcd-${ETCD_VERSION}-linux-amd64/etcdctl /usr/local/bin/ && \
+    rm -rf /tmp/etcd-${ETCD_VERSION}-linux-amd64
 
-# Copy requirements and install dependencies
-COPY requirements.txt /app/
-RUN uv pip install --no-cache -r requirements.txt
+# Install Cython and numpy first (required for some NeMo dependencies)
+# Note: Skipping pip upgrade as Triton image has pip installed via apt
+RUN pip install --no-cache-dir \
+    Cython \
+    numpy
+
+# Install PyTorch audio and torchcodec (matching the PyTorch version in Triton 24.12)
+RUN pip install --no-cache-dir \
+    torchaudio \
+    torchcodec
+
+# Install NeMo toolkit 2.4 with ASR support and all dependencies
+# NeMo 2.4 requires specific dependencies for ASR functionality
+RUN pip install --no-cache-dir \
+    "nemo_toolkit[asr]==2.4.0"
+
+# Install Dynamo runtime (since we're not using the Dynamo frontend image)
+RUN pip install --no-cache-dir \
+    ai-dynamo
+
+# Install additional application dependencies
+RUN pip install --no-cache-dir \
+    pydantic>=2.0.0 \
+    uvloop>=0.19.0 \
+    opentelemetry-api>=1.20.0 \
+    opentelemetry-sdk>=1.20.0 \
+    opentelemetry-exporter-otlp-proto-grpc>=1.20.0
 
 # Copy application source code
 COPY src/ /app/src/
@@ -68,10 +102,6 @@ RUN chmod +x /app/start_services.sh
 # Create directory for Dynamo runtime state
 RUN mkdir -p /app/state && chmod 777 /app/state
 ENV DYN_STATE_DIR=/app/state
-
-# Create non-root user for running the application
-RUN useradd -m -s /bin/bash asr || true
-RUN chown -R asr:asr /app /opt/venv 2>/dev/null || true
 
 # Health check - verify Python and imports work
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

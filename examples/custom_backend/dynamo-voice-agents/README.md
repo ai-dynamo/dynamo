@@ -46,6 +46,8 @@ Real-time speech-to-text transcription using NVIDIA Dynamo distributed runtime w
 
 ### Option 1: Docker (Recommended)
 
+The Docker image is based on `nvcr.io/nvidia/tritonserver:24.12-py3` with NeMo Toolkit 2.4 and Dynamo runtime installed.
+
 ```bash
 # Build the image
 docker build -t dynamo-voice-agents .
@@ -68,8 +70,9 @@ docker compose logs -f
 **Prerequisites:**
 - NVIDIA GPU with CUDA support
 - Python 3.10+
-- NeMo Toolkit installed (`pip install nemo_toolkit[asr]`)
-- Dynamo runtime (`pip install ai-dynamo-runtime`)
+- NeMo Toolkit 2.4 installed (`pip install nemo_toolkit[asr]==2.4.0`)
+- Dynamo runtime (`pip install ai-dynamo`)
+- Audio processing libraries: libsndfile, sox, ffmpeg
 
 **Terminal 1 - Start Inference Worker:**
 ```bash
@@ -212,3 +215,24 @@ ls -la /app/state/
 ## Architecture Details
 
 See [docs/dynamo-asr-webrtc-architecture.md](docs/dynamo-asr-webrtc-architecture.md) for the complete architecture proposal including WebRTC integration plans.
+
+
+
+## Running on OCI
+
+
+```
+docker build -f Dockerfile -t gitlab-master.nvidia.com/fciannella/dynamo-voice-agents/dynamo-voice-agents:0.0.1 -t gitlab-master.nvidia.com/fciannella/dynamo-voice-agents/dynamo-voice-agents:latest .
+```
+
+```
+docker push gitlab-master.nvidia.com/fciannella/dynamo-voice-agents/dynamo-voice-agents:latest
+
+docker push gitlab-master.nvidia.com/fciannella/dynamo-voice-agents/dynamo-voice-agents:0.0.1
+```
+
+
+```
+srun -A llmservice_nemo_mlops -p interactive_singlenode -G 4 --time 04:00:00 --container-mounts /lustre/fsw/portfolios/llmservice/users/fciannella/cache:/root/.cache,/lustre/fsw/portfolios/llmservice/users/fciannella/src:/root/src --container-image gitlab-master.nvidia.com/fciannella/dynamo-voice-agents/dynamo-voice-agents:0.0.1 --pty bash
+
+```
