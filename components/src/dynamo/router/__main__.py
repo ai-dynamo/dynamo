@@ -66,8 +66,6 @@ class StandaloneRouterHandler:
             self.worker_client = await worker_endpoint.client()
 
             # Create KvPushRouter with specified configuration
-            # Note: worker_type is now derived from MDC (Model Deployment Card) at routing time,
-            # so we don't need to pass it here. Workers self-identify as prefill/decode in MDC.
             self.kv_push_router = KvPushRouter(
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
