@@ -28,6 +28,7 @@ dynamo:
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
   nixl_libfabric_ref: v2.3.0
   enable_kvbm: "true"
+  enable_kvbm_nccl: "true"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "false"
   ffmpeg_version: "7.1"
@@ -50,6 +51,7 @@ vllm:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
+  enable_kvbm_nccl: "true"
   enable_modelexpress_p2p: "false"
   modelexpress_ref: "3d73992ce6c10e52ddc54f7f12af35d27e173f15"
 
@@ -65,6 +67,7 @@ sglang:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
+  enable_kvbm_nccl: "false"
 
 trtllm:
   base_image: nvcr.io/nvidia/pytorch
@@ -75,6 +78,7 @@ trtllm:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "false"
   enable_kvbm: "true"
+  enable_kvbm_nccl: "true"
   python_version: "3.12"
   index_url: https://pypi.nvidia.com/
   pip_wheel_dir: /tmp/trtllm_wheel/

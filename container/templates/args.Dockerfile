@@ -35,6 +35,7 @@ ARG RUNTIME_IMAGE_TAG={{ context[framework][cuda_context_key].runtime_image_tag 
 
 # Build configuration
 ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
+ARG ENABLE_KVBM_NCCL={{ context[framework].enable_kvbm_nccl }}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
