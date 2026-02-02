@@ -285,7 +285,8 @@ class EventPublisher:
         self.block_hashes: List[int] = []
 
     def store_event(self, tokens, lora_id):
-        parent_hash = self.block_hash_counter if self.block_hash_counter > 0 else None
+        # Parent hash should reference the last published block, not the current one
+        parent_hash = self.block_hashes[-1] if self.block_hashes else None
         self.publisher.publish_stored(
             tokens,  # token_ids
             [
