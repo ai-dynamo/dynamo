@@ -418,14 +418,14 @@ class PyTrtllmKvConnectorWorker:
             The TRT-LLM rank identifier
         rank: Optional[int]
             Rank for replicated mode (None = sharded mode).
-            Required when running in DEP (Data Expert Parallelism) mode.
+            Required for MLA support optimization (replicated mode).
         world_size: Optional[int]
             World size for replicated mode.
-            Required when running in DEP mode.
+            Required for MLA support optimization.
         nccl_comm_ptr: Optional[int]
             Raw ncclComm_t pointer for replicated mode.
             Can be obtained from NcclBootstrap.init_communicator().
-            Required when running in DEP mode.
+            Required for MLA support optimization.
         """
         ...
 
