@@ -34,6 +34,7 @@ pub struct ResponseStreamConverter {
     // Text message tracking
     message_item_id: String,
     message_started: bool,
+    message_output_index: u32,
     accumulated_text: String,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
@@ -65,6 +66,7 @@ impl ResponseStreamConverter {
             sequence_number: 0,
             message_item_id: format!("msg_{}", Uuid::new_v4().simple()),
             message_started: false,
+            message_output_index: 0,
             accumulated_text: String::new(),
             function_call_items: Vec::new(),
             current_fc_index: None,
@@ -80,7 +82,12 @@ impl ResponseStreamConverter {
 
     fn make_response(&self, status: Status) -> Response {
         let completed_at = if status == Status::Completed {
-            Some(self.created_at)
+            Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            )
         } else {
             None
         };
@@ -163,7 +170,8 @@ impl ResponseStreamConverter {
                     // Emit output_item.added + content_part.added on first text
                     if !self.message_started {
                         self.message_started = true;
-                        let output_index = self.next_output_index;
+                        self.message_output_index = self.next_output_index;
+                        let output_index = self.message_output_index;
                         self.next_output_index += 1;
 
                         let item_added =
@@ -200,7 +208,7 @@ impl ResponseStreamConverter {
                         ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
                             sequence_number: self.next_seq(),
                             item_id: self.message_item_id.clone(),
-                            output_index: 0,
+                            output_index: self.message_output_index,
                             content_index: 0,
                             delta: content.clone(),
                             logprobs: Some(vec![]),
@@ -302,7 +310,7 @@ impl ResponseStreamConverter {
             let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
                 sequence_number: self.next_seq(),
                 item_id: self.message_item_id.clone(),
-                output_index: 0,
+                output_index: self.message_output_index,
                 content_index: 0,
                 text: self.accumulated_text.clone(),
                 logprobs: Some(vec![]),
@@ -312,7 +320,7 @@ impl ResponseStreamConverter {
             let part_done = ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
                 sequence_number: self.next_seq(),
                 item_id: self.message_item_id.clone(),
-                output_index: 0,
+                output_index: self.message_output_index,
                 content_index: 0,
                 part: OutputContent::OutputText(OutputTextContent {
                     text: self.accumulated_text.clone(),
@@ -324,7 +332,7 @@ impl ResponseStreamConverter {
 
             let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
                 sequence_number: self.next_seq(),
-                output_index: 0,
+                output_index: self.message_output_index,
                 item: OutputItem::Message(OutputMessage {
                     id: self.message_item_id.clone(),
                     content: vec![OutputMessageContent::OutputText(OutputTextContent {
