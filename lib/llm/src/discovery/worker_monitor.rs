@@ -5,6 +5,7 @@ use crate::http::service::metrics::{WORKER_LAST_ITL_GAUGE, WORKER_LAST_TTFT_GAUG
 use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::protocols::ActiveLoad;
 use crate::model_card::ModelDeploymentCard;
+use dashmap::DashMap;
 use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
 use dynamo_runtime::metrics::prometheus_names::frontend_service;
@@ -148,7 +149,7 @@ pub struct KvWorkerMonitor {
     client: Client,
     /// Optional prefill endpoint client (used for TTFT cleanup in disaggregated mode)
     prefill_client: Arc<RwLock<Option<Client>>>,
-    worker_load_states: Arc<RwLock<HashMap<u64, WorkerLoadState>>>,
+    worker_load_states: Arc<DashMap<u64, WorkerLoadState>>,
     /// Active decode blocks threshold stored as parts-per-10000 (e.g., 8500 = 0.85)
     active_decode_blocks_threshold: Arc<AtomicU32>,
     /// Active prefill tokens threshold stored as literal token count (u64)
@@ -179,7 +180,7 @@ impl KvWorkerMonitor {
         Self {
             client,
             prefill_client: Arc::new(RwLock::new(None)),
-            worker_load_states: Arc::new(RwLock::new(HashMap::new())),
+            worker_load_states: Arc::new(DashMap::new()),
             active_decode_blocks_threshold: Arc::new(AtomicU32::new(
                 Self::active_decode_blocks_threshold_to_scaled(active_decode_blocks_threshold),
             )),
@@ -243,7 +244,7 @@ impl KvWorkerMonitor {
     }
 
     /// Get the worker load states for external access
-    pub fn load_states(&self) -> Arc<RwLock<HashMap<u64, WorkerLoadState>>> {
+    pub fn load_states(&self) -> Arc<DashMap<u64, WorkerLoadState>> {
         self.worker_load_states.clone()
     }
 }
@@ -384,13 +385,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
                         }
 
-                        let mut states = worker_load_states.write().unwrap();
-                        states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
+                        worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
 
                         // Update worker load states and known_worker_dp_ranks for all workers
                         // This ensures we track workers from MDCs even if they don't publish ActiveLoad
                         for (lease_id, runtime_config) in runtime_configs.iter() {
-                            let state = states.entry(*lease_id).or_default();
+                            let mut state = worker_load_states.entry(*lease_id).or_default();
 
                             // Track dp_ranks for this worker (for cleanup when worker disappears)
                             let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
@@ -432,16 +432,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                         // Update worker load state per dp_rank (for busy detection only)
                         // Note: Prometheus gauges are updated directly by sequence.rs
-                        let mut states = worker_load_states.write().unwrap();
-                        let state = states.entry(worker_id).or_default();
+                        {
+                            let mut state = worker_load_states.entry(worker_id).or_default();
 
-                        if let Some(active_blocks) = active_load.active_decode_blocks {
-                            state.active_decode_blocks.insert(dp_rank, active_blocks);
+                            if let Some(active_blocks) = active_load.active_decode_blocks {
+                                state.active_decode_blocks.insert(dp_rank, active_blocks);
+                            }
+                            if let Some(active_tokens) = active_load.active_prefill_tokens {
+                                state.active_prefill_tokens.insert(dp_rank, active_tokens);
+                            }
                         }
-                        if let Some(active_tokens) = active_load.active_prefill_tokens {
-                            state.active_prefill_tokens.insert(dp_rank, active_tokens);
-                        }
-                        drop(states);
 
                         // Load thresholds dynamically - allows runtime updates
                         let current_active_decode_blocks_threshold = Self::scaled_to_active_decode_blocks_threshold(
@@ -450,16 +450,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let current_active_prefill_tokens_threshold = active_prefill_tokens_threshold.load(Ordering::Relaxed);
 
                         // Recalculate all busy instances and update
-                        let states = worker_load_states.read().unwrap();
-                        let busy_instances: Vec<u64> = states
+                        let busy_instances: Vec<u64> = worker_load_states
                             .iter()
-                            .filter_map(|(&id, state)| {
-                                state
+                            .filter_map(|r| {
+                                r.value()
                                     .is_busy(current_active_decode_blocks_threshold, current_active_prefill_tokens_threshold)
-                                    .then_some(id)
+                                    .then_some(*r.key())
                             })
                             .collect();
-                        drop(states);
 
                         // Only update if busy_instances has changed
                         if busy_instances != previous_busy_instances {

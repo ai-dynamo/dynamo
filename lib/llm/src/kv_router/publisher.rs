@@ -423,8 +423,11 @@ pub async fn start_zmq_listener(
         return;
     }
 
+    // Connect to the ZMQ endpoint. SGLang binds locally, Dynamo connects.
+    // In multi-node setups, each node runs dynamo.sglang alongside local SGLang ranks,
+    // so ZMQ connections are always local. NATS handles cross-node event distribution.
     if let Err(e) = socket.connect(&zmq_endpoint).await {
-        tracing::error!("Failed to connect ZMQ SUB socket: {}", e);
+        tracing::error!("Failed to connect ZMQ SUB socket to {zmq_endpoint}: {e}");
         return;
     }
 
@@ -1556,7 +1559,7 @@ mod tests_startup_helpers {
         // Cancellation token so we can stop the listener
         let token = dynamo_runtime::CancellationToken::new();
 
-        // Spawn async listener
+        // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
             start_zmq_listener(endpoint.to_string(), topic, tx, token, 4)
