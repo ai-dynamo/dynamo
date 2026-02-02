@@ -1940,24 +1940,8 @@ def _test_router_decisions(
 
     # Use async to manage the test flow
     async def test_sync():
-        # Calculate expected number of instances
-        # With data parallelism:
-        # - vLLM/SGLang: each DP rank registers as a separate instance
-        # - Mockers: all DP ranks share the same worker instance ID (instance_ids returns worker IDs)
-        if test_dp_rank:
-            if (
-                hasattr(engine_workers, "data_parallel_size")
-                and engine_workers.data_parallel_size is not None
-            ):
-                # vLLM/SGLang: each DP rank registers as a separate instance
-                expected_num_instances = (
-                    engine_workers.num_workers * engine_workers.data_parallel_size
-                )
-            else:
-                # Mockers with dp_size or no DP: instance_ids() returns worker IDs
-                expected_num_instances = engine_workers.num_workers
-        else:
-            expected_num_instances = engine_workers.num_workers
+        # Workers register one instance per process (not per dp_rank)
+        expected_num_instances = engine_workers.num_workers
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
