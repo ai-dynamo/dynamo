@@ -166,6 +166,8 @@ addopts = [
     "--ignore-glob=components/src/dynamo/vllm/multimodal_handlers/*",
     "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
+    "--feature-matrix-json=artifacts/feature_matrix.json",
+    "--feature-matrix-md=artifacts/feature_matrix.md",
 ]
 xfail_strict = true
 log_cli_level = "INFO"
