@@ -554,15 +554,11 @@ async def parse_args(args: list[str]) -> Config:
     image_diffusion_worker = getattr(parsed_args, "image_diffusion_worker", False)
 
     if image_diffusion_worker:
-        logging.info(
-            f"Image diffusion worker detected with model: {model_path}, creating minimal ServerArgs stub"
-        )
-        # Create a minimal ServerArgs-like object that bypasses model config loading
-        # Image diffusion workers don't actually use ServerArgs - they use DiffGenerator
-        import types
+        logging.info(f"Image diffusion worker detected with model: {model_path}")
 
-        server_args = types.SimpleNamespace()
-        # Copy over any attrs that might be needed, but avoid triggering __post_init__
+        # Need to use ServerArgs not intended for sglang[diffusion], multimodal_gen has its own ServerArgs.
+        server_args = ServerArgs("none")  # HACK: Avoid triggering __post_init__
+
         server_args.model_path = model_path
         server_args.served_model_name = parsed_args.served_model_name
         server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
