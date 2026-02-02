@@ -563,11 +563,16 @@ async def parse_args(args: list[str]) -> Config:
         server_args.served_model_name = parsed_args.served_model_name
         server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
         server_args.log_level = getattr(parsed_args, "log_level", "info")
-        server_args.skip_tokenizer_init = True
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
+        server_args.tp_size = getattr(parsed_args, "tensor_parallel_size", 1)
+        server_args.dp_size = getattr(parsed_args, "data_parallel_size", 1)
+
+        parsed_args.use_sglang_tokenizer = True
+        parsed_args.dyn_endpoint_types = "images"
+
         logging.info(
             f"Created stub ServerArgs for diffusion: model_path={server_args.model_path}"
         )
