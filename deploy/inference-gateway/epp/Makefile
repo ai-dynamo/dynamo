@@ -113,6 +113,7 @@ image-build-ci: dynamo-lib ## Build & Push to CI registry (No new builder create
 	$(MAKE) image-build \
 		PUSH=--push \
 		LOAD= \
+		PLATFORMS=linux/$(ARCH) \
 		IMAGE_TAG=$(REGISTRY)/$(IMAGE_REPO):$(GIT_TAG)-$(ARCH)
 
 ##@ Local Development with Buildx

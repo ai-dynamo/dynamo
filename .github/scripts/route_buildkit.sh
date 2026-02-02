@@ -179,9 +179,15 @@ get_target_indices() {
     fi
   done
 
-  # If no pods match the specific modulo, fallback to ALL available pods
+  # If no pods match the specific modulo, fallback to the highest available index
   if [ "${#final_targets[@]}" -eq "0" ]; then
-    echo "${available_indices[@]}"
+    local max_idx=${available_indices[0]}
+    for idx in "${available_indices[@]}"; do
+      if [ "$idx" -gt "$max_idx" ]; then
+        max_idx=$idx
+      fi
+    done
+    echo "$max_idx"
   else
     echo "${final_targets[@]}"
   fi
