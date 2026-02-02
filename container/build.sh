@@ -156,7 +156,6 @@ EFA_VERSION=1.45.1
 NO_CACHE=""
 NO_LOAD=""
 PUSH=""
-CI_BUILD=""
 
 # KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
 # or can be explicitly enabled via --enable-kvbm flag
@@ -404,9 +403,6 @@ get_options() {
         --no-tag-latest)
             NO_TAG_LATEST=true
             ;;
-        --ci)
-            CI_BUILD=true
-            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -564,7 +560,6 @@ show_help() {
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo "  [--efa-version AWS EFA installer version (default: 1.45.1)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
-    echo "  [--ci CI mode: the script is running in a CI environment]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -1068,30 +1063,18 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
         echo "Using DOCKER_PROXY: ${DOCKER_PROXY}"
     fi
 
-    # Compute EPP image tag components (must match Makefile's IMAGE_TAG)
+    # Build EPP image using the Makefile
+    # The Makefile handles: building Dynamo library, building Docker image, loading it locally
+    $RUN_PREFIX make -C "${EPP_DIR}" all DYNAMO_DIR="${BUILD_CONTEXT}" ${DOCKER_PROXY_ARG}
+
+    # Compute EPP image tag (must match Makefile's IMAGE_TAG)
     # IMAGE_TAG = $(IMAGE_REPO):$(GIT_TAG)
     # IMAGE_REPO = $(DOCKER_SERVER)/$(IMAGE_NAME)
+    # Image lives in local cache only, not pushed to any registry
     EPP_DOCKER_SERVER="dynamo"
     EPP_IMAGE_NAME="dynamo-epp"
     EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
-
-    # Build EPP image using the Makefile
-    # The Makefile handles: building Dynamo library, building Docker image, loading/pushing it
-    if [[ "${CI_BUILD}" == "true" ]]; then
-        # CI mode: use existing buildx builder, push to registry (no local load)
-        if [[ -z "${ECR_HOSTNAME}" ]]; then
-            error "ERROR: --ci requires ECR_HOSTNAME to be set for EPP image push"
-        fi
-        echo "CI mode: Building and pushing EPP image to ${ECR_HOSTNAME}"
-        $RUN_PREFIX make -C "${EPP_DIR}" image-build-ci DYNAMO_DIR="${BUILD_CONTEXT}" REGISTRY="${ECR_HOSTNAME}/ai-dynamo" ARCH="${ARCH}" ${DOCKER_PROXY_ARG}
-        # ARCH suffix is appended as a patch until Dockerfiles support multi-arch builds
-        EPP_IMAGE_TAG="${ECR_HOSTNAME}/ai-dynamo/${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}-${ARCH}"
-    else
-        # Local mode: create temp buildx builder, load image locally
-        $RUN_PREFIX make -C "${EPP_DIR}" all DYNAMO_DIR="${BUILD_CONTEXT}" ${DOCKER_PROXY_ARG}
-        # Image lives in local cache only, not pushed to any registry
-        EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
-    fi
+    EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
 
     echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
 
