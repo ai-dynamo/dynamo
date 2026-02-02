@@ -52,6 +52,7 @@ def send_request(
     timeout: float = 30.0,
     method: str = "POST",
     log_level: int = 20,
+    stream: bool = False,
 ) -> requests.Response:
     """
     Send an HTTP request to the engine with detailed logging.
@@ -97,7 +98,9 @@ def send_request(
         if method_upper == "GET":
             response = requests.get(url, params=payload, timeout=timeout)
         elif method_upper == "POST":
-            response = requests.post(url, json=payload, timeout=timeout)
+            response = requests.post(
+                url, json=payload, timeout=timeout, stream=stream
+            )
         else:
             # Fallback for other methods if needed
             response = requests.request(
