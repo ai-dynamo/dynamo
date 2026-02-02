@@ -59,9 +59,11 @@ def _check_type(value: Any, expected: str, path: str) -> list[str]:
         # int check should not match bool
         if expected in ("integer", "number") and isinstance(value, bool):
             return [_path_err(path, f"Expected {expected}, received boolean")]
-        return [_path_err(path, f"Expected {expected}, received {type(value).__name__}")]
+        return [
+            _path_err(path, f"Expected {expected}, received {type(value).__name__}")
+        ]
     if expected == "integer" and isinstance(value, float) and not value.is_integer():
-        return [_path_err(path, f"Expected integer, received float")]
+        return [_path_err(path, "Expected integer, received float")]
     return []
 
 
@@ -108,17 +110,31 @@ def validate_response_resource(data: Any, path: str = "") -> list[str]:
     for field_name in ("id", "object", "status", "model", "service_tier"):
         val = data.get(field_name)
         if val is None:
-            errors.append(_path_err(f"{path}.{field_name}" if path else field_name, "Required"))
+            errors.append(
+                _path_err(f"{path}.{field_name}" if path else field_name, "Required")
+            )
         else:
-            errors.extend(_check_type(val, "string", f"{path}.{field_name}" if path else field_name))
+            errors.extend(
+                _check_type(
+                    val, "string", f"{path}.{field_name}" if path else field_name
+                )
+            )
 
     # object must be "response"
     if data.get("object") is not None:
-        errors.extend(_check_enum(data.get("object"), ["response"], f"{path}.object" if path else "object"))
+        errors.extend(
+            _check_enum(
+                data.get("object"), ["response"], f"{path}.object" if path else "object"
+            )
+        )
 
     # status enum
     if isinstance(data.get("status"), str):
-        errors.extend(_check_enum(data["status"], STATUS_VALUES, f"{path}.status" if path else "status"))
+        errors.extend(
+            _check_enum(
+                data["status"], STATUS_VALUES, f"{path}.status" if path else "status"
+            )
+        )
 
     # --- Required integer fields ---
     for field_name in ("created_at", "top_logprobs"):
@@ -162,7 +178,9 @@ def validate_response_resource(data: Any, path: str = "") -> list[str]:
     if output is None:
         errors.append(_path_err(fpath, "Required"))
     elif not isinstance(output, list):
-        errors.append(_path_err(fpath, f"Expected array, received {type(output).__name__}"))
+        errors.append(
+            _path_err(fpath, f"Expected array, received {type(output).__name__}")
+        )
     else:
         for i, item in enumerate(output):
             errors.extend(validate_output_item(item, f"{fpath}[{i}]"))
@@ -184,7 +202,9 @@ def validate_response_resource(data: Any, path: str = "") -> list[str]:
     elif isinstance(tc, str):
         errors.extend(_check_enum(tc, TOOL_CHOICE_VALUES, fpath))
     elif not isinstance(tc, dict):
-        errors.append(_path_err(fpath, f"Expected string or object, received {type(tc).__name__}"))
+        errors.append(
+            _path_err(fpath, f"Expected string or object, received {type(tc).__name__}")
+        )
 
     # text: object with format field
     text = data.get("text")
@@ -192,13 +212,19 @@ def validate_response_resource(data: Any, path: str = "") -> list[str]:
     if text is None:
         errors.append(_path_err(fpath, "Required"))
     elif not isinstance(text, dict):
-        errors.append(_path_err(fpath, f"Expected object, received {type(text).__name__}"))
+        errors.append(
+            _path_err(fpath, f"Expected object, received {type(text).__name__}")
+        )
     else:
         fmt = text.get("format")
         if fmt is None:
             errors.append(_path_err(f"{fpath}.format", "Required"))
         elif not isinstance(fmt, dict):
-            errors.append(_path_err(f"{fpath}.format", f"Expected object, received {type(fmt).__name__}"))
+            errors.append(
+                _path_err(
+                    f"{fpath}.format", f"Expected object, received {type(fmt).__name__}"
+                )
+            )
         elif "type" not in fmt:
             errors.append(_path_err(f"{fpath}.format.type", "Required"))
 
@@ -216,7 +242,10 @@ def validate_response_resource(data: Any, path: str = "") -> list[str]:
             errors.extend(_check_nullable(data[field_name], "integer", fpath))
 
     nullable_string_fields = [
-        "previous_response_id", "instructions", "safety_identifier", "prompt_cache_key",
+        "previous_response_id",
+        "instructions",
+        "safety_identifier",
+        "prompt_cache_key",
     ]
     for field_name in nullable_string_fields:
         fpath = f"{path}.{field_name}" if path else field_name
@@ -277,7 +306,9 @@ def validate_output_item(item: Any, path: str = "output") -> list[str]:
     elif item_type == "reasoning":
         pass  # Minimal validation for reasoning
     else:
-        errors.append(_path_err(f"{path}.type", f"Invalid discriminator value: {item_type!r}"))
+        errors.append(
+            _path_err(f"{path}.type", f"Invalid discriminator value: {item_type!r}")
+        )
 
     return errors
 
@@ -344,9 +375,15 @@ def _validate_content_part(part: Any, path: str) -> list[str]:
         # logprobs: array (NOT nullable per spec)
         lp = part.get("logprobs")
         if lp is None:
-            errors.append(_path_err(f"{path}.logprobs", "Expected array, received null"))
+            errors.append(
+                _path_err(f"{path}.logprobs", "Expected array, received null")
+            )
         elif not isinstance(lp, list):
-            errors.append(_path_err(f"{path}.logprobs", f"Expected array, received {type(lp).__name__}"))
+            errors.append(
+                _path_err(
+                    f"{path}.logprobs", f"Expected array, received {type(lp).__name__}"
+                )
+            )
 
     # Other content types (input_text, refusal, etc.) are less common in output
     return errors
@@ -371,7 +408,7 @@ def _validate_function_call_item(item: dict, path: str) -> list[str]:
 
     # name must match pattern ^[a-zA-Z0-9_-]+$
     name = item.get("name")
-    if isinstance(name, str) and not re.match(r'^[a-zA-Z0-9_-]+$', name):
+    if isinstance(name, str) and not re.match(r"^[a-zA-Z0-9_-]+$", name):
         errors.append(_path_err(f"{path}.name", f"Invalid function name: {name!r}"))
 
     return errors
@@ -435,12 +472,19 @@ def validate_sse_event(event: dict) -> list[str]:
     # All events require sequence_number (integer)
     if "sequence_number" not in event:
         errors.append(f"{evt_type}: missing 'sequence_number'")
-    elif not isinstance(event["sequence_number"], int) or isinstance(event["sequence_number"], bool):
+    elif not isinstance(event["sequence_number"], int) or isinstance(
+        event["sequence_number"], bool
+    ):
         errors.append(f"{evt_type}: 'sequence_number' must be integer")
 
     # Event-specific validation
-    if evt_type in ("response.created", "response.in_progress",
-                     "response.completed", "response.failed", "response.incomplete"):
+    if evt_type in (
+        "response.created",
+        "response.in_progress",
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+    ):
         errors.extend(_validate_response_lifecycle_event(event, evt_type))
     elif evt_type == "response.output_item.added":
         errors.extend(_validate_output_item_event(event, evt_type))
@@ -487,7 +531,9 @@ def _validate_output_item_event(event: dict, evt_type: str) -> list[str]:
     errors: list[str] = []
     if "output_index" not in event:
         errors.append(f"{evt_type}: missing 'output_index'")
-    elif not isinstance(event["output_index"], int) or isinstance(event["output_index"], bool):
+    elif not isinstance(event["output_index"], int) or isinstance(
+        event["output_index"], bool
+    ):
         errors.append(f"{evt_type}: 'output_index' must be integer")
 
     item = event.get("item")
@@ -506,11 +552,15 @@ def _validate_content_part_event(event: dict, evt_type: str) -> list[str]:
     errors: list[str] = []
     for field_name in ("item_id",):
         if field_name not in event or not isinstance(event[field_name], str):
-            errors.append(f"{evt_type}: missing or invalid '{field_name}' (expected string)")
+            errors.append(
+                f"{evt_type}: missing or invalid '{field_name}' (expected string)"
+            )
     for field_name in ("output_index", "content_index"):
         if field_name not in event:
             errors.append(f"{evt_type}: missing '{field_name}'")
-        elif not isinstance(event[field_name], int) or isinstance(event[field_name], bool):
+        elif not isinstance(event[field_name], int) or isinstance(
+            event[field_name], bool
+        ):
             errors.append(f"{evt_type}: '{field_name}' must be integer")
 
     part = event.get("part")
@@ -534,7 +584,9 @@ def _validate_text_delta_event(event: dict) -> list[str]:
     for field_name in ("output_index", "content_index"):
         if field_name not in event:
             errors.append(f"{evt_type}: missing '{field_name}'")
-        elif not isinstance(event[field_name], int) or isinstance(event[field_name], bool):
+        elif not isinstance(event[field_name], int) or isinstance(
+            event[field_name], bool
+        ):
             errors.append(f"{evt_type}: '{field_name}' must be integer")
     if "delta" not in event or not isinstance(event["delta"], str):
         errors.append(f"{evt_type}: missing or invalid 'delta' (expected string)")
@@ -560,7 +612,9 @@ def _validate_text_done_event(event: dict) -> list[str]:
     for field_name in ("output_index", "content_index"):
         if field_name not in event:
             errors.append(f"{evt_type}: missing '{field_name}'")
-        elif not isinstance(event[field_name], int) or isinstance(event[field_name], bool):
+        elif not isinstance(event[field_name], int) or isinstance(
+            event[field_name], bool
+        ):
             errors.append(f"{evt_type}: '{field_name}' must be integer")
     if "text" not in event or not isinstance(event["text"], str):
         errors.append(f"{evt_type}: missing or invalid 'text' (expected string)")
@@ -1126,9 +1180,7 @@ def print_result(result: TestResult, verbose: bool = False) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="OpenResponses Compliance Test Suite"
-    )
+    parser = argparse.ArgumentParser(description="OpenResponses Compliance Test Suite")
     parser.add_argument(
         "--base-url",
         default="http://localhost:8000/v1",
@@ -1146,7 +1198,8 @@ def main() -> int:
         help="Request timeout in seconds (default: 30)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Print full response on failures",
     )
