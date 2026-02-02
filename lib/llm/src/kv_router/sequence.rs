@@ -1203,6 +1203,12 @@ impl ActiveSequencesMultiWorker {
     }
 
     pub fn get_active_count_for_lora(&self, lora_name: &str) -> usize {
+        let lora_name = lora_name.trim();
+        if lora_name.is_empty() {
+            tracing::warn!("get_active_count_for_lora called with empty lora_name");
+            return 0;
+        }
+
         self.request_to_lora
             .iter()
             .filter(|entry| entry.value() == lora_name)
