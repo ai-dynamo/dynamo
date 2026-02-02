@@ -139,3 +139,28 @@ jobs:
       - name: "Check all dependent jobs"
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+  
+  # ============================================================================
+  # CLEANUP JOBS
+  # Clean up ephemeral Kubernetes namespace and resources
+  # ============================================================================
+
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [build-frontend-image, changed-files]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - name: Create K8s builders (skip bootstrap)
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: ${{ needs.changed-files.outputs.builder_name }}
+        buildkit_worker_addresses: '' # k8s builder
+        skip_bootstrap: true
+    - name: Builder Cleanup in case of k8s builder
+      shell: bash
+      run: |
+        docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true

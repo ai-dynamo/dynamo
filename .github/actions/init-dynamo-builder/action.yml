@@ -85,7 +85,7 @@ inputs:
   tolerations:
     description: 'Tolerations for buildkit pods'
     required: false
-    default: 'key=buildkit-worker,value=true,operator=Equal,effect=NoSchedule'
+    default: "key=buildkit-fallback-workervalue=true,operator=Equal,effect=NoSchedule"
 
 runs:
   using: "composite"
