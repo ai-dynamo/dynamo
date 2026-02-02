@@ -12,6 +12,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.storage import get_fs
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -483,24 +484,11 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     )
 
     # Initialize fsspec filesystems for image storage
-    fs = None
     fs_url = dynamo_args.image_diffusion_fs_url
 
     # Initialize primary filesystem
     if not fs_url:
         raise ValueError("--diffusion-fs-url is required for diffusion workers")
-
-    import fsspec
-
-    # Extract protocol from URL (s3://, gs://, az://, file://)
-    fs_url_parts = fs_url.split("://")
-    protocol = fs_url_parts[0] if "://" in fs_url else "file"
-
-    # Initialize filesystem, configure fsspec using json configuration file
-    #  - json configuration file: ~/.config/fsspec/s3.json
-    #  - environment variables i.e. FSSPEC_S3_SECRET
-    fs = fsspec.filesystem(protocol, auto_mkdir=True)
-    logging.info(f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})")
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -516,7 +504,7 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
         generator,
         config,
         publisher=None,
-        fs=fs,
+        fs=get_fs(fs_url),
     )
 
     # Create proper health check payload that sends a minimal diffusion request
