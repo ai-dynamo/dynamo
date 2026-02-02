@@ -145,13 +145,28 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
                 "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
             }
         )
-        # [gluo NOTE] this actually loads the full model,
-        # which require more GPU memory than needed.
+        # Load only the vision model via vLLM on encoder workers to avoid loading the full LLM weights, significantly reducing memory usage.
+        # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/30242.
+        # Model needs the class method get_language_model_spec to be defined for this to work.
+
+        # Monkey patch to vLLM's Qwen 2.5 VL class to add get_language_model_spec
+        from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+        from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+
+        @classmethod
+        def get_language_model_spec(cls):
+            return (Qwen2ForCausalLM, "language_model")
+
+        Qwen2_5_VLForConditionalGeneration.get_language_model_spec = get_language_model_spec
+
+        # Load only the vision model via vLLM
         vllm_model = LLM(
             model=model_id,
             enforce_eager=True,
             gpu_memory_utilization=0.4,
             max_model_len=10,
+            convert="mm_encoder_only",
+            enable_prefix_caching=False,
         )
         return (
             vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
