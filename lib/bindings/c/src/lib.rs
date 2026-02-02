@@ -617,28 +617,42 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        // Create PrefillRouter (auto-activates when prefill workers discovered)
-        let prefill_router = model_manager
-            .register_prefill_router(model_name_str.clone())
-            .map(|rx| {
-                let mut prefill_config = kv_router_config.clone();
-                prefill_config.router_track_active_blocks = false;
+        // Create PrefillRouter based on one-time discovery of prefill workers
+        let prefill_router = if wait_for_prefill {
+            match find_prefill_endpoint(&drt, &namespace_str).await {
+                Some(prefill_endpoint) => {
+                    tracing::info!("Prefill worker discovered, creating active prefill router");
+                    let mut prefill_config = kv_router_config.clone();
+                    prefill_config.router_track_active_blocks = false;
 
-                PrefillRouter::new(
-                    rx,
-                    model_manager.clone(),
-                    RouterMode::KV,
-                    block_size,
-                    Some(prefill_config),
-                    enforce_disagg,
-                )
-            })
-            .unwrap_or_else(|| {
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
-            });
+                    // Create immediately-resolved channel to activate router
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = tx.send(prefill_endpoint);
 
-        // Start prefill watcher for dynamic discovery
-        spawn_prefill_watcher(drt.clone(), model_manager.clone(), namespace_str.clone());
+                    PrefillRouter::new(
+                        rx,
+                        model_manager.clone(),
+                        RouterMode::KV,
+                        block_size,
+                        Some(prefill_config),
+                        enforce_disagg,
+                    )
+                }
+                None if enforce_disagg => {
+                    tracing::error!(
+                        "Prefill workers required (enforce_disagg=true) but none found"
+                    );
+                    return Err(QueryRouterResult::ErrDisaggEnforced);
+                }
+                None => {
+                    tracing::info!("No prefill workers found, running in aggregated mode");
+                    PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+                }
+            }
+        } else {
+            tracing::info!("Prefill discovery not requested, running in aggregated mode");
+            PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+        };
 
         // Fetch model card via discovery and create preprocessor
         let preprocessor = match fetch_preprocessor_from_discovery(&drt, &model_name_str).await {
@@ -655,47 +669,6 @@ pub unsafe extern "C" fn create_routers(
                 None
             }
         };
-
-        // Optionally wait for prefill workers to be discovered
-        if wait_for_prefill {
-            let timeout_secs = get_discovery_timeout_secs();
-
-            tracing::info!(
-                timeout_secs = timeout_secs,
-                "Waiting for prefill workers to be discovered..."
-            );
-
-            let start = std::time::Instant::now();
-            let timeout = Duration::from_secs(timeout_secs);
-
-            loop {
-                if prefill_router.is_activated() {
-                    tracing::info!(
-                        elapsed_ms = start.elapsed().as_millis(),
-                        "Prefill router activated successfully"
-                    );
-                    break;
-                }
-
-                if start.elapsed() > timeout {
-                    if enforce_disagg {
-                        tracing::error!(
-                            timeout_secs = timeout_secs,
-                            "Prefill workers not found within timeout and enforce_disagg=true"
-                        );
-                        return Err(QueryRouterResult::ErrInitFailed);
-                    } else {
-                        tracing::warn!(
-                            timeout_secs = timeout_secs,
-                            "Prefill workers not found within timeout, continuing in aggregated mode"
-                        );
-                        break;
-                    }
-                }
-
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
 
         Ok((prefill_router, decode_router, model_manager, namespace_str, preprocessor))
     });
@@ -1141,108 +1114,60 @@ async fn fetch_preprocessor_from_discovery(
     OpenAIPreprocessor::new(card)
 }
 
-/// Spawn a background task to watch for prefill models and activate prefill routers.
-/// This is a lightweight watcher that only handles prefill model discovery.
-fn spawn_prefill_watcher(
-    drt: DistributedRuntime,
-    model_manager: Arc<ModelManager>,
-    target_namespace: String,
-) {
+/// Find a prefill endpoint from already-discovered instances (one-time filter).
+/// Returns the endpoint if a prefill worker is found in the target namespace.
+async fn find_prefill_endpoint(
+    drt: &DistributedRuntime,
+    target_namespace: &str,
+) -> Option<dynamo_runtime::component::Endpoint> {
     use dynamo_llm::model_card::ModelDeploymentCard;
-    use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
-    use dynamo_runtime::protocols::EndpointId;
-    use futures::StreamExt;
+    use dynamo_runtime::discovery::DiscoveryInstance;
 
-    tokio::spawn(async move {
-        let discovery = drt.discovery();
-        let mut stream = match discovery
-            .list_and_watch(DiscoveryQuery::AllModels, None)
-            .await
+    let discovery = drt.discovery();
+    let instances = match discovery.list(DiscoveryQuery::AllModels).await {
+        Ok(instances) => instances,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to list instances for prefill discovery");
+            return None;
+        }
+    };
+
+    for instance in instances {
+        if let DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            ..
+        } = &instance
         {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to start prefill discovery stream");
-                return;
+            // Filter by namespace
+            if namespace != target_namespace {
+                continue;
             }
-        };
 
-        while let Some(result) = stream.next().await {
-            let event = match result {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::error!(error = %e, "Error in prefill discovery stream");
-                    continue;
-                }
+            let card = match instance.deserialize_model::<ModelDeploymentCard>() {
+                Ok(card) => card,
+                Err(_) => continue,
             };
 
-            match event {
-                DiscoveryEvent::Added(instance) => {
-                    let (endpoint_id, card) = match &instance {
-                        DiscoveryInstance::Model {
-                            namespace,
-                            component,
-                            endpoint,
-                            ..
-                        } => {
-                            // Filter by namespace
-                            if namespace != &target_namespace {
-                                continue;
-                            }
+            // Only handle prefill models
+            if !card.model_type.supports_prefill() {
+                continue;
+            }
 
-                            let eid = EndpointId {
-                                namespace: namespace.clone(),
-                                component: component.clone(),
-                                name: endpoint.clone(),
-                            };
+            tracing::info!(
+                model_name = card.name(),
+                "Prefill worker found in discovered instances"
+            );
 
-                            match instance.deserialize_model::<ModelDeploymentCard>() {
-                                Ok(card) => (eid, card),
-                                Err(_) => continue,
-                            }
-                        }
-                        _ => continue,
-                    };
-
-                    // Only handle prefill models
-                    if !card.model_type.supports_prefill() {
-                        continue;
-                    }
-
-                    tracing::info!(
-                        model_name = card.name(),
-                        "Prefill model discovered, activating prefill router"
-                    );
-
-                    // Get the endpoint and activate the prefill router
-                    if let Ok(ns) = drt.namespace(&endpoint_id.namespace)
-                        && let Ok(comp) = ns.component(&endpoint_id.component)
-                    {
-                        let endpoint = comp.endpoint(&endpoint_id.name);
-                        if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint)
-                        {
-                            tracing::warn!(
-                                model_name = card.name(),
-                                error = %e,
-                                "Failed to activate prefill router"
-                            );
-                        } else {
-                            tracing::info!(
-                                model_name = card.name(),
-                                "Prefill router activated successfully"
-                            );
-                        }
-                    }
-                }
-                DiscoveryEvent::Removed(id) => {
-                    // Log removal for observability
-                    // Note: The PrefillRouter remains active - worker availability
-                    // is handled dynamically by the underlying Client's instance tracking
-                    tracing::debug!(
-                        instance_id = id.instance_id(),
-                        "Prefill worker instance removed from discovery"
-                    );
-                }
+            // Build and return the endpoint
+            if let Ok(ns) = drt.namespace(namespace)
+                && let Ok(comp) = ns.component(component)
+            {
+                return Some(comp.endpoint(endpoint));
             }
         }
-    });
+    }
+
+    None
 }
