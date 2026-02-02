@@ -44,9 +44,6 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
-    #[error("all workers busy")]
-    AllWorkersBusy,
-
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
 
@@ -259,12 +256,6 @@ impl KvScheduler {
                     }
                     Err(KvSchedulerError::NoEndpoints) => {
                         tracing::trace!("no endpoints available; waiting for endpoints update");
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        continue;
-                    }
-                    // TODO: this is not actually hooked up
-                    Err(KvSchedulerError::AllWorkersBusy) => {
-                        tracing::trace!("all workers busy; waiting for more capacity");
                         tokio::time::sleep(Duration::from_millis(5)).await;
                         continue;
                     }
