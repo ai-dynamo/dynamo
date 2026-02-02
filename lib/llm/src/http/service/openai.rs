@@ -1155,10 +1155,10 @@ async fn handler_responses(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, _stream_handle) =
+    let (mut connection_handle, stream_handle) =
         create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
-    let response = tokio::spawn(responses(state, template, request).in_current_span())
+    let response = tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -1179,6 +1179,7 @@ async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
+    stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -1254,6 +1255,9 @@ async fn responses(
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
+    // Capture the context to cancel the stream if the client disconnects
+    let ctx = engine_stream.context();
+
     // Create inflight_guard now that actual processing has begun
     let mut inflight_guard =
         state
@@ -1310,9 +1314,11 @@ async fn responses(
 
         let full_stream = full_stream.map(|result| result.map_err(axum::Error::new));
 
-        inflight_guard.mark_ok();
+        // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
+        // and defers inflight_guard.mark_ok() until the stream completes.
+        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
 
-        let mut sse_stream = Sse::new(full_stream);
+        let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
