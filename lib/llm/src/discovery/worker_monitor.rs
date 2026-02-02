@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+use dashmap::DashMap;
+
 use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::protocols::ActiveLoad;
 use crate::model_card::ModelDeploymentCard;
@@ -9,9 +15,6 @@ use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
 
 /// Scale factor for storing f64 thresholds as u32 (10000 = 4 decimal places)
 const THRESHOLD_SCALE: u32 = 10000;
@@ -86,7 +89,7 @@ impl WorkerLoadState {
 #[derive(Clone)]
 pub struct KvWorkerMonitor {
     client: Client,
-    worker_load_states: Arc<RwLock<HashMap<u64, WorkerLoadState>>>,
+    worker_load_states: Arc<DashMap<u64, WorkerLoadState>>,
     /// Active decode blocks threshold stored as parts-per-10000 (e.g., 8500 = 0.85)
     active_decode_blocks_threshold: Arc<AtomicU32>,
     /// Active prefill tokens threshold stored as literal token count (u64)
@@ -110,7 +113,7 @@ impl KvWorkerMonitor {
     ) -> Self {
         Self {
             client,
-            worker_load_states: Arc::new(RwLock::new(HashMap::new())),
+            worker_load_states: Arc::new(DashMap::new()),
             active_decode_blocks_threshold: Arc::new(AtomicU32::new(
                 Self::active_decode_blocks_threshold_to_scaled(active_decode_blocks_threshold),
             )),
@@ -160,7 +163,7 @@ impl KvWorkerMonitor {
     }
 
     /// Get the worker load states for external access
-    pub fn load_states(&self) -> Arc<RwLock<HashMap<u64, WorkerLoadState>>> {
+    pub fn load_states(&self) -> Arc<DashMap<u64, WorkerLoadState>> {
         self.worker_load_states.clone()
     }
 }
@@ -219,12 +222,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     _ = config_events_rx.changed() => {
                         let runtime_configs = config_events_rx.borrow().clone();
 
-                        let mut states = worker_load_states.write().unwrap();
-                        states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
+                        worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
 
                         // Update worker load states with total blocks for all dp_ranks
                         for (lease_id, runtime_config) in runtime_configs.iter() {
-                            let state = states.entry(*lease_id).or_default();
+                            let mut state = worker_load_states.entry(*lease_id).or_default();
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
                             if let Some(total_blocks) = runtime_config.total_kv_blocks {
@@ -251,16 +253,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let dp_rank = active_load.dp_rank;
 
                         // Update worker load state per dp_rank
-                        let mut states = worker_load_states.write().unwrap();
-                        let state = states.entry(worker_id).or_default();
+                        {
+                            let mut state = worker_load_states.entry(worker_id).or_default();
 
-                        if let Some(active_blocks) = active_load.active_decode_blocks {
-                            state.active_decode_blocks.insert(dp_rank, active_blocks);
+                            if let Some(active_blocks) = active_load.active_decode_blocks {
+                                state.active_decode_blocks.insert(dp_rank, active_blocks);
+                            }
+                            if let Some(active_tokens) = active_load.active_prefill_tokens {
+                                state.active_prefill_tokens.insert(dp_rank, active_tokens);
+                            }
                         }
-                        if let Some(active_tokens) = active_load.active_prefill_tokens {
-                            state.active_prefill_tokens.insert(dp_rank, active_tokens);
-                        }
-                        drop(states);
 
                         // Load thresholds dynamically - allows runtime updates
                         let current_active_decode_blocks_threshold = Self::scaled_to_active_decode_blocks_threshold(
@@ -269,16 +271,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let current_active_prefill_tokens_threshold = active_prefill_tokens_threshold.load(Ordering::Relaxed);
 
                         // Recalculate all busy instances and update
-                        let states = worker_load_states.read().unwrap();
-                        let busy_instances: Vec<u64> = states
+                        let busy_instances: Vec<u64> = worker_load_states
                             .iter()
-                            .filter_map(|(&id, state)| {
-                                state
+                            .filter_map(|r| {
+                                r.value()
                                     .is_busy(current_active_decode_blocks_threshold, current_active_prefill_tokens_threshold)
-                                    .then_some(id)
+                                    .then_some(*r.key())
                             })
                             .collect();
-                        drop(states);
 
                         // Only update if busy_instances has changed
                         if busy_instances != previous_busy_instances {
