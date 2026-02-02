@@ -230,6 +230,12 @@ def parse_args():
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
     )
     parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. When > 0, enables request migration on worker disconnect (default: 0).",
+    )
+    parser.add_argument(
         "--active-decode-blocks-threshold",
         type=float,
         default=None,
@@ -417,6 +423,7 @@ async def async_main():
             active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
             enforce_disagg=flags.enforce_disagg,
         ),
+        "migration_limit": flags.migration_limit,
     }
 
     if flags.model_name:

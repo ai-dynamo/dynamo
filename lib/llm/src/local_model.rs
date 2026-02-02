@@ -307,6 +307,7 @@ impl LocalModelBuilder {
                 custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
                 custom_backend_metrics_polling_interval: self
                     .custom_backend_metrics_polling_interval,
+                migration_limit: self.migration_limit,
             });
         }
 
@@ -360,6 +361,7 @@ impl LocalModelBuilder {
             namespace: self.namespace.clone(),
             custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
             custom_backend_metrics_polling_interval: self.custom_backend_metrics_polling_interval,
+            migration_limit: self.migration_limit,
         })
     }
 }
@@ -380,6 +382,8 @@ pub struct LocalModel {
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
+    /// Maximum number of times a request may be migrated to a different engine worker
+    migration_limit: u32,
 }
 
 impl LocalModel {
@@ -441,6 +445,10 @@ impl LocalModel {
 
     pub fn runtime_config(&self) -> &ModelRuntimeConfig {
         &self.runtime_config
+    }
+
+    pub fn migration_limit(&self) -> u32 {
+        self.migration_limit
     }
 
     pub fn namespace(&self) -> Option<&str> {

@@ -151,11 +151,6 @@ impl Flags {
                         "'--kv-cache-block-size' flag should only be used on the worker node, not on the ingress"
                     );
                 }
-                if self.migration_limit.is_some() {
-                    anyhow::bail!(
-                        "'--migration-limit' flag should only be used on the worker node, not on the ingress"
-                    );
-                }
             }
             Output::Echo => {}
             #[cfg(feature = "mistralrs")]
