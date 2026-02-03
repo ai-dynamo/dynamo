@@ -41,7 +41,7 @@ inputs:
   dind_as_sidecar:
     description: 'dind runs as a sidecar container (true/false)'
     required: false
-    default: 'false'  
+    default: 'false'
   cpu_limit:
     description: 'Maximum number of cores available to docker'
     required: false

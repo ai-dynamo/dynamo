@@ -127,7 +127,7 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         env:
-          NO_CACHE_FLAG: 'false' 
+          NO_CACHE_FLAG: 'false'
         run: |
           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
