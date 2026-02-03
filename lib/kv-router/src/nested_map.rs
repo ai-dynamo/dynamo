@@ -13,13 +13,22 @@
 //!   The main lookup structure. Position-first nesting enables O(1) position access.
 //! - `worker_blocks`: worker -> seq_hash -> (position, local_hash)
 //!   Per-worker reverse lookup for efficient remove operations.
-
+use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use dashmap::DashMap;
+use flume::unbounded;
+use tokio::sync::oneshot;
 
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
-    RouterEvent, WorkerId, WorkerWithDpRank, compute_hash,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
+    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent,
+    WorkerId, WorkerWithDpRank, TokensWithHashes, compute_seq_hash_for_block,
 };
+
+use crate::indexer::{KvIndexerInterface, KvRouterError, MatchRequest};
+use crate::compute_block_hash_for_seq;
 
 /// Entry for the innermost level of the index.
 ///
@@ -144,1011 +153,537 @@ impl SeqEntry {
     }
 }
 
-/// A positional HashMap-based structure for KV cache indexing.
-///
-/// Uses nested HashMaps with position as the primary key to enable:
-/// - O(1) position-based access
-/// - Jump/binary-search optimization for find_matches
-/// - Lazy sequence hash computation (only when disambiguation needed)
-///
-/// # Structure
-///
-/// - `index`: position -> local_hash -> seq_hash -> workers
-/// - `worker_blocks`: worker -> seq_hash -> (position, local_hash)
-pub struct NestedMap {
-    /// Main index: position -> local_hash -> SeqEntry
-    /// Uses SeqEntry to optimize for the common single-seq-hash case.
-    index: HashMap<u64, HashMap<LocalBlockHash, SeqEntry>>,
-
+struct PositionalIndexer {
+    index: Arc<DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>>,
     /// Per-worker reverse lookup: worker -> seq_hash -> (position, local_hash)
     /// Enables efficient remove operations without global flat reverse map.
-    worker_blocks:
-        HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, (u64, LocalBlockHash)>>,
+    worker_blocks: Arc<DashMap<WorkerWithDpRank, DashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>>>,
 
-    /// Jump size for find_matches optimization (default 32)
-    jump_size: u64,
+    worker_assignments: Arc<DashMap<WorkerId, usize>>,
+    worker_assignment_count: AtomicUsize,
+
+    worker_event_channels: Arc<Vec<flume::Sender<RouterEvent>>>,
+    worker_request_channel: flume::Sender<MatchRequest>,
+
+    num_workers: usize,
+    kv_block_size: u32,
+
+    /// Weight for binary search starting position (0.0 to 1.0).
+    /// With weight=0.2 and 100 blocks, search starts at position 20.
+    /// Lower values are better when expecting shorter prefix matches.
+    search_weight: f64,
 }
 
-impl NestedMap {
-    /// Create a new empty NestedMap with default jump size of 32.
-    pub fn new() -> Self {
-        Self::new_with_jump_size(32)
-    }
-
-    /// Create a new empty NestedMap with specified jump size.
-    pub fn new_with_jump_size(jump_size: u64) -> Self {
-        Self {
-            index: HashMap::new(),
-            worker_blocks: HashMap::new(),
-            jump_size,
-        }
-    }
-
-    /// Store blocks for a worker starting from a parent position.
+impl PositionalIndexer {
+    /// Create a new PositionalIndexer.
     ///
     /// # Arguments
-    /// * `worker` - The worker storing the blocks
-    /// * `parent_hash` - Optional parent block hash (None for root)
-    /// * `blocks` - List of (seq_hash, local_hash) pairs to store
-    ///
-    /// # Returns
-    /// * `Ok(())` on success
-    /// * `Err(KvCacheEventError::ParentBlockNotFound)` if parent_hash is Some but not found
-    fn store_blocks(
-        &mut self,
-        worker: WorkerWithDpRank,
-        parent_hash: Option<ExternalSequenceBlockHash>,
-        blocks: &[(ExternalSequenceBlockHash, LocalBlockHash)],
-    ) -> Result<(), KvCacheEventError> {
-        // Determine starting position
-        let start_pos = match parent_hash {
-            None => 0,
-            Some(parent) => {
-                let worker_map = self.worker_blocks.get(&worker);
-                match worker_map.and_then(|m| m.get(&parent)) {
-                    Some(&(parent_pos, _)) => parent_pos + 1,
-                    None => {
-                        tracing::warn!(
-                            worker_id = worker.worker_id.to_string(),
-                            dp_rank = worker.dp_rank,
-                            parent_hash = ?parent,
-                            num_blocks = blocks.len(),
-                            "Failed to find parent block; skipping store operation"
-                        );
-                        return Err(KvCacheEventError::ParentBlockNotFound);
-                    }
-                }
-            }
-        };
+    /// * `num_workers` - Number of worker threads for event processing
+    /// * `kv_block_size` - Block size for KV cache
+    /// * `search_weight` - Weight for binary search starting position (0.0 to 1.0).
+    ///   With weight=0.2 and 100 blocks, search starts at position 20.
+    ///   Lower values are better when expecting shorter prefix matches.
+    pub fn new(num_workers: usize, kv_block_size: u32, search_weight: f64) -> Self {
+        assert!(num_workers > 0, "Number of workers must be greater than 0");
+        assert!(
+            (0.0..=1.0).contains(&search_weight),
+            "search_weight must be between 0.0 and 1.0"
+        );
 
-        // Get or create worker's block map
-        let worker_block_map = self.worker_blocks.entry(worker).or_default();
+        let index = Arc::new(DashMap::new());
+        let worker_blocks = Arc::new(DashMap::new());
+        let mut worker_event_senders = Vec::new();
 
-        // Insert each block
-        for (i, &(seq_hash, local_hash)) in blocks.iter().enumerate() {
-            let position = start_pos + i as u64;
+        let (worker_request_channel_tx, worker_request_channel_rx) = unbounded::<MatchRequest>();
 
-            // Insert into main index using SeqEntry
-            let local_map = self.index.entry(position).or_default();
-            match local_map.get_mut(&local_hash) {
-                Some(entry) => entry.insert(seq_hash, worker),
-                None => {
-                    local_map.insert(local_hash, SeqEntry::new(seq_hash, worker));
-                }
-            }
+        for _ in 0..num_workers {
+            let (event_sender, event_receiver) = unbounded::<RouterEvent>();
+            worker_event_senders.push(event_sender);
 
-            // Insert into worker's reverse lookup
-            worker_block_map.insert(seq_hash, (position, local_hash));
+            let worker_request_channel_rx = worker_request_channel_rx.clone();
+            let index = Arc::clone(&index);
+            let search_weight = search_weight;
+
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async move {
+                        loop {
+                            tokio::select! {
+                                biased;
+
+                                Ok(_event) = event_receiver.recv_async() => {
+                                    // Event processing handled elsewhere
+                                }
+
+                                Ok(request) = worker_request_channel_rx.recv_async() => {
+                                    let scores = PositionalIndexer::weighted_binary_search_matches(
+                                        &index,
+                                        &request.sequence,
+                                        search_weight,
+                                        request.early_exit,
+                                    );
+                                    let _ = request.resp.send(scores);
+                                }
+                            }
+                        }
+                    });
+            });
         }
 
+        Self {
+            index,
+            worker_blocks,
+            worker_assignments: Arc::new(DashMap::new()),
+            worker_assignment_count: AtomicUsize::new(0),
+            worker_event_channels: Arc::new(worker_event_senders),
+            worker_request_channel: worker_request_channel_tx,
+            num_workers,
+            kv_block_size,
+            search_weight,
+        }
+    }
+}
+
+#[async_trait]
+impl KvIndexerInterface for PositionalIndexer {
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let req = MatchRequest {
+            sequence,
+            early_exit: false,
+            resp: resp_tx,
+        };
+
+        if let Err(e) = self.worker_request_channel.send(req) {
+            tracing::error!(
+                "Failed to send match request: {:?}; the indexer maybe offline",
+                e
+            );
+            return Err(KvRouterError::IndexerOffline);
+        }
+
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
+    async fn find_matches_for_request(
+        &self,
+        tokens: &[u32],
+    ) -> Result<OverlapScores, KvRouterError> {
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        self.find_matches(sequence).await
+    }
+
+    async fn apply_event(&self, event: RouterEvent) {
+        let shard = self.worker_assignments.entry(event.worker_id).or_insert_with(|| {
+            let shard = self.worker_assignment_count.fetch_add(1, Ordering::Relaxed) % self.num_workers;
+            shard
+        });
+
+        self.worker_event_channels[*shard].send(event).unwrap();
+    }
+
+    async fn remove_worker(&self, worker_id: WorkerId) {
+        self.remove_worker_blocks(worker_id);
+    }
+
+    fn shutdown(&self) {
+        unimplemented!()
+    }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        Ok(self.dump_as_events())
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens_with_hashes: &mut TokensWithHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        // TODO(jthomson04): Nothing to do here, right?
         Ok(())
     }
+}
 
-    /// Remove blocks for a worker.
-    ///
-    /// Uses per-worker reverse lookup to find position and local_hash for each block.
-    fn remove_blocks(
-        &mut self,
-        worker: WorkerWithDpRank,
-        block_hashes: &[ExternalSequenceBlockHash],
-    ) -> Result<(), KvCacheEventError> {
-        let Some(worker_block_map) = self.worker_blocks.get_mut(&worker) else {
-            return Ok(());
-        };
+impl PositionalIndexer {
+    fn apply_event_sync(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+        let (worker_id, kv_event) = (event.worker_id, event.event);
+        let (id, op) = (kv_event.event_id, kv_event.data);
 
-        // Collect blocks to remove (need position and local_hash from reverse lookup)
-        let mut to_remove: Vec<(ExternalSequenceBlockHash, u64, LocalBlockHash)> = Vec::new();
-        let mut any_not_found = false;
+        let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
-        for &seq_hash in block_hashes {
-            let Some(&(position, local_hash)) = worker_block_map.get(&seq_hash) else {
-                tracing::warn!(
-                    worker_id = worker.worker_id.to_string(),
-                    dp_rank = worker.dp_rank,
-                    block_hash = ?seq_hash,
-                    "Block not found in worker's lookup; skipping"
-                );
-                any_not_found = true;
-                continue;
-            };
-            to_remove.push((seq_hash, position, local_hash));
-        }
+        tracing::trace!(id, "PositionalIndexer::apply_event_sync: operation: {:?}", op);
 
-        // Remove from worker's reverse lookup
-        for &(seq_hash, _, _) in &to_remove {
-            worker_block_map.remove(&seq_hash);
-        }
-
-        // Clean up empty worker entry before we lose the mutable reference
-        let worker_empty = worker_block_map.is_empty();
-        if worker_empty {
-            self.worker_blocks.remove(&worker);
-        }
-
-        // Remove from main index
-        for (seq_hash, position, local_hash) in to_remove {
-            self.remove_worker_from_index(worker, position, local_hash, seq_hash);
-        }
-
-        if any_not_found {
-            Err(KvCacheEventError::BlockNotFound)
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Get workers at a specific position and local_hash with lazy hash computation.
-    ///
-    /// If `seq_hash` is provided, uses it for exact lookup.
-    /// Otherwise, if there's only one entry at (position, local_hash), uses it directly.
-    /// Returns None if disambiguation is needed but seq_hash wasn't provided.
-    fn get_workers_at_position(
-        &self,
-        position: u64,
-        local_hash: LocalBlockHash,
-        seq_hash: Option<ExternalSequenceBlockHash>,
-    ) -> Option<&HashSet<WorkerWithDpRank>> {
-        let local_map = self.index.get(&position)?;
-        let entry = local_map.get(&local_hash)?;
-
-        if let Some(hash) = seq_hash {
-            return entry.get(hash);
-        }
-
-        // Lazy optimization: if only one entry, use it directly
-        entry.get_single()
-    }
-
-    /// Get workers at position with lazy hash, computing seq_hash only if needed.
-    ///
-    /// This is a convenience wrapper that handles the common pattern of:
-    /// 1. Check if position/local_hash exists
-    /// 2. If single entry, use directly (skip hash computation)
-    /// 3. If multiple entries, compute hash and disambiguate
-    fn get_workers_lazy(
-        &self,
-        position: u64,
-        local_hash: LocalBlockHash,
-        seq_hashes: &mut Vec<u64>,
-        sequence: &[LocalBlockHash],
-    ) -> Option<&HashSet<WorkerWithDpRank>> {
-        let local_map = self.index.get(&position)?;
-        let entry = local_map.get(&local_hash)?;
-
-        // Lazy optimization: if single entry, skip hash computation
-        if let Some(workers) = entry.get_single() {
-            return Some(workers);
-        }
-
-        // Multiple entries - compute seq_hash for disambiguation
-        Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
-        let hash = ExternalSequenceBlockHash(seq_hashes[position as usize]);
-        entry.get(hash)
-    }
-
-    /// Ensure seq_hashes is computed up to and including target_pos.
-    fn ensure_seq_hash_computed(
-        seq_hashes: &mut Vec<u64>,
-        target_pos: u64,
-        sequence: &[LocalBlockHash],
-    ) {
-        while seq_hashes.len() <= target_pos as usize {
-            let pos = seq_hashes.len();
-            let prev = seq_hashes[pos - 1];
-            let local = sequence[pos].0;
-            seq_hashes.push(Self::compute_next_seq_hash(prev, local));
-        }
-    }
-
-    /// Compute sequence hash incrementally from previous hash and current local hash.
-    fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
-        let combined = [prev_seq_hash, current_local_hash];
-        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
-        compute_hash(&bytes)
-    }
-
-    /// Find matches for a sequence of local block hashes.
-    ///
-    /// Uses jump optimization to skip common prefixes efficiently.
-    /// Lazy sequence hash computation - only computes when disambiguation is needed.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Start at position 0, jump by `jump_size` positions
-    /// 2. At each jump, check if workers drained:
-    ///    - Same workers: continue jumping
-    ///    - Fewer workers or missing position: scan range to find drain points
-    /// 3. Continue until sequence exhausted or no workers remain
-    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
-        let mut scores = OverlapScores::new();
-
-        if sequence.is_empty() {
-            return scores;
-        }
-
-        let seq_len = sequence.len() as u64;
-
-        // Check first position - first block's seq_hash equals its local_hash
-        let first_local = sequence[0];
-        let first_seq_hash = ExternalSequenceBlockHash(first_local.0);
-        let Some(first_workers) =
-            self.get_workers_at_position(0, first_local, Some(first_seq_hash))
-        else {
-            return scores;
-        };
-
-        if first_workers.is_empty() {
-            return scores;
-        }
-
-        let mut active = first_workers.clone();
-        let mut current_pos: u64 = 0;
-        let mut seq_hashes: Vec<u64> = vec![first_local.0];
-
-        // Process remaining positions with jump optimization
-        while current_pos + 1 < seq_len {
-            let next_pos = std::cmp::min(current_pos + self.jump_size, seq_len - 1);
-            let jumped = next_pos > current_pos + 1;
-            let next_local = sequence[next_pos as usize];
-
-            let Some(workers) =
-                self.get_workers_lazy(next_pos, next_local, &mut seq_hashes, &sequence)
-            else {
-                // Position doesn't exist or no match
-                if !jumped {
-                    break; // Sequential move - we're done
-                }
-                // Scan to find boundary
-                let prev_pos = current_pos;
-                current_pos = self.linear_scan_drain(
-                    &sequence,
-                    &mut seq_hashes,
-                    &mut active,
-                    &mut scores,
-                    current_pos,
-                    next_pos,
-                    early_exit,
-                );
-                // If no progress made (first position in range had no match), we're done
-                if current_pos == prev_pos || active.is_empty() || (early_exit && active.len() == 1)
-                {
-                    break;
-                }
-                continue;
-            };
-
-            // Check drain status
-            let all_match = active.iter().all(|w| workers.contains(w));
-            let any_match = active.iter().any(|w| workers.contains(w));
-
-            if all_match {
-                // No drain - continue (skip intermediate positions)
-                current_pos = next_pos;
-            } else if !any_match {
-                // All workers drained
-                if !jumped {
-                    break; // Sequential - all drained at this position
-                }
-                let prev_pos = current_pos;
-                current_pos = self.linear_scan_drain(
-                    &sequence,
-                    &mut seq_hashes,
-                    &mut active,
-                    &mut scores,
-                    current_pos,
-                    next_pos,
-                    early_exit,
-                );
-                if current_pos == prev_pos || active.is_empty() || (early_exit && active.len() == 1)
-                {
-                    break;
-                }
-            } else if jumped {
-                // Some workers drained after a jump - scan for exact drain points
-                let prev_pos = current_pos;
-                current_pos = self.linear_scan_drain(
-                    &sequence,
-                    &mut seq_hashes,
-                    &mut active,
-                    &mut scores,
-                    current_pos,
-                    next_pos,
-                    early_exit,
-                );
-                if current_pos == prev_pos || active.is_empty() || (early_exit && active.len() == 1)
-                {
-                    break;
-                }
-            } else {
-                // Sequential move with partial drain - record drains directly
-                let depth = next_pos as u32; // depth at previous position
-                active.retain(|worker| {
-                    if workers.contains(worker) {
-                        return true;
-                    }
-                    scores.scores.insert(*worker, depth);
-                    false
-                });
-                current_pos = next_pos;
-            }
-
-            if early_exit && active.len() == 1 {
-                break;
-            }
-        }
-
-        // Drain remaining active workers with final depth
-        let final_depth = (current_pos + 1) as u32;
-        for worker in active {
-            scores.scores.insert(worker, final_depth);
-        }
-
-        // Populate tree sizes
-        for &worker in scores.scores.keys() {
-            let Some(blocks) = self.worker_blocks.get(&worker) else {
-                continue;
-            };
-            scores.tree_sizes.insert(worker, blocks.len());
-        }
-
-        scores
-    }
-
-    /// Scan positions sequentially in (lo, hi] range, updating active set and scores.
-    ///
-    /// Returns the highest position where workers remain.
-    ///
-    /// TODO: Optimize to use binary search for O(log J) instead of O(J) per range.
-    #[allow(clippy::too_many_arguments)]
-    fn linear_scan_drain(
-        &self,
-        sequence: &[LocalBlockHash],
-        seq_hashes: &mut Vec<u64>,
-        active: &mut HashSet<WorkerWithDpRank>,
-        scores: &mut OverlapScores,
-        lo: u64,
-        hi: u64,
-        early_exit: bool,
-    ) -> u64 {
-        let mut current_pos = lo;
-
-        for pos in (lo + 1)..=hi {
-            let local_hash = sequence[pos as usize];
-
-            let Some(worker_set) = self.get_workers_lazy(pos, local_hash, seq_hashes, sequence)
-            else {
-                return current_pos; // No workers at this position
-            };
-
-            let depth = pos as u32;
-            active.retain(|worker| {
-                if worker_set.contains(worker) {
-                    return true;
-                }
-                scores.scores.insert(*worker, depth);
-                false
-            });
-
-            if active.is_empty() {
-                return current_pos;
-            }
-
-            current_pos = pos;
-
-            // Early exit if only one worker remains
-            if early_exit && active.len() == 1 {
-                return current_pos;
-            }
-        }
-
-        current_pos
-    }
-
-    /// Apply a RouterEvent to the index.
-    ///
-    /// # Returns
-    /// * `Ok(())` on success
-    /// * `Err(KvCacheEventError)` on error (parent not found, block not found, etc.)
-    pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
-        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-
-        match event.event.data {
+        match op {
             KvCacheEventData::Stored(store_data) => {
-                let blocks: Vec<_> = store_data
-                    .blocks
-                    .iter()
-                    .map(|b| (b.block_hash, b.tokens_hash))
-                    .collect();
-                self.store_blocks(worker, store_data.parent_hash, &blocks)
+                // Determine starting position based on parent_hash
+                let start_pos = match store_data.parent_hash {
+                    Some(parent_hash) => {
+                        // Find parent position from worker_blocks
+                        match self.worker_blocks.get(&worker) {
+                            Some(worker_map) => {
+                                match worker_map.get(&parent_hash) {
+                                    Some(entry) => entry.0 + 1, // parent position + 1
+                                    None => {
+                                        tracing::warn!(
+                                            worker_id = worker.worker_id.to_string(),
+                                            dp_rank = worker.dp_rank,
+                                            id,
+                                            parent_hash = ?parent_hash,
+                                            num_blocks = store_data.blocks.len(),
+                                            "Failed to find parent block; skipping store operation"
+                                        );
+                                        return Err(KvCacheEventError::ParentBlockNotFound);
+                                    }
+                                }
+                            }
+                            None => {
+                                tracing::warn!(
+                                    worker_id = worker.worker_id.to_string(),
+                                    dp_rank = worker.dp_rank,
+                                    id,
+                                    parent_hash = ?parent_hash,
+                                    "Failed to find worker blocks; skipping store operation"
+                                );
+                                return Err(KvCacheEventError::ParentBlockNotFound);
+                            }
+                        }
+                    }
+                    None => 0, // Start from position 0
+                };
+
+                for (i, block_data) in store_data.blocks.into_iter().enumerate() {
+                    let position = start_pos + i;
+                    let local_hash = block_data.tokens_hash;
+                    let seq_hash = block_data.block_hash;
+
+                    // Insert into index: position -> local_hash -> seq_hash -> worker
+                    let pos_map = self.index.entry(position).or_insert_with(DashMap::new);
+                    pos_map
+                        .entry(local_hash)
+                        .and_modify(|entry| entry.insert(seq_hash, worker))
+                        .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+
+                    // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
+                    let worker_map = self.worker_blocks.entry(worker).or_insert_with(DashMap::new);
+                    worker_map.insert(seq_hash, (position, local_hash));
+                }
+
+                Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                self.remove_blocks(worker, &remove_data.block_hashes)
+                let mut kv_cache_err: Option<KvCacheEventError> = None;
+
+                for seq_hash in remove_data.block_hashes {
+                    // Find the block in worker_blocks
+                    let worker_map = match self.worker_blocks.get(&worker) {
+                        Some(map) => map,
+                        None => {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                block_hash = ?seq_hash,
+                                "Failed to find worker blocks to remove"
+                            );
+                            if kv_cache_err.is_none() {
+                                kv_cache_err = Some(KvCacheEventError::BlockNotFound);
+                            }
+                            continue;
+                        }
+                    };
+
+                    // Get position and local_hash for this seq_hash
+                    let (position, local_hash) = match worker_map.remove(&seq_hash) {
+                        Some((_, (pos, lh))) => (pos, lh),
+                        None => {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                block_hash = ?seq_hash,
+                                "Failed to find block to remove; skipping remove operation"
+                            );
+                            if kv_cache_err.is_none() {
+                                kv_cache_err = Some(KvCacheEventError::BlockNotFound);
+                            }
+                            continue;
+                        }
+                    };
+
+                    // Remove from index
+                    if let Some(pos_map) = self.index.get(&position) {
+                        if let Some(mut entry) = pos_map.get_mut(&local_hash) {
+                            if entry.remove(seq_hash, worker) {
+                                // Entry is empty, remove it
+                                drop(entry);
+                                pos_map.remove(&local_hash);
+                            }
+                        }
+                    }
+                }
+
+                kv_cache_err.map_or(Ok(()), Err)
             }
             KvCacheEventData::Cleared => {
-                self.clear_all_blocks(worker.worker_id);
+                self.clear_worker_blocks(worker_id);
                 Ok(())
             }
         }
     }
 
-    /// Helper function to remove or clear blocks for a worker.
-    fn remove_or_clear_worker_blocks(&mut self, worker_id: WorkerId, keep_worker: bool) {
-        let workers: Vec<WorkerWithDpRank> = self
-            .worker_blocks
-            .keys()
-            .filter(|w| w.worker_id == worker_id)
-            .copied()
-            .collect();
-
-        for worker in workers {
-            let Some(block_map) = self.worker_blocks.remove(&worker) else {
-                continue;
-            };
-
-            // Remove worker from all blocks in main index
-            for (seq_hash, (position, local_hash)) in block_map {
-                self.remove_worker_from_index(worker, position, local_hash, seq_hash);
-            }
-
-            if keep_worker {
-                self.worker_blocks.insert(worker, HashMap::new());
-            }
-        }
-    }
-
-    /// Remove a worker from a specific index entry and cleanup empty maps.
-    fn remove_worker_from_index(
-        &mut self,
-        worker: WorkerWithDpRank,
-        position: u64,
-        local_hash: LocalBlockHash,
-        seq_hash: ExternalSequenceBlockHash,
-    ) {
-        let Some(local_map) = self.index.get_mut(&position) else {
-            return;
-        };
-
-        let Some(entry) = local_map.get_mut(&local_hash) else {
-            return;
-        };
-
-        // Remove worker from entry; if entry becomes empty, remove it
-        if entry.remove(seq_hash, worker) {
-            local_map.remove(&local_hash);
-        }
-
-        if local_map.is_empty() {
-            self.index.remove(&position);
-        }
-    }
-
-    /// Remove a worker and all their blocks from the index.
-    pub fn remove_worker(&mut self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, false);
-    }
-
-    /// Clear all blocks for a worker but keep the worker tracked.
-    pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
+    /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
+    fn clear_worker_blocks(&self, worker_id: WorkerId) {
         self.remove_or_clear_worker_blocks(worker_id, true);
     }
 
-    /// Get all worker IDs currently tracked in the index.
-    pub fn get_workers(&self) -> Vec<WorkerId> {
-        let mut worker_ids: Vec<WorkerId> = self
+    /// Remove a worker and all their blocks completely from the index.
+    fn remove_worker_blocks(&self, worker_id: WorkerId) {
+        self.remove_or_clear_worker_blocks(worker_id, false);
+    }
+
+    /// Helper function to remove or clear blocks for a worker.
+    /// If `keep_worker` is true, the worker remains tracked with empty blocks.
+    /// If `keep_worker` is false, the worker is completely removed.
+    fn remove_or_clear_worker_blocks(&self, worker_id: WorkerId, keep_worker: bool) {
+        // Collect all WorkerWithDpRank keys that match this worker_id
+        let workers: Vec<WorkerWithDpRank> = self
             .worker_blocks
-            .keys()
-            .map(|w| w.worker_id)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        worker_ids.sort_unstable();
-        worker_ids
-    }
-
-    /// Dump the index as a series of RouterEvents that can reconstruct the state.
-    ///
-    /// NOTE: Not implemented for PositionalIndex - use serialization directly if needed.
-    pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
-        unimplemented!(
-            "dump_tree_as_events not supported for PositionalIndex; serialize directly if needed"
-        )
-    }
-
-    /// Returns the total number of (worker, block) pairs stored.
-    pub fn current_size(&self) -> usize {
-        self.worker_blocks.values().map(|m| m.len()).sum()
-    }
-}
-
-impl Default for NestedMap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocols::{
-        KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
-    };
-
-    /// Helper to create store event with proper cumulative hashes.
-    fn make_store_event(
-        worker_id: WorkerId,
-        event_id: u64,
-        local_hashes: &[u64],
-        parent_hash: Option<ExternalSequenceBlockHash>,
-    ) -> RouterEvent {
-        // Compute cumulative sequence hashes
-        let local_blocks: Vec<LocalBlockHash> =
-            local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-        let seq_hashes = crate::protocols::compute_seq_hash_for_block(&local_blocks);
-
-        let blocks: Vec<KvCacheStoredBlockData> = local_hashes
             .iter()
-            .zip(seq_hashes.iter())
-            .map(|(&local, &seq)| KvCacheStoredBlockData {
-                tokens_hash: LocalBlockHash(local),
-                block_hash: ExternalSequenceBlockHash(seq),
-                mm_extra_info: None,
-            })
+            .filter(|entry| entry.key().worker_id == worker_id)
+            .map(|entry| *entry.key())
             .collect();
 
-        RouterEvent {
-            worker_id,
-            event: KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash,
-                    blocks,
-                }),
-                dp_rank: 0,
-            },
-        }
-    }
+        for worker in workers {
+            if let Some((_, worker_map)) = self.worker_blocks.remove(&worker) {
+                // Remove each block from the index
+                for entry in worker_map.iter() {
+                    let seq_hash = *entry.key();
+                    let (position, local_hash) = *entry.value();
 
-    fn make_remove_event(worker_id: WorkerId, event_id: u64, seq_hashes: &[u64]) -> RouterEvent {
-        RouterEvent {
-            worker_id,
-            event: KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: seq_hashes
-                        .iter()
-                        .map(|&h| ExternalSequenceBlockHash(h))
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        }
-    }
+                    if let Some(pos_map) = self.index.get(&position) {
+                        if let Some(mut seq_entry) = pos_map.get_mut(&local_hash) {
+                            if seq_entry.remove(seq_hash, worker) {
+                                // Entry is empty, remove it
+                                drop(seq_entry);
+                                pos_map.remove(&local_hash);
+                            }
+                        }
+                    }
+                }
+            }
 
-    #[test]
-    fn test_index_structure_after_store() {
-        let mut index = NestedMap::new();
-
-        // Store [1, 2, 3] for worker 0
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, 3], None))
-            .unwrap();
-
-        // Verify index has 3 positions
-        assert_eq!(index.index.len(), 3, "Should have 3 positions");
-        assert!(index.index.contains_key(&0), "Position 0 should exist");
-        assert!(index.index.contains_key(&1), "Position 1 should exist");
-        assert!(index.index.contains_key(&2), "Position 2 should exist");
-
-        // Verify each position has the correct local_hash entry
-        let pos0 = index.index.get(&0).unwrap();
-        assert!(
-            pos0.contains_key(&LocalBlockHash(1)),
-            "Position 0 should have local_hash 1"
-        );
-
-        let pos1 = index.index.get(&1).unwrap();
-        assert!(
-            pos1.contains_key(&LocalBlockHash(2)),
-            "Position 1 should have local_hash 2"
-        );
-
-        let pos2 = index.index.get(&2).unwrap();
-        assert!(
-            pos2.contains_key(&LocalBlockHash(3)),
-            "Position 2 should have local_hash 3"
-        );
-
-        // Verify worker is in each position's worker set
-        let worker = WorkerWithDpRank::new(0, 0);
-        for pos in 0..3 {
-            let local_map = index.index.get(&pos).unwrap();
-            let has_worker = local_map.values().any(|entry| {
-                entry
-                    .iter_workers()
-                    .any(|workers| workers.contains(&worker))
-            });
-            assert!(has_worker, "Worker should be at position {}", pos);
-        }
-    }
-
-    #[test]
-    fn test_worker_blocks_reverse_lookup() {
-        let mut index = NestedMap::new();
-
-        // Store [10, 20, 30] for worker 0
-        index
-            .apply_event(make_store_event(0, 0, &[10, 20, 30], None))
-            .unwrap();
-
-        let worker = WorkerWithDpRank::new(0, 0);
-        let worker_map = index.worker_blocks.get(&worker).unwrap();
-
-        // Should have 3 entries
-        assert_eq!(worker_map.len(), 3, "Worker should have 3 blocks");
-
-        // Verify each entry has correct (position, local_hash)
-        for (seq_hash, &(position, local_hash)) in worker_map {
-            // Verify position matches expected
-            assert!(position < 3, "Position should be 0, 1, or 2");
-
-            // Verify we can navigate to the correct place in main index
-            let local_map = index.index.get(&position).unwrap();
-            let entry = local_map.get(&local_hash).unwrap();
-            assert!(entry.contains(*seq_hash), "Should find seq_hash in index");
-        }
-    }
-
-    #[test]
-    fn test_multiple_workers_same_prefix() {
-        let mut index = NestedMap::new();
-
-        // Both workers store [100, 200]
-        index
-            .apply_event(make_store_event(0, 0, &[100, 200], None))
-            .unwrap();
-        index
-            .apply_event(make_store_event(1, 1, &[100, 200], None))
-            .unwrap();
-
-        // Position 0, local_hash 100 should have 1 seq_hash entry with 2 workers
-        let pos0 = index.index.get(&0).unwrap();
-        let entry = pos0.get(&LocalBlockHash(100)).unwrap();
-        assert_eq!(
-            entry.len(),
-            1,
-            "Should have exactly 1 seq_hash (no collision)"
-        );
-
-        let workers = entry.get_single().unwrap();
-        assert_eq!(workers.len(), 2, "Should have 2 workers");
-        assert!(workers.contains(&WorkerWithDpRank::new(0, 0)));
-        assert!(workers.contains(&WorkerWithDpRank::new(1, 0)));
-    }
-
-    #[test]
-    fn test_different_prefixes_same_local_at_position() {
-        let mut index = NestedMap::new();
-
-        // Worker 0: [1, 2, SHARED]
-        // Worker 1: [3, 4, SHARED]
-        // At position 2, both have local_hash SHARED but different seq_hash (different prefixes)
-        let shared = 999u64;
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, shared], None))
-            .unwrap();
-        index
-            .apply_event(make_store_event(1, 1, &[3, 4, shared], None))
-            .unwrap();
-
-        // Position 2 should have local_hash SHARED
-        let pos2 = index.index.get(&2).unwrap();
-        let entry = pos2.get(&LocalBlockHash(shared)).unwrap();
-
-        // Should have 2 different seq_hash entries (different prefixes)
-        assert_eq!(
-            entry.len(),
-            2,
-            "Should have 2 seq_hash entries for different prefixes"
-        );
-
-        // Each seq_hash should map to exactly 1 worker
-        for workers in entry.iter_workers() {
-            assert_eq!(workers.len(), 1, "Each seq_hash should have 1 worker");
-        }
-    }
-
-    #[test]
-    fn test_remove_cleans_up_nested_maps() {
-        let mut index = NestedMap::new();
-
-        // Store [1, 2, 3] for worker 0
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, 3], None))
-            .unwrap();
-        assert_eq!(index.index.len(), 3);
-
-        // Compute the seq_hashes for removal
-        let local_blocks = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
-        let seq_hashes = crate::protocols::compute_seq_hash_for_block(&local_blocks);
-
-        // Remove all blocks
-        index
-            .apply_event(make_remove_event(0, 1, &seq_hashes))
-            .unwrap();
-
-        // Index should be completely empty
-        assert!(
-            index.index.is_empty(),
-            "Index should be empty after removing all blocks"
-        );
-        assert!(
-            index.worker_blocks.is_empty(),
-            "Worker blocks should be empty"
-        );
-    }
-
-    #[test]
-    fn test_remove_partial_keeps_other_positions() {
-        let mut index = NestedMap::new();
-
-        // Store [1, 2, 3] for worker 0
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, 3], None))
-            .unwrap();
-
-        // Compute seq_hashes
-        let local_blocks = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
-        let seq_hashes = crate::protocols::compute_seq_hash_for_block(&local_blocks);
-
-        // Remove only the last block
-        index
-            .apply_event(make_remove_event(0, 1, &[seq_hashes[2]]))
-            .unwrap();
-
-        // Should have 2 positions left
-        assert_eq!(
-            index.index.len(),
-            2,
-            "Should have 2 positions after partial remove"
-        );
-        assert!(index.index.contains_key(&0));
-        assert!(index.index.contains_key(&1));
-        assert!(
-            !index.index.contains_key(&2),
-            "Position 2 should be removed"
-        );
-    }
-
-    #[test]
-    fn test_jump_optimization_skips_positions() {
-        // Use small jump size to test the jump behavior
-        let mut index = NestedMap::new_with_jump_size(4);
-
-        // Store a long sequence [0, 1, 2, ..., 15] for worker 0
-        let seq: Vec<u64> = (0..16).collect();
-        index
-            .apply_event(make_store_event(0, 0, &seq, None))
-            .unwrap();
-
-        // Store same sequence for worker 1 but only first 8 blocks
-        let partial: Vec<u64> = (0..8).collect();
-        index
-            .apply_event(make_store_event(1, 1, &partial, None))
-            .unwrap();
-
-        // Query the full sequence
-        let query: Vec<LocalBlockHash> = seq.iter().map(|&h| LocalBlockHash(h)).collect();
-        let scores = index.find_matches(query, false);
-
-        // Worker 0 should have depth 16, worker 1 should have depth 8
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            16
-        );
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 8);
-    }
-
-    #[test]
-    fn test_lazy_hash_single_entry_optimization() {
-        let mut index = NestedMap::new();
-
-        // Store [1, 2, 3] for worker 0
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, 3], None))
-            .unwrap();
-
-        // Each (position, local_hash) should have exactly 1 seq_hash entry (Single variant)
-        for (pos, local_map) in &index.index {
-            for (local_hash, entry) in local_map {
-                assert!(
-                    entry.is_single(),
-                    "Position {}, local_hash {:?} should be Single variant (lazy optimization applies)",
-                    pos,
-                    local_hash
-                );
+            if keep_worker {
+                // Re-insert worker with empty map to keep it tracked
+                self.worker_blocks.insert(worker, DashMap::new());
             }
         }
     }
 
-    #[test]
-    fn test_chained_stores_with_parent() {
-        let mut index = NestedMap::new();
+    /// Dump the index as a series of RouterEvents that can reconstruct the index.
+    /// Each worker gets one event per block they have stored.
+    fn dump_as_events(&self) -> Vec<RouterEvent> {
+        let mut events = Vec::new();
+        let mut event_id = 0u64;
 
-        // Store [1, 2] for worker 0
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2], None))
-            .unwrap();
+        // Iterate over all workers and their blocks
+        for worker_entry in self.worker_blocks.iter() {
+            let worker = *worker_entry.key();
+            let blocks_map = worker_entry.value();
 
-        // Compute parent hash (seq_hash at position 1)
-        let local_blocks = vec![LocalBlockHash(1), LocalBlockHash(2)];
-        let seq_hashes = crate::protocols::compute_seq_hash_for_block(&local_blocks);
-        let parent = ExternalSequenceBlockHash(seq_hashes[1]);
+            // Collect blocks sorted by position for consistent ordering
+            let mut blocks: Vec<(ExternalSequenceBlockHash, usize, LocalBlockHash)> = blocks_map
+                .iter()
+                .map(|entry| (*entry.key(), entry.value().0, entry.value().1))
+                .collect();
+            blocks.sort_by_key(|(_, pos, _)| *pos);
 
-        // Store [3, 4] continuing from parent for worker 0
-        index
-            .apply_event(make_store_event(0, 1, &[3, 4], Some(parent)))
-            .unwrap();
+            // Group consecutive blocks into single events where possible
+            // For simplicity, emit one event per block (like radix tree does)
+            for (seq_hash, position, local_hash) in blocks {
+                // Determine parent_hash (previous block's seq_hash if position > 0)
+                let parent_hash = if position > 0 {
+                    // Find the block at position - 1 for this worker
+                    blocks_map
+                        .iter()
+                        .find(|e| e.value().0 == position - 1)
+                        .map(|e| *e.key())
+                } else {
+                    None
+                };
 
-        // Should have 4 positions now
-        assert_eq!(
-            index.index.len(),
-            4,
-            "Should have 4 positions after chained store"
-        );
-        assert!(index.index.contains_key(&0));
-        assert!(index.index.contains_key(&1));
-        assert!(index.index.contains_key(&2));
-        assert!(index.index.contains_key(&3));
+                let event = RouterEvent {
+                    worker_id: worker.worker_id,
+                    event: KvCacheEvent {
+                        event_id,
+                        dp_rank: worker.dp_rank,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash,
+                            blocks: vec![KvCacheStoredBlockData {
+                                block_hash: seq_hash,
+                                tokens_hash: local_hash,
+                                mm_extra_info: None,
+                            }],
+                        }),
+                    },
+                };
 
-        // Worker should have 4 blocks total
-        let worker = WorkerWithDpRank::new(0, 0);
-        assert_eq!(index.worker_blocks.get(&worker).unwrap().len(), 4);
+                events.push(event);
+                event_id += 1;
+            }
+        }
+
+        events
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Weighted binary search methods (associated functions for use in worker threads)
+// -----------------------------------------------------------------------------
+
+impl PositionalIndexer {
+    /// Check if there's a match at the given position for the (local_hash, seq_hash) pair.
+    #[inline]
+    fn has_match_at_position(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        position: usize,
+        local_hash: LocalBlockHash,
+        seq_hash: ExternalSequenceBlockHash,
+    ) -> bool {
+        let Some(pos_map) = index.get(&position) else {
+            return false;
+        };
+        let Some(entry) = pos_map.get(&local_hash) else {
+            return false;
+        };
+        entry.get(seq_hash).is_some()
     }
 
-    #[test]
-    fn test_parent_not_found_error() {
-        let mut index = NestedMap::new();
-
-        // Try to store with non-existent parent
-        let fake_parent = ExternalSequenceBlockHash(0xDEADBEEF);
-        let result = index.apply_event(make_store_event(0, 0, &[1, 2], Some(fake_parent)));
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            KvCacheEventError::ParentBlockNotFound
-        ));
+    /// Update scores with workers at a specific position for a (local_hash, seq_hash) pair.
+    /// Returns true if workers were found and scores were updated.
+    #[inline]
+    fn update_scores_at_position(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        position: usize,
+        local_hash: LocalBlockHash,
+        seq_hash: ExternalSequenceBlockHash,
+        scores: &mut OverlapScores,
+        record_frequency: bool,
+    ) -> bool {
+        let Some(pos_map) = index.get(&position) else {
+            return false;
+        };
+        let Some(entry) = pos_map.get(&local_hash) else {
+            return false;
+        };
+        let Some(workers) = entry.get(seq_hash) else {
+            return false;
+        };
+        scores.update_scores(workers.iter());
+        if record_frequency {
+            scores.add_frequency(workers.len());
+        }
+        true
     }
 
-    #[test]
-    fn test_find_matches_empty_on_miss() {
-        let mut index = NestedMap::new();
+    /// Find the boundary between matching and non-matching positions using weighted binary search.
+    ///
+    /// Returns the first position with no match (i.e., all positions in `0..boundary` match).
+    /// The weight is applied at each step of the binary search, biasing toward lower positions.
+    ///
+    /// # Arguments
+    /// * `index` - The position -> local_hash -> SeqEntry index
+    /// * `local_hashes` - Sequence of LocalBlockHash to match
+    /// * `seq_hashes` - Corresponding sequence hashes for exact matching
+    /// * `search_weight` - Weight for midpoint calculation (0.0 to 1.0) applied at each step
+    fn find_match_boundary(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        local_hashes: &[LocalBlockHash],
+        seq_hashes: &[ExternalSequenceBlockHash],
+        search_weight: f64,
+    ) -> usize {
+        let len = local_hashes.len();
+        if len == 0 {
+            return 0;
+        }
 
-        // Store [1, 2, 3]
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, 3], None))
-            .unwrap();
+        let mut low = 0;
+        let mut high = len;
 
-        // Query for completely different sequence
-        let query = vec![LocalBlockHash(999), LocalBlockHash(998)];
-        let scores = index.find_matches(query, false);
+        while low < high {
+            let range = high - low;
+            // Apply weight to calculate midpoint, clamped to ensure progress
+            let offset = (((range as f64) * search_weight).floor() as usize).min(range - 1);
+            let mid = low + offset;
 
-        assert!(
-            scores.scores.is_empty(),
-            "Should have no matches for miss query"
-        );
+            if Self::has_match_at_position(index, mid, local_hashes[mid], seq_hashes[mid]) {
+                // Match found, boundary is above mid
+                low = mid + 1;
+            } else {
+                // No match, boundary is at or below mid
+                high = mid;
+            }
+        }
+
+        low
     }
 
-    #[test]
-    fn test_tree_sizes_in_overlap_scores() {
-        let mut index = NestedMap::new();
+    /// Perform weighted binary search to find matches for a sequence of block hashes.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Compute sequence hashes from local block hashes for exact prefix matching
+    /// 2. Use weighted binary search to find the boundary (first non-matching position)
+    /// 3. The weight biases each step toward lower positions (useful when short matches are common)
+    /// 4. Scan all matching positions (0..boundary) to collect worker scores
+    ///
+    /// # Arguments
+    /// * `index` - The position -> local_hash -> SeqEntry index
+    /// * `local_hashes` - Sequence of LocalBlockHash to match
+    /// * `search_weight` - Weight for midpoint calculation (0.0 to 1.0) applied at each step
+    /// * `early_exit` - If true, stop after finding any match
+    fn weighted_binary_search_matches(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        local_hashes: &[LocalBlockHash],
+        search_weight: f64,
+        early_exit: bool,
+    ) -> OverlapScores {
+        let mut scores = OverlapScores::new();
 
-        // Worker 0 has 5 blocks, worker 1 has 3 blocks
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, 3, 4, 5], None))
-            .unwrap();
-        index
-            .apply_event(make_store_event(1, 1, &[1, 2, 3], None))
-            .unwrap();
+        if local_hashes.is_empty() {
+            return scores;
+        }
 
-        // Query [1, 2]
-        let query = vec![LocalBlockHash(1), LocalBlockHash(2)];
-        let scores = index.find_matches(query, false);
+        // Compute sequence hashes for exact prefix matching
+        let seq_hashes: Vec<ExternalSequenceBlockHash> = compute_seq_hash_for_block(local_hashes)
+            .into_iter()
+            .map(ExternalSequenceBlockHash::from)
+            .collect();
 
-        // Both workers should appear with correct tree sizes
-        assert_eq!(
-            *scores.tree_sizes.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            5
-        );
-        assert_eq!(
-            *scores.tree_sizes.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
-            3
-        );
-    }
+        let boundary = Self::find_match_boundary(index, local_hashes, &seq_hashes, search_weight);
 
-    #[test]
-    fn test_early_exit_stops_at_single_worker() {
-        let mut index = NestedMap::new_with_jump_size(2);
+        if boundary == 0 {
+            return scores;
+        }
 
-        // Worker 0: [1, 2, 3, 4, 5]
-        // Worker 1: [1] only
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, 3, 4, 5], None))
-            .unwrap();
-        index
-            .apply_event(make_store_event(1, 1, &[1], None))
-            .unwrap();
+        // Collect workers from all matching positions (0..boundary)
+        if early_exit {
+            // For early exit, just check position 0
+            Self::update_scores_at_position(index, 0, local_hashes[0], seq_hashes[0], &mut scores, false);
+        } else {
+            // Scan all matching positions
+            for pos in 0..boundary {
+                Self::update_scores_at_position(index, pos, local_hashes[pos], seq_hashes[pos], &mut scores, true);
+            }
+        }
 
-        // Query [1, 2, 3, 4, 5] with early_exit=true
-        let query: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
-        let scores = index.find_matches(query, true);
-
-        // Worker 1 drops at position 1 (after block 1), leaving worker 0 alone
-        // With early_exit, we stop when only 1 worker remains
-        // Worker 0's score should be 2 (blocks 1 and 2), not 5
-        let worker0_score = *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap();
-        assert!(
-            worker0_score <= 2,
-            "Early exit should stop early, got {}",
-            worker0_score
-        );
-    }
-
-    #[test]
-    fn test_current_size() {
-        let mut index = NestedMap::new();
-
-        assert_eq!(index.current_size(), 0);
-
-        index
-            .apply_event(make_store_event(0, 0, &[1, 2, 3], None))
-            .unwrap();
-        assert_eq!(index.current_size(), 3);
-
-        index
-            .apply_event(make_store_event(1, 1, &[1, 2], None))
-            .unwrap();
-        assert_eq!(index.current_size(), 5);
-
-        index.remove_worker(0);
-        assert_eq!(index.current_size(), 2);
-    }
-
-    #[test]
-    fn test_get_workers() {
-        let mut index = NestedMap::new();
-
-        index
-            .apply_event(make_store_event(2, 0, &[1], None))
-            .unwrap();
-        index
-            .apply_event(make_store_event(0, 1, &[1], None))
-            .unwrap();
-        index
-            .apply_event(make_store_event(1, 2, &[1], None))
-            .unwrap();
-
-        let workers = index.get_workers();
-        assert_eq!(workers, vec![0, 1, 2], "Workers should be sorted");
+        scores
     }
 }
