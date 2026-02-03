@@ -182,6 +182,7 @@ pub(crate) struct ZmqKvEventListener {
 #[pymethods]
 impl ZmqKvEventListener {
     #[new]
+    #[pyo3(signature = (zmq_endpoint, zmq_topic, kv_block_size))]
     fn new(zmq_endpoint: String, zmq_topic: String, kv_block_size: usize) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
@@ -1248,6 +1249,7 @@ impl KvPushRouter {
                     &token_ids,
                     router_config_override.as_ref(),
                     update_states,
+                    None, // lora_name not exposed in Python API yet
                 )
                 .await
                 .map_err(to_pyerr)?;

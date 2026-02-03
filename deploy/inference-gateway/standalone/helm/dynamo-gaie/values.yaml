@@ -50,10 +50,9 @@ httpRoute:
     request: "300s"
 
 extension:
-  # EPP image for the GAIE extension (Dynamo EPP image by default)
-  image: "" # leave empty to use defaults below
-  standardImage: us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v1.2.1
-  dynamoImage: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:new-build-1
+  # EPP image for the GAIE extension (required - no default)
+  # Set via --set-string extension.image=$EPP_IMAGE or in your values file
+  image: ""
 
 # generic knobs you may want in both modes
 imagePullSecrets:

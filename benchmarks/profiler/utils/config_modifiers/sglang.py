@@ -3,6 +3,7 @@
 
 import logging
 import re
+from typing import Tuple
 
 import yaml
 
@@ -279,7 +280,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         return cfg.model_dump()
 
     @classmethod
-    def get_model_name(cls, config: dict) -> str:
+    def get_model_name(cls, config: dict) -> Tuple[str, str]:
         cfg = Config.model_validate(config)
         try:
             worker_service = get_worker_service_from_config(cfg, backend="sglang")
@@ -288,23 +289,10 @@ class SGLangConfigModifier(BaseConfigModifier):
             logger.warning(
                 f"Worker service missing or invalid, using default model name: {DEFAULT_MODEL_NAME}"
             )
-            return DEFAULT_MODEL_NAME
+            return DEFAULT_MODEL_NAME, DEFAULT_MODEL_NAME
 
         args = break_arguments(args)
-        # Check for --model-path first (primary argument for SGLang)
-        for i, arg in enumerate(args):
-            if arg == "--model-path" and i + 1 < len(args):
-                return args[i + 1]
-
-        # Fall back to --served-model-name if --model-path not found
-        for i, arg in enumerate(args):
-            if arg == "--served-model-name" and i + 1 < len(args):
-                return args[i + 1]
-
-        logger.warning(
-            f"Model name not found in configuration args, using default model name: {DEFAULT_MODEL_NAME}"
-        )
-        return DEFAULT_MODEL_NAME
+        return cls._get_model_name_and_path_from_args(args, DEFAULT_MODEL_NAME, logger)
 
     @classmethod
     def get_port(cls, config: dict) -> int:

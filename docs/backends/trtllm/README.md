@@ -324,5 +324,3 @@ cache_transceiver_config:
 For example, see `examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml`.
 
 **Related Issue:** [#4327](https://github.com/ai-dynamo/dynamo/issues/4327)
-
----

@@ -1081,9 +1081,10 @@ def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
-async def fetch_llm(remote_name: str) -> str:
+async def fetch_llm(remote_name: str, ignore_weights: bool = False) -> str:
     """
     Download a model from Hugging Face, returning it's local path.
+    If `ignore_weights` is True, only fetches tokenizer and config files.
     Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
     """
     ...
