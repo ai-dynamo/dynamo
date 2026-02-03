@@ -88,7 +88,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
                     continue
 
         # set metadata name
-        cfg.metadata.name = "trtllm-agg"
+        cfg.metadata.name = "agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
