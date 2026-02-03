@@ -10,7 +10,7 @@ from tensorrt_llm.llmapi import BuildConfig
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
 from dynamo.trtllm import __version__
-from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 
@@ -22,7 +22,11 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"  # Prefill 
 DEFAULT_ENCODE_ENDPOINT = (
     f"dyn://{DYN_NAMESPACE}.tensorrt_llm_encode.generate"  # Encode workers
 )
+DEFAULT_DIFFUSION_ENDPOINT = (
+    f"dyn://{DYN_NAMESPACE}.diffusion.generate"  # Diffusion workers
+)
 DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+DEFAULT_VIDEO_MODEL_PATH = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 
 
@@ -66,6 +70,28 @@ class Config:
         # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
         self.use_kv_events: bool = False
 
+        # Diffusion-specific config (only used when modality is video_diffusion or image_diffusion)
+        self.model_type: Optional[str] = None  # e.g., "wan_t2v", "flux"
+        self.output_dir: str = "/tmp/dynamo_videos"
+        self.default_height: int = 480
+        self.default_width: int = 832
+        self.default_num_frames: int = 81
+        self.default_num_inference_steps: int = 50
+        self.default_guidance_scale: float = 5.0
+        self.enable_teacache: bool = False
+        self.teacache_thresh: float = 0.2
+        self.attn_type: str = "default"
+        self.linear_type: str = "default"
+        self.disable_torch_compile: bool = False
+        self.torch_compile_mode: str = "default"
+        self.dit_dp_size: int = 1
+        self.dit_tp_size: int = 1
+        self.dit_ulysses_size: int = 1
+        self.dit_ring_size: int = 1
+        self.dit_cfg_size: int = 1
+        self.dit_fsdp_size: int = 1
+        self.enable_async_cpu_offload: bool = False
+
     def __str__(self) -> str:
         return (
             f"Config(namespace={self.namespace}, "
@@ -100,7 +126,11 @@ class Config:
             f"request_plane={self.request_plane}, "
             f"event_plane={self.event_plane}, "
             f"enable_local_indexer={self.enable_local_indexer}, "
-            f"use_kv_events={self.use_kv_events}"
+            f"use_kv_events={self.use_kv_events}, "
+            f"model_type={self.model_type}, "
+            f"output_dir={self.output_dir}, "
+            f"dit_dp_size={self.dit_dp_size}, "
+            f"dit_tp_size={self.dit_tp_size})"
         )
 
 
@@ -265,8 +295,17 @@ def cmd_line_args():
         "--modality",
         type=str,
         default="text",
-        choices=["text", "multimodal"],
-        help="Modality to use for the model. Default: text. Current supported modalities are image.",
+        choices=[m.value for m in Modality],
+        help="Modality to use for the model. Default: text. "
+        "Options: text (LLM), multimodal (VLM), video_diffusion, image_diffusion.",
+    )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default=None,
+        help="Model type for diffusion modalities (required for video_diffusion/image_diffusion). "
+        "Examples: wan_t2v, wan_i2v, cosmos, flux. "
+        "Run with invalid value to see allowed options for your modality.",
     )
     parser.add_argument(
         "--encode-endpoint",
@@ -350,6 +389,126 @@ def cmd_line_args():
         help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
 
+    # Diffusion-specific options (only used when modality is video_diffusion or image_diffusion)
+    diffusion_group = parser.add_argument_group(
+        "Diffusion Options",
+        "Options for video_diffusion and image_diffusion modalities",
+    )
+    diffusion_group.add_argument(
+        "--output-dir",
+        type=str,
+        default="/tmp/dynamo_videos",
+        help="Directory to store generated videos/images. Default: /tmp/dynamo_videos",
+    )
+    diffusion_group.add_argument(
+        "--default-height",
+        type=int,
+        default=480,
+        help="Default video/image height in pixels. Default: 480",
+    )
+    diffusion_group.add_argument(
+        "--default-width",
+        type=int,
+        default=832,
+        help="Default video/image width in pixels. Default: 832",
+    )
+    diffusion_group.add_argument(
+        "--default-num-frames",
+        type=int,
+        default=81,
+        help="Default number of frames for video generation. Default: 81",
+    )
+    diffusion_group.add_argument(
+        "--default-num-inference-steps",
+        type=int,
+        default=50,
+        help="Default number of inference steps. Default: 50",
+    )
+    diffusion_group.add_argument(
+        "--default-guidance-scale",
+        type=float,
+        default=5.0,
+        help="Default CFG guidance scale. Default: 5.0",
+    )
+    diffusion_group.add_argument(
+        "--enable-teacache",
+        action="store_true",
+        help="Enable TeaCache optimization for faster generation.",
+    )
+    diffusion_group.add_argument(
+        "--teacache-thresh",
+        type=float,
+        default=0.2,
+        help="TeaCache threshold. Default: 0.2",
+    )
+    diffusion_group.add_argument(
+        "--attn-type",
+        type=str,
+        default="default",
+        choices=["default", "sage-attn", "sparse-videogen", "sparse-videogen2"],
+        help="Attention type for diffusion models. Default: default",
+    )
+    diffusion_group.add_argument(
+        "--linear-type",
+        type=str,
+        default="default",
+        choices=["default", "trtllm-fp8-blockwise", "trtllm-fp8-per-tensor", "trtllm-nvfp4"],
+        help="Linear type for quantization. Default: default",
+    )
+    diffusion_group.add_argument(
+        "--disable-torch-compile",
+        action="store_true",
+        help="Disable torch.compile optimization.",
+    )
+    diffusion_group.add_argument(
+        "--torch-compile-mode",
+        type=str,
+        default="default",
+        choices=["default", "reduce-overhead", "max-autotune"],
+        help="torch.compile mode. Default: default",
+    )
+    diffusion_group.add_argument(
+        "--dit-dp-size",
+        type=int,
+        default=1,
+        help="Data parallel size for DiT. Default: 1",
+    )
+    diffusion_group.add_argument(
+        "--dit-tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size for DiT. Default: 1",
+    )
+    diffusion_group.add_argument(
+        "--dit-ulysses-size",
+        type=int,
+        default=1,
+        help="Ulysses parallel size for DiT. Default: 1",
+    )
+    diffusion_group.add_argument(
+        "--dit-ring-size",
+        type=int,
+        default=1,
+        help="Ring parallel size for DiT. Default: 1",
+    )
+    diffusion_group.add_argument(
+        "--dit-cfg-size",
+        type=int,
+        default=1,
+        help="CFG parallel size for DiT. Default: 1",
+    )
+    diffusion_group.add_argument(
+        "--dit-fsdp-size",
+        type=int,
+        default=1,
+        help="FSDP size for DiT. Default: 1",
+    )
+    diffusion_group.add_argument(
+        "--enable-async-cpu-offload",
+        action="store_true",
+        help="Enable async CPU offload for memory efficiency.",
+    )
+
     args = parser.parse_args()
 
     config = Config()
@@ -361,12 +520,18 @@ def cmd_line_args():
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
+    # Set modality and model_type
+    config.modality = args.modality
+    config.model_type = args.model_type
+
     # Set the disaggregation mode.
     config.disaggregation_mode = DisaggregationMode(args.disaggregation_mode)
 
-    # Set the appropriate default for the endpoint based on disaggregation mode
+    # Set the appropriate default for the endpoint based on modality and disaggregation mode
     if args.endpoint == "":
-        if config.disaggregation_mode == DisaggregationMode.ENCODE:
+        if Modality(args.modality) in (Modality.VIDEO_DIFFUSION, Modality.IMAGE_DIFFUSION):
+            args.endpoint = DEFAULT_DIFFUSION_ENDPOINT
+        elif config.disaggregation_mode == DisaggregationMode.ENCODE:
             args.endpoint = DEFAULT_ENCODE_ENDPOINT
         elif config.disaggregation_mode == DisaggregationMode.PREFILL:
             args.endpoint = DEFAULT_PREFILL_ENDPOINT
@@ -403,7 +568,6 @@ def cmd_line_args():
     config.extra_engine_args = args.extra_engine_args
     config.override_engine_args = args.override_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
-    config.modality = args.modality
 
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
@@ -430,6 +594,27 @@ def cmd_line_args():
         config.custom_jinja_template = expanded_template_path
     else:
         config.custom_jinja_template = None
+
+    # Copy diffusion-specific args (only relevant for video_diffusion/image_diffusion)
+    config.output_dir = args.output_dir
+    config.default_height = args.default_height
+    config.default_width = args.default_width
+    config.default_num_frames = args.default_num_frames
+    config.default_num_inference_steps = args.default_num_inference_steps
+    config.default_guidance_scale = args.default_guidance_scale
+    config.enable_teacache = args.enable_teacache
+    config.teacache_thresh = args.teacache_thresh
+    config.attn_type = args.attn_type
+    config.linear_type = args.linear_type
+    config.disable_torch_compile = args.disable_torch_compile
+    config.torch_compile_mode = args.torch_compile_mode
+    config.dit_dp_size = args.dit_dp_size
+    config.dit_tp_size = args.dit_tp_size
+    config.dit_ulysses_size = args.dit_ulysses_size
+    config.dit_ring_size = args.dit_ring_size
+    config.dit_cfg_size = args.dit_cfg_size
+    config.dit_fsdp_size = args.dit_fsdp_size
+    config.enable_async_cpu_offload = args.enable_async_cpu_offload
 
     return config
 
