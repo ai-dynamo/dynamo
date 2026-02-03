@@ -776,6 +776,7 @@ $NIXL_PLUGIN_DIR:\
 $TENSORRT_LIB_DIR:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
+/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib:\
 /usr/local/cuda/lib:\
 /usr/local/cuda/lib64:\
 $LD_LIBRARY_PATH
