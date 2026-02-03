@@ -309,13 +309,12 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-        model="Qwen/Qwen3-VL-2B-Instruct",
+        model="Qwen/Qwen2-VL-2B-Instruct",
         # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
         script_args=[
             "--model",
-            "Qwen/Qwen3-VL-2B-Instruct",
+            "Qwen/Qwen2-VL-2B-Instruct",
             "--frontend-decoding",
-            "--max-model-len=32000",
         ],
         request_payloads=[
             chat_payload(
