@@ -21,6 +21,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
+    discovery::MultiPoolManager,
     kv_router::{
         KvRouter, KvRouterConfig, protocols::WorkerId, router_endpoint_id,
         scheduler::DefaultWorkerSelector,
@@ -78,6 +79,10 @@ pub struct ModelManager {
     // Per-model monitoring: worker_monitors for load-based rejection, runtime_configs for KvScheduler
     worker_monitors: DashMap<String, KvWorkerMonitor>,
     runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
+
+    /// Multi-pool managers per model name for prefix-mode routing.
+    /// Only populated when using --namespace-prefix mode.
+    multi_pool_managers: DashMap<String, Arc<MultiPoolManager>>,
 }
 
 impl Default for ModelManager {
@@ -100,6 +105,7 @@ impl ModelManager {
             prefill_router_activators: DashMap::new(),
             worker_monitors: DashMap::new(),
             runtime_configs: DashMap::new(),
+            multi_pool_managers: DashMap::new(),
         }
     }
 
@@ -355,6 +361,7 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
+        model_name: Option<&str>,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let endpoint_id = endpoint.id();
 
@@ -396,17 +403,43 @@ impl ModelManager {
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
-        let chooser = KvRouter::new(
-            endpoint.clone(),
-            client,
-            workers_with_configs,
-            kv_cache_block_size,
-            Some(selector),
-            kv_router_config,
-            instance_id,
-            worker_type,
-        )
-        .await?;
+
+        // Check if we have a MultiPoolManager for this model (multi-pool mode)
+        let pool_manager = model_name.and_then(|name| self.get_multi_pool_manager(name));
+
+        let chooser = if let Some(pool_manager) = pool_manager {
+            tracing::info!(
+                model_name = model_name,
+                pool_count = pool_manager.pool_count(),
+                total_workers = pool_manager.total_instances(),
+                "Creating KvRouter with multi-pool support"
+            );
+            KvRouter::new_with_pool_manager(
+                endpoint.clone(),
+                client,
+                pool_manager,
+                workers_with_configs,
+                kv_cache_block_size,
+                Some(selector),
+                kv_router_config,
+                instance_id,
+                worker_type,
+            )
+            .await?
+        } else {
+            KvRouter::new(
+                endpoint.clone(),
+                client,
+                workers_with_configs,
+                kv_cache_block_size,
+                Some(selector),
+                kv_router_config,
+                instance_id,
+                worker_type,
+            )
+            .await?
+        };
+
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers.insert(endpoint_id, new_kv_chooser.clone());
         Ok(new_kv_chooser)
@@ -524,6 +557,35 @@ impl ModelManager {
         let reasoning_parser = None; // TODO: Implement reasoning parser
 
         crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
+    }
+
+    /// Get or create a MultiPoolManager for a model in prefix mode.
+    ///
+    /// The manager tracks all workers across namespaces matching the prefix,
+    /// enabling weighted pool selection during routing.
+    pub fn get_or_create_multi_pool_manager(
+        &self,
+        model_name: &str,
+        prefix: &str,
+    ) -> Arc<MultiPoolManager> {
+        self.multi_pool_managers
+            .entry(model_name.to_string())
+            .or_insert_with(|| {
+                tracing::info!(
+                    model_name,
+                    prefix,
+                    "Creating MultiPoolManager for model"
+                );
+                Arc::new(MultiPoolManager::new(prefix.to_string()))
+            })
+            .clone()
+    }
+
+    /// Get an existing MultiPoolManager for a model, if one exists.
+    pub fn get_multi_pool_manager(&self, model_name: &str) -> Option<Arc<MultiPoolManager>> {
+        self.multi_pool_managers
+            .get(model_name)
+            .map(|entry| entry.value().clone())
     }
 
     /// Gets or sets the load threshold config for a model's worker monitor.

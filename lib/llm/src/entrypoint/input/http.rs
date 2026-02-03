@@ -199,6 +199,7 @@ async fn run_watcher(
         runtime.clone(),
         model_manager,
         router_config,
+        namespace_filter.clone(),
         engine_factory,
         metrics.clone(),
     );
@@ -225,7 +226,7 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(discovery_stream, namespace_filter).await;
+        watch_obj.watch(discovery_stream).await;
     });
 
     Ok(())

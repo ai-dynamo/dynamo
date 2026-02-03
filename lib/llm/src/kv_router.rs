@@ -44,10 +44,11 @@ pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
-    discovery::RuntimeConfigs,
+    discovery::{MultiPoolManager, RuntimeConfigs},
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
+        pool_scheduler::PoolAwareScheduler,
         protocols::{
             DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
             TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
@@ -324,6 +325,10 @@ pub struct KvRouter {
     // How about a Box<dyn KvIndexerInterface>
     scheduler: KvScheduler,
 
+    /// Pool-aware scheduler for multi-pool (prefix) mode.
+    /// When Some, find_best_match uses two-level selection (pool → worker).
+    pool_scheduler: Option<PoolAwareScheduler>,
+
     block_size: u32,
 
     kv_router_config: KvRouterConfig,
@@ -482,6 +487,170 @@ impl KvRouter {
         Ok(Self {
             indexer,
             scheduler,
+            pool_scheduler: None,
+            block_size,
+            kv_router_config,
+            cancellation_token,
+            client,
+            worker_query_client: Some(worker_query_client),
+        })
+    }
+
+    /// Create a new KvRouter with multi-pool support.
+    ///
+    /// This constructor is used in prefix mode where multiple worker pools exist.
+    /// The pool_manager provides weighted pool selection, and the router uses
+    /// two-level selection: first pick a pool, then pick a worker within that pool.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_pool_manager(
+        endpoint: Endpoint,
+        client: Client,
+        pool_manager: Arc<MultiPoolManager>,
+        workers_with_configs: Arc<RuntimeConfigs>,
+        block_size: u32,
+        selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
+        kv_router_config: Option<KvRouterConfig>,
+        router_id: u64,
+    ) -> Result<Self> {
+        let kv_router_config = kv_router_config.unwrap_or_default();
+        let component = endpoint.component();
+        let cancellation_token = component.drt().primary_token();
+
+        let indexer = if kv_router_config.overlap_score_weight == 0.0 {
+            // When overlap_score_weight is zero, we don't need to track prefixes
+            Indexer::None
+        } else {
+            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+
+            // If use_kv_events is false, enable TTL and pruning for approximate behavior
+            let prune_config = if !kv_router_config.use_kv_events {
+                Some(PruneConfig {
+                    ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
+                    max_tree_size: kv_router_config.router_max_tree_size,
+                    prune_target_ratio: kv_router_config.router_prune_target_ratio,
+                })
+            } else {
+                None
+            };
+
+            Indexer::KvIndexer(KvIndexer::new_with_frequency(
+                cancellation_token.clone(),
+                None,
+                block_size,
+                kv_indexer_metrics,
+                prune_config,
+            ))
+        };
+
+        // Wait for at least one worker with a known runtime config before starting scheduler
+        workers_with_configs.subscribe().wait_for_some().await;
+
+        let scheduler = KvScheduler::start(
+            component.clone(),
+            block_size,
+            workers_with_configs.clone(),
+            selector,
+            kv_router_config.router_replica_sync,
+            router_id,
+        )
+        .await?;
+
+        // Create pool-aware scheduler for pool selection and metrics.
+        // The actual worker selection uses the KvScheduler above, so we pass None for selector.
+        let pool_scheduler = Some(PoolAwareScheduler::new(
+            Some(pool_manager),
+            block_size,
+            kv_router_config,
+            None,
+        ));
+
+        // Initialize worker query client
+        let worker_query_client = worker_query::WorkerQueryClient::new(
+            component.clone(),
+            workers_with_configs.subscribe(),
+        );
+        tracing::info!("Worker query client initialized for multi-pool mode");
+
+        // Start KV event subscriber background process (only when use_kv_events is enabled)
+        if kv_router_config.use_kv_events
+            && let Indexer::KvIndexer(ref kv_indexer) = indexer
+        {
+            let all_local_indexer = workers_with_configs
+                .configs
+                .iter()
+                .filter_map(|r| r.value().as_ref().map(|c| c.enable_local_indexer))
+                .all(|b| b);
+
+            tracing::info!(
+                "Found {} worker(s), starting KV event subscriber (multi-pool mode)",
+                workers_with_configs.num_workers()
+            );
+
+            let transport_kind = EventTransportKind::from_env_or_default();
+
+            if all_local_indexer {
+                if transport_kind == EventTransportKind::Zmq {
+                    if kv_router_config.router_snapshot_threshold.is_some()
+                        || kv_router_config.router_reset_states
+                    {
+                        tracing::warn!(
+                            "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        "All {} workers have local_indexer enabled, using NATS Core subscription",
+                        workers_with_configs.num_workers()
+                    );
+                }
+
+                start_kv_router_background_event_plane(
+                    component.clone(),
+                    kv_indexer.event_sender(),
+                    kv_indexer.remove_worker_sender(),
+                    cancellation_token.clone(),
+                    worker_query::WorkerQueryClient::new(
+                        component.clone(),
+                        workers_with_configs.subscribe(),
+                    ),
+                    transport_kind,
+                )
+                .await?;
+            } else {
+                if transport_kind == EventTransportKind::Zmq {
+                    tracing::warn!(
+                        "Not all workers have local_indexer enabled; falling back to JetStream for durability"
+                    );
+                }
+                tracing::info!(
+                    "Not all workers have local_indexer enabled, using JetStream subscription"
+                );
+
+                let consumer_id = router_id.to_string();
+                start_kv_router_background(
+                    component.clone(),
+                    consumer_id,
+                    kv_indexer.event_sender(),
+                    kv_indexer.remove_worker_sender(),
+                    kv_router_config
+                        .router_snapshot_threshold
+                        .map(|_| kv_indexer.get_workers_sender()),
+                    kv_router_config
+                        .router_snapshot_threshold
+                        .map(|_| kv_indexer.snapshot_event_sender()),
+                    cancellation_token.clone(),
+                    kv_router_config.router_snapshot_threshold,
+                    kv_router_config.router_reset_states,
+                )
+                .await?;
+            }
+        }
+
+        tracing::info!("KV Routing initialized (multi-pool mode)");
+        Ok(Self {
+            indexer,
+            scheduler,
+            pool_scheduler,
             block_size,
             kv_router_config,
             cancellation_token,
@@ -493,6 +662,21 @@ impl KvRouter {
     /// Get a reference to the client used by this KvRouter
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Check if this router is in multi-pool mode.
+    pub fn is_multi_pool(&self) -> bool {
+        self.pool_scheduler
+            .as_ref()
+            .is_some_and(|ps| ps.is_multi_pool())
+    }
+
+    /// Get pool weights for metrics/debugging (multi-pool mode only).
+    pub fn pool_weights(&self) -> HashMap<String, usize> {
+        self.pool_scheduler
+            .as_ref()
+            .map(|ps| ps.pool_weights())
+            .unwrap_or_default()
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.

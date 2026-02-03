@@ -109,7 +109,14 @@ async fn run_watcher(
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
     let metrics = Arc::new(Metrics::new());
-    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config, None, metrics);
+    let watch_obj = ModelWatcher::new(
+        runtime.clone(),
+        model_manager,
+        router_config,
+        namespace_filter,
+        None,
+        metrics,
+    );
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
@@ -125,7 +132,7 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(discovery_stream, namespace_filter).await;
+        watch_obj.watch(discovery_stream).await;
     });
 
     Ok(())

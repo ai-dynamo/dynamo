@@ -64,4 +64,12 @@ impl NamespaceFilter {
             _ => None,
         }
     }
+
+    /// Get the prefix string if in Prefix mode, None otherwise.
+    pub fn prefix(&self) -> Option<&str> {
+        match self {
+            NamespaceFilter::Prefix(prefix) => Some(prefix),
+            _ => None,
+        }
+    }
 }

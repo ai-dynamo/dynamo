@@ -71,6 +71,7 @@ pub async fn prepare_engine(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
+                NamespaceFilter::Global,
                 None,
                 metrics,
             ));
@@ -83,9 +84,7 @@ pub async fn prepare_engine(
                 .await?;
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj
-                    .watch(discovery_stream, NamespaceFilter::Global)
-                    .await;
+                inner_watch_obj.watch(discovery_stream).await;
             });
             tracing::info!("Waiting for remote model..");
 
