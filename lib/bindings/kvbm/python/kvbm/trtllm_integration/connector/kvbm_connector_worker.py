@@ -82,17 +82,28 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
     
     logger.info(f"KVBM: Rank {rank} bootstrap world_size={bootstrap.world_size()}")
 
-    # In TRT-LLM TP mode with MPI, each rank is in a separate process
-    # with CUDA_VISIBLE_DEVICES restricting it to one GPU.
-    # We need to ensure CUDA is initialized on device 0 (the only visible device).
-    local_device = torch.cuda.current_device()
-    torch.cuda.set_device(local_device)  # Explicitly set to ensure context is active
-    torch.cuda.synchronize()  # Ensure all prior CUDA ops complete
+    # In TRT-LLM TP mode with MPI, all ranks see all GPUs (device_count=4)
+    # but default to device 0. We must set each rank to its corresponding GPU.
+    # NCCL requires each rank to be on a DIFFERENT device for multi-GPU comm.
+    device_count = torch.cuda.device_count()
+    if device_count > 1:
+        # Multi-GPU: each rank uses its own GPU
+        target_device = rank % device_count
+        torch.cuda.set_device(target_device)
+        logger.info(
+            f"KVBM: Rank {rank} set to CUDA device {target_device} "
+            f"(device_count={device_count})"
+        )
+    else:
+        # Single GPU per process (CUDA_VISIBLE_DEVICES restricts view)
+        target_device = 0
+        torch.cuda.set_device(target_device)
+        logger.info(
+            f"KVBM: Rank {rank} on CUDA device {target_device} "
+            f"(device_count={device_count})"
+        )
     
-    logger.info(
-        f"KVBM: Rank {rank} on CUDA device {local_device}, "
-        f"device_count={torch.cuda.device_count()}"
-    )
+    torch.cuda.synchronize()  # Ensure device is properly initialized
 
     # Synchronize all ranks before NCCL initialization
     # This ensures all processes are ready before the collective call
