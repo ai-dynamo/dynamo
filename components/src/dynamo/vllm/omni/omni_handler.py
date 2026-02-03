@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Omni handler for text-to-text generation using vLLM-Omni orchestrator."""
+"""Omni handler for text-to-text/text-to-image generation using vLLM-Omni orchestrator."""
 
 import asyncio
 import logging
+import time
 from typing import Any, AsyncGenerator, Dict
 
 from vllm import SamplingParams
-from vllm.inputs import TokensPrompt
 from vllm_omni.entrypoints import AsyncOmni
 
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
@@ -36,11 +36,17 @@ class OmniHandler(BaseWorkerHandler):
         # Note: stage_configs_path is validated as required in args.py
         logger.info(f"Using stage config from: {config.stage_configs_path}")
 
-        omni_kwargs = {
-            "model": config.model,
-            "trust_remote_code": config.engine_args.trust_remote_code,
-            "stage_configs_path": config.stage_configs_path,
-        }
+        if config.stage_configs_path:
+            omni_kwargs = {
+                "model": config.model,
+                "trust_remote_code": config.engine_args.trust_remote_code,
+                "stage_configs_path": config.stage_configs_path,
+            }
+        else:
+            omni_kwargs = {
+                "model": config.model,
+                "trust_remote_code": config.engine_args.trust_remote_code,
+            }
 
         self.engine_client = AsyncOmni(**omni_kwargs)
 
@@ -59,90 +65,229 @@ class OmniHandler(BaseWorkerHandler):
     async def generate(
         self, request: Dict[str, Any], context
     ) -> AsyncGenerator[Dict, None]:
-        """Generate text using AsyncOmni orchestrator. Currently supports text-to-text only."""
+        """Generate outputs using AsyncOmni orchestrator with OpenAI-compatible format.
+
+        Supports text-to-text and text-to-image generation based on stage configuration.
+        Returns OpenAI-compatible streaming chunks with detokenized text.
+        """
         request_id = context.id()
         logger.debug(f"Omni Request ID: {request_id}")
 
-        # Extract token_ids from internal protocol format
-        token_ids = request.get("token_ids")
-        if not token_ids:
-            logger.error(f"Request {request_id}: No token_ids found in request")
-            yield {
-                "finish_reason": "error: No token_ids in request",
-                "token_ids": [],
-            }
+        prompt = self._extract_text_prompt(request)
+        if not prompt:
+            logger.error(
+                f"Request {request_id}: No prompt or messages found in request"
+            )
+            yield self._error_chunk(request_id, "No prompt or messages in request")
             return
 
         logger.info(
-            f"Request {request_id}: Generating text for {len(token_ids)} input tokens"
+            f"Request {request_id}: Generating from prompt: {str(prompt)[:100]}..."
         )
 
-        # Build sampling parameters from request
-        sampling_params = self._build_sampling_params(request)
-        sampling_params_list = [sampling_params]
+        # Get OpenAI request ID if provided
+        openai_request_id = request.get("id") or request.get("request_id", request_id)
 
-        tokens_prompt: TokensPrompt = {
-            "prompt_token_ids": token_ids,
-        }
+        # Build sampling parameters from request
+        # (ayushag) TODO: Need to add proper multi-stage sampling param support
+        # sampling_params = self._build_sampling_params(request)
+        # sampling_params_list = [sampling_params]
+
+        previous_text = ""
 
         async with self._abort_monitor(context, request_id):
             try:
-                num_output_tokens_so_far = 0
-
                 async for stage_output in self.engine_client.generate(
-                    prompt=tokens_prompt,  # Pass TokensPrompt format
+                    prompt=prompt,
                     request_id=request_id,
-                    sampling_params_list=sampling_params_list,
+                    # sampling_params_list=sampling_params_list,
                 ):
-                    # stage_output is OmniRequestOutput
-                    # For text generation: stage_output.request_output is a single vLLM RequestOutput
+                    # Handle different output types
                     if (
                         stage_output.final_output_type == "text"
                         and stage_output.request_output
                     ):
-                        vllm_output = stage_output.request_output
+                        # Text generation (LLM stage)
+                        chunk = self._format_text_chunk(
+                            stage_output.request_output,
+                            openai_request_id,
+                            previous_text,
+                        )
+                        if chunk:
+                            # Update previous_text for delta calculation
+                            output = stage_output.request_output.outputs[0]
+                            previous_text = output.text
+                            yield chunk
 
-                        if not vllm_output.outputs:
-                            logger.warning(f"Request {request_id} returned no outputs")
-                            yield {
-                                "finish_reason": "error: No outputs from vLLM engine",
-                                "token_ids": [],
-                            }
-                            break
-
-                        output = vllm_output.outputs[0]
-                        next_total_toks = len(output.token_ids)
-
-                        out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-
-                        if output.finish_reason:
-                            out["finish_reason"] = self._normalize_finish_reason(
-                                output.finish_reason
-                            )
-                            out["completion_usage"] = self._build_completion_usage(
-                                vllm_output
-                            )
-                            logger.debug(
-                                f"Completed generation for request {request_id}: "
-                                f"{next_total_toks} output tokens, finish_reason={output.finish_reason}"
-                            )
-
-                        if output.stop_reason:
-                            out["stop_reason"] = output.stop_reason
-
-                        yield out
-                        num_output_tokens_so_far = next_total_toks
+                    elif (
+                        stage_output.final_output_type == "image"
+                        and stage_output.images
+                    ):
+                        # Image generation (diffusion stage)
+                        chunk = self._format_image_chunk(
+                            stage_output.images,
+                            openai_request_id,
+                        )
+                        if chunk:
+                            yield chunk
 
             except GeneratorExit:
-                # Shutdown was triggered during generation
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
-                yield {
-                    "finish_reason": f"error: {str(e)}",
-                    "token_ids": [],
+                yield self._error_chunk(openai_request_id, str(e))
+
+    def _format_text_chunk(
+        self,
+        request_output,
+        openai_request_id: str,
+        previous_text: str,
+    ) -> Dict[str, Any] | None:
+        """Format text output as OpenAI chat completion chunk."""
+        if not request_output.outputs:
+            return self._error_chunk(openai_request_id, "No outputs from engine")
+
+        output = request_output.outputs[0]
+
+        # Calculate delta text (new text since last chunk)
+        delta_text = output.text[len(previous_text) :]
+
+        chunk = {
+            "id": openai_request_id,
+            "created": int(time.time()),
+            "object": "chat.completion.chunk",
+            "model": self.config.served_model_name or self.config.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": delta_text,
+                    },
+                    "finish_reason": self._normalize_finish_reason(
+                        output.finish_reason
+                    ),
                 }
+            ],
+        }
+
+        # Add usage on final chunk
+        if output.finish_reason:
+            chunk["usage"] = self._build_completion_usage(request_output)
+
+        return chunk
+
+    def _format_image_chunk(
+        self,
+        images: list,
+        openai_request_id: str,
+    ) -> Dict[str, Any] | None:
+        """Format image output as OpenAI chat completion chunk with base64 data URLs."""
+        import base64
+        from io import BytesIO
+
+        if not images:
+            return self._error_chunk(openai_request_id, "No images generated")
+
+        # Convert images to base64 data URLs
+        data_urls = []
+        for idx, img in enumerate(images):
+            # Convert PIL image to base64
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+            # Create data URL (can be opened directly in browser)
+            data_url = f"data:image/png;base64,{img_base64}"
+            data_urls.append(data_url)
+            logger.info(f"Generated image {idx} for request {openai_request_id}")
+
+        content_text = "\n".join(data_urls)
+
+        chunk = {
+            "id": openai_request_id,
+            "created": int(time.time()),
+            "object": "chat.completion.chunk",
+            "model": self.config.served_model_name or self.config.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": content_text,
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        return chunk
+
+    def _error_chunk(self, request_id: str, error_message: str) -> Dict[str, Any]:
+        """Format error as OpenAI chat completion chunk."""
+        return {
+            "id": request_id,
+            "created": int(time.time()),
+            "object": "chat.completion.chunk",
+            "model": self.config.served_model_name or self.config.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": "error",
+                }
+            ],
+            "error": error_message,
+        }
+
+    def _extract_text_prompt(self, request: Dict[str, Any]) -> str | None:
+        """Extract text prompt from request.
+
+        Similar to InputParamManager.get_input_param but without tokenizer dependency.
+        Handles OpenAI messages and direct prompt formats.
+
+        Returns:
+            text_prompt (or None if not found)
+        """
+        # Direct prompt (simple completion format)
+        if "prompt" in request:
+            return request["prompt"]
+
+        # OpenAI messages format - extract text content only
+        messages = request.get("messages", [])
+        if not messages:
+            return None
+
+        # For single user message, return content directly
+        # This is common for text-to-image generation
+        if len(messages) == 1 and messages[0].get("role") == "user":
+            content = messages[0].get("content")
+            if isinstance(content, str):
+                return content
+            elif isinstance(content, list):
+                # Extract text from multimodal content
+                return " ".join(
+                    item.get("text", "")
+                    for item in content
+                    if item.get("type") == "text"
+                )
+
+        # For multi-turn conversations, concatenate all text
+        # (vLLM-Omni handles chat template internally if needed)
+        text_parts = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                text_parts.extend(
+                    item.get("text", "")
+                    for item in content
+                    if item.get("type") == "text"
+                )
+
+        return " ".join(text_parts) if text_parts else None
 
     def _build_sampling_params(self, request: Dict[str, Any]) -> SamplingParams:
         """Build sampling params using shared handler utility."""
