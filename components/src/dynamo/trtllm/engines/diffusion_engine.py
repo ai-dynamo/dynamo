@@ -186,7 +186,9 @@ class DiffusionEngine:
 
         # Move to GPU if not using CPU offload
         if not self.config.enable_async_cpu_offload:
-            logger.info("Pipeline loaded (device placement managed by pipeline)")
+            logger.info("Moving pipeline to GPU...")
+            self._pipeline.to("cuda")
+            logger.info("Pipeline moved to GPU successfully")
 
         self._initialized = True
         logger.info(f"DiffusionEngine initialization complete: {self.model_type}")
