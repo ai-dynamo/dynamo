@@ -193,16 +193,16 @@ _Appears in:_
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
-| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  | Optional: \{\} <br /> |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
-| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
-| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
+| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  | Optional: \{\} <br /> |
+| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  | Optional: \{\} <br /> |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  |  |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -232,16 +232,16 @@ _Appears in:_
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
-| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  | Optional: \{\} <br /> |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
-| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
-| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
+| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  | Optional: \{\} <br /> |
+| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  | Optional: \{\} <br /> |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  |  |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -397,9 +397,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | Replicas is the current number of replicas for the target service.<br />This is synced from the DGD's service replicas and is required for the scale subresource. |  |  |
-| `selector` _string_ | Selector is a label selector string for the pods managed by this adapter.<br />Required for HPA compatibility via the scale subresource. |  |  |
-| `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastScaleTime is the last time the adapter scaled the target service. |  |  |
+| `replicas` _integer_ | Replicas is the current number of replicas for the target service.<br />This is synced from the DGD's service replicas and is required for the scale subresource. |  | Optional: \{\} <br /> |
+| `selector` _string_ | Selector is a label selector string for the pods managed by this adapter.<br />Required for HPA compatibility via the scale subresource. |  | Optional: \{\} <br /> |
+| `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastScaleTime is the last time the adapter scaled the target service. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentServiceRef
@@ -454,8 +454,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
-| `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  |  |
-| `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  |  |
+| `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
+| `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -492,8 +492,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelName` _string_ | ModelName is the full model identifier (e.g., "meta-llama/Llama-3.3-70B-Instruct-lora") |  | Required: \{\} <br /> |
 | `baseModelName` _string_ | BaseModelName is the base model identifier that matches the service label<br />This is used to discover endpoints via headless services |  | Required: \{\} <br /> |
-| `modelType` _string_ | ModelType specifies the type of model (e.g., "base", "lora", "adapter") | base | Enum: [base lora adapter] <br /> |
-| `source` _[ModelSource](#modelsource)_ | Source specifies the model source location (only applicable for lora model type) |  |  |
+| `modelType` _string_ | ModelType specifies the type of model (e.g., "base", "lora", "adapter") | base | Enum: [base lora adapter] <br />Optional: \{\} <br /> |
+| `source` _[ModelSource](#modelsource)_ | Source specifies the model source location (only applicable for lora model type) |  | Optional: \{\} <br /> |
 
 
 #### DynamoModelStatus
@@ -509,10 +509,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  |  |
+| `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  | Optional: \{\} <br /> |
 | `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig
@@ -530,8 +530,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | ConfigMapRef references a user-provided ConfigMap containing EPP configuration.<br />The ConfigMap should contain EndpointPickerConfig YAML.<br />Mutually exclusive with Config. |  |  |
-| `config` _[EndpointPickerConfig](#endpointpickerconfig)_ | Config allows specifying EPP EndpointPickerConfig directly as a structured object.<br />The operator will marshal this to YAML and create a ConfigMap automatically.<br />Mutually exclusive with ConfigMapRef.<br />One of ConfigMapRef or Config must be specified (no default configuration).<br />Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension |  | Type: object <br /> |
+| `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | ConfigMapRef references a user-provided ConfigMap containing EPP configuration.<br />The ConfigMap should contain EndpointPickerConfig YAML.<br />Mutually exclusive with Config. |  | Optional: \{\} <br /> |
+| `config` _[EndpointPickerConfig](#endpointpickerconfig)_ | Config allows specifying EPP EndpointPickerConfig directly as a structured object.<br />The operator will marshal this to YAML and create a ConfigMap automatically.<br />Mutually exclusive with ConfigMapRef.<br />One of ConfigMapRef or Config must be specified (no default configuration).<br />Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### EndpointInfo
@@ -548,7 +548,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
-| `podName` _string_ | PodName is the name of the pod serving this endpoint |  |  |
+| `podName` _string_ | PodName is the name of the pod serving this endpoint |  | Optional: \{\} <br /> |
 | `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
 
 
@@ -646,7 +646,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the base model identifier (e.g., "llama-3-70b-instruct-v1") |  | Required: \{\} <br /> |
-| `revision` _string_ | Revision is the model revision/version (optional) |  |  |
+| `revision` _string_ | Revision is the model revision/version (optional) |  | Optional: \{\} <br /> |
 
 
 #### ModelSource
@@ -816,7 +816,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedID` _string_ | ObservedID is the restart ID that has been observed and is being processed.<br />Matches the Restart.ID field in the spec. |  |  |
 | `phase` _[RestartPhase](#restartphase)_ | Phase is the phase of the restart. |  |  |
-| `inProgress` _string array_ | InProgress contains the names of the services that are currently being restarted. |  |  |
+| `inProgress` _string array_ | InProgress contains the names of the services that are currently being restarted. |  | Optional: \{\} <br /> |
 
 
 #### RestartStrategy
@@ -869,7 +869,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled indicates whether the ScalingAdapter should be enabled for this service.<br />When true, a DGDSA is created and owns the replicas field.<br />When false (default), no DGDSA is created and replicas can be modified directly in the DGD. | false |  |
+| `enabled` _boolean_ | Enabled indicates whether the ScalingAdapter should be enabled for this service.<br />When true, a DGDSA is created and owns the replicas field.<br />When false (default), no DGDSA is created and replicas can be modified directly in the DGD. | false | Optional: \{\} <br /> |
 
 
 #### ServiceReplicaStatus
@@ -889,8 +889,8 @@ _Appears in:_
 | `componentName` _string_ | ComponentName is the name of the underlying resource. |  |  |
 | `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
-| `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
-| `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
+| `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### SharedMemorySpec

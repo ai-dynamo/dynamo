@@ -27,6 +27,17 @@ from dynamo.llm import (
     fetch_llm,
     register_llm,
 )
+
+# Optional imports for frontend decoding support
+try:
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    MEDIA_DECODER_AVAILABLE = True
+except ImportError:
+    MediaDecoder = None
+    MediaFetcher = None
+    MEDIA_DECODER_AVAILABLE = False
+
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
@@ -407,6 +418,23 @@ async def register_vllm_model(
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
     runtime_config.data_parallel_size = data_parallel_size
 
+    # Configure media decoder for frontend image decoding when enabled
+    # This enables frontend to decode images and transfer via NIXL RDMA
+    media_decoder = None
+    media_fetcher = None
+    if config.frontend_decoding:
+        if not MEDIA_DECODER_AVAILABLE:
+            raise RuntimeError(
+                "--frontend-decoding requires MediaDecoder support. "
+                "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+            )
+        media_decoder = MediaDecoder()
+        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+        # media_decoder.enable_video({})
+
+        media_fetcher = MediaFetcher()
+        media_fetcher.timeout_ms(30000)
+
     await register_llm(
         model_input,
         model_type,
@@ -417,6 +445,8 @@ async def register_vllm_model(
         migration_limit=migration_limit,
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
+        media_decoder=media_decoder,
+        media_fetcher=media_fetcher,
     )
 
 
@@ -449,6 +479,7 @@ async def init_prefill(
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
         shutdown_event=shutdown_event,
+        enable_frontend_decoding=config.frontend_decoding,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -577,6 +608,7 @@ async def init(
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
         shutdown_event=shutdown_event,
+        enable_frontend_decoding=config.frontend_decoding,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
