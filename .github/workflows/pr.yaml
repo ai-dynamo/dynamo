@@ -84,6 +84,11 @@ jobs:
     # if: needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      ECR_DEFAULT_IMAGE_BASE: ${{ needs.changed-files.outputs.ecr_image_base }}
     outputs:
       operator_default_image_name: ${{ steps.build-and-push-image.outputs.operator_default_image_name }}
       operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
@@ -127,11 +132,6 @@ jobs:
         id: build-and-push-image
         shell: bash
         working-directory: ./deploy/operator
-        env:
-          IMAGE_REGISTRY: ai-dynamo
-          IMAGE_REPOSITORY: dynamo
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          ECR_DEFAULT_IMAGE_BASE: ${{ needs.changed-files.outputs.ecr_image_base }}
         run: |
           DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
@@ -191,8 +191,6 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-        ${{ github.ref_name == 'ops-2572' && 'ops-2572-vllm' || '' }}
-        ${{ github.ref_name == 'ops-2572' && format('ops-2572-vllm-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
@@ -214,8 +212,6 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-        ${{ github.ref_name == 'ops-2572' && 'ops-2572-sglang' || '' }}
-        ${{ github.ref_name == 'ops-2572' && format('ops-2572-sglang-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: true
@@ -234,7 +230,7 @@ jobs:
       cuda_versions: '["12.9"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+        ${{ github.ref_name == 'main' && format('main-trt-llm-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: true
