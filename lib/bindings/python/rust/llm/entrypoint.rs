@@ -10,6 +10,7 @@ use std::sync::Arc;
 use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
+use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::EngineFactoryCallback;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
@@ -94,18 +95,21 @@ pub struct RouterConfig {
     active_decode_blocks_threshold: Option<f64>,
     /// Threshold for active prefill tokens utilization (literal token count)
     active_prefill_tokens_threshold: Option<u64>,
+    /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
+    active_prefill_tokens_threshold_frac: Option<f64>,
     enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
+        active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
     ) -> Self {
         Self {
@@ -113,6 +117,7 @@ impl RouterConfig {
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac,
             enforce_disagg,
         }
     }
@@ -123,8 +128,11 @@ impl From<RouterConfig> for RsRouterConfig {
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
-            active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
+            load_threshold_config: RsLoadThresholdConfig {
+                active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
+                active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
+                active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
+            },
             enforce_disagg: rc.enforce_disagg,
         }
     }

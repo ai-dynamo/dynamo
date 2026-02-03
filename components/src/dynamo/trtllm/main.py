@@ -71,8 +71,9 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 configure_dynamo_logging()
 
 
-async def graceful_shutdown(runtime):
+async def graceful_shutdown(runtime, shutdown_event):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    shutdown_event.set()
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
 
@@ -128,25 +129,39 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    # Enable NATS based on use_kv_events flag (derived from publish_events_and_metrics)
+    # Create shutdown event
+    shutdown_event = asyncio.Event()
+
+    # Set DYN_EVENT_PLANE environment variable based on config
+    os.environ["DYN_EVENT_PLANE"] = config.event_plane
+
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND use_kv_events is True
+    enable_nats = config.request_plane == "nats" or (
+        config.event_plane == "nats" and config.use_kv_events
+    )
+
     runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, config.use_kv_events
+        loop, config.store_kv, config.request_plane, enable_nats
     )
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
         # Schedule the shutdown coroutine instead of calling it directly
-        asyncio.create_task(graceful_shutdown(runtime))
+        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    await init(runtime, config)
+    await init(runtime, config, shutdown_event)
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Instantiate and serve
     """
@@ -425,6 +440,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
             kv_block_size=config.kv_block_size,
+            shutdown_event=shutdown_event,
         )
 
         # Register the model with runtime config

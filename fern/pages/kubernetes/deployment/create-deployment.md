@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Creating Kubernetes Deployments"
 ---
+
+# Creating Kubernetes Deployments
 
 The scripts in the `examples/<backend>/launch` folder like [agg.sh](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
 The corresponding YAML files like [agg.yaml](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg.yaml) show you how you could create a Kubernetes deployment for your inference graph.

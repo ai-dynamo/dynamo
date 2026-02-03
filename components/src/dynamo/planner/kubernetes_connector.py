@@ -113,6 +113,8 @@ class KubernetesConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
     ):
         """
         Verify that the deployment contains services with subComponentType prefill and decode and the model name exists.
@@ -126,26 +128,32 @@ class KubernetesConnector(PlannerConnector):
 
         errors = []
 
-        try:
-            get_service_from_sub_component_type_or_name(
-                deployment,
-                SubComponentType.PREFILL,
-                component_name=prefill_component_name,
-            )
-        except PlannerError as e:
-            errors.append(str(e))
+        if require_prefill:
+            try:
+                get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
+                )
+            except PlannerError as e:
+                errors.append(str(e))
+
+        if require_decode:
+            try:
+                get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.DECODE,
+                    component_name=decode_component_name,
+                )
+            except PlannerError as e:
+                errors.append(str(e))
 
         try:
-            get_service_from_sub_component_type_or_name(
+            self.get_model_name(
                 deployment,
-                SubComponentType.DECODE,
-                component_name=decode_component_name,
+                require_prefill=require_prefill,
+                require_decode=require_decode,
             )
-        except PlannerError as e:
-            errors.append(str(e))
-
-        try:
-            self.get_model_name(deployment)
         except PlannerError as e:
             errors.append(str(e))
 
@@ -153,7 +161,12 @@ class KubernetesConnector(PlannerConnector):
         if errors:
             raise DeploymentValidationError(errors)
 
-    def get_model_name(self, deployment: Optional[dict] = None) -> str:
+    def get_model_name(
+        self,
+        deployment: Optional[dict] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> str:
         """Get the model name from the deployment"""
         try:
             if deployment is None:
@@ -163,16 +176,20 @@ class KubernetesConnector(PlannerConnector):
 
             # TODO: benchmarks/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
-            prefill_service = get_service_from_sub_component_type_or_name(
-                deployment,
-                SubComponentType.PREFILL,
-            )
-            decode_service = get_service_from_sub_component_type_or_name(
-                deployment,
-                SubComponentType.DECODE,
-            )
-            prefill_model_name = prefill_service.get_model_name()
-            decode_model_name = decode_service.get_model_name()
+            prefill_model_name = None
+            decode_model_name = None
+            if require_prefill:
+                prefill_service = get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.PREFILL,
+                )
+                prefill_model_name = prefill_service.get_model_name()
+            if require_decode:
+                decode_service = get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.DECODE,
+                )
+                decode_model_name = decode_service.get_model_name()
 
             if prefill_model_name is None and decode_model_name is None:
                 raise ModelNameNotFoundError()

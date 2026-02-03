@@ -6,6 +6,7 @@
 package dynamo
 
 import (
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
@@ -31,6 +32,8 @@ func ComponentDefaultsFactory(componentType string) ComponentDefaults {
 		return NewWorkerDefaults()
 	case commonconsts.ComponentTypePlanner:
 		return NewPlannerDefaults()
+	case commonconsts.ComponentTypeEPP:
+		return NewEPPDefaults()
 	default:
 		return &BaseComponentDefaults{}
 	}
@@ -46,6 +49,7 @@ type ComponentContext struct {
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
 	DiscoveryBackend               string
+	EPPConfig                      *v1alpha1.EPPConfig
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {

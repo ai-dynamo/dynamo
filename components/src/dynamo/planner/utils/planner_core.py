@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from prometheus_client import Gauge, start_http_server
@@ -119,15 +119,110 @@ class PlannerPrometheusMetrics:
         self.gpu_hours = Gauge(f"{prefix}:gpu_hours", "Cumulative GPU hours used")
 
 
-class Planner:
+@dataclass
+class PlannerSharedState:
+    last_metrics: Metrics = field(default_factory=Metrics)
+    p_endpoints: list = field(default_factory=list)
+    d_endpoints: list = field(default_factory=list)
+    cumulative_gpu_hours: float = 0.0
+    last_adjustment_time: float = 0.0
+
+
+def _apply_global_gpu_budget(
+    next_num_p: int, next_num_d: int, args: argparse.Namespace
+) -> tuple[int, int]:
+    """Apply GPU budget constraint to both prefill and decode replicas.
+
+    When total GPUs required (num_p * prefill_gpus + num_d * decode_gpus) exceeds the
+    budget, scale down both proportionally using scale = budget / total_required. Prefill
+    replicas are clamped to [min_endpoint, max_prefill] where max_prefill reserves enough
+    GPUs for min_endpoint decode replicas. Remaining budget is then allocated to decode.
+    Returns (0, 0) if budget cannot satisfy min_endpoint for both components.
+    """
+    if args.max_gpu_budget < 0:
+        return next_num_p, next_num_d
+    total_gpu_required = (
+        next_num_p * args.prefill_engine_num_gpu
+        + next_num_d * args.decode_engine_num_gpu
+    )
+    if total_gpu_required <= args.max_gpu_budget:
+        return next_num_p, next_num_d
+    min_required = (
+        args.min_endpoint * args.prefill_engine_num_gpu
+        + args.min_endpoint * args.decode_engine_num_gpu
+    )
+    if args.max_gpu_budget < min_required:
+        logger.warning(
+            f"max_gpu_budget ({args.max_gpu_budget}) is below the minimum required "
+            f"for min_endpoint ({min_required}); enforcing zero replicas"
+        )
+        return 0, 0
+    scale = args.max_gpu_budget / total_gpu_required
+    max_prefill = math.floor(
+        (args.max_gpu_budget - args.min_endpoint * args.decode_engine_num_gpu)
+        / args.prefill_engine_num_gpu
+    )
+    next_num_p = max(
+        args.min_endpoint, min(max_prefill, math.floor(next_num_p * scale))
+    )
+    remaining = args.max_gpu_budget - next_num_p * args.prefill_engine_num_gpu
+    next_num_d = max(
+        args.min_endpoint, math.floor(remaining / args.decode_engine_num_gpu)
+    )
+    logger.warning(
+        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({args.max_gpu_budget}), "
+        f"scaling down to {next_num_p} prefill and {next_num_d} decode replicas"
+    )
+    return next_num_p, next_num_d
+
+
+def _apply_component_gpu_budget(
+    desired_replicas: int, engine_num_gpu: int, args: argparse.Namespace
+) -> int:
+    """Apply GPU budget constraint to a single component (prefill-only or decode-only).
+
+    When total GPUs required (replicas * gpus_per_replica) exceeds the budget, scale down
+    using scale = budget / total_required, floored and clamped to at least min_endpoint.
+    Returns 0 if budget cannot satisfy min_endpoint replicas.
+    """
+    if args.max_gpu_budget < 0:
+        return desired_replicas
+    total_gpu_required = desired_replicas * engine_num_gpu
+    if total_gpu_required <= args.max_gpu_budget:
+        return desired_replicas
+    min_required = args.min_endpoint * engine_num_gpu
+    if args.max_gpu_budget < min_required:
+        logger.warning(
+            f"max_gpu_budget ({args.max_gpu_budget}) is below the minimum required "
+            f"for min_endpoint ({min_required}); enforcing zero replicas"
+        )
+        return 0
+    scale = args.max_gpu_budget / total_gpu_required
+    next_num = max(args.min_endpoint, math.floor(desired_replicas * scale))
+    logger.warning(
+        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({args.max_gpu_budget}), "
+        f"scaling down to {next_num} replicas"
+    )
+    return next_num
+
+
+class BasePlanner:
+    component_type: SubComponentType
+
     def __init__(
         self,
         runtime: Optional[DistributedRuntime],
         args: argparse.Namespace,
         dryrun: bool = False,
+        shared_state: Optional[PlannerSharedState] = None,
+        prometheus_metrics: Optional[PlannerPrometheusMetrics] = None,
+        prometheus_api_client: Optional[PrometheusAPIClient] = None,
+        connector=None,
+        start_prometheus_server: bool = True,
     ):
         self.args = args
         self.dryrun = dryrun
+        self.shared_state = shared_state or PlannerSharedState()
 
         # Rely on getting model name from connector
         self.model_name: Optional[str] = None
@@ -137,7 +232,9 @@ class Planner:
             self.namespace = args.namespace
 
             if not args.no_operation:
-                if args.environment == "kubernetes":
+                if connector is not None:
+                    self.connector = connector
+                elif args.environment == "kubernetes":
                     self.connector = KubernetesConnector(
                         self.namespace, self.model_name
                     )
@@ -150,7 +247,7 @@ class Planner:
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
-            self.prometheus_api_client = PrometheusAPIClient(
+            self.prometheus_api_client = prometheus_api_client or PrometheusAPIClient(
                 args.metric_pulling_prometheus_endpoint,
                 args.namespace,
             )
@@ -231,22 +328,16 @@ class Planner:
         if not self.dryrun:
             self.prefill_client = None
             self.workers_client = None
-            self.p_endpoints = []  # type: ignore
-            self.d_endpoints = []  # type: ignore
-
-            self.last_adjustment_time = time.time()
-            self.last_metrics = Metrics()
 
             self.prometheus_port = args.metric_reporting_prometheus_port
 
-            # Initialize Prometheus metrics
-            self.prometheus_metrics = PlannerPrometheusMetrics()
-
-            # Track cumulative GPU hours
-            self.cumulative_gpu_hours = 0.0
+            if prometheus_metrics is None:
+                self.prometheus_metrics = PlannerPrometheusMetrics()
+            else:
+                self.prometheus_metrics = prometheus_metrics
 
             # Start Prometheus HTTP server if port is specified
-            if self.prometheus_port != 0:
+            if start_prometheus_server and self.prometheus_port != 0:
                 try:
                     start_http_server(self.prometheus_port)
                     logger.info(
@@ -254,6 +345,9 @@ class Planner:
                     )
                 except Exception as e:
                     logger.error(f"Failed to start Prometheus metrics server: {e}")
+        else:
+            self.prometheus_port = 0
+            self.prometheus_metrics = prometheus_metrics
 
         self.p_correction_factor = 1.0
         self.d_correction_factor = 1.0
@@ -261,6 +355,14 @@ class Planner:
             self.no_correction = True
         else:
             self.no_correction = args.no_correction
+
+    @property
+    def last_metrics(self) -> Metrics:
+        return self.shared_state.last_metrics
+
+    @last_metrics.setter
+    def last_metrics(self, value: Metrics) -> None:
+        self.shared_state.last_metrics = value
 
     async def _async_init(self):
         """Async initialization for components that need it"""
@@ -271,80 +373,94 @@ class Planner:
         ):
             await self.connector._async_init()
 
-    async def get_workers_info(self):
+    async def _get_model_name(self, require_prefill: bool, require_decode: bool) -> str:
+        model_name = self.connector.get_model_name(
+            require_prefill=require_prefill, require_decode=require_decode
+        )
+        if asyncio.iscoroutine(model_name):
+            model_name = await model_name
+        return model_name
+
+    async def _get_or_create_client(self, component_name: str, endpoint_name: str):
+        """Create a client for the given component and endpoint, with a brief sleep for state sync."""
+        client = (
+            await self.runtime.namespace(self.namespace)
+            .component(component_name)
+            .endpoint(endpoint_name)
+            .client()
+        )
+        # TODO: remove this sleep after rust client() is blocking until watching state
+        await asyncio.sleep(0.1)
+        return client
+
+    async def get_workers_info(
+        self, require_prefill: bool = True, require_decode: bool = True
+    ):
         if self.runtime is None:
             raise RuntimeError("Runtime is not initialized")
 
-        try:
-            if self.prefill_client is None:
-                self.prefill_client = (
-                    await self.runtime.namespace(self.namespace)
-                    .component(
-                        WORKER_COMPONENT_NAMES[
-                            self.args.backend
-                        ].prefill_worker_component_name
+        p_endpoints = []
+        d_endpoints = []
+        worker_names = WORKER_COMPONENT_NAMES[self.args.backend]
+
+        if require_prefill:
+            try:
+                if self.prefill_client is None:
+                    self.prefill_client = await self._get_or_create_client(
+                        worker_names.prefill_worker_component_name,
+                        worker_names.prefill_worker_endpoint,
                     )
-                    .endpoint(
-                        WORKER_COMPONENT_NAMES[
-                            self.args.backend
-                        ].prefill_worker_endpoint
-                    )
-                    .client()
+                p_endpoints = self.prefill_client.instance_ids()  # type: ignore
+            except Exception:
+                p_endpoints = []
+                logger.warning(
+                    "No prefill workers found, aggregated mode is not supported yet"
                 )
-                # TODO: remove this sleep after rust client() is blocking until watching state
-                await asyncio.sleep(0.1)
-            # TODO: use etcd events instead of pulling instance_ids
-            p_endpoints = self.prefill_client.instance_ids()  # type: ignore
-        except Exception:
-            p_endpoints = []
-            logger.warning(
-                "No prefill workers found, aggregated mode is not supported yet"
-            )
-        try:
-            if self.workers_client is None:
-                self.workers_client = (
-                    await self.runtime.namespace(self.namespace)
-                    .component(
-                        WORKER_COMPONENT_NAMES[
-                            self.args.backend
-                        ].decode_worker_component_name
+
+        if require_decode:
+            try:
+                if self.workers_client is None:
+                    self.workers_client = await self._get_or_create_client(
+                        worker_names.decode_worker_component_name,
+                        worker_names.decode_worker_endpoint,
                     )
-                    .endpoint(
-                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker_endpoint
-                    )
-                    .client()
-                )
-                # TODO: remove this sleep after rust client() is blocking until watching state
-                await asyncio.sleep(0.1)
-            # TODO: use etcd events instead of pulling instance_ids
-            d_endpoints = self.workers_client.instance_ids()  # type: ignore
-        except Exception as e:
-            raise RuntimeError(f"Failed to get decode worker endpoints: {e}")
+                d_endpoints = self.workers_client.instance_ids()  # type: ignore
+            except Exception as e:
+                raise RuntimeError(f"Failed to get decode worker endpoints: {e}")
+
         return p_endpoints, d_endpoints
 
-    async def observe_metrics(self):
-        self.p_endpoints, self.d_endpoints = await self.get_workers_info()
+    async def observe_metrics(
+        self, require_prefill: bool = True, require_decode: bool = True
+    ):
+        p_endpoints, d_endpoints = await self.get_workers_info(
+            require_prefill=require_prefill, require_decode=require_decode
+        )
+        self.shared_state.p_endpoints = p_endpoints
+        self.shared_state.d_endpoints = d_endpoints
         logger.debug(
-            f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
+            f"Number of prefill workers: {len(p_endpoints)}, number of decode workers: {len(d_endpoints)}"
         )
 
         # Update Prometheus metrics if server is running
-        if self.prometheus_port != 0:
-            self.prometheus_metrics.num_p_workers.set(len(self.p_endpoints))
-            self.prometheus_metrics.num_d_workers.set(len(self.d_endpoints))
+        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
+            self.prometheus_metrics.num_p_workers.set(len(p_endpoints))
+            self.prometheus_metrics.num_d_workers.set(len(d_endpoints))
 
             # Calculate and accumulate GPU hours for this interval
             # TODO: track startup and shutdown times to get more accurate GPU hours
             interval_gpu_hours = (
                 (
-                    len(self.p_endpoints) * self.args.prefill_engine_num_gpu
-                    + len(self.d_endpoints) * self.args.decode_engine_num_gpu
+                    len(p_endpoints) * self.args.prefill_engine_num_gpu
+                    + len(d_endpoints) * self.args.decode_engine_num_gpu
                 )
                 * self.args.adjustment_interval
                 / 3600
             )
-            self.cumulative_gpu_hours += interval_gpu_hours
-            self.prometheus_metrics.gpu_hours.set(self.cumulative_gpu_hours)
+            self.shared_state.cumulative_gpu_hours += interval_gpu_hours
+            self.prometheus_metrics.gpu_hours.set(
+                self.shared_state.cumulative_gpu_hours
+            )
 
         # Prometheus returns seconds, convert to milliseconds
         self.last_metrics.ttft = (
@@ -392,7 +508,7 @@ class Planner:
         )
 
         # Update observed metrics in Prometheus
-        if self.prometheus_port != 0:
+        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
             self.prometheus_metrics.observed_ttft.set(self.last_metrics.ttft)
             self.prometheus_metrics.observed_itl.set(self.last_metrics.itl)
             self.prometheus_metrics.observed_request_rate.set(
@@ -404,9 +520,12 @@ class Planner:
             self.prometheus_metrics.observed_isl.set(self.last_metrics.isl)
             self.prometheus_metrics.observed_osl.set(self.last_metrics.osl)
 
-        self.num_req_predictor.add_data_point(self.last_metrics.num_req)
-        self.isl_predictor.add_data_point(self.last_metrics.isl)
-        self.osl_predictor.add_data_point(self.last_metrics.osl)
+        self.update_predictors_from_metrics(self.last_metrics)
+
+    def update_predictors_from_metrics(self, metrics: Metrics) -> None:
+        self.num_req_predictor.add_data_point(metrics.num_req)
+        self.isl_predictor.add_data_point(metrics.isl)
+        self.osl_predictor.add_data_point(metrics.osl)
 
     def predict_load(self):
         try:
@@ -427,43 +546,193 @@ class Planner:
         self.isl_predictor.add_data_point(isl_avg)
         self.osl_predictor.add_data_point(osl_avg)
 
+    def plan_adjustment(self) -> Optional[int]:
+        # Skip adjustment if no traffic
+        if not self.last_metrics.is_valid():
+            logger.info(
+                "Metrics contain None or NaN values (no active requests), skipping adjustment"
+            )
+            return None
+
+        if not self.no_correction:
+            try:
+                if not self._update_correction_factor():
+                    return None
+            except Exception as e:
+                logger.error(f"Failed to correct prediction factors: {e}")
+                return None
+
+        next_num_req, next_isl, next_osl = self.predict_load()
+        if next_num_req is None or next_isl is None or next_osl is None:
+            return None
+
+        # Update predicted load metrics in Prometheus
+        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
+            self.prometheus_metrics.predicted_request_rate.set(
+                next_num_req / self.args.adjustment_interval
+            )
+            self.prometheus_metrics.predicted_isl.set(next_isl)
+            self.prometheus_metrics.predicted_osl.set(next_osl)
+
+        try:
+            return self._compute_replica_requirements(next_num_req, next_isl, next_osl)
+        except Exception as e:
+            logger.error(f"Failed to compute number of replicas: {e}")
+            return None
+
+    def update_predicted_replicas_metric(self, desired_replicas: int) -> None:
+        raise NotImplementedError
+
     def _compute_replica_requirements(
         self, next_num_req: float, next_isl: float, next_osl: float
-    ) -> tuple[int, int]:
-        """Compute the number of prefill and decode replicas needed based on predicted load.
+    ) -> int:
+        raise NotImplementedError
 
-        Args:
-            next_num_req: Predicted number of requests
-            next_isl: Predicted input sequence length
-            next_osl: Predicted output sequence length
+    def _update_correction_factor(self) -> bool:
+        raise NotImplementedError
 
-        Returns:
-            tuple[int, int]: Number of prefill and decode replicas needed
-        """
-        # compute how many replicas are needed for prefill
-        # here we assume the prefill bias is purely due to request queueing
-        # and we increase the number of prefill replicas linearly to account for the queueing delay
+    def _component_name(self) -> str:
+        if self.component_type == SubComponentType.PREFILL:
+            return self.prefill_component_name
+        return self.decode_component_name
+
+    def _engine_num_gpu(self) -> int:
+        if self.component_type == SubComponentType.PREFILL:
+            return self.args.prefill_engine_num_gpu
+        return self.args.decode_engine_num_gpu
+
+    def apply_component_budget(self, desired_replicas: int) -> int:
+        return _apply_component_gpu_budget(
+            desired_replicas, self._engine_num_gpu(), self.args
+        )
+
+    async def _apply_scaling(self, desired_replicas: int) -> None:
+        if self.args.no_operation:
+            return
+        target_replicas = [
+            TargetReplica(
+                sub_component_type=self.component_type,
+                component_name=self._component_name(),
+                desired_replicas=desired_replicas,
+            )
+        ]
+        await self.connector.set_component_replicas(target_replicas, blocking=False)
+
+    async def run(self):
+        """Main loop for the planner"""
+        if not self.args.no_operation:
+            logger.info("Validating deployment...")
+            require_prefill = self.component_type == SubComponentType.PREFILL
+            require_decode = self.component_type == SubComponentType.DECODE
+            await self.connector.validate_deployment(
+                prefill_component_name=(
+                    self.prefill_component_name if require_prefill else None
+                ),
+                decode_component_name=(
+                    self.decode_component_name if require_decode else None
+                ),
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+            )
+            logger.info("Successfully validated the deployment")
+
+            await self.connector.wait_for_deployment_ready()
+
+            model_name = await self._get_model_name(
+                require_prefill=require_prefill, require_decode=require_decode
+            )
+            logger.info(f"Detected model name from deployment: {model_name}")
+            self.model_name = (
+                model_name.lower()
+            )  # normalize model name to lowercase (MDC)
+
+        self.shared_state.last_adjustment_time = time.time()
+
+        while True:
+            current_time = time.time()
+
+            if (
+                current_time - self.shared_state.last_adjustment_time
+                >= self.args.adjustment_interval
+            ):
+                self.shared_state.last_adjustment_time = time.time()
+                logger.info("New adjustment interval started!")
+
+                await self.observe_metrics(
+                    require_prefill=require_prefill, require_decode=require_decode
+                )
+                desired_replicas = self.plan_adjustment()
+                if desired_replicas is not None:
+                    desired_replicas = self.apply_component_budget(desired_replicas)
+                    self.update_predicted_replicas_metric(desired_replicas)
+                    await self._apply_scaling(desired_replicas)
+
+            # sleep for a while to avoid busy-waiting but not too long to miss the next adjustment
+            await asyncio.sleep(self.args.adjustment_interval / 10)
+
+
+class PrefillPlanner(BasePlanner):
+    component_type = SubComponentType.PREFILL
+
+    def _update_correction_factor(self) -> bool:
+        expect_ttft = self.prefill_interpolator.interpolate_ttft(self.last_metrics.isl)
+        self.p_correction_factor = self.last_metrics.ttft / expect_ttft
+        logger.info(f"Correction factor (prefill TTFT): {self.p_correction_factor:.3f}")
+        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
+            self.prometheus_metrics.p_correction_factor.set(self.p_correction_factor)
+        return True
+
+    def _compute_replica_requirements(
+        self, next_num_req: float, next_isl: float, next_osl: float
+    ) -> int:
         pred_prefill_throughput = (
             next_num_req
             * next_isl
             / self.args.adjustment_interval
             * min(1, self.p_correction_factor)
         )
+        p_thpt_per_gpu = self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
         next_num_p = math.ceil(
-            pred_prefill_throughput
-            / self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
-            / self.args.prefill_engine_num_gpu
+            pred_prefill_throughput / p_thpt_per_gpu / self.args.prefill_engine_num_gpu
         )
-
+        next_num_p = max(next_num_p, self.args.min_endpoint)
         logger.info(
             f"Prefill calculation: {pred_prefill_throughput:.2f}(p_thpt) / "
-            f"{self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl) * self.args.prefill_engine_num_gpu:.2f}(p_engine_cap) = "
+            f"{p_thpt_per_gpu * self.args.prefill_engine_num_gpu:.2f}(p_engine_cap) = "
             f"{next_num_p}(num_p)"
         )
+        return next_num_p
 
-        # compute how many replicas are needed for decode
-        # 1. apply d_correction_factor to the ITL SLA
-        # Prevent divide by zero when d_correction_factor is 0 (no metrics yet)
+    def update_predicted_replicas_metric(self, desired_replicas: int) -> None:
+        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
+            self.prometheus_metrics.predicted_num_p.set(desired_replicas)
+
+
+class DecodePlanner(BasePlanner):
+    component_type = SubComponentType.DECODE
+
+    def _update_correction_factor(self) -> bool:
+        if not self.shared_state.d_endpoints:
+            logger.warning(
+                "No decode workers found for correction factor, skipping correction update"
+            )
+            return True
+        expect_itl = self.decode_interpolator.interpolate_itl(
+            concurrency=self.last_metrics.num_req  # type: ignore
+            / len(self.shared_state.d_endpoints)
+            * self.last_metrics.request_duration  # type: ignore
+            / self.args.adjustment_interval,
+            context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
+        )
+        self.d_correction_factor = self.last_metrics.itl / expect_itl
+        logger.info(f"Correction factor (decode ITL): {self.d_correction_factor:.3f}")
+        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
+            self.prometheus_metrics.d_correction_factor.set(self.d_correction_factor)
+        return True
+
+    def _compute_replica_requirements(
+        self, next_num_req: float, next_isl: float, next_osl: float
+    ) -> int:
         if self.d_correction_factor <= 0:
             logger.warning(
                 f"d_correction_factor is {self.d_correction_factor}, using default value of 1.0"
@@ -471,7 +740,6 @@ class Planner:
             corrected_itl = self.args.itl
         else:
             corrected_itl = self.args.itl / self.d_correction_factor
-        # 2. reversely find out what is best throughput/gpu that can achieve corrected_itl under the predicted context length
         (
             pred_decode_thpt_per_gpu,
             _,
@@ -479,318 +747,136 @@ class Planner:
         ) = self.decode_interpolator.find_best_throughput_per_gpu(
             itl=corrected_itl, context_length=next_isl + next_osl / 2
         )
-        # 3. compute number of decode replicas needed
         pred_decode_throughput = next_num_req * next_osl / self.args.adjustment_interval
         next_num_d = math.ceil(
             pred_decode_throughput
             / pred_decode_thpt_per_gpu
             / self.args.decode_engine_num_gpu
         )
-
+        next_num_d = max(next_num_d, self.args.min_endpoint)
         logger.info(
             f"Decode calculation: {pred_decode_throughput:.2f}(d_thpt) / "
             f"{pred_decode_thpt_per_gpu * self.args.decode_engine_num_gpu:.2f}(d_engine_cap) = "
             f"{next_num_d}(num_d)"
         )
+        return next_num_d
 
-        # correct num_p and num_d based on the gpu budget
-        next_num_p = max(next_num_p, self.args.min_endpoint)
-        next_num_d = max(next_num_d, self.args.min_endpoint)
-        logger.info(
-            f"Predicted number of engine replicas: prefill={next_num_p}, decode={next_num_d}"
+    def update_predicted_replicas_metric(self, desired_replicas: int) -> None:
+        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
+            self.prometheus_metrics.predicted_num_d.set(desired_replicas)
+
+
+class DisaggPlanner:
+    def __init__(
+        self, runtime: Optional[DistributedRuntime], args: argparse.Namespace
+    ) -> None:
+        self.args = args
+        self.shared_state = PlannerSharedState()
+        prometheus_metrics = PlannerPrometheusMetrics()
+
+        self.prefill_planner = PrefillPlanner(
+            runtime,
+            args,
+            shared_state=self.shared_state,
+            prometheus_metrics=prometheus_metrics,
+            start_prometheus_server=True,
+        )
+        self.decode_planner = DecodePlanner(
+            runtime,
+            args,
+            shared_state=self.shared_state,
+            prometheus_metrics=prometheus_metrics,
+            prometheus_api_client=getattr(
+                self.prefill_planner, "prometheus_api_client", None
+            ),
+            connector=getattr(self.prefill_planner, "connector", None),
+            start_prometheus_server=False,
         )
 
-        total_gpu_required = (
-            next_num_p * self.args.prefill_engine_num_gpu
-            + next_num_d * self.args.decode_engine_num_gpu
-        )
-        if total_gpu_required > self.args.max_gpu_budget:
-            scale = self.args.max_gpu_budget / total_gpu_required
-            next_num_p = max(self.args.min_endpoint, round(next_num_p * scale))
-            next_num_d = max(
-                self.args.min_endpoint,
-                round(
-                    (
-                        self.args.max_gpu_budget
-                        - next_num_p * self.args.prefill_engine_num_gpu
-                    )
-                    / self.args.decode_engine_num_gpu
-                ),
-            )
-            logger.warning(
-                f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({self.args.max_gpu_budget}), scaling down to {next_num_p} prefill and {next_num_d} decode replicas"
-            )
-
-        return next_num_p, next_num_d
-
-    async def make_adjustments(self):
-        # Skip adjustment if no traffic
-        if not self.last_metrics.is_valid():
-            logger.info(
-                "Metrics contain None or NaN values (no active requests), skipping adjustment"
-            )
-            return
-
-        if not self.no_correction:
-            try:
-                self.p_endpoints, self.d_endpoints = await self.get_workers_info()
-                logger.info(
-                    f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
-                )
-
-                # first correct the prediction correction factor
-                # for TTFT, we expect the correction factor to be << 1 due to queuing delay
-                expect_ttft = self.prefill_interpolator.interpolate_ttft(
-                    self.last_metrics.isl
-                )
-                self.p_correction_factor = self.last_metrics.ttft / expect_ttft
-                # for ITL, we expect the correction factor to be close to 1
-                expect_itl = self.decode_interpolator.interpolate_itl(
-                    concurrency=self.last_metrics.num_req  # type: ignore
-                    / len(self.d_endpoints)
-                    * self.last_metrics.request_duration  # type: ignore
-                    / self.args.adjustment_interval,
-                    context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
-                )
-                self.d_correction_factor = self.last_metrics.itl / expect_itl
-                logger.info(
-                    f"Correction factors: TTFT: {self.p_correction_factor:.3f}, ITL: {self.d_correction_factor:.3f}"
-                )
-
-                # Update correction factor metrics in Prometheus
-                if self.prometheus_port != 0:
-                    self.prometheus_metrics.p_correction_factor.set(
-                        self.p_correction_factor
-                    )
-                    self.prometheus_metrics.d_correction_factor.set(
-                        self.d_correction_factor
-                    )
-            except Exception as e:
-                logger.error(f"Failed to correct prediction factors: {e}")
-                return
-
-        next_num_req, next_isl, next_osl = self.predict_load()
-
-        if next_num_req is not None and next_isl is not None and next_osl is not None:
-            # Update predicted load metrics in Prometheus
-            if self.prometheus_port != 0:
-                self.prometheus_metrics.predicted_request_rate.set(
-                    next_num_req / self.args.adjustment_interval
-                )
-                self.prometheus_metrics.predicted_isl.set(next_isl)
-                self.prometheus_metrics.predicted_osl.set(next_osl)
-
-            try:
-                next_num_p, next_num_d = self._compute_replica_requirements(
-                    next_num_req, next_isl, next_osl
-                )
-
-                # Update predicted replica metrics in Prometheus
-                if self.prometheus_port != 0:
-                    self.prometheus_metrics.predicted_num_p.set(next_num_p)
-                    self.prometheus_metrics.predicted_num_d.set(next_num_d)
-            except Exception as e:
-                logger.error(f"Failed to compute number of replicas: {e}")
-                return
-
-        if not self.args.no_operation:
-            target_replicas = [
-                TargetReplica(
-                    sub_component_type=SubComponentType.PREFILL,
-                    component_name=self.prefill_component_name,
-                    desired_replicas=next_num_p,
-                ),
-                TargetReplica(
-                    sub_component_type=SubComponentType.DECODE,
-                    component_name=self.decode_component_name,
-                    desired_replicas=next_num_d,
-                ),
-            ]
-            await self.connector.set_component_replicas(target_replicas, blocking=False)
+    async def _async_init(self):
+        # Prefill/Decode share the same connector instance in disagg mode.
+        await self.prefill_planner._async_init()
 
     async def run(self):
-        """Main loop for the planner"""
-
         if not self.args.no_operation:
-            # Fail fast if the deployment is not valid
             logger.info("Validating deployment...")
-
-            # TODO: still supporting framework component names for backwards compatibility
-            # Should be deprecated in favor of service subComponentType
-            await self.connector.validate_deployment(
-                prefill_component_name=self.prefill_component_name,
-                decode_component_name=self.decode_component_name,
+            await self.prefill_planner.connector.validate_deployment(
+                prefill_component_name=self.prefill_planner.prefill_component_name,
+                decode_component_name=self.prefill_planner.decode_component_name,
+                require_prefill=True,
+                require_decode=True,
             )
             logger.info("Successfully validated the deployment")
 
-            await self.connector.wait_for_deployment_ready()
+            await self.prefill_planner.connector.wait_for_deployment_ready()
 
-            model_name = self.connector.get_model_name()
+            model_name = await self.prefill_planner._get_model_name(
+                require_prefill=True, require_decode=True
+            )
             logger.info(f"Detected model name from deployment: {model_name}")
-            self.model_name = (
-                model_name.lower()
-            )  # normalize model name to lowercase (MDC)
+            model_name = model_name.lower()
+            self.prefill_planner.model_name = model_name
+            self.decode_planner.model_name = model_name
 
-        self.last_adjustment_time = time.time()
+        self.shared_state.last_adjustment_time = time.time()
 
         while True:
             current_time = time.time()
 
             if (
-                current_time - self.last_adjustment_time
+                current_time - self.shared_state.last_adjustment_time
                 >= self.args.adjustment_interval
             ):
-                self.last_adjustment_time = time.time()
+                self.shared_state.last_adjustment_time = time.time()
                 logger.info("New adjustment interval started!")
 
-                await self.observe_metrics()
-                await self.make_adjustments()
+                await self.prefill_planner.observe_metrics(
+                    require_prefill=True, require_decode=True
+                )
+                self.decode_planner.update_predictors_from_metrics(
+                    self.shared_state.last_metrics
+                )
+                next_num_p = self.prefill_planner.plan_adjustment()
+                next_num_d = self.decode_planner.plan_adjustment()
+                if next_num_p is None or next_num_d is None:
+                    continue
+
+                next_num_p, next_num_d = _apply_global_gpu_budget(
+                    next_num_p, next_num_d, self.args
+                )
+                self.prefill_planner.update_predicted_replicas_metric(next_num_p)
+                self.decode_planner.update_predicted_replicas_metric(next_num_d)
+
+                if not self.args.no_operation:
+                    target_replicas = [
+                        TargetReplica(
+                            sub_component_type=SubComponentType.PREFILL,
+                            component_name=self.prefill_planner.prefill_component_name,
+                            desired_replicas=next_num_p,
+                        ),
+                        TargetReplica(
+                            sub_component_type=SubComponentType.DECODE,
+                            component_name=self.prefill_planner.decode_component_name,
+                            desired_replicas=next_num_d,
+                        ),
+                    ]
+                    await self.prefill_planner.connector.set_component_replicas(
+                        target_replicas, blocking=False
+                    )
 
             # sleep for a while to avoid busy-waiting but not too long to miss the next adjustment
             await asyncio.sleep(self.args.adjustment_interval / 10)
 
-    def dryrun_run(self):
-        """Run planner in dry-run mode with dataset"""
-        warmup_metrics = None
-        if getattr(self.args, "load_predictor_warmup_trace", None):
-            warmup_metrics = extract_metrics_from_mooncake(
-                self.args.load_predictor_warmup_trace,
-                self.args.adjustment_interval,
-            )
-
-        metrics = extract_metrics_from_mooncake(
-            self.args.dataset, self.args.adjustment_interval
-        )
-
-        def compute_safe_p_thpt(num_p: int, isl: float, ttft: float):
-            """safe throughput is maximum throughput that the engine can handle given the TTFT SLA"""
-            actual_ttft = self.prefill_interpolator.interpolate_ttft(isl)
-            if actual_ttft > ttft:
-                return 0
-            else:
-                return num_p * self.prefill_interpolator.interpolate_thpt_per_gpu(isl)
-
-        def compute_safe_d_thpt(num_d: int, isl: float, osl: float, itl: float):
-            """safe throughput is maximum throughput that the engine can handle given the ITL SLA"""
-            (
-                pred_decode_thpt_per_gpu,
-                actual_itl,
-                _,
-            ) = self.decode_interpolator.find_best_throughput_per_gpu(
-                itl=itl, context_length=isl + osl / 2
-            )
-            if actual_itl > itl:
-                return 0
-            else:
-                return num_d * pred_decode_thpt_per_gpu
-
-        time = [0]
-        rr = [metrics[0]["request_count"]]
-        est_rr = [metrics[0]["request_count"]]
-        isl = [metrics[0]["avg_isl"]]
-        est_isl = [metrics[0]["avg_isl"]]
-        osl = [metrics[0]["avg_osl"]]
-        est_osl = [metrics[0]["avg_osl"]]
-        num_p = [self.args.start_num_p]
-        p_thpt = [metrics[0]["request_count"] * metrics[0]["avg_isl"]]
-        safe_p_thpt = [
-            compute_safe_p_thpt(
-                self.args.start_num_p, metrics[0]["avg_isl"], self.args.ttft
-            )
-            * self.args.adjustment_interval
-        ]
-        num_d = [self.args.start_num_d]
-        d_thpt = [metrics[0]["request_count"] * metrics[0]["avg_osl"]]
-        safe_d_thpt = [
-            compute_safe_d_thpt(
-                self.args.start_num_d,
-                metrics[0]["avg_isl"],
-                metrics[0]["avg_osl"],
-                self.args.itl,
-            )
-            * self.args.adjustment_interval
-        ]
-        self.dryrun_observe_metrics(
-            metrics[0]["request_count"], metrics[0]["avg_isl"], metrics[0]["avg_osl"]
-        )
-
-        for metric in metrics[1:]:
-            # update time
-            time.append(time[-1] + self.args.adjustment_interval)
-
-            # load prediction
-            _est_rr, _est_isl, _est_osl = self.predict_load()
-            est_rr.append(_est_rr)
-            est_isl.append(_est_isl)
-            est_osl.append(_est_osl)
-
-            # compute num_p and num_d
-            _num_p, _num_d = self._compute_replica_requirements(
-                _est_rr, _est_isl, _est_osl
-            )
-            num_p.append(_num_p)
-            num_d.append(_num_d)
-
-            # update load predictor
-            self.dryrun_observe_metrics(
-                metric["request_count"], metric["avg_isl"], metric["avg_osl"]
-            )
-
-            # fill in ground truth
-            rr.append(metric["request_count"])
-            isl.append(metric["avg_isl"])
-            osl.append(metric["avg_osl"])
-
-            p_thpt.append(rr[-1] * isl[-1])
-            d_thpt.append(rr[-1] * osl[-1])
-
-            safe_p_thpt.append(
-                compute_safe_p_thpt(num_p[-1], isl[-1], self.args.ttft)
-                * self.args.adjustment_interval
-            )
-            safe_d_thpt.append(
-                compute_safe_d_thpt(num_d[-1], isl[-1], osl[-1], self.args.itl)
-                * self.args.adjustment_interval
-            )
-
-        # plot the results
-        from dynamo.planner.utils.dryrun_plot_utils import create_dryrun_plot
-
-        warmup_time = None
-        warmup_rr = None
-        warmup_isl = None
-        warmup_osl = None
-        if warmup_metrics:
-            interval = self.args.adjustment_interval
-            n = len(warmup_metrics)
-            warmup_time = [-(n - i) * interval for i in range(n)]
-            warmup_rr = [m["request_count"] for m in warmup_metrics]
-            warmup_isl = [m["avg_isl"] for m in warmup_metrics]
-            warmup_osl = [m["avg_osl"] for m in warmup_metrics]
-
-        create_dryrun_plot(
-            time=time,
-            rr=rr,
-            est_rr=est_rr,
-            isl=isl,
-            est_isl=est_isl,
-            osl=osl,
-            est_osl=est_osl,
-            num_p=num_p,
-            p_thpt=p_thpt,
-            safe_p_thpt=safe_p_thpt,
-            num_d=num_d,
-            d_thpt=d_thpt,
-            safe_d_thpt=safe_d_thpt,
-            output_path=self.args.output_plot,
-            warmup_time=warmup_time,
-            warmup_rr=warmup_rr,
-            warmup_isl=warmup_isl,
-            warmup_osl=warmup_osl,
-        )
-
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
-    planner = Planner(runtime, args)
+    mode = getattr(args, "mode", "disagg")
+    if mode == "disagg":
+        planner = DisaggPlanner(runtime, args)
+    elif mode == "prefill":
+        planner = PrefillPlanner(runtime, args)
+    elif mode == "decode":
+        planner = DecodePlanner(runtime, args)
+    else:
+        raise ValueError(f"Invalid planner mode: {mode}")
     await planner._async_init()
     await planner.run()
