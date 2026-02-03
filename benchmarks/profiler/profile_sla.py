@@ -495,11 +495,6 @@ async def run_profile(args):
 
         if args.dry_run:
             logger.info("Skipping recommendations in dry run mode")
-            write_profiler_status(
-                args.output_dir,
-                status=ProfilerStatus.SUCCESS,
-                message="Dry run completed successfully (no recommendations generated)",
-            )
         else:
             logger.info("Analyzing results and generate recommendations...")
             # Safety guards: no results → exit early with a clear message
@@ -801,7 +796,7 @@ async def run_profile(args):
         )
 
     except Exception as e:
-        logger.error(f"Profile job failed with error: {e}")
+        logger.exception("Profile job failed with error")
         write_profiler_status(
             args.output_dir,
             status=ProfilerStatus.FAILED,

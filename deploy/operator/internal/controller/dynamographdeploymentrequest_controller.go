@@ -207,16 +207,51 @@ while true; do
   sleep 5
 done
 
-# Check profiler status using Python utility (2 minute timeout)
+# Check profiler status file (2 minute timeout)
 echo "Checking profiler status..."
-python3 -m benchmarks.profiler.utils.profiler_status \
-  --output-dir {{.OutputPath}} \
-  --timeout 120
+STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
+TIMEOUT=120
+CHECK_START=$(date +%s)
 
-if [ $? -ne 0 ]; then
-  echo "ERROR: Profiler failed"
+# Wait for status file to exist
+while [ ! -f "$STATUS_FILE" ]; do
+  ELAPSED=$(($(date +%s) - CHECK_START))
+  if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo "ERROR: Status file not found after ${TIMEOUT}s"
+    exit 1
+  fi
+  sleep 2
+done
+
+# Read and parse status from YAML file
+STATUS=$(grep "^status:" "$STATUS_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
+
+if [ -z "$STATUS" ]; then
+  echo "ERROR: Invalid status file format"
   exit 1
 fi
+
+# Check status value
+case "$STATUS" in
+  success)
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    echo "Profiler succeeded: $MESSAGE"
+    ;;
+  failed)
+    ERROR=$(grep "^error:" "$STATUS_FILE" | sed 's/^error: *//' | tr -d '"' | tr -d "'")
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    echo "ERROR: Profiler failed: ${ERROR:-$MESSAGE}"
+    exit 1
+    ;;
+  running)
+    echo "ERROR: Profiler still running (unexpected)"
+    exit 1
+    ;;
+  *)
+    echo "ERROR: Unknown status: $STATUS"
+    exit 1
+    ;;
+esac
 
 echo "Creating ConfigMap..."
 
