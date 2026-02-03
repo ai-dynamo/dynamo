@@ -79,7 +79,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
+    # if: needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-default-v2
     env:
@@ -244,7 +244,7 @@ jobs:
 
   deploy-operator:
     runs-on: prod-default-small-v2
-    # if: needs.changed-files.outputs.core == 'true'
+    if: needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator]
     outputs:
       NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
