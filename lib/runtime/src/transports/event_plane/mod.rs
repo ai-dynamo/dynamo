@@ -99,9 +99,10 @@ struct BrokerEndpoints {
 
 /// Resolve ZMQ broker endpoints from environment or discovery
 /// Returns None if broker mode is not configured (direct mode)
+/// Brokers are namespace-agnostic, so all clients query the same well-known namespace
 async fn resolve_zmq_broker(
     drt: &DistributedRuntime,
-    scope: &EventScope,
+    _scope: &EventScope,
 ) -> Result<Option<BrokerEndpoints>> {
     // Priority 1: Explicit URL from DYN_ZMQ_BROKER_URL
     if let Ok(broker_url) =
@@ -124,8 +125,13 @@ async fn resolve_zmq_broker(
         .unwrap_or_default()
         == "true"
     {
+        let broker_namespace = std::env::var(
+            crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_DISCOVERY_NAMESPACE,
+        )
+        .unwrap_or_else(|_| "dynamo".to_string());
+
         let query = DiscoveryQuery::EventChannels(EventChannelQuery::component(
-            scope.namespace().to_string(),
+            broker_namespace.clone(),
             "zmq_broker".to_string(),
         ));
 
@@ -149,13 +155,14 @@ async fn resolve_zmq_broker(
 
         if xsub_endpoints.is_empty() {
             anyhow::bail!(
-                "DYN_ZMQ_BROKER_ENABLED=true but no broker found in discovery for namespace '{}'",
-                scope.namespace()
+                "DYN_ZMQ_BROKER_ENABLED=true but no broker found in discovery namespace '{}'",
+                broker_namespace
             );
         }
 
         tracing::info!(
             num_brokers = xsub_endpoints.len(),
+            broker_namespace = %broker_namespace,
             "Discovered ZMQ brokers from discovery plane"
         );
 

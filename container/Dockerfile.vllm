@@ -497,6 +497,17 @@ RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
 
+# Build zmq-broker binary for scalable pub/sub event plane
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
+    cd /opt/dynamo && \
+    cargo build --release -p zmq-broker && \
+    /tmp/use-sccache.sh show-stats "zmq-broker"
+
 ########################################################
 ########## Framework Development Image ################
 ########################################################
@@ -765,6 +776,7 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/target/release/zmq-broker /usr/local/bin/zmq-broker
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \

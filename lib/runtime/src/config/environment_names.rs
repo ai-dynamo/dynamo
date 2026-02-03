@@ -327,6 +327,10 @@ pub mod zmq_broker {
     /// Enable ZMQ broker discovery mode
     pub const DYN_ZMQ_BROKER_ENABLED: &str = "DYN_ZMQ_BROKER_ENABLED";
 
+    /// Namespace to query for broker discovery (default: "dynamo")
+    /// Clients query this namespace regardless of their own namespace
+    pub const DYN_ZMQ_BROKER_DISCOVERY_NAMESPACE: &str = "DYN_ZMQ_BROKER_DISCOVERY_NAMESPACE";
+
     /// XSUB bind address (broker binary only)
     pub const ZMQ_BROKER_XSUB_BIND: &str = "ZMQ_BROKER_XSUB_BIND";
 
@@ -447,6 +451,7 @@ mod tests {
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,
             zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+            zmq_broker::DYN_ZMQ_BROKER_DISCOVERY_NAMESPACE,
             zmq_broker::ZMQ_BROKER_XSUB_BIND,
             zmq_broker::ZMQ_BROKER_XPUB_BIND,
             zmq_broker::ZMQ_BROKER_NAMESPACE,
