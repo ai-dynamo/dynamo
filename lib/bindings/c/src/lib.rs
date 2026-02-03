@@ -950,6 +950,7 @@ pub unsafe extern "C" fn dynamo_router_add_request(
                 overlap_blocks,
                 None,
                 worker,
+                None, // lora_name not exposed in C API yet
             )
             .await;
 
