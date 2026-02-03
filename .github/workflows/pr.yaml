@@ -188,7 +188,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+      no_cache: ${{ github.ref_name == 'main' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
       run_tests: true
@@ -209,7 +209,7 @@ jobs:
   #     extra_tags: |
   #       ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
   #       ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-  #     no_cache: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+  #     no_cache: ${{ github.ref_name == 'main' }}
   #     builder_name: ${{ needs.changed-files.outputs.builder_name }}
   #     run_tests: true
   #     copy_to_acr: true
@@ -228,7 +228,7 @@ jobs:
   #     extra_tags: |
   #       ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
   #       ${{ github.ref_name == 'main' && format('main-trt-llm-{0}', github.sha) || '' }}
-  #     no_cache: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+  #     no_cache: ${{ github.ref_name == 'main' }}
   #     builder_name: ${{ needs.changed-files.outputs.builder_name }}
   #     run_tests: true
   #     copy_to_acr: true
