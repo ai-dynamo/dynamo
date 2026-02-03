@@ -49,16 +49,16 @@ impl GrpcTuningConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(val) = std::env::var("DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE") {
-            if let Ok(size) = val.parse::<u32>() {
-                config.initial_connection_window_size = Some(size);
-            }
+        if let Ok(val) = std::env::var("DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE")
+            && let Ok(size) = val.parse::<u32>()
+        {
+            config.initial_connection_window_size = Some(size);
         }
 
-        if let Ok(val) = std::env::var("DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE") {
-            if let Ok(size) = val.parse::<u32>() {
-                config.initial_stream_window_size = Some(size);
-            }
+        if let Ok(val) = std::env::var("DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE")
+            && let Ok(size) = val.parse::<u32>()
+        {
+            config.initial_stream_window_size = Some(size);
         }
 
         config
