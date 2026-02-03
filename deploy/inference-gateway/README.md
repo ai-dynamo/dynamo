@@ -113,7 +113,6 @@ kubectl create secret generic hf-token-secret \
 
 Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
 This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
-Take a note of the model's block size provided in the model card.
 
 ### 4. Build EPP image (Optional)
 
@@ -215,7 +214,6 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
 - Set `DYN_ENFORCE_DISAGG=true` if you want to enforce every request being served in the disaggregated manner. By default it is false meaning if the the prefill worker is not available the request will be served in the aggregated manner.
 - By default the Dynamo plugin uses KV routing. You can expose `DYNAMO_USE_KV_ROUTING=false`  in your [values-dynamo-epp.yaml] if you prefer to route in the round-robin fashion.
 - If using kv-routing:
-  - Overwrite the `DYN_KV_BLOCK_SIZE` in your [values-dynamo-epp.yaml](./values-dynamo-epp.yaml) to match your model's block size.The `DYN_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
   - Set `DYNAMO_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
   - Set `DYNAMO_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
   - Set `DYNAMO_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing

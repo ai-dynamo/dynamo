@@ -53,8 +53,6 @@ typedef struct {
 // Router bindings API (replaces Pipeline API)
 query_router_result_t create_routers(const char *namespace_c_str,
                                      const char *component_c_str,
-                                     const char *model_name_c_str,
-                                     uint32_t block_size,
                                      bool enforce_disagg,
                                      RouterHandles **out_handle);
 
@@ -200,8 +198,6 @@ var (
 
 	ffiNamespace     string
 	ffiComponent     string
-	ffiModel         string
-	ffiKvBlockSize   uint32
 	ffiEnforceDisagg bool
 
 	routerInitialized bool
@@ -214,40 +210,15 @@ var (
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
-	ffiModel = getEnvOrDefault("DYN_MODEL", "Qwen/Qwen3-0.6B")
 	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
-
-	kvBlockSizeStr := os.Getenv("DYN_KV_BLOCK_SIZE")
-	if kvBlockSizeStr == "" {
-		panic("DYN_KV_BLOCK_SIZE is required and must match the model card's kv_cache_block_size")
-	}
-	var tmp int64
-	if n, err := fmt.Sscanf(kvBlockSizeStr, "%d", &tmp); err != nil || n != 1 {
-		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE='%s' is not a valid integer", kvBlockSizeStr))
-	}
-	ffiKvBlockSize = uint32(tmp)
-	if ffiKvBlockSize < 16 || ffiKvBlockSize > 8192 {
-		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE=%d outside [16,8192]", ffiKvBlockSize))
-	}
-	if (ffiKvBlockSize & (ffiKvBlockSize - 1)) != 0 {
-		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE=%d must be a power of 2", ffiKvBlockSize))
-	}
-	fmt.Printf("Dynamo KV Scorer: Loaded DYN_KV_BLOCK_SIZE=%d\n", ffiKvBlockSize)
+	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
+	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, enforce_disagg=%v\n",
+		ffiNamespace, ffiComponent, ffiEnforceDisagg)
 }
 
 func getEnvOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
-	}
-	return def
-}
-
-func getEnvInt64OrDefault(key string, def int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		var p int64
-		if n, err := fmt.Sscanf(v, "%d", &p); err == nil && n == 1 {
-			return p
-		}
 	}
 	return def
 }
@@ -271,10 +242,8 @@ func initFFI() error {
 
 		ns := C.CString(ffiNamespace)
 		cm := C.CString(ffiComponent)
-		model := C.CString(ffiModel)
 		defer C.free(unsafe.Pointer(ns))
 		defer C.free(unsafe.Pointer(cm))
-		defer C.free(unsafe.Pointer(model))
 
 		// Create router handles
 		routerHandlesMutex.Lock()
@@ -283,8 +252,6 @@ func initFFI() error {
 		rc := C.create_routers(
 			ns,
 			cm,
-			model,
-			C.uint32_t(ffiKvBlockSize),
 			C.bool(ffiEnforceDisagg),
 			&routerHandles,
 		)
@@ -564,10 +531,12 @@ func buildOpenAIRequest(req *schedtypes.LLMRequest) map[string]any {
 		requestBody["messages"] = []map[string]any{{"role": "user", "content": "default prompt"}}
 	}
 
+	// Model field is required by OpenAI spec but not used by the router's tokenizer
+	// (tokenizer is determined by the discovered model card)
 	if req != nil && strings.TrimSpace(req.TargetModel) != "" {
 		requestBody["model"] = req.TargetModel
 	} else {
-		requestBody["model"] = ffiModel
+		requestBody["model"] = "default"
 	}
 	return requestBody
 }

@@ -503,14 +503,13 @@ pub enum QueryRouterResult {
 ///
 /// This function waits for at least one decode worker to be discovered before returning.
 /// It auto-detects disaggregated mode by checking if prefill workers are present.
+/// The KV cache block size is automatically fetched from the model card via discovery.
 ///
 /// Timeout is controlled by `DYN_DISCOVERY_TIMEOUT_SEC` env var (default: 30 minutes).
 ///
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `model_name`: Model name for prefill router registration
-/// - `block_size`: KV cache block size
 /// - `enforce_disagg`: If true, disaggregated mode is required (fails if no prefill workers found)
 /// - `out_handle`: Output handle
 ///
@@ -521,12 +520,10 @@ pub enum QueryRouterResult {
 pub unsafe extern "C" fn create_routers(
     namespace: *const c_char,
     component: *const c_char,
-    model_name: *const c_char,
-    block_size: u32,
     enforce_disagg: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
-    if namespace.is_null() || model_name.is_null() || out_handle.is_null() {
+    if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
 
@@ -542,11 +539,6 @@ pub unsafe extern "C" fn create_routers(
             Ok(s) if !s.is_empty() => s.to_owned(),
             _ => "backend".to_string(),
         }
-    };
-
-    let model_name_str = match unsafe { CStr::from_ptr(model_name) }.to_str() {
-        Ok(s) => s.to_owned(),
-        Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
 
     // Create the runtime once - it will be stored in RouterHandles and reused
@@ -603,6 +595,25 @@ pub unsafe extern "C" fn create_routers(
 
         let model_manager = Arc::new(ModelManager::new());
 
+        // Fetch model card via discovery and create preprocessor + get block_size
+        let (preprocessor, block_size) =
+            match fetch_preprocessor_from_discovery(&drt, &namespace_str).await {
+                Ok((prep, bs)) => {
+                    tracing::info!(
+                        kv_cache_block_size = bs,
+                        "Preprocessor created from discovery"
+                    );
+                    (Some(prep), bs)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to fetch model card from discovery - cannot determine block_size"
+                    );
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            };
+
         // Create decode router
         let decode_router = match model_manager
             .kv_chooser_for(&endpoint, block_size, Some(kv_router_config.clone()))
@@ -643,22 +654,6 @@ pub unsafe extern "C" fn create_routers(
             None => {
                 tracing::info!("No prefill workers found, running in aggregated mode");
                 PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
-            }
-        };
-
-        // Fetch model card via discovery and create preprocessor
-        let preprocessor = match fetch_preprocessor_from_discovery(&drt, &model_name_str).await {
-            Ok(prep) => {
-                tracing::info!(model_name = %model_name_str, "Preprocessor created from discovery");
-                Some(prep)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    model_name = %model_name_str,
-                    error = %e,
-                    "Failed to create preprocessor from discovery, tokenization will not be available"
-                );
-                None
             }
         };
 
@@ -1062,13 +1057,14 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 ///
 /// This function:
 /// 1. Lists all models via discovery
-/// 2. Finds the first model matching the given name
+/// 2. Finds the first model in the target namespace (decode workers only)
 /// 3. Downloads the model config (tokenizer files) if needed
 /// 4. Creates an OpenAIPreprocessor from the model card
+/// 5. Returns the preprocessor and the kv_cache_block_size from the model card
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
-    model_name: &str,
-) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
+    target_namespace: &str,
+) -> anyhow::Result<(Arc<OpenAIPreprocessor>, u32)> {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_runtime::discovery::DiscoveryInstance;
 
@@ -1077,17 +1073,25 @@ async fn fetch_preprocessor_from_discovery(
     // List all models
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-    // Find matching model card
+    // Find first model card in the target namespace (decode workers only)
     let mut model_card: Option<ModelDeploymentCard> = None;
 
     for instance in instances {
-        if let DiscoveryInstance::Model { .. } = &instance {
+        if let DiscoveryInstance::Model { namespace, .. } = &instance {
+            // Filter by namespace
+            if namespace != target_namespace {
+                continue;
+            }
+
             match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) if card.name() == model_name => {
+                Ok(card) => {
+                    // Skip prefill-only workers, we want decode workers for routing
+                    if card.model_type.supports_prefill() && !card.model_type.supports_decode() {
+                        continue;
+                    }
                     model_card = Some(card);
                     break;
                 }
-                Ok(_) => continue, // Different model name
                 Err(e) => {
                     tracing::debug!(error = %e, "Failed to deserialize model card, skipping");
                     continue;
@@ -1096,14 +1100,26 @@ async fn fetch_preprocessor_from_discovery(
         }
     }
 
-    let mut card = model_card
-        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in discovery", model_name))?;
+    let mut card = model_card.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No model found in namespace '{}' via discovery",
+            target_namespace
+        )
+    })?;
+
+    let kv_cache_block_size = card.kv_cache_block_size;
+    tracing::info!(
+        model_name = card.name(),
+        kv_cache_block_size = kv_cache_block_size,
+        "Found model card via discovery"
+    );
 
     // Download config (tokenizer files) if not local
     card.download_config().await?;
 
     // Create preprocessor
-    OpenAIPreprocessor::new(card)
+    let preprocessor = OpenAIPreprocessor::new(card)?;
+    Ok((preprocessor, kv_cache_block_size))
 }
 
 /// Find a prefill endpoint from already-discovered instances (one-time filter).
