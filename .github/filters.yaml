@@ -58,6 +58,7 @@ ignore:
   - 'container/templates/aws.Dockerfile'
   - 'container/templates/local_dev.Dockerfile'
   - 'container/templates/dev.Dockerfile'
+  - 'opensearch_upload/**'
 
 ci: &ci
   - '.github/workflows/**'
