@@ -168,7 +168,7 @@ jobs:
 
       - name: Build Container
         id: build-image
-        uses: ./.github/actions/docker-build
+        uses: ./.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
           framework: ${{ inputs.framework }}
