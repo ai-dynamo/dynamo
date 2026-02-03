@@ -713,9 +713,7 @@ async fn handle_worker_added(
     worker_query_client: &WorkerQueryClient,
     kv_events_tx: &mpsc::Sender<RouterEvent>,
 ) {
-    tracing::info!(
-        "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
-    );
+    tracing::info!("DISCOVERY: Worker {worker_id} added, dumping local indexer into router");
 
     match recover_from_worker(worker_query_client, worker_id, None, None, kv_events_tx).await {
         Ok(count) => {

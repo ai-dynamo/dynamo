@@ -49,7 +49,9 @@ impl WorkerQueryClient {
 
     /// Wait for runtime config changes.
     /// Returns Ok(()) when configs have changed, or Err if the sender was dropped.
-    pub async fn wait_for_config_change(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+    pub async fn wait_for_config_change(
+        &mut self,
+    ) -> Result<(), tokio::sync::watch::error::RecvError> {
         self.subscriber.change_rx.changed().await
     }
 
