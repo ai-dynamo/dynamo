@@ -52,8 +52,22 @@ install_sccache() {
 
 show_stats() {
     if command -v sccache >/dev/null 2>&1; then
-        echo "=== sccache statistics AFTER $1 ==="
-        sccache --show-stats
+        # Generate timestamp in ISO 8601 format
+        local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Output JSON markers for deterministic parsing
+        echo "=== SCCACHE_JSON_BEGIN ==="
+
+        # Create JSON wrapper with section metadata
+        cat <<EOF
+{
+  "section": "$1",
+  "timestamp": "$timestamp",
+  "sccache_stats": $(sccache --show-stats --stats-format json)
+}
+EOF
+
+        echo "=== SCCACHE_JSON_END ==="
     else
         echo "sccache is not available"
     fi
