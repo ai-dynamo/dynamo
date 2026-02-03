@@ -149,6 +149,8 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
         # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/30242.
         # Model needs the class method get_language_model_spec to be defined for this to work.
 
+        # TODO(gluo/dsocek): Remove this monkey patch once vLLM upstream adds
+        # get_language_model_spec to Qwen VL model classes.
         # Monkey patch to vLLM's Qwen 2.5 VL class to add get_language_model_spec
         from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
         from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
