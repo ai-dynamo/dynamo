@@ -75,17 +75,19 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         default=SLAPlannerDefaults.min_endpoint,
         help="Minimum number of endpoints",
     )
+    # GPU counts are derived from DGD in Kubernetes mode.
+    # In virtual mode, these flags are required.
     parser.add_argument(
         "--decode-engine-num-gpu",
         type=int,
-        default=SLAPlannerDefaults.decode_engine_num_gpu,
-        help="Number of GPUs for decode engine",
+        default=None,
+        help=argparse.SUPPRESS,  # Hidden - derived from DGD in K8s, required in virtual
     )
     parser.add_argument(
         "--prefill-engine-num-gpu",
         type=int,
-        default=SLAPlannerDefaults.prefill_engine_num_gpu,
-        help="Number of GPUs for prefill engine",
+        default=None,
+        help=argparse.SUPPRESS,  # Hidden - derived from DGD in K8s, required in virtual
     )
     parser.add_argument(
         "--profile-results-dir",

@@ -16,6 +16,12 @@ from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_moonc
 
 
 def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
+    # Dryrun mode: use defaults if GPU counts not provided (no DGD available)
+    if args.prefill_engine_num_gpu is None:
+        args.prefill_engine_num_gpu = 1
+    if args.decode_engine_num_gpu is None:
+        args.decode_engine_num_gpu = 1
+
     warmup_metrics = None
     if getattr(args, "load_predictor_warmup_trace", None):
         warmup_metrics = extract_metrics_from_mooncake(

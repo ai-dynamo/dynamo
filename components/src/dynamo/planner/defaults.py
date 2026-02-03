@@ -183,6 +183,35 @@ class Service(BaseModel):
 
         return None
 
+    def get_gpu_count(self) -> int:
+        """Get the GPU count from the service's resource limits.
+
+        GPU count is read from spec.services.[ServiceName].resources.limits.gpu
+
+        Returns:
+            The number of GPUs configured for this service
+
+        Raises:
+            ValueError: If GPU count is not specified or invalid
+        """
+        resources = self.service.get("resources", {})
+        limits = resources.get("limits", {})
+        gpu_str = limits.get("gpu")
+
+        if gpu_str is None:
+            raise ValueError(
+                f"No GPU count specified for service '{self.name}'. "
+                f"Please set resources.limits.gpu in the DGD."
+            )
+
+        try:
+            return int(gpu_str)
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"Invalid GPU count '{gpu_str}' for service '{self.name}'. "
+                f"GPU count must be an integer."
+            )
+
 
 # TODO: still supporting framework component names for backwards compatibility
 # Should be deprecated in favor of service subComponentType

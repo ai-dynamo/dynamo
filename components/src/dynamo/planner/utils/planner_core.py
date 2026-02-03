@@ -18,6 +18,7 @@ from dynamo.planner import (
     VirtualConnector,
 )
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner.utils.exceptions import DeploymentValidationError
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
@@ -204,6 +205,50 @@ def _apply_component_gpu_budget(
         f"scaling down to {next_num} replicas"
     )
     return next_num
+
+
+def _initialize_gpu_counts(
+    args: argparse.Namespace,
+    connector,
+    require_prefill: bool,
+    require_decode: bool,
+) -> None:
+    """Initialize GPU counts from DGD (Kubernetes) or CLI args (virtual).
+
+    In Kubernetes mode: reads from DGD, errors if not found
+    In virtual mode: requires CLI flags, errors if not provided
+
+    Raises:
+        DeploymentValidationError: If GPU counts cannot be determined
+    """
+    if hasattr(connector, "get_gpu_counts"):
+        # Kubernetes mode: read from DGD
+        prefill_gpu, decode_gpu = connector.get_gpu_counts(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+        args.prefill_engine_num_gpu = prefill_gpu
+        args.decode_engine_num_gpu = decode_gpu
+        logger.info(
+            f"Detected GPU counts from DGD: prefill={prefill_gpu}, decode={decode_gpu}"
+        )
+    else:
+        # Virtual mode: require CLI flags
+        errors = []
+        if require_prefill and args.prefill_engine_num_gpu is None:
+            errors.append(
+                "Missing --prefill-engine-num-gpu flag (required in virtual mode)"
+            )
+        if require_decode and args.decode_engine_num_gpu is None:
+            errors.append(
+                "Missing --decode-engine-num-gpu flag (required in virtual mode)"
+            )
+        if errors:
+            raise DeploymentValidationError(errors)
+        logger.info(
+            f"Using GPU counts from CLI: prefill={args.prefill_engine_num_gpu}, "
+            f"decode={args.decode_engine_num_gpu}"
+        )
 
 
 class BasePlanner:
@@ -636,6 +681,14 @@ class BasePlanner:
             )
             logger.info("Successfully validated the deployment")
 
+            # Initialize GPU counts
+            _initialize_gpu_counts(
+                self.args,
+                self.connector,
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+            )
+
             await self.connector.wait_for_deployment_ready()
 
             model_name = await self._get_model_name(
@@ -807,6 +860,14 @@ class DisaggPlanner:
                 require_decode=True,
             )
             logger.info("Successfully validated the deployment")
+
+            # Initialize GPU counts
+            _initialize_gpu_counts(
+                self.args,
+                self.prefill_planner.connector,
+                require_prefill=True,
+                require_decode=True,
+            )
 
             await self.prefill_planner.connector.wait_for_deployment_ready()
 
