@@ -48,6 +48,7 @@ class KVRouterProcess(ManagedProcess):
         enforce_disagg: bool = False,
         blocks_threshold: float | None = None,
         tokens_threshold: float | None = None,
+        tokens_threshold_frac: float | None = None,
         request_plane: str = "nats",
     ):
         command = [
@@ -74,6 +75,11 @@ class KVRouterProcess(ManagedProcess):
 
         if tokens_threshold is not None:
             command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
+
+        if tokens_threshold_frac is not None:
+            command.extend(
+                ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
+            )
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
@@ -2392,6 +2398,52 @@ def _test_busy_threshold_endpoint(
                     data = await response.json()
                     logger.info(
                         f"POST /busy_threshold (invalid tokens) response: {data}"
+                    )
+
+                # Test 10: Set active_prefill_tokens_threshold_frac (fraction of max_num_batched_tokens)
+                test_frac_threshold = 0.8
+                logger.info(
+                    f"Testing POST /busy_threshold to set active_prefill_tokens_threshold_frac={test_frac_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold_frac": test_frac_threshold,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set frac) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_prefill_tokens_threshold_frac")
+                        == test_frac_threshold
+                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set frac) response: {data}")
+
+                # Test 11: Verify frac threshold appears in GET /busy_threshold list
+                logger.info(
+                    "Testing GET /busy_threshold to verify frac threshold in list"
+                )
+                async with session.get(busy_threshold_url) as response:
+                    assert (
+                        response.status == 200
+                    ), f"GET /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    thresholds = data.get("thresholds", [])
+                    model_entry = next(
+                        (t for t in thresholds if t["model"] == model_name), None
+                    )
+                    assert (
+                        model_entry is not None
+                    ), f"Expected model '{model_name}' in thresholds: {data}"
+                    assert (
+                        model_entry.get("active_prefill_tokens_threshold_frac")
+                        == test_frac_threshold
+                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    logger.info(
+                        f"GET /busy_threshold (after set frac) response: {data}"
                     )
 
                 logger.info("All busy_threshold endpoint tests passed!")

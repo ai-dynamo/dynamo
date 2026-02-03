@@ -1398,8 +1398,11 @@ pub async fn create_worker_selection_pipeline_chat(
     let router_config = dynamo_llm::entrypoint::RouterConfig {
         router_mode,
         kv_router_config: kv_router_config.unwrap_or_default(),
-        active_decode_blocks_threshold: busy_threshold,
-        active_prefill_tokens_threshold: None,
+        load_threshold_config: dynamo_llm::discovery::LoadThresholdConfig {
+            active_decode_blocks_threshold: busy_threshold,
+            active_prefill_tokens_threshold: None,
+            active_prefill_tokens_threshold_frac: None,
+        },
         enforce_disagg,
     };
     // Create metrics for migration tracking (not exposed via /metrics in C bindings)
@@ -1496,7 +1499,16 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Create worker monitor if busy_threshold is set
     // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
-    let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t, 1000000));
+    let worker_monitor = busy_threshold.map(|t| {
+        KvWorkerMonitor::new(
+            client.clone(),
+            dynamo_llm::discovery::LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(t),
+                active_prefill_tokens_threshold: None,
+                active_prefill_tokens_threshold_frac: None,
+            },
+        )
+    });
 
     // Clone chooser before passing to build_routed_pipeline (which takes ownership)
     let kv_router = chooser.clone();
