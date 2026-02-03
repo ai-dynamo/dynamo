@@ -698,48 +698,33 @@ pub async fn start_kv_router_background(
     Ok(())
 }
 
-/// Handle a worker discovery event (added or removed).
-async fn handle_worker_discovery(
-    event: DiscoveryEvent,
+/// Handle a worker removal event.
+async fn handle_worker_removal(worker_id: WorkerId, remove_worker_tx: &mpsc::Sender<WorkerId>) {
+    tracing::warn!("DISCOVERY: Worker {worker_id} removed, removing from router indexer");
+
+    if let Err(e) = remove_worker_tx.send(worker_id).await {
+        tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
+    }
+}
+
+/// Handle a newly added worker by recovering from its local indexer.
+async fn handle_worker_added(
+    worker_id: WorkerId,
     worker_query_client: &WorkerQueryClient,
     kv_events_tx: &mpsc::Sender<RouterEvent>,
-    remove_worker_tx: &mpsc::Sender<WorkerId>,
 ) {
-    match event {
-        DiscoveryEvent::Added(instance) => {
-            let worker_id = instance.instance_id();
+    tracing::info!(
+        "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
+    );
+
+    match recover_from_worker(worker_query_client, worker_id, None, None, kv_events_tx).await {
+        Ok(count) => {
             tracing::info!(
-                "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
+                "Successfully dumped worker {worker_id}'s local indexer, recovered {count} events"
             );
-
-            match recover_from_worker(
-                worker_query_client,
-                worker_id,
-                None, // Start from beginning
-                None, // Get all events
-                kv_events_tx,
-            )
-            .await
-            {
-                Ok(count) => {
-                    tracing::info!(
-                        "Successfully dumped worker {worker_id}'s local indexer, recovered {count} events"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to dump worker {worker_id}'s local indexer (may not have local indexer enabled): {e}"
-                    );
-                }
-            }
         }
-        DiscoveryEvent::Removed(id) => {
-            let worker_id = id.instance_id();
-            tracing::warn!("DISCOVERY: Worker {worker_id} removed, removing from router indexer");
-
-            if let Err(e) = remove_worker_tx.send(worker_id).await {
-                tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
-            }
+        Err(e) => {
+            tracing::warn!("Failed to dump worker {worker_id}'s local indexer: {e}");
         }
     }
 }
@@ -824,6 +809,8 @@ pub async fn start_kv_router_background_event_plane(
     tokio::spawn(async move {
         // Track last received event ID per worker for gap detection
         let mut last_event_ids: HashMap<WorkerId, u64> = HashMap::new();
+        // Track newly added workers waiting for runtime config before recovery
+        let mut newly_added_workers: HashSet<WorkerId> = HashSet::new();
 
         loop {
             tokio::select! {
@@ -834,19 +821,63 @@ pub async fn start_kv_router_background_event_plane(
                     break;
                 }
 
+                // Handle runtime config changes - check if any pending workers now have config
+                result = worker_query_client.wait_for_config_change(), if !newly_added_workers.is_empty() => {
+                    if result.is_err() {
+                        tracing::warn!("Runtime config watch sender dropped");
+                        continue;
+                    }
+
+                    // Check each pending worker - only process those whose config is now available
+                    let pending: Vec<_> = newly_added_workers.iter().copied().collect();
+                    for worker_id in pending {
+                        if worker_query_client.has_config(worker_id) {
+                            newly_added_workers.remove(&worker_id);
+                            if worker_query_client.has_local_indexer(worker_id) {
+                                handle_worker_added(worker_id, &worker_query_client, &kv_events_tx).await;
+                            } else {
+                                tracing::debug!(
+                                    "DISCOVERY: Worker {worker_id} config available, but local indexer not enabled"
+                                );
+                            }
+                        }
+                        // If config still not available, keep in pending set for next change notification
+                    }
+                }
+
                 // Handle generate endpoint instance add/remove events
                 Some(discovery_event_result) = instance_event_stream.next() => {
                     let Ok(event) = discovery_event_result else {
                         continue;
                     };
 
-                    handle_worker_discovery(
-                        event,
-                        &worker_query_client,
-                        &kv_events_tx,
-                        &remove_worker_tx,
-                    )
-                    .await;
+                    match event {
+                        DiscoveryEvent::Added(instance) => {
+                            let worker_id = instance.instance_id();
+
+                            if worker_query_client.has_config(worker_id) {
+                                // Config is available - recover if local indexer is enabled
+                                if worker_query_client.has_local_indexer(worker_id) {
+                                    handle_worker_added(worker_id, &worker_query_client, &kv_events_tx).await;
+                                } else {
+                                    tracing::debug!(
+                                        "DISCOVERY: Worker {worker_id} added, but local indexer not enabled"
+                                    );
+                                }
+                            } else {
+                                // Config not ready yet, wait for change_rx notification
+                                tracing::info!(
+                                    "DISCOVERY: Worker {worker_id} added, waiting for runtime config before recovery"
+                                );
+                                newly_added_workers.insert(worker_id);
+                            }
+                        }
+                        DiscoveryEvent::Removed(id) => {
+                            let worker_id = id.instance_id();
+                            newly_added_workers.remove(&worker_id);
+                            handle_worker_removal(worker_id, &remove_worker_tx).await;
+                        }
+                    }
                 }
 
                 // Handle event consumption from event plane subscription

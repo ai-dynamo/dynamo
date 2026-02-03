@@ -47,6 +47,20 @@ impl WorkerQueryClient {
         self.subscriber.wait_for_some().await
     }
 
+    /// Wait for runtime config changes.
+    /// Returns Ok(()) when configs have changed, or Err if the sender was dropped.
+    pub async fn wait_for_config_change(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.subscriber.change_rx.changed().await
+    }
+
+    /// Check if a worker has a runtime config available (Some).
+    pub fn has_config(&self, worker_id: WorkerId) -> bool {
+        self.subscriber
+            .configs
+            .get(&worker_id)
+            .is_some_and(|entry| entry.value().is_some())
+    }
+
     /// Check if a worker has local indexer enabled
     pub fn has_local_indexer(&self, worker_id: WorkerId) -> bool {
         self.subscriber
