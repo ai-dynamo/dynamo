@@ -38,6 +38,7 @@ use crate::{
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
+            images::{NvCreateImageRequest, NvImagesResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
@@ -619,6 +620,19 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
+            // Case: Text + Images (diffusion models)
+            // Takes text prompts as input, generates images
+            let push_router = PushRouter::<
+                NvCreateImageRequest,
+                Annotated<NvImagesResponse>,
+            >::from_client_with_threshold(
+                client, self.router_config.router_mode, None, None
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_images_model(card.name(), checksum, engine)?;
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens
@@ -656,7 +670,7 @@ impl ModelWatcher {
             // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions|Prefill), Text+Chat, Text+Completions, Tokens+Embeddings, Tensor+TensorBased",
+                Tokens+(Chat|Completions|Prefill), Text+(Chat|Completions|Images), Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
             );
