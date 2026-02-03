@@ -89,6 +89,11 @@ type ProfilingConfigSpec struct {
 	// For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
 	// +kubebuilder:validation:Optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.
+	// For example, to schedule on ARM64 nodes, use {"kubernetes.io/arch": "arm64"}.
+	// +kubebuilder:validation:Optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.

@@ -302,6 +302,13 @@ spec:
                             type: string
                         type: object
                       type: array
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.
+                        For example, to schedule on ARM64 nodes, use {"kubernetes.io/arch": "arm64"}.
+                      type: object
                   required:
                     - profilerImage
                   type: object

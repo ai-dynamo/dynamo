@@ -1212,6 +1212,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			podSpec.Tolerations = dgdr.Spec.ProfilingConfig.Tolerations
 		}
 
+		// Apply nodeSelector if specified in the DGDR
+		if len(dgdr.Spec.ProfilingConfig.NodeSelector) > 0 {
+			podSpec.NodeSelector = dgdr.Spec.ProfilingConfig.NodeSelector
+		}
+
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
