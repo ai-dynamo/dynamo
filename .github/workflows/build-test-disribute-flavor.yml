@@ -259,7 +259,6 @@ jobs:
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
         uses: ./.github/actions/pytest
-        if:  ${{ !(inputs.framework == 'trtllm' && matrix.platform == 'arm64') }} # trtllm tests on arm64 are not supported
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ format('pre_merge and {0} and gpu_0', inputs.framework) }}
@@ -290,12 +289,11 @@ jobs:
 # ============================================================================
   copy-to-acr:
     needs: [build, test]
-    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped) and we are on amd64
+    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped) 
     if: |
       always() &&
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
-      inputs.platform == 'amd64' &&  
       (needs.test.result == 'success' || needs.test.result == 'skipped')
     name: copy ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-default-small-v2
