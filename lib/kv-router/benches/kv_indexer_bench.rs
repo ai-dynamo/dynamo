@@ -779,11 +779,12 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
         let _ = indexer.find_matches(seq.local_hashes.clone()).await;
         baseline_durations.push(start.elapsed());
     }
-    let baseline_service_time = median(&baseline_durations);
-    let theoretical_max = 1.0 / baseline_service_time.as_secs_f64();
+    let stats = LatencyStats::from_durations(baseline_durations.clone()).unwrap();
+    let baseline_service_time = stats.p50;
+    let theoretical_max = stats.throughput_ops_sec;
 
     println!(
-        "  Baseline find_matches latency: {:?} (median of 10)",
+        "  Baseline find_matches latency: {:?} (p50 of 10)",
         baseline_service_time
     );
     println!(

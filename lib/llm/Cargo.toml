@@ -28,6 +28,7 @@ integration = ["dynamo-runtime/integration"]
 media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
 kv-router-stress = ["dep:clap", "dep:indicatif"]
+bench = ["dynamo-kv-router/bench"]
 
 [[bench]]
 name = "tokenizer"

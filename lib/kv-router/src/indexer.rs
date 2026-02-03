@@ -31,6 +31,7 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
+#[cfg(feature = "bench")]
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -338,6 +339,7 @@ pub struct MatchRequest {
     /// A channel sender to send the `OverlapScores` response.
     resp: oneshot::Sender<OverlapScores>,
     /// Timestamp when the request was created (for queue wait time measurement)
+    #[cfg(feature = "bench")]
     created_at: Instant,
 }
 
@@ -653,14 +655,19 @@ impl KvIndexer {
                         }
 
                         Some(req) = match_rx.recv() => {
+                            #[cfg(feature = "bench")]
                             let queue_wait = req.created_at.elapsed();
+                            #[cfg(feature = "bench")]
                             let seq_len = req.sequence.len();
 
+                            #[cfg(feature = "bench")]
                             let process_start = Instant::now();
                             let matches = trie.find_matches(req.sequence, req.early_exit);
+                            #[cfg(feature = "bench")]
                             let process_time = process_start.elapsed();
 
-                            tracing::trace!(
+                            #[cfg(feature = "bench")]
+                            tracing::info!(
                                 seq_len,
                                 queue_wait_us = queue_wait.as_micros() as u64,
                                 process_us = process_time.as_micros() as u64,
@@ -764,14 +771,22 @@ impl KvIndexerInterface for KvIndexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
+        #[cfg(feature = "bench")]
         let start = Instant::now();
         let seq_len = sequence.len();
         let (resp_tx, resp_rx) = oneshot::channel();
+        #[cfg(feature = "bench")]
         let req = MatchRequest {
             sequence,
             early_exit: false,
             resp: resp_tx,
             created_at: start,
+        };
+        #[cfg(not(feature = "bench"))]
+        let req = MatchRequest {
+            sequence,
+            early_exit: false,
+            resp: resp_tx,
         };
 
         if let Err(e) = self.match_tx.send(req).await {
@@ -786,12 +801,17 @@ impl KvIndexerInterface for KvIndexer {
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest);
 
-        let elapsed = start.elapsed();
-        tracing::trace!(
-            seq_len,
-            elapsed_us = elapsed.as_micros() as u64,
-            "find_matches completed"
-        );
+        #[cfg(feature = "bench")]
+        {
+            let elapsed = start.elapsed();
+            tracing::info!(
+                seq_len,
+                elapsed_us = elapsed.as_micros() as u64,
+                "find_matches completed"
+            );
+        }
+        #[cfg(not(feature = "bench"))]
+        let _ = seq_len;
 
         result
     }
@@ -1165,6 +1185,7 @@ pub struct ShardedMatchRequest {
     sequence: Vec<LocalBlockHash>,
     early_exit: bool,
     resp: mpsc::Sender<OverlapScores>,
+    #[cfg(feature = "bench")]
     created_at: Instant,
 }
 
@@ -1409,14 +1430,19 @@ impl KvIndexerSharded {
                             }
 
                             Ok(req) = shard_broadcast_rx.recv() => {
+                                #[cfg(feature = "bench")]
                                 let queue_wait = req.created_at.elapsed();
+                                #[cfg(feature = "bench")]
                                 let seq_len = req.sequence.len();
 
+                                #[cfg(feature = "bench")]
                                 let process_start = Instant::now();
                                 let matches = trie.find_matches(req.sequence, req.early_exit);
+                                #[cfg(feature = "bench")]
                                 let process_time = process_start.elapsed();
 
-                                tracing::trace!(
+                                #[cfg(feature = "bench")]
+                                tracing::info!(
                                     seq_len,
                                     queue_wait_us = queue_wait.as_micros() as u64,
                                     process_us = process_time.as_micros() as u64,
@@ -1489,19 +1515,30 @@ impl KvIndexerInterface for KvIndexerSharded {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
+        #[cfg(feature = "bench")]
         let start = Instant::now();
+        #[cfg(feature = "bench")]
         let seq_len = sequence.len();
+        #[cfg(feature = "bench")]
         let num_shards = self.event_tx.len();
 
         'match_loop: loop {
             let (match_tx, mut match_rx) = mpsc::channel(self.event_tx.len());
+            #[cfg(feature = "bench")]
+            let sharded_req = ShardedMatchRequest {
+                sequence: sequence.clone(),
+                early_exit: false,
+                resp: match_tx,
+                created_at: Instant::now(),
+            };
+            #[cfg(not(feature = "bench"))]
+            let sharded_req = ShardedMatchRequest {
+                sequence: sequence.clone(),
+                early_exit: false,
+                resp: match_tx,
+            };
             self.request_broadcast_tx
-                .send(ShardedMatchRequest {
-                    sequence: sequence.clone(),
-                    early_exit: false,
-                    resp: match_tx,
-                    created_at: Instant::now(),
-                })
+                .send(sharded_req)
                 .map_err(|_| KvRouterError::IndexerOffline)?;
 
             let mut scores = OverlapScores::new();
@@ -1535,13 +1572,16 @@ impl KvIndexerInterface for KvIndexerSharded {
                 }
             }
 
-            let elapsed = start.elapsed();
-            tracing::trace!(
-                seq_len,
-                num_shards,
-                elapsed_us = elapsed.as_micros() as u64,
-                "find_matches (sharded) completed"
-            );
+            #[cfg(feature = "bench")]
+            {
+                let elapsed = start.elapsed();
+                tracing::info!(
+                    seq_len,
+                    num_shards,
+                    elapsed_us = elapsed.as_micros() as u64,
+                    "find_matches (sharded) completed"
+                );
+            }
             return Ok(scores);
         }
     }
