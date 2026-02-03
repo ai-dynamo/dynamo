@@ -465,20 +465,11 @@ impl ModelWatcher {
             // Get or create the worker monitor for this model.
             // Always create the monitor for Prometheus metrics (active_decode_blocks, active_prefill_tokens,
             // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
-            // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
-            let active_decode_blocks = self
-                .router_config
-                .active_decode_blocks_threshold
-                .unwrap_or(1.0);
-            let active_prefill_tokens = self
-                .router_config
-                .active_prefill_tokens_threshold
-                .unwrap_or(1000000);
+            // LoadThresholdConfig allows dynamic threshold updates via the ModelManager.
             let worker_monitor = Some(self.manager.get_or_create_worker_monitor(
                 card.name(),
                 client.clone(),
-                active_decode_blocks,
-                active_prefill_tokens,
+                self.router_config.load_threshold_config.clone(),
             ));
 
             // Add chat engine only if the model supports chat
