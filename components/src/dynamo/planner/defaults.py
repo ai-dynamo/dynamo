@@ -184,9 +184,10 @@ class Service(BaseModel):
         return None
 
     def get_gpu_count(self) -> int:
-        """Get the GPU count from the service's resource limits.
+        """Get the GPU count from the service's resource specification.
 
-        GPU count is read from spec.services.[ServiceName].resources.limits.gpu
+        GPU count is read from spec.services.[ServiceName].resources.limits.gpu,
+        falling back to requests.gpu if limits is not specified.
 
         Returns:
             The number of GPUs configured for this service
@@ -196,12 +197,17 @@ class Service(BaseModel):
         """
         resources = self.service.get("resources", {})
         limits = resources.get("limits", {})
-        gpu_str = limits.get("gpu")
+        requests = resources.get("requests", {})
+
+        # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
+        # typically treat requests and limits as equivalent since GPUs are
+        # non-compressible and allocated exclusively (no fractional sharing).
+        gpu_str = limits.get("gpu") or requests.get("gpu")
 
         if gpu_str is None:
             raise ValueError(
                 f"No GPU count specified for service '{self.name}'. "
-                f"Please set resources.limits.gpu in the DGD."
+                f"Please set resources.limits.gpu or resources.requests.gpu in the DGD."
             )
 
         try:
