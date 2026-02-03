@@ -41,7 +41,7 @@ def render(args, context, script_dir):
 
     if args.full_output == True:
         filename = f"{args.framework}-{args.target}-cuda{args.cuda_version}-{args.platform}.Dockerfile"
-    else
+    else:
         filename = "rendered.Dockerfile"
 
     with open(f"{script_dir}/{filename}", "w") as f:
