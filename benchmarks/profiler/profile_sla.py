@@ -172,7 +172,7 @@ async def run_profile(args):
         logger.info(f"Profiling GPU counts: {profile_num_gpus}")
         os.makedirs(args.output_dir, exist_ok=True)
 
-        model_name = config_modifier.get_model_name(config)
+        model_name, model_path = config_modifier.get_model_name(config)
 
         # Determine sweep max context length: allow user-provided cap to override model's if smaller
         use_specified_max_context_len = getattr(args, "max_context_length", None)
@@ -314,7 +314,7 @@ async def run_profile(args):
                         args.isl,
                         ai_perf_artifact_dir,
                         model_name,
-                        model_name,
+                        model_path,
                         base_url,
                         attention_dp_size=mapping.get_attn_dp_size(),
                     )
@@ -461,7 +461,7 @@ async def run_profile(args):
                                 num_request,
                                 ai_perf_artifact_dir,
                                 model_name,
-                                model_name,
+                                model_path,
                                 base_url=base_url,
                                 num_gpus=num_gpus,
                                 attention_dp_size=mapping.get_attn_dp_size(),
@@ -655,7 +655,7 @@ async def run_profile(args):
             profile_prefill(
                 work_dir,
                 model_name,
-                model_name,
+                model_path,
                 base_url,
                 best_prefill_gpus,
                 sweep_max_context_length,
@@ -742,7 +742,7 @@ async def run_profile(args):
             profile_decode(
                 work_dir,
                 model_name,
-                model_name,
+                model_path,
                 base_url,
                 best_decode_gpus,
                 max_kv_tokens,
