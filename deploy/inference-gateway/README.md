@@ -146,6 +146,18 @@ kubectl apply -f operator-managed/examples/agg.yaml -n ${NAMESPACE}
 kubectl apply -f operator-managed/examples/http-route.yaml -n ${NAMESPACE}
 ```
 
+**Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
+If your model takes longer to load, increase the `failureThreshold` in the EPP's `startupProbe`. For example,
+to allow 60 minutes for startup:
+
+```yaml
+extraPodSpec:
+  mainContainer:
+    startupProbe:
+      failureThreshold: 360  # 10s × 360 = 60 minutes
+```
+
+**Gateway Namespace**
 Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
 If you installed it into a different namespace, you need to adjust the HttpRoute entry in http-route.yaml.
 
