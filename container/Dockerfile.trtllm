@@ -827,6 +827,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt \
         cupy-cuda13x
 
+# Upgrade NCCL to 2.29.3+ which includes ncclAlltoAll (required for KVBM NCCL replicated mode)
+# The base nvidia-nccl-cu13 2.27.7 on ARM64 is missing ncclAlltoAll symbol
+RUN uv pip install --no-cache --upgrade "nvidia-nccl-cu13>=2.29.3"
+
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
