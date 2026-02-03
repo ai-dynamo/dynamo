@@ -78,6 +78,17 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
     if rank != 0:
         bootstrap = NcclBootstrap.deserialize(bootstrap_data)
 
+    # Ensure CUDA device is set correctly for this rank
+    # In TRT-LLM TP mode, each rank should be on its own GPU
+    current_device = torch.cuda.current_device()
+    logger.debug(f"KVBM: Rank {rank} using CUDA device {current_device}")
+
+    # Synchronize all ranks before NCCL initialization
+    # This ensures all processes are ready before the collective call
+    logger.debug(f"KVBM: Rank {rank} waiting at barrier before ncclCommInitRank")
+    comm.Barrier()
+    logger.debug(f"KVBM: Rank {rank} passed barrier, calling ncclCommInitRank")
+
     # All ranks collectively initialize (must be called together)
     # This is a blocking collective operation
     nccl_comm_ptr = bootstrap.init_communicator(rank)
