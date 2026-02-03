@@ -34,11 +34,12 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
+from dynamo.multimodal_utils.image_batch_loader import load_image_batch
+from dynamo.multimodal_utils.image_loader import ImageLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
-from .multimodal_utils.image_loader import ImageLoader
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -970,7 +971,9 @@ class BaseWorkerHandler(ABC):
         vllm_mm_data = {}
 
         # Process image_url entries
-        images = await self._load_image_batch(mm_map.get(IMAGE_URL_KEY, []))
+        images = await load_image_batch(
+            mm_map.get(IMAGE_URL_KEY, []), self.image_loader
+        )
 
         if images:
             # vLLM expects single image or list
