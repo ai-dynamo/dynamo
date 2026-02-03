@@ -13,8 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: v1
-kind: ServiceAccount
+# NOTE: You can remove metadata.namespace if using kubectl apply -n
+# The backendRefs.namespace field should match where your InferencePool is deployed
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
-  name: epp-sa
-# no metadata.namespace (kubectl -n sets it)
+  name: llama3-70b-agg-route
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+      namespace: kgateway-system
+  rules:
+    - backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: llama3-70b-agg-pool
+          port: 8000
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 300s
