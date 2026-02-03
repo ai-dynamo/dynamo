@@ -6,7 +6,7 @@ name: PR
 on:
   push:
     branches:
-      - ops-2572 #todo remove
+      - ops-2572
       - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
