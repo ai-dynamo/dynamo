@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "NVIDIA Dynamo Glossary"
 ---
+
+# NVIDIA Dynamo Glossary
 
 ## B
 **Block** - A fixed-size chunk of tokens (typically 16 or 64 tokens) used for efficient KV cache management and memory allocation, serving as the fundamental unit for techniques like PagedAttention.

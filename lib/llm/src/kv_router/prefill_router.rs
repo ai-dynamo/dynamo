@@ -266,10 +266,12 @@ impl PrefillRouter {
                 InnerPrefillRouter::KvRouter(r) => r,
                 _ => return None,
             };
+            // Extract LORA name from routing hints
+            let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
             match async {
                 kv_router
                     .chooser
-                    .find_best_match(None, &req.token_ids, None, false)
+                    .find_best_match(None, &req.token_ids, None, false, lora_name)
                     .await
             }
             .instrument(tracing::info_span!("kv_find_best_match"))
