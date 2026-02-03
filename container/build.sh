@@ -301,7 +301,7 @@ get_options() {
             ;;
         --tag)
             if [ "$2" ]; then
-                TAG="--tag $2"
+                TAG+=" --tag $2"
                 shift
             else
                 missing_requirement "$1"
@@ -540,7 +540,7 @@ show_help() {
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
-    echo "  [--tag tag for image]"
+    echo "  [--tag tag for image (can be specified multiple times)]"
     echo "  [--uid user ID for local-dev images (only with --target local-dev)]"
     echo "  [--gid group ID for local-dev images (only with --target local-dev)]"
     echo "  [--no-cache disable docker build cache]"
