@@ -480,6 +480,7 @@ impl LocalModel {
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
+        self.card.lora_name = lora_name.map(|name| name.to_string());
 
         // Compute model_suffix from lora_name if present
         let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());

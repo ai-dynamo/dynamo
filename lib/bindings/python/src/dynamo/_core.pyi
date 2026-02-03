@@ -129,16 +129,6 @@ class Namespace:
         """
         ...
 
-    @property
-    def metrics(self) -> PyRuntimeMetrics:
-        """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
-
-        Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
-        """
-        ...
-
 class Component:
     """
     A component is a collection of endpoints
@@ -152,15 +142,6 @@ class Component:
         """
         ...
 
-    @property
-    def metrics(self) -> PyRuntimeMetrics:
-        """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
-
-        Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
-        """
-        ...
 
 class Endpoint:
     """
@@ -198,10 +179,10 @@ class Endpoint:
     @property
     def metrics(self) -> PyRuntimeMetrics:
         """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
+        Get a PyRuntimeMetrics helper for registering Prometheus metrics callbacks.
 
         Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
+            A PyRuntimeMetrics object for callback registration
         """
         ...
 
@@ -397,86 +378,9 @@ class Context:
         """
         ...
 
-class WorkerStats:
-    """
-    Worker stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        request_active_slots: int,
-        request_total_slots: int,
-        num_requests_waiting: int,
-        data_parallel_rank: Optional[int] = None,
-    ) -> None:
-        """
-        Create a `WorkerStats` object.
-        """
-        ...
-
-class KvStats:
-    """
-    KV stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        kv_active_blocks: int,
-        kv_total_blocks: int,
-        gpu_cache_usage_perc: float,
-        gpu_prefix_cache_hit_rate: float,
-    ) -> None:
-        """
-        Create a `KvStats` object.
-        """
-        ...
-
-class SpecDecodeStats:
-    """
-    Speculative decoding stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        num_spec_tokens: int,
-        num_drafts: int,
-        num_draft_tokens: int,
-        num_accepted_tokens: int,
-        num_accepted_tokens_per_pos: List[int],
-    ) -> None:
-        """
-        Create a `SpecDecodeStats` object when running with speculative decoding.
-        """
-        ...
-
-class ForwardPassMetrics:
-    """
-    A collection of metrics for a forward pass.
-    Includes worker stats, KV stats, and speculative decoding stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        worker_stats: WorkerStats,
-        kv_stats: KvStats,
-        spec_decode_stats: Optional[SpecDecodeStats] = None,
-    ) -> None:
-        """
-        Create a `ForwardPassMetrics` object
-        """
-        ...
-
 class WorkerMetricsPublisher:
     """
-    A metrics publisher will provide metrics to the router.
+    A metrics publisher will provide metrics to the router for load monitoring.
     """
 
     ...
@@ -486,8 +390,10 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component) -> None:
+    async def create_endpoint(self, component: Component) -> None:
         """
+        Create the NATS endpoint for metrics publishing. Must be awaited.
+
         Only service created through this method will interact with KV router of the same component.
 
         Args:
@@ -496,10 +402,15 @@ class WorkerMetricsPublisher:
 
     def publish(
         self,
-        metrics: ForwardPassMetrics
+        dp_rank: Optional[int],
+        active_decode_blocks: int,
     ) -> None:
         """
-        Update the metrics being reported.
+        Publish worker metrics for load monitoring.
+
+        Args:
+            dp_rank: Data parallel rank of the worker (None defaults to 0)
+            active_decode_blocks: Number of active KV cache blocks
         """
         ...
 
@@ -842,7 +753,6 @@ class KvEventPublisher:
 
     def publish_stored(
         self,
-        event_id: int,
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
@@ -852,8 +762,9 @@ class KvEventPublisher:
         """
         Publish a KV stored event.
 
+        Event IDs are managed internally by the publisher using a monotonic counter.
+
         Args:
-            event_id: The event ID
             token_ids: List of token IDs
             num_block_tokens: Number of tokens per block
             block_hashes: List of block hashes (signed 64-bit integers)
@@ -862,12 +773,13 @@ class KvEventPublisher:
         """
         ...
 
-    def publish_removed(self, event_id: int, block_hashes: List[int]) -> None:
+    def publish_removed(self, block_hashes: List[int]) -> None:
         """
         Publish a KV removed event.
 
+        Event IDs are managed internally by the publisher using a monotonic counter.
+
         Args:
-            event_id: The event ID
             block_hashes: List of block hashes to remove (signed 64-bit integers)
         """
         ...
@@ -879,7 +791,8 @@ class ZmqKvEventPublisherConfig:
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
         zmq_topic: str = "",
-        enable_local_indexer: bool = False
+        enable_local_indexer: bool = False,
+        dp_rank: int = 0
     ) -> None:
         """
         Configuration for the ZmqKvEventPublisher.
@@ -889,6 +802,7 @@ class ZmqKvEventPublisherConfig:
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
         :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
+        :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
         """
         ...
 
@@ -1170,9 +1084,10 @@ def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
-async def fetch_llm(remote_name: str) -> str:
+async def fetch_llm(remote_name: str, ignore_weights: bool = False) -> str:
     """
     Download a model from Hugging Face, returning it's local path.
+    If `ignore_weights` is True, only fetches tokenizer and config files.
     Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
     """
     ...
@@ -1398,15 +1313,6 @@ class BlockManager:
             List of allocated blocks
         """
         ...
-
-class KvbmCacheManager:
-    """
-    A KV cache manager for VLLM
-    """
-
-    def __init__(self, block_manager: BlockManager) -> None:
-        ...
-
 
 class KvbmRequest:
     """

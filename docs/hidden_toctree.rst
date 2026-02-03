@@ -82,6 +82,8 @@
 
    benchmarks/kv-router-ab-testing.md
 
+   mocker/mocker.md
+
    frontends/kserve.md
    _sections/frontends.rst
 

@@ -108,6 +108,10 @@ STUB_MODULES = [
     "botocore",
     "botocore.client",
     "botocore.exceptions",
+    "pynvml",
+    "gpu_memory_service",
+    "gpu_memory_service.common",
+    "gpu_memory_service.common.utils",
 ]
 
 # Project paths for local imports

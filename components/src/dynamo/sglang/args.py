@@ -108,7 +108,7 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "type": str,
         "choices": ["etcd", "file", "mem"],
         "default": os.environ.get("DYN_STORE_KV", "etcd"),
-        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     },
     "request-plane": {
         "flags": ["--request-plane"],
@@ -116,6 +116,13 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "choices": ["nats", "http", "tcp"],
         "default": os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         "help": "Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    },
+    "event-plane": {
+        "flags": ["--event-plane"],
+        "type": str,
+        "choices": ["nats", "zmq"],
+        "default": os.environ.get("DYN_EVENT_PLANE", "nats"),
+        "help": "Determines how events are published [nats|zmq]",
     },
     "enable-local-indexer": {
         "flags": ["--enable-local-indexer"],
@@ -135,6 +142,7 @@ class DynamoArgs:
     migration_limit: int
     store_kv: str
     request_plane: str
+    event_plane: str
 
     # tool and reasoning parser options
     tool_call_parser: Optional[str] = None
@@ -196,6 +204,7 @@ class Config:
 def _preprocess_for_encode_config(
     config: Config,
 ) -> Dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+    """Convert Config object to dictionary for encoding."""
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
@@ -357,6 +366,13 @@ async def parse_args(args: list[str]) -> Config:
     # SGLang args
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
+
+    # Add "gms" to --load-format choices so it passes argparse validation.
+    # The actual loader class is set in main.py when load_format == "gms".
+    for action in parser._actions:
+        if getattr(action, "dest", None) == "load_format" and action.choices:
+            action.choices = list(action.choices) + ["gms"]
+            break
 
     # Handle config file if present
     temp_config_file = None  # Track temp file for cleanup
@@ -549,6 +565,7 @@ async def parse_args(args: list[str]) -> Config:
         migration_limit=parsed_args.migration_limit,
         store_kv=parsed_args.store_kv,
         request_plane=parsed_args.request_plane,
+        event_plane=parsed_args.event_plane,
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,

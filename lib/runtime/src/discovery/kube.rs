@@ -132,6 +132,21 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_model_card(instance.clone())?;
             }
+            DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                topic,
+                ..
+            } => {
+                tracing::info!(
+                    "Registering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
+                    namespace,
+                    component,
+                    topic,
+                    instance_id
+                );
+                metadata.register_event_channel(instance.clone())?;
+            }
         }
 
         // Build and apply the CR with the updated metadata
@@ -188,6 +203,21 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.unregister_model_card(&instance)?;
+            }
+            DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                topic,
+                ..
+            } => {
+                tracing::info!(
+                    "Unregistering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
+                    namespace,
+                    component,
+                    topic,
+                    instance_id
+                );
+                metadata.unregister_event_channel(&instance)?;
             }
         }
 

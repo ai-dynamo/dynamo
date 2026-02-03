@@ -237,7 +237,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         config: Config,
         prefill_client: Client = None,
     ):
-        super().__init__(component, engine, config, None, prefill_client)
+        super().__init__(component, engine, config, None)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
@@ -400,9 +400,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         return bootstrap_info
 
     def cleanup(self):
+        super().cleanup()
         self.engine.shutdown()
         logger.info("Multimodal worker engine shutdown")
-        super().cleanup()
 
 
 class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
@@ -515,6 +515,6 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
             pass
 
     def cleanup(self):
+        super().cleanup()
         self.engine.shutdown()
         logger.info("Multimodal prefill engine shutdown")
-        super().cleanup()

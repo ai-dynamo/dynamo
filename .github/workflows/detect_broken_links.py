@@ -289,6 +289,15 @@ def find_markdown_files(root_dir: str, logger: logging.Logger) -> List[Path]:
         logger.error(error_msg)
         raise ValueError(error_msg)
 
+    # Patterns for files to skip (attribution files, etc.)
+    skip_patterns = [
+        "ATTRIBUTION",
+        "ATTRIBUTIONS",
+        "THIRD_PARTY",
+        "THIRD-PARTY",
+        "LICENSES",
+    ]
+
     md_files = []
 
     if root_path.is_file():
@@ -302,6 +311,11 @@ def find_markdown_files(root_dir: str, logger: logging.Logger) -> List[Path]:
         # If it's a directory, find all .md files recursively
         logger.debug(f"Scanning directory recursively: {root_path}")
         for file_path in root_path.rglob("*.md"):
+            # Skip attribution files
+            file_name_upper = file_path.name.upper()
+            if any(pattern in file_name_upper for pattern in skip_patterns):
+                logger.debug(f"Skipping attribution file: {file_path}")
+                continue
             md_files.append(file_path)
 
         logger.info(f"Found {len(md_files)} markdown files in {root_dir}")
@@ -400,15 +414,15 @@ def resolve_link_path(
         logger.debug(f"Absolute filesystem path detected: {link_url}")
         return Path(link_url)
 
-    # Handle symlinks: resolve relative paths from the target's directory, not the symlink's directory
+    # For symlinks, resolve relative paths from the symlink's location, not the
+    # target's location. This matches GitHub's behavior where links in symlinked
+    # files are resolved relative to the symlink
+    source_dir = source_file.parent
     if source_file.is_symlink():
-        # Get the real path (target) of the symlink
-        real_source_file = source_file.resolve()
-        source_dir = real_source_file.parent
-        logger.debug(f"Source file is a symlink, using target directory: {source_dir}")
-    else:
-        # Resolve relative path from the source file's directory
-        source_dir = source_file.parent
+        logger.debug(
+            f"Source file is a symlink, resolving links from symlink location: "
+            f"{source_dir}"
+        )
 
     resolved_path = source_dir / link_url
 
@@ -472,42 +486,96 @@ def validate_links(
                     link_url, md_file, logger, git_root_dir
                 )
 
-                # Only check if the target should be a markdown file
-                if is_markdown_file(resolved_path):
-                    if not resolved_path.exists():
-                        # Generate GitHub URL for the broken link line
-                        file_for_github = (
-                            path_relative_to_git_root(md_file, git_root_dir, logger)
-                            if git_root_dir
-                            else str(md_file)
-                        )
-                        github_url = (
-                            construct_github_url(
-                                file_for_github, git_info, logger, line_num
-                            )
-                            if git_info
-                            else ""
-                        )
+                # Determine if this is a markdown file, directory, or should be skipped
+                is_markdown = is_markdown_file(resolved_path)
+                is_directory_link = link_url.endswith("/") or (
+                    resolved_path.exists() and resolved_path.is_dir()
+                )
 
-                        broken_link_info = {
-                            "line": line_num,
-                            "link_text": link_text,
-                            "link_url": link_url,
-                            "resolved_path": str(resolved_path),
-                            "github_url": github_url,
-                        }
-                        broken_links.append(broken_link_info)
-                        total_broken_links += 1
-                        logger.warning(
-                            f"Broken link found in {md_file}:{line_num} - {link_url} -> {resolved_path}"
+                # Check if link has a non-markdown file extension (image, code file, etc.)
+                has_other_extension = (
+                    resolved_path.suffix
+                    and resolved_path.suffix.lower() not in [".md", ""]
+                )
+
+                # Skip non-markdown files (images, videos, code files, etc.)
+                # but validate markdown files and directory links (with or without trailing slash)
+                if not is_markdown and not is_directory_link and has_other_extension:
+                    logger.debug(
+                        f"Skipping non-markdown file link in {md_file}:{line_num} - {link_url}"
+                    )
+                    continue
+
+                # Validate the link
+                is_broken = False
+                error_reason = None
+
+                if is_markdown:
+                    # Check markdown file exists
+                    if not resolved_path.exists():
+                        is_broken = True
+                        error_reason = f"Markdown file does not exist: {resolved_path}"
+                    else:
+                        logger.debug(
+                            f"Valid markdown link in {md_file}:{line_num} - {link_url} -> {resolved_path}"
+                        )
+                elif is_directory_link:
+                    # It's a directory link (ends with / or resolves to existing directory)
+                    # Check if directory exists
+                    if not resolved_path.exists():
+                        is_broken = True
+                        error_reason = f"Directory does not exist: {resolved_path}"
+                    elif not resolved_path.is_dir():
+                        is_broken = True
+                        error_reason = (
+                            f"Path exists but is not a directory: {resolved_path}"
                         )
                     else:
                         logger.debug(
-                            f"Valid link in {md_file}:{line_num} - {link_url} -> {resolved_path}"
+                            f"Valid directory link in {md_file}:{line_num} - {link_url} -> {resolved_path}"
                         )
                 else:
-                    logger.debug(
-                        f"Skipping non-markdown link in {md_file}:{line_num} - {link_url}"
+                    # Link without extension that's not markdown or directory
+                    # Could be LICENSE, Makefile, etc. - check if it exists
+                    if not resolved_path.exists():
+                        is_broken = True
+                        error_reason = (
+                            f"File does not exist: {resolved_path}. "
+                            f"If this is a directory link, add a trailing slash (/)"
+                        )
+                    else:
+                        logger.debug(
+                            f"Valid file link in {md_file}:{line_num} - {link_url} -> {resolved_path}"
+                        )
+
+                # Report broken link if found
+                if is_broken:
+                    # Generate GitHub URL for the broken link line
+                    file_for_github = (
+                        path_relative_to_git_root(md_file, git_root_dir, logger)
+                        if git_root_dir
+                        else str(md_file)
+                    )
+                    github_url = (
+                        construct_github_url(
+                            file_for_github, git_info, logger, line_num
+                        )
+                        if git_info
+                        else ""
+                    )
+
+                    broken_link_info = {
+                        "line": line_num,
+                        "link_text": link_text,
+                        "link_url": link_url,
+                        "resolved_path": str(resolved_path),
+                        "error_reason": error_reason,
+                        "github_url": github_url,
+                    }
+                    broken_links.append(broken_link_info)
+                    total_broken_links += 1
+                    logger.warning(
+                        f"Broken link found in {md_file}:{line_num} - {link_url} -> {error_reason}"
                     )
 
             except Exception as e:
@@ -528,7 +596,8 @@ def validate_links(
                     "line": line_num,
                     "link_text": link_text,
                     "link_url": link_url,
-                    "resolved_path": f"ERROR: {e}",
+                    "resolved_path": "ERROR",
+                    "error_reason": f"Error resolving link: {e}",
                     "github_url": github_url,
                 }
                 broken_links.append(broken_link_info)

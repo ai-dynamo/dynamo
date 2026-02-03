@@ -176,10 +176,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<context::Context>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
-    m.add_class::<llm::kv::ForwardPassMetrics>()?;
-    m.add_class::<llm::kv::WorkerStats>()?;
-    m.add_class::<llm::kv::KvStats>()?;
-    m.add_class::<llm::kv::SpecDecodeStats>()?;
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
@@ -433,11 +429,17 @@ fn unregister_llm<'p>(
 /// Download a model from Hugging Face, returning it's local path
 /// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
 #[pyfunction]
-#[pyo3(signature = (remote_name))]
-fn fetch_llm<'p>(py: Python<'p>, remote_name: &str) -> PyResult<Bound<'p, PyAny>> {
+#[pyo3(signature = (remote_name, ignore_weights=false))]
+fn fetch_llm<'p>(
+    py: Python<'p>,
+    remote_name: &str,
+    ignore_weights: bool,
+) -> PyResult<Bound<'p, PyAny>> {
     let repo = remote_name.to_string();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        LocalModel::fetch(&repo, false).await.map_err(to_pyerr)
+        LocalModel::fetch(&repo, ignore_weights)
+            .await
+            .map_err(to_pyerr)
     })
 }
 
@@ -758,12 +760,6 @@ impl Component {
             event_loop: self.event_loop.clone(),
         })
     }
-
-    /// Get a RuntimeMetrics helper for creating Prometheus metrics
-    #[getter]
-    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
-        prometheus_metrics::RuntimeMetrics::from_component(self.inner.clone())
-    }
 }
 
 #[pymethods]
@@ -892,12 +888,6 @@ impl Namespace {
             inner,
             event_loop: self.event_loop.clone(),
         })
-    }
-
-    /// Get a RuntimeMetrics helper for creating Prometheus metrics
-    #[getter]
-    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
-        prometheus_metrics::RuntimeMetrics::from_namespace(self.inner.clone())
     }
 }
 
