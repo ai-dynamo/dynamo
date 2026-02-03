@@ -49,6 +49,7 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+      ecr_image_base: ${{ steps.export-builder-name.outputs.ecr_image_base }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -63,6 +64,7 @@ jobs:
         id: export-builder-name
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+          echo "ecr_image_base=${{ env.ECR_DEFAULT_IMAGE_BASE }}" >> $GITHUB_OUTPUT
 
 
   backend-status-check:
@@ -188,10 +190,10 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        "${{ env.ECR_DEFAULT_IMAGE_BASE }}:${{ github.ref_name == 'main' && 'main-vllm' || '' }}"
-        "${{ env.ECR_DEFAULT_IMAGE_BASE }}:${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}"
-        "${{ env.ECR_DEFAULT_IMAGE_BASE }}:${{ github.ref_name == 'ops-2572' && 'ops-2572-vllm' || '' }}"
-        "${{ env.ECR_DEFAULT_IMAGE_BASE }}:${{ github.ref_name == 'ops-2572' && format('ops-2572-vllm-{0}', github.sha) || '' }}"
+        "${{ needs.changed-files.outputs.ecr_image_base }}:${{ github.ref_name == 'main' && 'main-vllm' || '' }}"
+        "${{ needs.changed-files.outputs.ecr_image_base }}:${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}"
+        "${{ needs.changed-files.outputs.ecr_image_base }}:${{ github.ref_name == 'ops-2572' && 'ops-2572-vllm' || '' }}"
+        "${{ needs.changed-files.outputs.ecr_image_base }}:${{ github.ref_name == 'ops-2572' && format('ops-2572-vllm-{0}', github.sha) || '' }}"
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
