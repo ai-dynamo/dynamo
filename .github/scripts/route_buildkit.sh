@@ -123,7 +123,7 @@ get_active_indices() {
   # Loop through theoretical indices to see which ones actually resolve via DNS.
   for (( i=0; i<MAX_POD_CHECK; i++ )); do
     local pod_dns="buildkit-${arch}-${i}.${service_name}.${NAMESPACE}.svc.cluster.local"
-    
+
     # Check if this specific pod resolves
     if nslookup "$pod_dns" >/dev/null 2>&1; then
       active_indices+=("$i")
@@ -169,9 +169,9 @@ get_target_indices() {
   esac
 
   echo "    [DEBUG] Routing Key: '$route_key' -> Worker Index Modulo: $target_mod" >&2
-  
+
   local final_targets=()
-  
+
   # Filter the AVAILABLE indices (not just 0..count)
   for idx in "${available_indices[@]}"; do
     if [ $(( idx % 3 )) -eq "$target_mod" ]; then
@@ -215,7 +215,7 @@ for ARCH in "${ARCHS[@]}"; do
       # Re-probe for active indices
       ACTIVE_INDICES=($(get_active_indices "$ARCH" "$SERVICE_NAME"))
       COUNT=${#ACTIVE_INDICES[@]}
-      
+
       if [ "$COUNT" -gt "0" ]; then
         echo "✅ BuildKit pods for ${ARCH} are now available!"
         break
@@ -224,7 +224,7 @@ for ARCH in "${ARCHS[@]}"; do
       if [ "$retry" -eq "$MAX_RETRIES" ]; then
         echo "::warning::No remote BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts. Falling back to Kubernetes driver."
         echo "⚠️  Warning: No remote BuildKit pods available for ${ARCH}."
-        
+
         for flavor in "${FLAVORS[@]}"; do
           echo "${flavor}_${ARCH}=" >> "$GITHUB_OUTPUT"
         done

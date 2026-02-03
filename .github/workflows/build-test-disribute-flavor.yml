@@ -289,7 +289,7 @@ jobs:
 # ============================================================================
   copy-to-acr:
     needs: [build, test]
-    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped) 
+    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
     if: |
       always() &&
       inputs.copy_to_acr &&

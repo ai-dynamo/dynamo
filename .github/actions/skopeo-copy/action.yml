@@ -24,7 +24,7 @@ inputs:
     description: 'Multiple target tags (comma-separated list)'
     required: false
     default: ''
-  
+
   # Skopeo Login inputs for source registry
   source_aws_default_region:
     description: 'AWS Default Region for source ECR'

@@ -125,7 +125,7 @@ runs:
             echo "🔍 Mypy type checking enabled"
             MYPY_FLAG="--mypy"
           fi
-          
+
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
           # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
@@ -135,7 +135,7 @@ runs:
           else
             echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
           fi
-          
+
           # Determine parallelization based on parallel_mode input
           case "${{ inputs.parallel_mode }}" in
             "auto")
@@ -151,7 +151,7 @@ runs:
               echo "📊 Parallelization: ${{ inputs.parallel_mode }} workers"
               ;;
           esac
-          
+
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
           PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""

@@ -133,7 +133,7 @@ runs:
 
         echo "$EXTRA_ARGS"
         # Collect optional overrides provided by the workflow
-        
+
         if [[ "${{ inputs.ci }}" == "true" ]]; then
           # CI mode for frontend: use existing buildx builder, push EPP to registry
           EXTRA_ARGS+=" --ci"
