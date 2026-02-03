@@ -1095,7 +1095,9 @@ impl ActiveSequencesMultiWorker {
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
+        #[cfg(feature = "bench")]
         let start = Instant::now();
+        #[cfg(feature = "bench")]
         let num_workers = self.senders.len();
 
         let mut potential_blocks = HashMap::new();
@@ -1129,6 +1131,7 @@ impl ActiveSequencesMultiWorker {
             }
         }
 
+        #[cfg(feature = "bench")]
         let send_elapsed = start.elapsed();
 
         // Collect results from all workers
@@ -1147,13 +1150,16 @@ impl ActiveSequencesMultiWorker {
             }
         }
 
-        let total_elapsed = start.elapsed();
-        tracing::trace!(
-            num_workers,
-            send_us = send_elapsed.as_micros() as u64,
-            total_us = total_elapsed.as_micros() as u64,
-            "potential_blocks_and_tokens completed"
-        );
+        #[cfg(feature = "bench")]
+        {
+            let total_elapsed = start.elapsed();
+            tracing::info!(
+                num_workers,
+                send_us = send_elapsed.as_micros() as u64,
+                total_us = total_elapsed.as_micros() as u64,
+                "potential_blocks_and_tokens completed"
+            );
+        }
 
         (potential_blocks, potential_tokens)
     }
