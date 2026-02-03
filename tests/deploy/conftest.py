@@ -41,18 +41,7 @@ from typing import Dict, List, Optional
 
 import pytest
 
-from tests.utils.managed_deployment import DeploymentSpec
-
-
-def _get_workspace_dir() -> Path:
-    """Get the workspace root directory containing pyproject.toml."""
-    current = Path(__file__).resolve()
-    while current != current.parent:
-        if (current / "pyproject.toml").exists():
-            return current
-        current = current.parent
-    # Fallback: assume workspace is 3 levels up from tests/deploy/
-    return Path(__file__).resolve().parent.parent.parent
+from tests.utils.managed_deployment import DeploymentSpec, _get_workspace_dir
 
 
 # -----------------------------------------------------------------------------
@@ -106,7 +95,7 @@ def discover_example_targets(
         List of DeploymentTarget objects for each discovered deployment.
     """
     if workspace is None:
-        workspace = _get_workspace_dir()
+        workspace = Path(_get_workspace_dir())
 
     backends_dir = workspace / "examples" / "backends"
     targets: List[DeploymentTarget] = []

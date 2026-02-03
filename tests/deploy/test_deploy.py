@@ -27,7 +27,7 @@ import pytest
 import requests
 
 from tests.deploy.conftest import DeploymentTarget
-from tests.utils.client import wait_for_model_availability
+from tests.utils.client import send_request, wait_for_model_availability
 from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 
 logger = logging.getLogger(__name__)
@@ -82,13 +82,9 @@ def send_test_request(
         "temperature": temperature,
         "stream": False,
     }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
 
     logger.info(f"Sending test request to {url} with model '{model}'")
-    response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    response = send_request(url, payload, timeout=float(timeout), method="POST")
     logger.info(f"Received response with status code {response.status_code}")
 
     return response
@@ -176,7 +172,7 @@ async def test_deployment(
     deployment_spec: DeploymentSpec,
     namespace: str,
     skip_service_restart: bool,
-    log_dir: str,
+    request,
 ) -> None:
     """Test Kubernetes deployment end-to-end.
 
@@ -194,7 +190,7 @@ async def test_deployment(
         namespace: Kubernetes namespace for the deployment
         skip_service_restart: Whether to skip restarting NATS/etcd services (default: True).
             Use --restart-services flag to restart services before deployment.
-        log_dir: Temporary directory for test logs (cleaned up on success, preserved on failure)
+        request: Pytest request object for accessing test metadata
     """
     # Extract identifying information from the target
     framework = deployment_target.framework
@@ -212,11 +208,11 @@ async def test_deployment(
         f"Starting deployment test for {deployment_target.test_id} "
         f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
     )
-    logger.info(f"Log directory: {log_dir}")
+    logger.info(f"Log directory: {request.node.name}")
 
     # Deploy and test
     async with ManagedDeployment(
-        log_dir=log_dir,
+        log_dir=request.node.name,
         deployment_spec=deployment_spec,
         namespace=namespace,
         skip_service_restart=skip_service_restart,
