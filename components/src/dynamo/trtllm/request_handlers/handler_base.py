@@ -38,6 +38,9 @@ from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
+from dynamo.trtllm.request_handlers.base_generative_handler import (
+    BaseGenerativeHandler,
+)
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -70,9 +73,13 @@ class RequestHandlerConfig:
     shutdown_event: Optional[asyncio.Event] = None
 
 
-class HandlerBase:
+class HandlerBase(BaseGenerativeHandler):
     """
-    Base class for request handlers.
+    Base class for LLM request handlers.
+
+    Inherits from BaseGenerativeHandler to share the common interface with
+    video/image diffusion handlers. Contains LLM-specific logic for disaggregation,
+    multimodal processing, and TensorRT-LLM engine interaction.
     """
 
     def __init__(self, config: RequestHandlerConfig):
