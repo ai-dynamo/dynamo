@@ -8,6 +8,10 @@
 name: CI Test Suite
 
 on:
+  # TODO: Remove the push trigger before merging this change
+  push:
+    branches:
+      - dtokarev-fix-trtll-cuda-version-in-ci
   workflow_call:
     inputs:
       pipeline_type:
