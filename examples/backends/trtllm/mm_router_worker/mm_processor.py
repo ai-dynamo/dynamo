@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Multimodal processing utilities for MM Router Worker.
-
-This module provides functions for:
-- Processing multimodal inputs (images)
-- Computing mm_hash using TRT-LLM's apply_mm_hashes
-- Building block_mm_infos for KV-aware routing
-"""
+"""Multimodal processing utilities for MM Router Worker."""
 
 import logging
 from dataclasses import dataclass
@@ -16,26 +9,33 @@ from typing import Any
 
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
 from tensorrt_llm.inputs.utils import default_multimodal_input_loader, load_image
+from transformers import AutoConfig
 
 logger = logging.getLogger(__name__)
 
-# Qwen2-VL specific token IDs
-QWEN2_VL_IMAGE_TOKEN_ID = 151655
-QWEN2_VL_REPLACEMENT_ID = 151937  # to match TRTLLM process logic, the image padding token in kv event is vocab_size + 1
+
+# =============================================================================
+# Data structures
+# =============================================================================
 
 
 @dataclass
 class ProcessedInput:
-    """Processed input ready for routing."""
+    """Processed multimodal input."""
 
     tokens: list[int]
     mm_hashes: list[int] | None
-    image_offsets_list: list[list[int]] | None
+    image_ranges: list[tuple[int, int]] | None  # [(start, end), ...] per image
+
+
+# =============================================================================
+# Public functions
+# =============================================================================
 
 
 def extract_image_urls(messages: list[dict]) -> list[str]:
     """Extract image URLs from OpenAI-format messages."""
-    image_urls = []
+    urls = []
     for msg in messages:
         content = msg.get("content", [])
         if isinstance(content, list):
@@ -43,8 +43,8 @@ def extract_image_urls(messages: list[dict]) -> list[str]:
                 if part.get("type") == "image_url":
                     url = part.get("image_url", {}).get("url")
                     if url:
-                        image_urls.append(url)
-    return image_urls
+                        urls.append(url)
+    return urls
 
 
 def build_prompt_from_messages(messages: list[dict]) -> str:
@@ -53,17 +53,12 @@ def build_prompt_from_messages(messages: list[dict]) -> str:
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
-
         if isinstance(content, str):
             parts.append(f"{role}: {content}")
         elif isinstance(content, list):
-            text_parts = []
-            for part in content:
-                if part.get("type") == "text":
-                    text_parts.append(part.get("text", ""))
-            if text_parts:
-                parts.append(f"{role}: {' '.join(text_parts)}")
-
+            texts = [p.get("text", "") for p in content if p.get("type") == "text"]
+            if texts:
+                parts.append(f"{role}: {' '.join(texts)}")
     return "\n".join(parts)
 
 
@@ -75,253 +70,263 @@ def process_multimodal(
     model: str,
     model_type: str,
 ) -> ProcessedInput:
-    """
-    Process multimodal request: load images, compute tokens and mm_hashes.
-
-    Args:
-        messages: OpenAI-format messages
-        image_urls: List of image URLs extracted from messages
-        tokenizer: TRT-LLM tokenizer
-        processor: HuggingFace AutoProcessor (for getting visual tokens)
-        model: Model path/name
-        model_type: Model type (e.g., "qwen2_vl")
-
-    Returns:
-        ProcessedInput with tokens, mm_hashes, and image_offsets_list
-    """
+    """Process multimodal request: load images, get expanded tokens and mm_hashes."""
     try:
         prompt = build_prompt_from_messages(messages)
-        logger.info(f"Built prompt from messages: {prompt[:200]}...")
+        prompt = messages
+        logger.info(f"prompt: {prompt}")
+        logger.info(f"image_urls: {image_urls}")
+        logger.info(f"messages: {messages}")
 
-        # Use TRT-LLM's multimodal loader to process images
-        modality = "multiple_image" if len(image_urls) > 1 else "image"
-        logger.info(f"Calling default_multimodal_input_loader with modality={modality}")
+        # Use TRT-LLM loader to process images and get mm data
         inputs = default_multimodal_input_loader(
             tokenizer=tokenizer,
             model_dir=model,
             model_type=model_type,
-            modality=modality,
+            modality="multiple_image" if len(image_urls) > 1 else "image",
             prompts=[prompt],
             media=[image_urls],
             image_data_format="pt",
             device="cuda",
         )
+
         mm_input = inputs[0]
         processed_prompt = mm_input.get("prompt", prompt)
         multi_modal_data = mm_input.get("multi_modal_data")
-        logger.info(
-            f"TRT-LLM loader returned processed_prompt: {processed_prompt[:200] if processed_prompt else 'None'}..."
-        )
-        logger.info(
-            f"multi_modal_data keys: {multi_modal_data.keys() if multi_modal_data else 'None'}"
-        )
 
-        # Get tokens with visual expansion
-        tokens, image_offsets_list = get_mm_tokens(
-            processed_prompt, image_urls, tokenizer, processor
+        # Get expanded tokens and image ranges
+        tokens, image_ranges = _get_expanded_tokens(
+            processed_prompt, image_urls, tokenizer, processor, model, model_type
         )
 
         # Compute mm_hash for each image
-        mm_hashes = compute_mm_hashes(multi_modal_data)
-
-        logger.debug(
-            f"Processed MM input: {len(tokens)} tokens, "
-            f"{len(mm_hashes) if mm_hashes else 0} images"
-        )
+        mm_hashes = _compute_mm_hashes(multi_modal_data)
 
         return ProcessedInput(
-            tokens=tokens,
-            mm_hashes=mm_hashes,
-            image_offsets_list=image_offsets_list,
+            tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges
         )
 
     except Exception as e:
         logger.warning(f"MM processing failed: {e}, falling back to text-only")
         prompt = build_prompt_from_messages(messages)
         return ProcessedInput(
-            tokens=tokenizer.encode(prompt),
-            mm_hashes=None,
-            image_offsets_list=None,
+            tokens=tokenizer.encode(prompt), mm_hashes=None, image_ranges=None
         )
-
-
-def get_mm_tokens(
-    prompt: str,
-    image_urls: list[str],
-    tokenizer: Any,
-    processor: Any,
-) -> tuple[list[int], list[list[int]] | None]:
-    """
-    Get tokens with visual expansion and find image token positions.
-
-    Args:
-        prompt: Text prompt (may contain image placeholders)
-        image_urls: List of image URLs
-        tokenizer: TRT-LLM tokenizer
-        processor: HuggingFace AutoProcessor
-
-    Returns:
-        Tuple of (tokens, image_offsets_list)
-    """
-    if processor is None:
-        logger.warning(
-            "HF processor is None, using tokenizer.encode() - no visual token expansion!"
-        )
-        return tokenizer.encode(prompt), None
-
-    try:
-        # Load images as PIL
-        logger.info(f"Loading {len(image_urls)} images for HF processor")
-        pil_images = [load_image(url, format="pil") for url in image_urls]
-
-        # Process with HuggingFace processor to get visual-expanded tokens
-        logger.info(f"Calling HF processor with prompt length: {len(prompt)}")
-        processor_output = processor(
-            text=[prompt],
-            images=pil_images,
-            return_tensors="pt",
-            padding=True,
-        )
-        tokens = processor_output["input_ids"][0].tolist()
-        logger.info(f"HF processor returned {len(tokens)} tokens")
-        logger.info(f"Token sample (first 50): {tokens[:50]}")
-
-        # Find and replace image token positions
-        image_token_id = getattr(processor, "image_token_id", QWEN2_VL_IMAGE_TOKEN_ID)
-        logger.info(f"Looking for image_token_id: {image_token_id}")
-
-        # Count occurrences of image token
-        img_token_count = tokens.count(image_token_id)
-        logger.info(
-            f"Found {img_token_count} occurrences of image_token_id={image_token_id}"
-        )
-
-        return replace_image_tokens(tokens, image_token_id, QWEN2_VL_REPLACEMENT_ID)
-
-    except Exception as e:
-        logger.warning(f"Failed to process with HF processor: {e}", exc_info=True)
-        return tokenizer.encode(prompt), None
-
-
-def replace_image_tokens(
-    tokens: list[int],
-    image_token_id: int,
-    replacement_id: int,
-) -> tuple[list[int], list[list[int]] | None]:
-    """
-    Replace image tokens and return their positions.
-
-    Args:
-        tokens: Token list from processor
-        image_token_id: ID of image placeholder token
-        replacement_id: ID to replace with
-
-    Returns:
-        Tuple of (modified tokens, list of [start, end] ranges for each image)
-    """
-    image_offsets_list: list[list[int]] = []
-    current_start: int | None = None
-
-    for i, t in enumerate(tokens):
-        if t == image_token_id:
-            if current_start is None:
-                current_start = i
-            tokens[i] = replacement_id
-        else:
-            if current_start is not None:
-                image_offsets_list.append([current_start, i])
-                current_start = None
-
-    # Handle case where tokens end with image token
-    if current_start is not None:
-        image_offsets_list.append([current_start, len(tokens)])
-
-    return tokens, image_offsets_list if image_offsets_list else None
-
-
-def compute_mm_hashes(multi_modal_data: dict | None) -> list[int] | None:
-    """
-    Compute mm_hash for each image in multimodal data.
-
-    Uses TRT-LLM's apply_mm_hashes which computes hash of image tensors.
-
-    Args:
-        multi_modal_data: Dict containing processed image tensors
-
-    Returns:
-        List of 64-bit integer hashes, one per image
-    """
-    if not multi_modal_data:
-        return None
-
-    try:
-        mm_hashes_dict = apply_mm_hashes(multi_modal_data)
-
-        if "image" in mm_hashes_dict and mm_hashes_dict["image"]:
-            # Convert 256-bit hex digest to 64-bit int (take first 16 hex chars)
-            mm_hashes = [
-                int(hex_digest[:16], 16) for hex_digest in mm_hashes_dict["image"]
-            ]
-            logger.debug(f"Computed mm_hashes for {len(mm_hashes)} images")
-            return mm_hashes
-
-    except Exception as e:
-        logger.warning(f"Failed to compute mm_hashes: {e}")
-
-    return None
 
 
 def build_block_mm_infos(
     num_tokens: int,
     block_size: int,
     mm_hashes: list[int] | None,
-    image_offsets_list: list[list[int]] | None,
+    image_ranges: list[tuple[int, int]] | None,
 ) -> list[dict | None] | None:
     """
-    Build per-block mm_info for routing hash computation.
+    Build per-block mm_info for routing.
 
-    Each block that overlaps with an image gets mm_info containing the
-    mm_hash of that image. This is used by compute_block_hash_for_seq_py
-    to compute MM-aware block hashes.
+    For each block, check which images overlap with it and add their mm_hash.
 
-    Args:
-        num_tokens: Total number of tokens
-        block_size: KV cache block size
-        mm_hashes: List of mm_hash values, one per image
-        image_offsets_list: List of [start, end] token ranges for each image
-
-    Returns:
-        List of mm_info dicts (or None) for each block
+    Assumption: mm_hashes and image_ranges are in the same order as images appear
+    in the request (which matches their order in the token sequence).
     """
-    if mm_hashes is None or image_offsets_list is None:
-        return None
-
-    if len(mm_hashes) != len(image_offsets_list):
-        logger.warning(
-            f"mm_hashes ({len(mm_hashes)}) and image_offsets_list "
-            f"({len(image_offsets_list)}) length mismatch"
-        )
+    if not mm_hashes or not image_ranges or len(mm_hashes) != len(image_ranges):
         return None
 
     num_blocks = (num_tokens + block_size - 1) // block_size
+    result = []
 
-    result: list[dict | None] = []
     for block_idx in range(num_blocks):
         block_start = block_idx * block_size
         block_end = block_start + block_size
 
-        # Find all images that overlap with this block
-        mm_objects = []
-        for mm_hash, offsets in zip(mm_hashes, image_offsets_list):
-            img_start, img_end = offsets
-            # Check if block and image ranges overlap
-            if block_end > img_start and block_start < img_end:
-                mm_objects.append({"mm_hash": mm_hash, "offsets": [offsets]})
+        # Find images overlapping this block
+        mm_objects = [
+            {"mm_hash": mm_hash, "offsets": []}
+            for mm_hash, (img_start, img_end) in zip(mm_hashes, image_ranges)
+            if block_end > img_start and block_start < img_end
+        ]
 
-        # Only add mm_info if block contains image tokens
-        if mm_objects:
-            result.append({"mm_objects": mm_objects})
-        else:
-            result.append(None)
+        result.append({"mm_objects": mm_objects} if mm_objects else None)
 
     return result
+
+
+# =============================================================================
+# Internal functions
+# =============================================================================
+
+
+def _get_expanded_tokens(
+    prompt: str,
+    image_urls: list[str],
+    tokenizer: Any,
+    processor: Any,
+    model_path: str,
+    model_type: str,
+) -> tuple[list[int], list[tuple[int, int]] | None]:
+    """Get tokens with visual expansion and find each image's token range."""
+    if processor is None:
+        return tokenizer.encode(prompt), None
+
+    try:
+        # TODO @zdren: use async_load_image or batch load
+        pil_images = [load_image(url, format="pil") for url in image_urls]
+        output = processor(
+            text=[prompt], images=pil_images, return_tensors="pt", padding=True
+        )
+        tokens = output["input_ids"][0].tolist()
+
+        # Get image_token_id from processor
+        image_token_id = getattr(processor, "image_token_id", None)
+        if image_token_id is None:
+            raise ValueError("processor.image_token_id not found")
+
+        # Get replacement_id: TRTLLM uses vocab_size + 1 in KV events
+        replacement_id = _get_replacement_id(model_path)
+
+        # Find contiguous image token ranges and replace them in one pass
+        contiguous_ranges = _find_and_replace_image_tokens(
+            tokens, image_token_id, replacement_id
+        )
+
+        # Compute tokens per image from processor output
+        tokens_per_image = _compute_tokens_per_image(output, processor, model_type)
+
+        # Split ranges according to tokens_per_image
+        image_ranges = _compute_per_image_ranges(contiguous_ranges, tokens_per_image)
+
+        return tokens, image_ranges
+
+    except Exception as e:
+        logger.warning(f"HF processor failed: {e}", exc_info=True)
+        return tokenizer.encode(prompt), None
+
+
+def _compute_tokens_per_image(
+    processor_output: dict, processor: Any, model_type: str
+) -> list[int]:
+    """Compute the number of visual tokens for each image from processor output."""
+    if model_type == "qwen2_vl":
+        grid_thw = processor_output.get("image_grid_thw")
+        if grid_thw is None:
+            raise ValueError(
+                "image_grid_thw not found in processor output for Qwen2-VL"
+            )
+
+        merge_size = getattr(processor.image_processor, "merge_size", 2)
+        return [int(t * h * w) // (merge_size**2) for t, h, w in grid_thw]
+    else:
+        raise NotImplementedError(f"Model type '{model_type}' is not supported yet")
+
+
+def _get_replacement_id(model_path: str) -> int:
+    """
+    Get the replacement token ID for image tokens to match TRTLLM's KV event format.
+
+    TRTLLM replaces image placeholder tokens with (vocab_size + 1) in KV events.
+    The vocab_size comes from the model config, not the tokenizer.
+    """
+
+    try:
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        replacement_id = config.vocab_size + 1
+        logger.info(f"Got vocab_size={config.vocab_size} from AutoConfig")
+        return replacement_id
+    except Exception as e:
+        logger.warning(f"Failed to load model config: {e}")
+
+
+def _find_and_replace_image_tokens(
+    tokens: list[int], image_token_id: int, replacement_id: int
+) -> list[tuple[int, int]]:
+    """
+    Find all contiguous ranges of image tokens and replace them in place.
+
+    Returns: list of (start, end) ranges for contiguous image token regions.
+    """
+    ranges = []
+    start = None
+
+    for i, t in enumerate(tokens):
+        if t == image_token_id:
+            tokens[i] = replacement_id
+            if start is None:
+                start = i
+        elif start is not None:
+            ranges.append((start, i))
+            start = None
+
+    if start is not None:
+        ranges.append((start, len(tokens)))
+
+    if ranges:
+        logger.info(
+            f"Replaced {sum(e - s for s, e in ranges)} image tokens: {image_token_id} -> {replacement_id}"
+        )
+
+    return ranges
+
+
+def _compute_per_image_ranges(
+    contiguous_ranges: list[tuple[int, int]],
+    tokens_per_image: list[int],
+) -> list[tuple[int, int]] | None:
+    """
+    Split contiguous image token ranges by each image's token count.
+
+    Example: contiguous_ranges=[(0, 100)], tokens_per_image=[60, 40]
+    Returns: [(0, 60), (60, 100)]  # image 1 at 0-60, image 2 at 60-100
+    """
+    if not contiguous_ranges:
+        if tokens_per_image:
+            logger.warning(
+                f"No image tokens found but {len(tokens_per_image)} images expected"
+            )
+        return None
+
+    # Greedily assign images to ranges in order
+    result = []
+    image_idx = 0
+
+    for range_start, range_end in contiguous_ranges:
+        range_size = range_end - range_start
+        pos = range_start
+        consumed = 0
+
+        # Consume images that fit entirely in this range
+        # (a single image's tokens are always contiguous, cannot span ranges)
+        while image_idx < len(tokens_per_image):
+            needed = tokens_per_image[image_idx]
+            if consumed + needed <= range_size:
+                result.append((pos, pos + needed))
+                pos += needed
+                consumed += needed
+                image_idx += 1
+            else:
+                break
+
+        # Range must be exactly filled (no leftover image tokens)
+        if consumed != range_size:
+            logger.warning(
+                f"Range size mismatch: consumed {consumed} != range {range_size}"
+            )
+            return None
+
+    # All images must be consumed
+    if image_idx != len(tokens_per_image):
+        logger.warning(f"Not all images mapped: {image_idx} < {len(tokens_per_image)}")
+        return None
+
+    return result
+
+
+def _compute_mm_hashes(multi_modal_data: dict | None) -> list[int] | None:
+    """Compute mm_hash for each image."""
+    if not multi_modal_data:
+        return None
+    try:
+        result = apply_mm_hashes(multi_modal_data)
+        if "image" in result and result["image"]:
+            return [int(h[:16], 16) for h in result["image"]]
+    except Exception as e:
+        logger.warning(f"Failed to compute mm_hashes: {e}")
+    return None

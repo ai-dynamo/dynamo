@@ -14,7 +14,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .mm_processor import (
     build_block_mm_infos,
-    build_prompt_from_messages,
     extract_image_urls,
     process_multimodal,
 )
@@ -100,7 +99,7 @@ class MMRouterHandler:
                 num_tokens=len(processed.tokens),
                 block_size=self.block_size,
                 mm_hashes=processed.mm_hashes,
-                image_offsets_list=processed.image_offsets_list,
+                image_ranges=processed.image_ranges,
             )
 
             # Compute block hashes WITH mm_info
@@ -214,9 +213,7 @@ class MMRouterHandler:
                 )
         except Exception as e:
             logger.debug(f"Chat template failed: {e}")
-
-        # Fallback to simple prompt building
-        return build_prompt_from_messages(messages)
+            return None
 
     def update_instance_ids(self, instance_ids: list[int]) -> None:
         """Update the list of available worker instance IDs."""
