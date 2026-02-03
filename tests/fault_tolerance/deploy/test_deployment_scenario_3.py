@@ -35,6 +35,7 @@ from tests.utils.managed_load import LoadConfig
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
 @pytest.mark.e2e
+@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_worker_pod_kill_recovery(request):
     """
@@ -69,6 +70,7 @@ async def test_worker_pod_kill_recovery(request):
 
 @pytest.mark.k8s
 @pytest.mark.e2e
+@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_smoke_50_requests(request):
     """
