@@ -35,6 +35,7 @@ import (
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -252,7 +253,7 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *RestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
-		dynamoNamespace := getDynamoNamespace(parentDynamoGraphDeployment, component)
+		dynamoNamespace := GetDynamoNamespace(parentDynamoGraphDeployment, component)
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
 		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
@@ -336,7 +337,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 	return deployments, nil
 }
 
-func getDynamoNamespace(object metav1.Object, service *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
+func GetDynamoNamespace(object metav1.Object, service *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
 	return v1alpha1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, object.GetNamespace(), object.GetName())
 }
 
@@ -733,9 +734,10 @@ func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment
 type Role string
 
 const (
-	RoleLeader Role = "leader"
-	RoleWorker Role = "worker"
-	RoleMain   Role = "main"
+	RoleLeader     Role = "leader"
+	RoleWorker     Role = "worker"
+	RoleMain       Role = "main"
+	RoleCheckpoint Role = "checkpoint"
 )
 
 // Update ServiceRole struct for expandRolesForService
@@ -766,7 +768,20 @@ const (
 	BackendFrameworkSGLang BackendFramework = "sglang"
 	BackendFrameworkVLLM   BackendFramework = "vllm"
 	BackendFrameworkTRTLLM BackendFramework = "trtllm"
+	BackendFrameworkNoop   BackendFramework = "noop"
 )
+
+// ParseBackendFramework converts a string to BackendFramework type.
+// Returns an error if the framework string is not recognized.
+func ParseBackendFramework(framework string) (BackendFramework, error) {
+	bf := BackendFramework(framework)
+	switch bf {
+	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkNoop:
+		return bf, nil
+	default:
+		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm)", framework)
+	}
+}
 
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface
@@ -897,6 +912,7 @@ func GenerateBasePodSpec(
 	controllerConfig controller_common.Config,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controllerConfig.GetDiscoveryBackend(component.Annotations))
@@ -1071,6 +1087,23 @@ func GenerateBasePodSpec(
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
+
+	// Inject checkpoint configuration if enabled
+	// This handles ALL checkpoint-related modifications:
+	// - Command/Args transformation (moves Command to Args to respect image ENTRYPOINT)
+	// - Security context (hostIPC, privileged mode)
+	// - Environment variables (checkpoint path, hash, CRIU settings)
+	// - Storage configuration (volumes, mounts)
+	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
+	// Checkpoint config comes from the operator's controller config (Helm values)
+	var checkpointConfig *controller_common.CheckpointConfig
+	if controllerConfig.Checkpoint.Enabled {
+		checkpointConfig = &controllerConfig.Checkpoint
+	}
+	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, checkpointInfo, checkpointConfig); err != nil {
+		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
+	}
+
 	return &podSpec, nil
 }
 
@@ -1111,11 +1144,12 @@ func GeneratePodSpecForComponent(
 	controllerConfig controller_common.Config,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info
 ) (*corev1.PodSpec, error) {
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
 	}
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName, checkpointInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -1130,6 +1164,7 @@ func GenerateGrovePodCliqueSet(
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
+	checkpointInfoByService map[string]*checkpoint.CheckpointInfo, // Optional checkpoint info per service
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
@@ -1157,7 +1192,7 @@ func GenerateGrovePodCliqueSet(
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
-		dynamoNamespace := getDynamoNamespace(dynamoDeployment, component)
+		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 		component.DynamoNamespace = &dynamoNamespace
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
@@ -1170,6 +1205,12 @@ func GenerateGrovePodCliqueSet(
 				component.Annotations = make(map[string]string)
 			}
 			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoveryBackend
+		}
+
+		// Get checkpoint info for this service if available
+		var checkpointInfo *checkpoint.CheckpointInfo
+		if checkpointInfoByService != nil {
+			checkpointInfo = checkpointInfoByService[serviceName]
 		}
 
 		numberOfNodes := component.GetNumberOfNodes()
@@ -1188,6 +1229,7 @@ func GenerateGrovePodCliqueSet(
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				serviceName,
+				checkpointInfo,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
@@ -1272,15 +1314,21 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	}
 	// Add base model label if modelRef is specified
 	AddBaseModelLabel(labels, component.ModelRef)
+	// Add checkpoint labels if checkpointing is enabled
+	var err error
+	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inject checkpoint labels: %w", err)
+	}
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
-		err := mergo.Merge(&labels, component.Labels, mergo.WithOverride)
+		err = mergo.Merge(&labels, component.Labels, mergo.WithOverride)
 		if err != nil {
 			return nil, fmt.Errorf("failed to merge labels: %w", err)
 		}
 	}
 	if component.ExtraPodMetadata != nil {
-		err := mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
+		err = mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
 		if err != nil {
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
@@ -1335,9 +1383,6 @@ func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFra
 
 	return detected[0], nil
 }
-
-// BackendFrameworkNoop represents no backend processing needed
-const BackendFrameworkNoop BackendFramework = "noop"
 
 // determineBackendFramework is the core logic for hybrid backend framework detection
 // Takes extracted parameters and applies the detection logic
@@ -1457,6 +1502,7 @@ func GenerateBasePodSpecForController(
 	controllerConfig controller_common.Config,
 	role Role,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by caller)
 ) (*corev1.PodSpec, error) {
 	// Convert to our interface
 	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
@@ -1483,6 +1529,7 @@ func GenerateBasePodSpecForController(
 		controllerConfig,
 		multinodeDeploymentType,
 		serviceName,
+		checkpointInfo,
 	)
 	if err != nil {
 		return nil, err

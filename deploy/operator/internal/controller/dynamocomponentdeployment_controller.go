@@ -34,6 +34,7 @@ import (
 
 	"emperror.dev/errors"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -1200,7 +1201,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS)
+	// Resolve checkpoint for this component
+	var checkpointInfo *checkpoint.CheckpointInfo
+	if opt.dynamoComponentDeployment.Spec.Checkpoint != nil && opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to resolve checkpoint")
+		}
+		checkpointInfo = info
+	}
+
+	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
