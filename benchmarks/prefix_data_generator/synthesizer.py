@@ -27,6 +27,7 @@ from prefix_data_generator.graph_utils import (
     _remove_leaves,
     _verify_tree,
 )
+from prefix_data_generator.hasher import RollingHasher
 from prefix_data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
 from prefix_data_generator.sampler import EmpiricalSampler, sample_from_cdf
 
@@ -103,10 +104,14 @@ class Synthesizer:
             output_lens = []
             for line in f:
                 data = json.loads(line)
-                hash_ids_list.append(np.array(data["hash_ids"]))
+                hash_ids_list.append(data["hash_ids"])
                 timestamps.append(int(data["timestamp"]))
-                input_lens.append(np.array(data["input_length"]))
+                input_lens.append(int(data["input_length"]))
                 output_lens.append(int(data["output_length"]))
+
+        # Normalize hash_ids to consecutive integers starting from 0
+        hasher = RollingHasher()
+        hash_ids_list = [hasher([(h,) for h in hash_ids]) for hash_ids in hash_ids_list]
 
         # represent prefix-tree as directed graph
         self.G = nx.DiGraph()

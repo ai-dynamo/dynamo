@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Request Rejection (Load Shedding)"
 ---
+
+# Request Rejection (Load Shedding)
 
 This document describes how Dynamo implements request rejection to prevent system overload and maintain service stability under high load conditions.
 

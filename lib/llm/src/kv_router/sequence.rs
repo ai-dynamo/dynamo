@@ -405,6 +405,7 @@ enum UpdateSequences {
 pub struct ActiveSequencesMultiWorker {
     senders: Arc<DashMap<WorkerWithDpRank, tokio::sync::mpsc::UnboundedSender<UpdateSequences>>>,
     request_to_worker: Arc<DashMap<RequestId, WorkerWithDpRank>>,
+    request_to_lora: Arc<DashMap<RequestId, String>>,
     handles: Arc<DashMap<WorkerWithDpRank, std::thread::JoinHandle<()>>>,
     block_size: usize,
     component: Component,
@@ -429,6 +430,7 @@ impl ActiveSequencesMultiWorker {
         let senders = Arc::new(DashMap::new());
         let handles = Arc::new(DashMap::new());
         let request_to_worker = Arc::new(DashMap::new());
+        let request_to_lora = Arc::new(DashMap::new());
 
         // Expand workers by their dp_rank
         for (worker_id, config) in workers_with_configs {
@@ -452,6 +454,7 @@ impl ActiveSequencesMultiWorker {
         let multi_worker = Self {
             senders: senders.clone(),
             request_to_worker: request_to_worker.clone(),
+            request_to_lora: request_to_lora.clone(),
             handles,
             block_size,
             component: component.clone(),
@@ -465,6 +468,7 @@ impl ActiveSequencesMultiWorker {
         if replica_sync {
             let senders_clone = senders.clone();
             let request_to_worker_clone = request_to_worker.clone();
+            let request_to_lora_clone = request_to_lora.clone();
             let component_clone = component.clone();
             let router_id_clone = router_id;
             let cancel_token = component.drt().runtime().child_token();
@@ -474,6 +478,7 @@ impl ActiveSequencesMultiWorker {
                 if let Err(e) = Self::subscribe_to_events(
                     senders_clone,
                     request_to_worker_clone,
+                    request_to_lora_clone,
                     component_clone,
                     router_id_clone,
                     cancel_token,
@@ -603,6 +608,7 @@ impl ActiveSequencesMultiWorker {
             DashMap<WorkerWithDpRank, tokio::sync::mpsc::UnboundedSender<UpdateSequences>>,
         >,
         request_to_worker: Arc<DashMap<RequestId, WorkerWithDpRank>>,
+        request_to_lora: Arc<DashMap<RequestId, String>>,
         component: Component,
         router_id: u64,
         cancel_token: CancellationToken,
@@ -642,6 +648,11 @@ impl ActiveSequencesMultiWorker {
                         } => {
                             request_to_worker.insert(event.request_id.clone(), event.worker);
 
+                            // Store lora_name mapping if present
+                            if let Some(ref lora_name) = event.lora_name {
+                                request_to_lora.insert(event.request_id.clone(), lora_name.clone());
+                            }
+
                             if let Some(sender) = senders.get(&event.worker) {
                                 // For replicated events, we create a dummy response channel since we don't need to handle expired requests
                                 let (resp_tx, _) = tokio::sync::oneshot::channel();
@@ -668,6 +679,8 @@ impl ActiveSequencesMultiWorker {
                                     request_id: event.request_id.clone(),
                                 });
                             }
+                            // Clean up lora_name mapping
+                            request_to_lora.remove(&event.request_id);
                         }
                         ActiveSequenceEventData::MarkPrefillCompleted => {
                             if let Some(worker) = request_to_worker.get(&event.request_id)
@@ -724,9 +737,22 @@ impl ActiveSequencesMultiWorker {
             }
             self.handles.remove(worker);
 
+            // Collect request_ids to remove from request_to_lora
+            let requests_to_remove: Vec<RequestId> = self
+                .request_to_worker
+                .iter()
+                .filter(|entry| entry.value() == worker)
+                .map(|entry| entry.key().clone())
+                .collect();
+
             // Clean up request_to_worker mappings for this worker
             self.request_to_worker
                 .retain(|_request_id, mapped_worker| mapped_worker != worker);
+
+            // Clean up request_to_lora mappings for removed requests
+            for request_id in requests_to_remove {
+                self.request_to_lora.remove(&request_id);
+            }
         }
 
         // Add new workers
@@ -742,6 +768,7 @@ impl ActiveSequencesMultiWorker {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_request(
         &self,
         request_id: RequestId,
@@ -750,6 +777,7 @@ impl ActiveSequencesMultiWorker {
         overlap: u32,
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
+        lora_name: Option<String>,
     ) -> Result<(), SequenceError> {
         // Check for worker existence
         if !self.senders.contains_key(&worker) {
@@ -779,12 +807,18 @@ impl ActiveSequencesMultiWorker {
                     expected_output_tokens,
                 },
                 router_id: self.router_id,
+                lora_name: lora_name.clone(),
             };
             self.event_publisher.publish(&event).await?;
         }
 
         // Update local state with full WorkerWithDpRank
         self.request_to_worker.insert(request_id.clone(), worker);
+
+        // Store lora_name for later use in Free/MarkPrefillCompleted events
+        if let Some(lora) = lora_name {
+            self.request_to_lora.insert(request_id.clone(), lora);
+        }
 
         self.senders
             .get(&worker)
@@ -807,6 +841,7 @@ impl ActiveSequencesMultiWorker {
         // Remove expired requests from request_to_worker mapping
         for expired_id in &removed_requests {
             self.request_to_worker.remove(expired_id);
+            self.request_to_lora.remove(expired_id);
         }
 
         // Publish ActiveLoad metrics for this worker
@@ -833,11 +868,18 @@ impl ActiveSequencesMultiWorker {
 
         // Publish event only if replica_sync is enabled
         if self.replica_sync {
+            // Look up lora_name from mapping
+            let lora_name = self
+                .request_to_lora
+                .get(request_id)
+                .map(|entry| entry.value().clone());
+
             let event = ActiveSequenceEvent {
                 request_id: request_id.clone(),
                 worker,
                 data: ActiveSequenceEventData::Free,
                 router_id: self.router_id,
+                lora_name,
             };
             self.event_publisher.publish(&event).await?;
         }
@@ -852,6 +894,7 @@ impl ActiveSequencesMultiWorker {
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
         self.request_to_worker.remove(request_id);
+        self.request_to_lora.remove(request_id);
 
         // Publish ActiveLoad metrics for this worker
         self.publish_active_load_for_worker(worker).await;
@@ -882,11 +925,18 @@ impl ActiveSequencesMultiWorker {
 
         // Publish event only if replica_sync is enabled
         if self.replica_sync {
+            // Look up lora_name from mapping
+            let lora_name = self
+                .request_to_lora
+                .get(request_id)
+                .map(|entry| entry.value().clone());
+
             let event = ActiveSequenceEvent {
                 request_id: request_id.clone(),
                 worker,
                 data: ActiveSequenceEventData::MarkPrefillCompleted,
                 router_id: self.router_id,
+                lora_name,
             };
             self.event_publisher.publish(&event).await?;
         }
@@ -1156,6 +1206,15 @@ impl ActiveSequencesMultiWorker {
         self.query_workers(None, |_, resp_tx| UpdateSequences::ActiveTokens { resp_tx })
             .await
     }
+
+    pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for entry in self.request_to_lora.iter() {
+            let lora_name = entry.value().clone();
+            *counts.entry(lora_name).or_insert(0) += 1;
+        }
+        counts
+    }
 }
 
 impl Drop for ActiveSequencesMultiWorker {
@@ -1264,6 +1323,7 @@ mod tests {
                 0,    // no overlap
                 None, // expected_output_tokens
                 WorkerWithDpRank::new(0, 0),
+                None, // lora_name
             )
             .await?;
 
@@ -1276,6 +1336,7 @@ mod tests {
                 0,    // no overlap
                 None, // expected_output_tokens
                 WorkerWithDpRank::new(0, 1),
+                None, // lora_name
             )
             .await?;
 
@@ -1288,6 +1349,7 @@ mod tests {
                 0,    // no overlap
                 None, // expected_output_tokens
                 WorkerWithDpRank::new(1, 0),
+                None, // lora_name
             )
             .await?;
 
@@ -1423,6 +1485,7 @@ mod tests {
                 0,    // no overlap
                 None, // expected_output_tokens
                 WorkerWithDpRank::from_worker_id(0),
+                None, // lora_name
             )
             .await?;
 
@@ -1435,6 +1498,7 @@ mod tests {
                 0,    // no overlap
                 None, // expected_output_tokens
                 WorkerWithDpRank::from_worker_id(1),
+                None, // lora_name
             )
             .await?;
 
@@ -1447,6 +1511,7 @@ mod tests {
                 0,    // no overlap
                 None, // expected_output_tokens
                 WorkerWithDpRank::from_worker_id(2),
+                None, // lora_name
             )
             .await?;
 
