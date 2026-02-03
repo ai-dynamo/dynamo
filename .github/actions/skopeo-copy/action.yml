@@ -20,10 +20,6 @@ inputs:
   target_tag:
     description: 'Target image tag (defaults to source_tag if not specified)'
     required: false
-  multiple_target_tags:
-    description: 'Multiple target tags (comma-separated list)'
-    required: false
-    default: ''
 
   # Skopeo Login inputs for source registry
   source_aws_default_region:

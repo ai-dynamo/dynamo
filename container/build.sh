@@ -22,6 +22,7 @@ fi
 set -e
 
 TAG=
+PRIMARY_TAG=
 RUN_PREFIX=
 PLATFORM=linux/amd64
 
@@ -301,7 +302,12 @@ get_options() {
             ;;
         --tag)
             if [ "$2" ]; then
-                TAG+=" --tag $2"
+                if [ -z "$TAG" ]; then
+                    TAG="--tag $2"
+                    PRIMARY_TAG="$2"
+                else
+                    TAG+=" --tag $2"
+                fi
                 shift
             else
                 missing_requirement "$1"
@@ -475,8 +481,10 @@ get_options() {
 
     if [ -z "$TAG" ]; then
         TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
+        PRIMARY_TAG="dynamo:${VERSION}-${FRAMEWORK,,}"
         if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
             TAG="${TAG}-${TARGET}"
+            PRIMARY_TAG="${PRIMARY_TAG}-${TARGET}"
         fi
     fi
 
@@ -1010,7 +1018,7 @@ if [[ -z "${TARGET:-}" || "${TARGET:-}" == "dev" || "${TARGET:-}" == "local-dev"
     BUILD_ARGS+=" --build-arg FRAMEWORK=${FRAMEWORK,,} "
 
     # Preserve historical tagging behavior for dev/local-dev (build.sh used to delegate out).
-    base="${TAG#--tag }"
+    base="${PRIMARY_TAG}"
     base="${base%-runtime}"
     base="${base%-local-dev}"
     base="${base%-dev}"
@@ -1110,8 +1118,8 @@ fi
 # Handle --make-efa flag: add AWS EFA layer on top of the built image
 # This runs BEFORE local-dev so the flow is: dev -> dev-aws -> local-dev-aws
 if [[ "${MAKE_EFA:-}" == "true" ]]; then
-    # Get the base image that was just built (dev or runtime)
-    BASE_IMAGE_FOR_EFA=$(echo "$TAG" | sed 's/--tag //')
+    # Get the base image that was just built (use PRIMARY_TAG to avoid parsing issues)
+    BASE_IMAGE_FOR_EFA="${PRIMARY_TAG}"
 
     # Determine the EFA stage based on the target
     # runtime target -> runtime-aws stage

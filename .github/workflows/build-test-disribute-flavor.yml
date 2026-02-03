@@ -81,6 +81,8 @@ on:
         required: false
       AWS_SECRET_ACCESS_KEY:
         required: false
+      HF_TOKEN:
+        required: false
     outputs:
       image_tag:
         description: 'Image tag in ACR'
@@ -200,7 +202,7 @@ jobs:
   # TEST
   # ============================================================================
   test:
-    if: inputs.run_tests
+    if: inputs.run_tests && inputs.build_image
     needs: [build]
     name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
