@@ -552,6 +552,14 @@ def llm_server_kvbm(request, runtime_services):
     if gpu_blocks is not None:
         command.extend(["--num-gpu-blocks-override", str(gpu_blocks)])
 
+    # Chunked prefill configuration
+    if params.get("enable_chunked_prefill", False):
+        command.extend(["--enable-chunked-prefill"])
+    if "max_num_batched_tokens" in params:
+        command.extend(
+            ["--max-num-batched-tokens", str(params["max_num_batched_tokens"])]
+        )
+
     # Set up environment
     env = os.environ.copy()
     env.update(
