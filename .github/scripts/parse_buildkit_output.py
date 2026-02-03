@@ -439,7 +439,7 @@ def main():
         f"   Available: {container.get('sccache_available', False)}",
         file=sys.stderr,
     )
-    
+
     if "sccache" in container:
         sccache = container["sccache"]
         if "compile_requests" in sccache:
