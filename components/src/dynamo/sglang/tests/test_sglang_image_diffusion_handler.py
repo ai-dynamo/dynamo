@@ -5,7 +5,6 @@
 
 import base64
 import io
-import os
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
