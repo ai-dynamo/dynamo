@@ -72,22 +72,33 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
         bootstrap_data = None
 
     # Broadcast bootstrap data to all ranks
+    logger.info(f"KVBM: Rank {rank} entering bcast (data_len={len(bootstrap_data) if bootstrap_data else 0})")
     bootstrap_data = comm.bcast(bootstrap_data, root=0)
+    logger.info(f"KVBM: Rank {rank} received bootstrap data (len={len(bootstrap_data)})")
 
     # Non-rank-0 deserializes the data
     if rank != 0:
         bootstrap = NcclBootstrap.deserialize(bootstrap_data)
+    
+    logger.info(f"KVBM: Rank {rank} bootstrap world_size={bootstrap.world_size()}")
 
-    # Ensure CUDA device is set correctly for this rank
-    # In TRT-LLM TP mode, each rank should be on its own GPU
-    current_device = torch.cuda.current_device()
-    logger.debug(f"KVBM: Rank {rank} using CUDA device {current_device}")
+    # In TRT-LLM TP mode with MPI, each rank is in a separate process
+    # with CUDA_VISIBLE_DEVICES restricting it to one GPU.
+    # We need to ensure CUDA is initialized on device 0 (the only visible device).
+    local_device = torch.cuda.current_device()
+    torch.cuda.set_device(local_device)  # Explicitly set to ensure context is active
+    torch.cuda.synchronize()  # Ensure all prior CUDA ops complete
+    
+    logger.info(
+        f"KVBM: Rank {rank} on CUDA device {local_device}, "
+        f"device_count={torch.cuda.device_count()}"
+    )
 
     # Synchronize all ranks before NCCL initialization
     # This ensures all processes are ready before the collective call
-    logger.debug(f"KVBM: Rank {rank} waiting at barrier before ncclCommInitRank")
+    logger.info(f"KVBM: Rank {rank} waiting at MPI barrier before ncclCommInitRank")
     comm.Barrier()
-    logger.debug(f"KVBM: Rank {rank} passed barrier, calling ncclCommInitRank")
+    logger.info(f"KVBM: Rank {rank} passed barrier, calling ncclCommInitRank")
 
     # All ranks collectively initialize (must be called together)
     # This is a blocking collective operation
