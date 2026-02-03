@@ -38,7 +38,10 @@ inputs:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
     required: false
     default: 'auto'
-
+  dind_as_sidecar:
+    description: 'dind runs as a sidecar container (true/false)'
+    required: false
+    default: 'false'
 
 runs:
   using: "composite"
@@ -128,14 +131,24 @@ runs:
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
-          # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
-          if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
-            echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
-            GPU_FLAGS="--gpus all"
+          if [[ "${{ inputs.dind_as_sidecar }}" == "true" ]]; then
+            echo "🔍 Running in dind as sidecar mode"
+            # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
+            if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
+              echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
+              GPU_FLAGS="--gpus all"
+            else
+              echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
+            fi
           else
-            echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
+            echo "🔍 Running in normal mode"
+            if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+              echo "✓ GPU detected, enabling GPU runtime"
+              GPU_FLAGS="--runtime=nvidia --gpus all"
+            else
+              echo "⚠️  No GPU detected, running in CPU-only mode"
+            fi
           fi
-
           # Determine parallelization based on parallel_mode input
           case "${{ inputs.parallel_mode }}" in
             "auto")

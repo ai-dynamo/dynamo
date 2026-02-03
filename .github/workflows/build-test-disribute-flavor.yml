@@ -283,6 +283,7 @@ jobs:
           enable_mypy: 'false' # already covered by CPU tests
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
+          dind_as_sidecar: 'true'
 
 # ============================================================================
 # COPY TO ACR

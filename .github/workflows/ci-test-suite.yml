@@ -8,6 +8,9 @@
 name: CI Test Suite
 
 on:
+  push:
+    branches:
+      - ops-2572 #todo remove
   workflow_call:
     inputs:
       pipeline_type:
