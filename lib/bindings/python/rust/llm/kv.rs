@@ -114,7 +114,9 @@ pub struct ZmqKvEventPublisherConfig {
     pub zmq_topic: String,
     #[pyo3(get, set)]
     pub enable_local_indexer: bool, // whether the underlying KvEventPublisher publishes to
-                                    // both global and worker-local KvIndexers
+    // both global and worker-local KvIndexers
+    #[pyo3(get, set)]
+    pub dp_rank: DpRank, // data parallel rank for this publisher
 }
 
 #[pymethods]
@@ -125,7 +127,8 @@ impl ZmqKvEventPublisherConfig {
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
         zmq_topic = "".to_string(),
-        enable_local_indexer = false
+        enable_local_indexer = false,
+        dp_rank = 0
     ))]
     pub fn new(
         worker_id: WorkerId,
@@ -133,6 +136,7 @@ impl ZmqKvEventPublisherConfig {
         zmq_endpoint: String,
         zmq_topic: String,
         enable_local_indexer: bool,
+        dp_rank: DpRank,
     ) -> Self {
         Self {
             worker_id,
@@ -140,6 +144,7 @@ impl ZmqKvEventPublisherConfig {
             zmq_endpoint,
             zmq_topic,
             enable_local_indexer,
+            dp_rank,
         }
     }
 }
@@ -161,6 +166,7 @@ impl ZmqKvEventPublisher {
                 topic: config.zmq_topic,
             }),
             config.enable_local_indexer,
+            config.dp_rank,
         )
         .map_err(to_pyerr)?;
         Ok(Self { inner })
@@ -192,6 +198,8 @@ impl ZmqKvEventListener {
         runtime.block_on(async {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<KvCacheEvent>();
             let shutdown_token = tokio_util::sync::CancellationToken::new();
+            // Standalone listener needs its own event ID counter
+            let next_event_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
             tokio::spawn(start_zmq_listener(
                 zmq_endpoint,
@@ -199,6 +207,7 @@ impl ZmqKvEventListener {
                 tx,
                 shutdown_token.clone(),
                 kv_block_size as u32,
+                next_event_id,
             ));
 
             Ok(Self {
@@ -273,6 +282,7 @@ impl KvEventPublisher {
             kv_block_size as u32,
             None,
             enable_local_indexer,
+            dp_rank,
         )
         .map_err(to_pyerr)?;
 
@@ -285,11 +295,10 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None, block_mm_infos=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None, block_mm_infos=None))]
     fn publish_stored(
-        &mut self,
+        &self,
         py: Python,
-        event_id: u64,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
         block_hashes: Vec<i64>,
@@ -301,6 +310,9 @@ impl KvEventPublisher {
         let dp_rank = self.dp_rank;
         let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
+
+        // Use shared monotonic event_id counter from the inner publisher
+        let event_id = inner.next_event_id();
 
         // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
         let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
@@ -338,9 +350,12 @@ impl KvEventPublisher {
         })
     }
 
-    fn publish_removed(&self, py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
+    fn publish_removed(&self, py: Python, block_hashes: Vec<i64>) -> PyResult<()> {
         let dp_rank = self.dp_rank;
         let inner = self.inner.clone();
+
+        // Use shared monotonic event_id counter from the inner publisher
+        let event_id = inner.next_event_id();
 
         py.allow_threads(|| {
             let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
