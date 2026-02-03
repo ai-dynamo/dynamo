@@ -127,7 +127,7 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         env:
-          NO_CACHE_FLAG: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+          NO_CACHE_FLAG: 'false' 
         run: |
           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
@@ -188,12 +188,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_image: true
-      run_tests: true
-      copy_to_acr: true
-      push_image: true
     secrets: inherit
 
   # ============================================================================
@@ -210,10 +205,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_tests: true
-      copy_to_acr: true
     secrets: inherit
 
   # ============================================================================
@@ -230,10 +222,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trt-llm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_tests: true
-      copy_to_acr: true
     secrets: inherit
 
 

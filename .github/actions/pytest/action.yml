@@ -41,7 +41,11 @@ inputs:
   dind_as_sidecar:
     description: 'dind runs as a sidecar container (true/false)'
     required: false
-    default: 'false'
+    default: 'false'  
+  cpu_limit:
+    description: 'Maximum number of cores available to docker'
+    required: false
+    default: '10'
 
 runs:
   using: "composite"
@@ -101,7 +105,75 @@ runs:
           sleep 1
         done
 
-    - name: Run tests
+    - name: Run tests for runner v1
+      if: inputs.dind_as_sidecar == 'false'
+      shell: bash
+      env:
+        NUM_CPUS: ${{ inputs.cpu_limit }}
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_HOME: /runner/_work/_temp
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        # Run pytest with detailed output and JUnit XML
+        set +e  # Don't exit on test failures
+
+        # Determine docker runtime flags and pytest command based on dry_run mode
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
+          GPU_FLAGS=""
+          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+        else
+          echo "🚀 Running pytest in normal mode"
+          MYPY_FLAG=""
+          if [[ "${{ inputs.enable_mypy }}" == "true" ]]; then
+            echo "🔍 Mypy type checking enabled"
+            MYPY_FLAG="--mypy"
+          fi
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+
+          # Detect GPU availability and conditionally add GPU flags
+          GPU_FLAGS=""
+          if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+            echo "✓ GPU detected, enabling GPU runtime"
+            GPU_FLAGS="--runtime=nvidia --gpus all"
+          else
+            echo "⚠️  No GPU detected, running in CPU-only mode"
+          fi
+        fi
+
+        # Get absolute path for test-results directory and ensure it has proper permissions
+        TEST_RESULTS_DIR="$(pwd)/test-results"
+        chmod 777 "${TEST_RESULTS_DIR}"
+        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
+        docker run ${GPU_FLAGS} --rm -w /workspace \
+          --cpus=${NUM_CPUS} \
+          --network host \
+          --env HF_TOKEN="${HF_TOKEN}" \
+          --name ${{ env.CONTAINER_ID }}_pytest \
+          -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          ${{ inputs.image_tag }} \
+          bash -c "${PYTEST_CMD}"
+
+        TEST_EXIT_CODE=$?
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        # Verify test results were written (only in normal mode)
+        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+          if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
+            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+          else
+            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+          fi
+        fi
+
+        # Always continue to results processing
+        exit 0
+
+    - name: Run tests in dind as sidecar mode
+      if: inputs.dind_as_sidecar == 'true'
       shell: bash
       env:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
@@ -131,24 +203,14 @@ runs:
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
-          if [[ "${{ inputs.dind_as_sidecar }}" == "true" ]]; then
-            echo "🔍 Running in dind as sidecar mode"
-            # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
-            if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
-              echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
-              GPU_FLAGS="--gpus all"
-            else
-              echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
-            fi
+          # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
+          if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
+            echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
+            GPU_FLAGS="--gpus all"
           else
-            echo "🔍 Running in normal mode"
-            if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
-              echo "✓ GPU detected, enabling GPU runtime"
-              GPU_FLAGS="--runtime=nvidia --gpus all"
-            else
-              echo "⚠️  No GPU detected, running in CPU-only mode"
-            fi
+            echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
           fi
+
           # Determine parallelization based on parallel_mode input
           case "${{ inputs.parallel_mode }}" in
             "auto")

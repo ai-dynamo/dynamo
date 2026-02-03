@@ -8,56 +8,59 @@
 name: CI Test Suite
 
 on:
-  workflow_call:
-    inputs:
-      pipeline_type:
-        description: 'Type of pipeline: nightly or post_merge'
-        required: true
-        type: string
-      include_nightly_marks:
-        description: 'Include nightly pytest marks in test selection'
-        required: true
-        type: boolean
-      image_prefix:
-        description: 'Prefix for image tags (nightly or main)'
-        required: true
-        type: string
-      enable_slack_notification:
-        description: 'Enable Slack notifications on completion'
-        required: false
-        type: boolean
-        default: false
-    secrets:
-      AWS_ACCOUNT_ID:
-        required: true
-      AWS_DEFAULT_REGION:
-        required: true
-      AWS_ACCESS_KEY_ID:
-        required: true
-      AWS_SECRET_ACCESS_KEY:
-        required: true
-      NGC_CI_ACCESS_TOKEN:
-        required: true
-      CI_TOKEN:
-        required: true
-      SCCACHE_S3_BUCKET:
-        required: true
-      AZURE_ACR_HOSTNAME:
-        required: true
-      AZURE_ACR_USER:
-        required: true
-      AZURE_ACR_PASSWORD:
-        required: true
-      SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL:
-        required: false
-      SLACK_OPS_SUPPORT_GROUP_ID:
-        required: false
-      AZURE_AKS_CI_KUBECONFIG_B64:
-        required: false
-      HF_TOKEN:
-        required: false
-      DYNAMO_INGRESS_SUFFIX:
-        required: false
+  push:
+    branches:
+      - ops-2572
+  # workflow_call:
+  #   inputs:
+  #     pipeline_type:
+  #       description: 'Type of pipeline: nightly or post_merge'
+  #       required: true
+  #       type: string
+  #     include_nightly_marks:
+  #       description: 'Include nightly pytest marks in test selection'
+  #       required: true
+  #       type: boolean
+  #     image_prefix:
+  #       description: 'Prefix for image tags (nightly or main)'
+  #       required: true
+  #       type: string
+  #     enable_slack_notification:
+  #       description: 'Enable Slack notifications on completion'
+  #       required: false
+  #       type: boolean
+  #       default: false
+  #   secrets:
+  #     AWS_ACCOUNT_ID:
+  #       required: true
+  #     AWS_DEFAULT_REGION:
+  #       required: true
+  #     AWS_ACCESS_KEY_ID:
+  #       required: true
+  #     AWS_SECRET_ACCESS_KEY:
+  #       required: true
+  #     NGC_CI_ACCESS_TOKEN:
+  #       required: true
+  #     CI_TOKEN:
+  #       required: true
+  #     SCCACHE_S3_BUCKET:
+  #       required: true
+  #     AZURE_ACR_HOSTNAME:
+  #       required: true
+  #     AZURE_ACR_USER:
+  #       required: true
+  #     AZURE_ACR_PASSWORD:
+  #       required: true
+  #     SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL:
+  #       required: false
+  #     SLACK_OPS_SUPPORT_GROUP_ID:
+  #       required: false
+  #     AZURE_AKS_CI_KUBECONFIG_B64:
+  #       required: false
+  #     HF_TOKEN:
+  #       required: false
+  #     DYNAMO_INGRESS_SUFFIX:
+  #       required: false
 
 permissions:
   contents: read
