@@ -63,7 +63,7 @@ Install system dependencies and the Dynamo wheel for your chosen backend:
 .. note::
 
    For CUDA 13 (B300/GB300), the container is recommended. See
-   `SGLang install docs <https://docs.sglang.ai/start/install.html>`_ for details.
+   `SGLang install docs <https://docs.sglang.io/get_started/install.html>`_ for details.
 
 **TensorRT-LLM**
 

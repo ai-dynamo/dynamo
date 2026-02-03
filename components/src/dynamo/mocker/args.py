@@ -316,6 +316,17 @@ def parse_args():
         "If not specified, bootstrap rendezvous is disabled.",
     )
     parser.add_argument(
+        "--stagger-delay",
+        type=float,
+        default=-1.0,
+        help=(
+            "Delay in seconds between launching each worker to avoid overwhelming "
+            "etcd/NATS/frontend with many workers. Set to 0 to disable staggering. "
+            "Use -1 for auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
+            "Default: -1 (auto)"
+        ),
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
