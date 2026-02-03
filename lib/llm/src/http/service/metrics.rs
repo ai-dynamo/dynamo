@@ -36,37 +36,54 @@ pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
-pub static WORKER_LAST_TTFT_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+pub static WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
     GaugeVec::new(
         Opts::new(
             format!(
                 "dynamo_frontend_{}",
-                frontend_service::WORKER_LAST_TTFT_SECONDS
+                frontend_service::WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
             ),
             "Last observed time to first token per worker (seconds)",
         ),
         &["worker_id", "dp_rank", "worker_type"],
     )
-    .expect("Failed to create worker_last_ttft gauge")
+    .expect("Failed to create worker_last_time_to_first_token gauge")
+});
+
+/// Global Prometheus gauge for last observed input sequence tokens per worker
+/// Labels: worker_id, dp_rank, worker_type
+/// Updated atomically with TTFT - represents the input token count from the same request
+pub static WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::WORKER_LAST_INPUT_SEQUENCE_TOKENS
+            ),
+            "Last observed input sequence tokens per worker",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_input_sequence_tokens gauge")
 });
 
 /// Global Prometheus gauge for last observed ITL per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
-pub static WORKER_LAST_ITL_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+pub static WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
     GaugeVec::new(
         Opts::new(
             format!(
                 "dynamo_frontend_{}",
-                frontend_service::WORKER_LAST_ITL_SECONDS
+                frontend_service::WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS
             ),
             "Last observed inter-token latency per worker (seconds)",
         ),
         &["worker_id", "dp_rank", "worker_type"],
     )
-    .expect("Failed to create worker_last_itl gauge")
+    .expect("Failed to create worker_last_inter_token_latency gauge")
 });
 
-/// Register the global per-worker TTFT/ITL Prometheus metrics with the given registry.
+/// Register the global per-worker TTFT/ITL/input-tokens Prometheus metrics with the given registry.
 ///
 /// This should be called once during HTTP service setup to expose the metrics
 /// via the `/metrics` endpoint.
@@ -74,8 +91,9 @@ pub static WORKER_LAST_ITL_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
 /// # Errors
 /// Returns an error if the metrics are already registered with the registry.
 pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
-    registry.register(Box::new(WORKER_LAST_TTFT_GAUGE.clone()))?;
-    registry.register(Box::new(WORKER_LAST_ITL_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()))?;
     Ok(())
 }
 
@@ -1034,7 +1052,8 @@ impl ResponseMetricCollector {
                 .with_label_values(&[&self.model])
                 .observe(ttft);
 
-            // Update per-worker TTFT gauge - attributed to prefill worker.
+            // Update per-worker TTFT and input sequence tokens gauges - attributed to prefill worker.
+            // Both gauges are updated atomically from the same request to correlate latency with input size.
             // Use stored worker_type (from routing time) to avoid MDC lookup.
             // Falls back to WORKER_TYPE_PREFILL if not available.
             if let Some(worker_id) = self.prefill_worker_id {
@@ -1046,9 +1065,13 @@ impl ResponseMetricCollector {
                     .prefill_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_PREFILL);
-                WORKER_LAST_TTFT_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
+                let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+                WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                    .with_label_values(labels)
                     .set(ttft);
+                WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                    .with_label_values(labels)
+                    .set(isl as i64);
             }
 
             // Publish ISL
@@ -1083,7 +1106,7 @@ impl ResponseMetricCollector {
                     .decode_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_DECODE);
-                WORKER_LAST_ITL_GAUGE
+                WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
                     .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
                     .set(itl);
             }

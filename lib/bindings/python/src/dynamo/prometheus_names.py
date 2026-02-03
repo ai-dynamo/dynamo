@@ -86,12 +86,16 @@ class frontend_service:
     # Active prefill tokens per worker
     # Gauge metric tracking current queued prefill tokens for each worker
     WORKER_ACTIVE_PREFILL_TOKENS = "worker_active_prefill_tokens"
-    # Last observed time to first token per worker (seconds)
-    # Gauge metric tracking TTFT for the most recent request to each worker
-    WORKER_LAST_TTFT_SECONDS = "worker_last_ttft_seconds"
-    # Last observed inter-token latency per worker (seconds)
-    # Gauge metric tracking ITL for the most recent request to each worker
-    WORKER_LAST_ITL_SECONDS = "worker_last_itl_seconds"
+    # Last observed time to first token per worker (in seconds)
+    # Gauge metric tracking the most recent TTFT for each worker
+    WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS = "worker_last_time_to_first_token_seconds"
+    # Last observed input sequence tokens per worker
+    # Gauge metric tracking the input token count from the same request as WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
+    # Updated atomically with TTFT to correlate latency with input size
+    WORKER_LAST_INPUT_SEQUENCE_TOKENS = "worker_last_input_sequence_tokens"
+    # Last observed inter-token latency per worker (in seconds)
+    # Gauge metric tracking the most recent ITL for each worker
+    WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
 

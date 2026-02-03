@@ -10,7 +10,10 @@ use dashmap::DashMap;
 use prometheus::{IntGaugeVec, Opts, Registry};
 use serde::{Deserialize, Serialize};
 
-use crate::http::service::metrics::{WORKER_LAST_ITL_GAUGE, WORKER_LAST_TTFT_GAUGE};
+use crate::http::service::metrics::{
+    WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
+    WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
+};
 use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::protocols::ActiveLoad;
 use crate::model_card::ModelDeploymentCard;
@@ -465,10 +468,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                             .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
                                         let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
                                             .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
-                                        // Clean up timing metrics (TTFT/ITL per worker)
-                                        let _ = WORKER_LAST_TTFT_GAUGE
+                                        // Clean up timing metrics (TTFT/ITL/input-tokens per worker)
+                                        let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
                                             .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
-                                        let _ = WORKER_LAST_ITL_GAUGE
+                                        let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
+                                        let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
                                             .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
                                     }
                                 }
@@ -596,7 +601,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     .unwrap_or_else(|| vec![0]);
                                 for dp_rank in dp_ranks {
                                     let dp_rank_str = dp_rank.to_string();
-                                    let _ = WORKER_LAST_ITL_GAUGE
+                                    let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
                                         .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_DECODE]);
                                     let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
                                         .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_DECODE]);
@@ -643,7 +648,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                         .unwrap_or_else(|| vec![0]);
                                     for dp_rank in dp_ranks {
                                         let dp_rank_str = dp_rank.to_string();
-                                        let _ = WORKER_LAST_TTFT_GAUGE
+                                        let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_PREFILL]);
+                                        let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
                                             .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_PREFILL]);
                                         let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
                                             .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_PREFILL]);

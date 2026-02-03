@@ -160,11 +160,18 @@ pub mod frontend_service {
 
     /// Last observed time to first token per worker (in seconds)
     /// Gauge metric tracking the most recent TTFT for each worker
-    pub const WORKER_LAST_TTFT_SECONDS: &str = "worker_last_ttft_seconds";
+    pub const WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS: &str =
+        "worker_last_time_to_first_token_seconds";
+
+    /// Last observed input sequence tokens per worker
+    /// Gauge metric tracking the input token count from the same request as WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
+    /// Updated atomically with TTFT to correlate latency with input size
+    pub const WORKER_LAST_INPUT_SEQUENCE_TOKENS: &str = "worker_last_input_sequence_tokens";
 
     /// Last observed inter-token latency per worker (in seconds)
     /// Gauge metric tracking the most recent ITL for each worker
-    pub const WORKER_LAST_ITL_SECONDS: &str = "worker_last_itl_seconds";
+    pub const WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS: &str =
+        "worker_last_inter_token_latency_seconds";
 
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
