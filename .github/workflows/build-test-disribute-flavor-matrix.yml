@@ -92,6 +92,6 @@ jobs:
       builder_name: ${{ inputs.builder_name }}
       build_image: ${{ inputs.build_image }}
       run_tests: ${{ inputs.run_tests }}
-      copy_to_acr: ${{ inputs.copy_to_acr }}
-      push_image: ${{ inputs.push_image && matrix.platform == 'amd64' }}
+      copy_to_acr: ${{ inputs.copy_to_acr && matrix.platform == 'amd64' }}
+      push_image: ${{ inputs.push_image }}
     secrets: inherit
