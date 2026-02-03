@@ -186,12 +186,22 @@ impl LoadEstimator {
     async fn decrement_load(&self, lora_name: &str) -> anyhow::Result<()> {
         let now = Instant::now();
 
-        // Decrement active count (don't go below 0)
-        let new_count = *self
-            .active_counts
-            .entry(lora_name.to_string())
-            .and_modify(|count| *count = count.saturating_sub(1))
-            .or_insert(0);
+        // Atomically decrement and conditionally remove
+        let new_count = match self.active_counts.entry(lora_name.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let count = entry.get_mut();
+                *count = count.saturating_sub(1);
+                let new_val = *count;
+                if new_val == 0 {
+                    entry.remove_entry();
+                }
+                new_val
+            }
+            dashmap::mapref::entry::Entry::Vacant(_) => {
+                // No entry exists, treat as 0
+                0
+            }
+        };
 
         // Add sample to history
         let mut history = self.history.write().await;
@@ -205,11 +215,6 @@ impl LoadEstimator {
         });
 
         self.trim_samples(samples, now);
-
-        // Clean up if count reaches 0
-        if new_count == 0 {
-            self.active_counts.remove(lora_name);
-        }
 
         Ok(())
     }
