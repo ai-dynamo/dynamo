@@ -337,23 +337,24 @@ class TrtllmConfigModifier(BaseConfigModifier):
         # 4. Enable attention DP (replicates KV heads, partitions requests)
         override_dict["enable_attention_dp"] = True
 
-        # 5. Use WIDEEP MoE backend for DEP
-        if "moe_config" not in override_dict:
-            override_dict["moe_config"] = {}
-        override_dict["moe_config"]["backend"] = "WIDEEP"
+        # 5. Use WIDEEP MoE backend for DEP (only for multi-GPU, WIDEEP requires parallel_size > 1)
+        if dep_size > 1:
+            if "moe_config" not in override_dict:
+                override_dict["moe_config"] = {}
+            override_dict["moe_config"]["backend"] = "WIDEEP"
 
-        # Add required environment variables for WIDEEP to worker container
-        container = worker_service.extraPodSpec.mainContainer
-        if container.env is None:
-            container.env = []
-        wideep_envs = [
-            {"name": "TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER", "value": "1"},
-            {"name": "TRTLLM_ENABLE_PDL", "value": "1"},
-        ]
-        existing_env_names = {e.get("name") if isinstance(e, dict) else e.name for e in container.env}
-        for env in wideep_envs:
-            if env["name"] not in existing_env_names:
-                container.env.append(env)
+            # Add required environment variables for WIDEEP to worker container
+            container = worker_service.extraPodSpec.mainContainer
+            if container.env is None:
+                container.env = []
+            wideep_envs = [
+                {"name": "TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER", "value": "1"},
+                {"name": "TRTLLM_ENABLE_PDL", "value": "1"},
+            ]
+            existing_env_names = {e.get("name") if isinstance(e, dict) else e.name for e in container.env}
+            for env in wideep_envs:
+                if env["name"] not in existing_env_names:
+                    container.env.append(env)
 
         # Serialize JSON and append to args
         override_str = json.dumps(override_dict)
