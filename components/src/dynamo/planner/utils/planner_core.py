@@ -215,40 +215,44 @@ def _initialize_gpu_counts(
 ) -> None:
     """Initialize GPU counts from DGD (Kubernetes) or CLI args (virtual).
 
-    In Kubernetes mode: reads from DGD, errors if not found
-    In virtual mode: requires CLI flags, errors if not provided
+    In Kubernetes mode: reads from DGD, falls back to CLI flags if not found
+    (useful for mockers that don't specify GPU resources).
+    In virtual mode: requires CLI flags, errors if not provided.
 
     Raises:
         DeploymentValidationError: If GPU counts cannot be determined
     """
+    # Try to read from DGD in Kubernetes mode
     if hasattr(connector, "get_gpu_counts"):
-        # Kubernetes mode: read from DGD
-        prefill_gpu, decode_gpu = connector.get_gpu_counts(
-            require_prefill=require_prefill,
-            require_decode=require_decode,
-        )
-        args.prefill_engine_num_gpu = prefill_gpu
-        args.decode_engine_num_gpu = decode_gpu
-        logger.info(
-            f"Detected GPU counts from DGD: prefill={prefill_gpu}, decode={decode_gpu}"
-        )
-    else:
-        # Virtual mode: require CLI flags
-        errors = []
-        if require_prefill and args.prefill_engine_num_gpu is None:
-            errors.append(
-                "Missing --prefill-engine-num-gpu flag (required in virtual mode)"
+        try:
+            prefill_gpu, decode_gpu = connector.get_gpu_counts(
+                require_prefill=require_prefill,
+                require_decode=require_decode,
             )
-        if require_decode and args.decode_engine_num_gpu is None:
-            errors.append(
-                "Missing --decode-engine-num-gpu flag (required in virtual mode)"
+            args.prefill_engine_num_gpu = prefill_gpu
+            args.decode_engine_num_gpu = decode_gpu
+            logger.info(
+                f"Detected GPU counts from DGD: prefill={prefill_gpu}, decode={decode_gpu}"
             )
-        if errors:
-            raise DeploymentValidationError(errors)
-        logger.info(
-            f"Using GPU counts from CLI: prefill={args.prefill_engine_num_gpu}, "
-            f"decode={args.decode_engine_num_gpu}"
-        )
+            return
+        except Exception as e:
+            # Fall back to CLI flags (e.g., for mockers without GPU resources in DGD)
+            logger.warning(
+                f"Could not read GPU counts from DGD ({e}), falling back to CLI flags"
+            )
+
+    # Use CLI flags (virtual mode, or K8s fallback when DGD lacks GPU resources)
+    errors = []
+    if require_prefill and args.prefill_engine_num_gpu is None:
+        errors.append("Missing --prefill-engine-num-gpu flag")
+    if require_decode and args.decode_engine_num_gpu is None:
+        errors.append("Missing --decode-engine-num-gpu flag")
+    if errors:
+        raise DeploymentValidationError(errors)
+    logger.info(
+        f"Using GPU counts from CLI: prefill={args.prefill_engine_num_gpu}, "
+        f"decode={args.decode_engine_num_gpu}"
+    )
 
 
 class BasePlanner:

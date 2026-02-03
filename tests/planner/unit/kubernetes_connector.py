@@ -697,6 +697,33 @@ def test_service_get_gpu_count_valid():
     assert service.get_gpu_count() == 4
 
 
+def test_service_get_gpu_count_from_requests_fallback():
+    """Test that get_gpu_count falls back to requests.gpu when limits.gpu is missing"""
+    service = Service(
+        name="test-service",
+        service={
+            "replicas": 1,
+            "resources": {"requests": {"gpu": "2"}},
+        },
+    )
+    assert service.get_gpu_count() == 2
+
+
+def test_service_get_gpu_count_limits_preferred_over_requests():
+    """Test that limits.gpu is preferred over requests.gpu when both are present"""
+    service = Service(
+        name="test-service",
+        service={
+            "replicas": 1,
+            "resources": {
+                "limits": {"gpu": "4"},
+                "requests": {"gpu": "2"},
+            },
+        },
+    )
+    assert service.get_gpu_count() == 4
+
+
 def test_service_get_gpu_count_integer_value():
     """Test that get_gpu_count works with integer GPU values"""
     service = Service(

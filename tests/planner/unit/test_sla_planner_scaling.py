@@ -322,6 +322,61 @@ class TestInitializeGpuCounts:
 
         assert args.decode_engine_num_gpu == 4
 
+    def test_kubernetes_mode_fallback_to_cli_on_dgd_error(self):
+        """Test that K8s mode falls back to CLI flags when DGD parsing fails"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = 2
+        args.decode_engine_num_gpu = 4
+
+        connector = Mock()
+        connector.get_gpu_counts = Mock(
+            side_effect=ValueError("No GPU count specified")
+        )
+
+        _initialize_gpu_counts(
+            args, connector, require_prefill=True, require_decode=True
+        )
+
+        # Should use CLI flag values after fallback
+        assert args.prefill_engine_num_gpu == 2
+        assert args.decode_engine_num_gpu == 4
+
+    def test_kubernetes_mode_fallback_missing_cli_flags_raises_error(self):
+        """Test that K8s fallback raises error when CLI flags are also missing"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = None
+        args.decode_engine_num_gpu = None
+
+        connector = Mock()
+        connector.get_gpu_counts = Mock(
+            side_effect=ValueError("No GPU count specified")
+        )
+
+        with pytest.raises(DeploymentValidationError) as exc_info:
+            _initialize_gpu_counts(
+                args, connector, require_prefill=True, require_decode=True
+            )
+
+        assert len(exc_info.value.errors) == 2
+
+    def test_kubernetes_mode_fallback_partial_cli_flags(self):
+        """Test K8s fallback with only one CLI flag provided"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = 2
+        args.decode_engine_num_gpu = None
+
+        connector = Mock()
+        connector.get_gpu_counts = Mock(
+            side_effect=ValueError("No GPU count specified")
+        )
+
+        with pytest.raises(DeploymentValidationError) as exc_info:
+            _initialize_gpu_counts(
+                args, connector, require_prefill=True, require_decode=True
+            )
+
+        assert "decode-engine-num-gpu" in str(exc_info.value)
+
 
 # Tests for dryrun GPU defaults
 class TestDryrunGpuDefaults:
