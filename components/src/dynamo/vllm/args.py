@@ -71,6 +71,7 @@ class Config:
     enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+    frontend_decoding: bool = False
 
     # vLLM-native encoder worker (ECConnector mode)
     vllm_native_encoder_worker: bool = False
@@ -84,6 +85,9 @@ class Config:
 
     # Use vLLM's tokenizer for pre/post processing
     use_vllm_tokenizer: bool = False
+
+    # sleep mode support (enable_sleep_mode comes from vLLM's engine_args)
+    sleep_mode_level: int = 1
 
     # Whether to enable NATS for KV events (derived from kv_events_config in overwrite_args)
     use_kv_events: bool = False
@@ -218,6 +222,15 @@ def parse_args() -> Config:
         ),
     )
     parser.add_argument(
+        "--frontend-decoding",
+        action="store_true",
+        help=(
+            "Enable frontend decoding of multimodal images. "
+            "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
+            "Without this flag, images are decoded in the Python backend (default behavior)."
+        ),
+    )
+    parser.add_argument(
         "--vllm-native-encoder-worker",
         action="store_true",
         help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
@@ -278,6 +291,13 @@ def parse_args() -> Config:
         action="store_true",
         default=False,
         help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+    )
+    parser.add_argument(
+        "--sleep-mode-level",
+        type=int,
+        default=1,
+        choices=[1, 2, 3],
+        help="Sleep mode level (1=offload to CPU, 2=discard weights, 3=discard all). Default: 1",
     )
     add_config_dump_args(parser)
 
@@ -402,6 +422,7 @@ def parse_args() -> Config:
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
+    config.frontend_decoding = args.frontend_decoding
     config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
     config.ec_connector_backend = args.ec_connector_backend
     config.ec_storage_path = args.ec_storage_path
@@ -412,6 +433,7 @@ def parse_args() -> Config:
     config.event_plane = args.event_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
+    config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config
 
     # Validate custom Jinja template file exists if provided

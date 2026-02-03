@@ -38,6 +38,7 @@ use crate::{
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
+            images::{NvCreateImageRequest, NvImagesResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
@@ -460,24 +461,12 @@ impl ModelWatcher {
 
             // Get or create the worker monitor for this model
             // This allows dynamic threshold updates via the ModelManager
-            // Create monitor if either threshold is configured
-            let worker_monitor = if self.router_config.active_decode_blocks_threshold.is_some()
-                || self.router_config.active_prefill_tokens_threshold.is_some()
-            {
-                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
-                let active_decode_blocks = self
-                    .router_config
-                    .active_decode_blocks_threshold
-                    .unwrap_or(1.0);
-                let active_prefill_tokens = self
-                    .router_config
-                    .active_prefill_tokens_threshold
-                    .unwrap_or(1000000);
+            // Create monitor if any threshold is configured
+            let worker_monitor = if self.router_config.load_threshold_config.is_configured() {
                 Some(self.manager.get_or_create_worker_monitor(
                     card.name(),
                     client.clone(),
-                    active_decode_blocks,
-                    active_prefill_tokens,
+                    self.router_config.load_threshold_config.clone(),
                 ))
             } else {
                 None
@@ -631,6 +620,19 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
+            // Case: Text + Images (diffusion models)
+            // Takes text prompts as input, generates images
+            let push_router = PushRouter::<
+                NvCreateImageRequest,
+                Annotated<NvImagesResponse>,
+            >::from_client_with_threshold(
+                client, self.router_config.router_mode, None, None
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_images_model(card.name(), checksum, engine)?;
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens
@@ -668,7 +670,7 @@ impl ModelWatcher {
             // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions|Prefill), Text+Chat, Text+Completions, Tokens+Embeddings, Tensor+TensorBased",
+                Tokens+(Chat|Completions|Prefill), Text+(Chat|Completions|Images), Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
             );

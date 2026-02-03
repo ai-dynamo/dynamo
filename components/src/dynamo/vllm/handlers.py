@@ -21,7 +21,9 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+import dynamo.nixl_connect as nixl_connect
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import (
     ModelInput,
@@ -244,6 +246,7 @@ class BaseWorkerHandler(ABC):
         config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         self.runtime = runtime
         self.component = component
@@ -257,6 +260,10 @@ class BaseWorkerHandler(ABC):
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
+        self.enable_frontend_decoding = enable_frontend_decoding
+        # NIXL connector for frontend decoding - lazy initialized
+        self._nixl_connector = None
+        self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
@@ -879,6 +886,10 @@ class BaseWorkerHandler(ABC):
         """
         Load a batch of images from multimodal data items.
 
+        Supports two paths:
+        1. Url variant: Download and decode image from URL (default)
+        2. Decoded variant: Read pre-decoded image via NIXL RDMA (requires --frontend-decoding)
+
         Args:
             image_mm_items: List of multimodal data items for images
         Returns:
@@ -887,25 +898,41 @@ class BaseWorkerHandler(ABC):
             Exception: If any image fails to load
         """
         image_futures = []
+
         for item in image_mm_items:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                # URL path: download and decode in Python backend
                 url = item[URL_VARIANT_KEY]
                 image_futures.append(self.image_loader.load_image(url))
                 logger.debug(f"Preparing to load image from URL: {url[:80]}...")
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                logger.warning(
-                    "Decoded multimodal data not yet supported in standard worker"
-                )
+                if self.enable_frontend_decoding:
+                    async with self._nixl_connector_lock:
+                        if self._nixl_connector is None:
+                            self._nixl_connector = nixl_connect.Connector()
+                            await self._nixl_connector.initialize()
 
+                    metadata = item[DECODED_VARIANT_KEY]
+                    image_futures.append(
+                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
+                    )
+                else:
+                    logger.error(
+                        "Received Decoded multimodal data but --frontend-decoding not enabled. "
+                        "Use --frontend-decoding flag to enable NIXL RDMA image transfer."
+                    )
+                    raise ValueError("Could not load decoded media from frontend")
+
+        # Process images in parallel
         results = await asyncio.gather(*image_futures, return_exceptions=True)
         loaded_images = []
         collective_exceptions = ""
-        for i, result in enumerate(results):
+        for media_item, result in zip(image_mm_items, results):
             if isinstance(result, Exception):
-                url = image_mm_items[i].get(URL_VARIANT_KEY, "unknown")
-                logger.error(f"Failed to load image from {url[:80]}...: {result}")
+                source = media_item.get(URL_VARIANT_KEY, "decoded")
+                logger.error(f"Failed to load image from {source[:80]}...: {result}")
                 collective_exceptions += (
-                    f"Failed to load image from {url[:80]}...: {result}\n"
+                    f"Failed to load image from {source[:80]}...: {result}\n"
                 )
                 continue
             loaded_images.append(result)
@@ -1238,6 +1265,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         super().__init__(
             runtime,
@@ -1250,6 +1278,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             use_vllm_tokenizer,
             shutdown_event,
+            enable_frontend_decoding,
         )
 
     async def generate(self, request, context):
@@ -1451,6 +1480,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         config=None,
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         super().__init__(
             runtime,
@@ -1463,6 +1493,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             config,
             use_vllm_tokenizer,
             shutdown_event,
+            enable_frontend_decoding,
         )
 
     async def generate(self, request, context):
