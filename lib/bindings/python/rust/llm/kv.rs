@@ -1249,6 +1249,7 @@ impl KvPushRouter {
                     &token_ids,
                     router_config_override.as_ref(),
                     update_states,
+                    None, // lora_name not exposed in Python API yet
                 )
                 .await
                 .map_err(to_pyerr)?;

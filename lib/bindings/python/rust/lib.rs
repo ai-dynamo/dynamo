@@ -429,11 +429,17 @@ fn unregister_llm<'p>(
 /// Download a model from Hugging Face, returning it's local path
 /// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
 #[pyfunction]
-#[pyo3(signature = (remote_name))]
-fn fetch_llm<'p>(py: Python<'p>, remote_name: &str) -> PyResult<Bound<'p, PyAny>> {
+#[pyo3(signature = (remote_name, ignore_weights=false))]
+fn fetch_llm<'p>(
+    py: Python<'p>,
+    remote_name: &str,
+    ignore_weights: bool,
+) -> PyResult<Bound<'p, PyAny>> {
     let repo = remote_name.to_string();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        LocalModel::fetch(&repo, false).await.map_err(to_pyerr)
+        LocalModel::fetch(&repo, ignore_weights)
+            .await
+            .map_err(to_pyerr)
     })
 }
 
