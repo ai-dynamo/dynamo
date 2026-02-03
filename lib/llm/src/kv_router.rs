@@ -1025,7 +1025,7 @@ impl Drop for KvRouter {
     }
 }
 
-/// A simple direct routing wrapper for `RouterMode::Direct`.
+/// A direct routing wrapper for `RouterMode::Direct`.
 ///
 /// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
 /// then routes directly to the specified worker. Used when an external orchestrator
@@ -1033,6 +1033,12 @@ impl Drop for KvRouter {
 ///
 /// Unlike `KvPushRouter`, this does not require a `KvRouter` and does not perform
 /// KV scoring, bookkeeping, or metrics tracking. It simply routes to specified workers.
+/// Unlike Random/RoundRobin modes which are handled directly in PushRouter,
+/// Direct mode requires a wrapper because:
+/// 1. PushRouter is generic over `T` and doesn't know the request's structure
+/// 2. Direct mode needs to extract `worker_id` from `request.routing.decode_worker_id`
+/// DirectRoutingRouter is specialized for PreprocessedRequest, so it can read the
+/// routing hints and then call `PushRouter::direct(request, worker_id)`.
 pub struct DirectRoutingRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
 }
