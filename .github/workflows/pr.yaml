@@ -66,11 +66,11 @@ jobs:
 
   sglang-sccache:
     needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    uses: ./.github/workflows/build-test-disribute-flavor-matrix.yml
     with:
       framework: sglang
-      platform: 'amd64'
-      cuda_version: '12.9'
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       no_cache: false
       run_tests: false
