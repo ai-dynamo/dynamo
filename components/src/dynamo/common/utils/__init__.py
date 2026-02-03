@@ -14,6 +14,12 @@ Submodules:
     - prometheus: Prometheus metrics collection and logging utilities
 """
 
-from dynamo.common.utils import endpoint_types, otel_tracing, paths, prometheus
+from dynamo.common.utils import (
+    endpoint_types,
+    engine_response,
+    otel_tracing,
+    paths,
+    prometheus,
+)
 
-__all__ = ["endpoint_types", "otel_tracing", "paths", "prometheus"]
+__all__ = ["endpoint_types", "engine_response", "otel_tracing", "paths", "prometheus"]

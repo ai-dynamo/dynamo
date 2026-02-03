@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+from typing import Any, Callable
 
 import sglang as sgl
 import uvloop
@@ -130,6 +131,22 @@ async def worker():
     # Install signal handlers and save old ones for chaining
     for sig in (signal.SIGTERM, signal.SIGINT):
         old_handlers[sig] = signal.signal(sig, signal_handler)
+
+    # Override add_signal_handler to prevent SGLang from installing its own signal handlers.
+    # This ensures that Dynamo retains full control over the graceful shutdown flow,
+    # rather than allowing SGLang (or other libraries) to overwrite or interfere
+    # with the signal handlers that Dynamo sets up for SIGTERM/SIGINT.
+    _orig_add = loop.add_signal_handler
+
+    def watching_add_signal_handler(sig: int, callback: Callable, *args: Any):
+        if sig in [signal.SIGTERM, signal.SIGINT]:
+            logging.info(
+                "SIGTERM/SIGINThandler changed via loop.add_signal_handler() is being suppressed by Dynamo"
+            )
+        else:
+            return _orig_add(sig, callback, *args)
+
+    loop.add_signal_handler = watching_add_signal_handler  # type: ignore[assignment]
 
     logging.info("Signal handlers set up for graceful shutdown (with chaining)")
 
