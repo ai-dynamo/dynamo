@@ -34,6 +34,7 @@ a high-level, SLA-driven interface for deploying machine learning models on Dyna
 Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API group.
 
 ### Resource Types
+- [DynamoCheckpoint](#dynamocheckpoint)
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
@@ -65,6 +66,24 @@ _Appears in:_
 | `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array_ | Deprecated: This field is ignored. |  |  |
 
 
+
+
+#### CheckpointMode
+
+_Underlying type:_ _string_
+
+CheckpointMode defines how checkpoint creation is handled
+
+_Validation:_
+- Enum: [Auto Manual]
+
+_Appears in:_
+- [ServiceCheckpointConfig](#servicecheckpointconfig)
+
+| Field | Description |
+| --- | --- |
+| `Auto` | CheckpointModeAuto means the DGD controller will automatically create a Checkpoint CR<br /> |
+| `Manual` | CheckpointModeManual means the user must create the Checkpoint CR themselves<br /> |
 
 
 #### ComponentKind
@@ -148,6 +167,146 @@ _Appears in:_
 
 
 
+#### DynamoCheckpoint
+
+
+
+DynamoCheckpoint is the Schema for the dynamocheckpoints API
+It represents a container checkpoint that can be used to restore pods to a warm state
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoCheckpoint` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoCheckpointSpec](#dynamocheckpointspec)_ |  |  |  |
+| `status` _[DynamoCheckpointStatus](#dynamocheckpointstatus)_ |  |  |  |
+
+
+
+
+#### DynamoCheckpointIdentity
+
+
+
+DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence
+Two checkpoints with the same identity hash are considered equivalent
+
+
+
+_Appears in:_
+- [DynamoCheckpointSpec](#dynamocheckpointspec)
+- [ServiceCheckpointConfig](#servicecheckpointconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B") |  | Required: \{\} <br /> |
+| `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm) |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version (optional)<br />If not specified, version is not included in identity hash<br />This ensures checkpoint compatibility across Dynamo releases |  | Optional: \{\} <br /> |
+| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.) |  | Optional: \{\} <br /> |
+| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters are additional parameters that affect the checkpoint hash<br />Use for any framework-specific or custom parameters not covered above |  | Optional: \{\} <br /> |
+
+
+#### DynamoCheckpointJobConfig
+
+
+
+DynamoCheckpointJobConfig defines the configuration for the checkpoint creation Job
+
+
+
+_Appears in:_
+- [DynamoCheckpointSpec](#dynamocheckpointspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `podTemplateSpec` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplateSpec allows customizing the checkpoint Job pod<br />This should include the container that runs the workload to be checkpointed |  | Required: \{\} <br /> |
+| `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Optional: \{\} <br /> |
+| `backoffLimit` _integer_ | BackoffLimit specifies the number of retries before marking the Job failed | 3 | Optional: \{\} <br /> |
+| `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 | Optional: \{\} <br /> |
+
+
+#### DynamoCheckpointPhase
+
+_Underlying type:_ _string_
+
+DynamoCheckpointPhase represents the current phase of the checkpoint lifecycle
+
+_Validation:_
+- Enum: [Pending Creating Ready Failed]
+
+_Appears in:_
+- [DynamoCheckpointStatus](#dynamocheckpointstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | DynamoCheckpointPhasePending indicates the checkpoint CR has been created but the Job has not started<br /> |
+| `Creating` | DynamoCheckpointPhaseCreating indicates the checkpoint Job is running<br /> |
+| `Ready` | DynamoCheckpointPhaseReady indicates the checkpoint tar file is available on the PVC<br /> |
+| `Failed` | DynamoCheckpointPhaseFailed indicates the checkpoint creation failed<br /> |
+
+
+#### DynamoCheckpointSpec
+
+
+
+DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
+
+
+
+_Appears in:_
+- [DynamoCheckpoint](#dynamocheckpoint)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Identity defines the inputs that determine checkpoint equivalence |  | Required: \{\} <br /> |
+| `job` _[DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)_ | Job defines the configuration for the checkpoint creation Job |  | Required: \{\} <br /> |
+
+
+#### DynamoCheckpointStatus
+
+
+
+DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
+
+
+
+_Appears in:_
+- [DynamoCheckpoint](#dynamocheckpoint)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br />Optional: \{\} <br /> |
+| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />This hash is used to identify equivalent checkpoints |  | Optional: \{\} <br /> |
+| `location` _string_ | Location is the full URI/path to the checkpoint in the storage backend<br />For PVC: same as TarPath (e.g., /checkpoints/\{hash\}.tar)<br />For S3: s3://bucket/prefix/\{hash\}.tar<br />For OCI: oci://registry/repo:\{hash\} |  | Optional: \{\} <br /> |
+| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | StorageType indicates the storage backend type used for this checkpoint |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
+| `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
+| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint tar was created |  | Optional: \{\} <br /> |
+| `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represent the latest available observations of the checkpoint's state |  | Optional: \{\} <br /> |
+
+
+#### DynamoCheckpointStorageType
+
+_Underlying type:_ _string_
+
+DynamoCheckpointStorageType defines the supported storage backends for checkpoints
+
+_Validation:_
+- Enum: [pvc s3 oci]
+
+_Appears in:_
+- [DynamoCheckpointStatus](#dynamocheckpointstatus)
+
+
+
 #### DynamoComponentDeployment
 
 
@@ -203,6 +362,7 @@ _Appears in:_
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
+| `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -242,6 +402,7 @@ _Appears in:_
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
+| `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -456,6 +617,7 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
+| `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -870,6 +1032,44 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates whether the ScalingAdapter should be enabled for this service.<br />When true, a DGDSA is created and owns the replicas field.<br />When false (default), no DGDSA is created and replicas can be modified directly in the DGD. | false | Optional: \{\} <br /> |
+
+
+#### ServiceCheckpointConfig
+
+
+
+ServiceCheckpointConfig configures checkpointing for a DGD service
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false | Optional: \{\} <br /> |
+| `mode` _[CheckpointMode](#checkpointmode)_ | Mode defines how checkpoint creation is handled<br />- Auto: DGD controller creates Checkpoint CR automatically<br />- Manual: User must create Checkpoint CR | Auto | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
+| `checkpointRef` _string_ | CheckpointRef references an existing Checkpoint CR to use<br />If specified, Identity is ignored and this checkpoint is used directly |  | Optional: \{\} <br /> |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Identity defines the checkpoint identity for hash computation<br />Used when Mode is Auto or when looking up existing checkpoints<br />Required when checkpointRef is not specified |  | Optional: \{\} <br /> |
+
+
+#### ServiceCheckpointStatus
+
+
+
+ServiceCheckpointStatus contains checkpoint information for a single service.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `checkpointName` _string_ | CheckpointName is the name of the associated Checkpoint CR |  | Optional: \{\} <br /> |
+| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity |  | Optional: \{\} <br /> |
+| `ready` _boolean_ | Ready indicates if the checkpoint is ready for use |  | Optional: \{\} <br /> |
 
 
 #### ServiceReplicaStatus
