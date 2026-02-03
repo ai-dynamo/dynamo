@@ -324,7 +324,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -459,7 +459,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -595,7 +595,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -731,7 +731,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
