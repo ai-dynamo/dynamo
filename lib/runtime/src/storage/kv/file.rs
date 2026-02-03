@@ -31,6 +31,10 @@ const DEFAULT_TTL: Duration = Duration::from_secs(10);
 /// Don't do keep-alive any more often than this. Limits the disk write load.
 const MIN_KEEP_ALIVE: Duration = Duration::from_secs(1);
 
+/// Prefix for temporary files used in atomic writes.
+/// Files with this prefix are ignored by the watcher.
+const TEMP_FILE_PREFIX: &str = ".tmp_";
+
 /// Treat as a singleton
 #[derive(Clone)]
 pub struct FileStore {
@@ -291,7 +295,8 @@ impl fmt::Display for Directory {
 
 #[async_trait]
 impl Bucket for Directory {
-    /// Write a file to the directory
+    /// Write a file to the directory using atomic write (temp file + rename).
+    /// This ensures watchers never see a partially written file.
     async fn insert(
         &self,
         key: &Key,
@@ -300,11 +305,24 @@ impl Bucket for Directory {
     ) -> Result<StoreOutcome, StoreError> {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
-        self.owned_files.lock().insert(full_path.clone());
         let str_path = full_path.display().to_string();
-        fs::write(&full_path, &value)
-            .context(str_path)
+
+        // Use atomic write: write to temp file, then rename.
+        // This prevents watchers from seeing partially written files.
+        let temp_name = format!("{TEMP_FILE_PREFIX}{:016x}", rand::random::<u64>());
+        let temp_path = self.p.join(&temp_name);
+
+        // Write to temp file first
+        fs::write(&temp_path, &value)
+            .with_context(|| format!("writing temp file {}", temp_path.display()))
             .map_err(a_to_fs_err)?;
+
+        // Atomic rename to target path
+        fs::rename(&temp_path, &full_path)
+            .with_context(|| format!("renaming {} to {}", temp_path.display(), str_path))
+            .map_err(a_to_fs_err)?;
+
+        self.owned_files.lock().insert(full_path.clone());
         Ok(StoreOutcome::Created(0))
     }
 
@@ -399,8 +417,19 @@ impl Bucket for Directory {
                         }
                     };
 
+                    // Skip temp files used for atomic writes
+                    if item_path.file_name()
+                        .map(|n| n.to_string_lossy().starts_with(TEMP_FILE_PREFIX))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+
                     match event.kind {
-                        EventKind::Create(event::CreateKind::File) | EventKind::Modify(event::ModifyKind::Data(event::DataChange::Content)) => {
+                        // Handle file creation, modification, and rename-to (from atomic writes)
+                        EventKind::Create(event::CreateKind::File)
+                        | EventKind::Modify(event::ModifyKind::Data(event::DataChange::Content))
+                        | EventKind::Modify(event::ModifyKind::Name(event::RenameMode::To)) => {
                             let data: bytes::Bytes = match fs::read(&item_path) {
                                 Ok(data) => data.into(),
                                 Err(err) => {
@@ -436,6 +465,15 @@ impl Bucket for Directory {
                     path = %entry.path().display(),
                     "Unexpected entry, directory should only contain files."
                 );
+                continue;
+            }
+
+            // Skip temp files used for atomic writes
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(TEMP_FILE_PREFIX)
+            {
                 continue;
             }
 

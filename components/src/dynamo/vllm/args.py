@@ -40,6 +40,7 @@ class Config:
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
+    event_plane: str
     enable_local_indexer: bool = False
 
     # mirror vLLM
@@ -70,6 +71,7 @@ class Config:
     enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+    frontend_decoding: bool = False
 
     # vLLM-native encoder worker (ECConnector mode)
     vllm_native_encoder_worker: bool = False
@@ -217,6 +219,15 @@ def parse_args() -> Config:
         ),
     )
     parser.add_argument(
+        "--frontend-decoding",
+        action="store_true",
+        help=(
+            "Enable frontend decoding of multimodal images. "
+            "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
+            "Without this flag, images are decoded in the Python backend (default behavior)."
+        ),
+    )
+    parser.add_argument(
         "--vllm-native-encoder-worker",
         action="store_true",
         help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
@@ -257,6 +268,13 @@ def parse_args() -> Config:
         choices=["nats", "http", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
         "--enable-local-indexer",
@@ -394,6 +412,7 @@ def parse_args() -> Config:
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
+    config.frontend_decoding = args.frontend_decoding
     config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
     config.ec_connector_backend = args.ec_connector_backend
     config.ec_storage_path = args.ec_storage_path
@@ -401,6 +420,7 @@ def parse_args() -> Config:
     config.ec_consumer_mode = args.ec_consumer_mode
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.event_plane = args.event_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
     # use_kv_events is set later in overwrite_args() based on kv_events_config
@@ -578,6 +598,7 @@ def overwrite_args(config):
     defaults["kv_events_config"] = kv_cfg
     # Derive use_kv_events from whether kv_events_config is set AND enable_kv_cache_events is True
     config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
+
     logger.info(
         f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
         f"(use_kv_events={config.use_kv_events})"

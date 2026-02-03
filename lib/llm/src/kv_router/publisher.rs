@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -16,9 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use dynamo_runtime::traits::{
-    DistributedRuntimeProvider, events::EventPublisher as EventPublisherTrait,
-};
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::{
     component::{Component, Namespace},
@@ -42,7 +40,7 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
-    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent},
+    indexer::{KvIndexerMetrics, LocalKvIndexer},
     protocols::*,
     worker_query::start_worker_kv_query_endpoint,
 };
@@ -79,6 +77,7 @@ impl KvEventSource {
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
         tx: mpsc::UnboundedSender<KvCacheEvent>,
+        next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
             KvEventSourceConfig::Zmq { endpoint, topic } => {
@@ -92,6 +91,7 @@ impl KvEventSource {
                         tx,
                         cancellation_token.clone(),
                         kv_block_size,
+                        next_event_id,
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
@@ -119,6 +119,9 @@ pub struct KvEventPublisher {
     cancellation_token: CancellationToken,
     /// The channel to send events to.
     tx: mpsc::UnboundedSender<KvCacheEvent>,
+    /// Internal monotonic event ID counter - ensures each event gets a unique, incrementing ID.
+    /// Shared with the ZMQ listener (if any) to maintain consistency.
+    next_event_id: Arc<AtomicU64>,
 }
 
 impl KvEventPublisher {
@@ -127,7 +130,7 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
-        Self::new_with_local_indexer(component, kv_block_size, source_config, false)
+        Self::new_with_local_indexer(component, kv_block_size, source_config, false, 0)
     }
 
     pub fn new_with_local_indexer(
@@ -135,6 +138,7 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
         enable_local_indexer: bool,
+        dp_rank: DpRank,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
@@ -154,6 +158,9 @@ impl KvEventPublisher {
             );
         }
 
+        // Internal monotonic event ID counter - shared with ZMQ listener if any
+        let next_event_id = Arc::new(AtomicU64::new(0));
+
         // Create our event source (if any)
         let mut source = None;
         if let Some(config) = source_config {
@@ -163,6 +170,7 @@ impl KvEventPublisher {
                 config,
                 cancellation_token.clone(),
                 tx.clone(),
+                next_event_id.clone(),
             )?);
         }
 
@@ -191,6 +199,7 @@ impl KvEventPublisher {
                 .spawn(start_worker_kv_query_endpoint(
                     component,
                     worker_id,
+                    dp_rank,
                     local_indexer,
                 ))
         });
@@ -255,11 +264,18 @@ impl KvEventPublisher {
             source,
             cancellation_token,
             tx,
+            next_event_id,
         })
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
         self.tx.send(event)
+    }
+
+    /// Get and increment the next event ID atomically.
+    /// Use this to assign monotonically increasing event IDs to events before publishing.
+    pub fn next_event_id(&self) -> u64 {
+        self.next_event_id.fetch_add(1, Ordering::SeqCst)
     }
 
     pub fn kv_block_size(&self) -> u32 {
@@ -298,7 +314,7 @@ impl EventSink for EventPublisher {
 #[async_trait]
 impl EventSink for NatsQueue {
     async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
-        self.publish(KV_EVENT_SUBJECT, event).await
+        NatsQueue::publish_event(self, KV_EVENT_SUBJECT, event).await
     }
 }
 
@@ -384,9 +400,9 @@ async fn start_event_processor_jetstream(
                     }
                 }
 
-                // Then publish to event plane for global distribution
-                if let Err(e) = publisher.publish_event(&router_event).await {
-                    tracing::error!("Failed to publish event to event plane: {}", e);
+                // Then publish to NATS JetStream for global distribution
+                if let Err(e) = publisher.publish_event(KV_EVENT_SUBJECT, &router_event).await {
+                    tracing::error!("Failed to publish event to NATS JetStream: {}", e);
                 }
 
             }
@@ -408,6 +424,7 @@ pub async fn start_zmq_listener(
     tx: mpsc::UnboundedSender<KvCacheEvent>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
+    next_event_id: Arc<AtomicU64>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -425,8 +442,11 @@ pub async fn start_zmq_listener(
         return;
     }
 
+    // Connect to the ZMQ endpoint. SGLang binds locally, Dynamo connects.
+    // In multi-node setups, each node runs dynamo.sglang alongside local SGLang ranks,
+    // so ZMQ connections are always local. NATS handles cross-node event distribution.
     if let Err(e) = socket.connect(&zmq_endpoint).await {
-        tracing::error!("Failed to connect ZMQ SUB socket: {}", e);
+        tracing::error!("Failed to connect ZMQ SUB socket to {zmq_endpoint}: {e}");
         return;
     }
 
@@ -495,7 +515,9 @@ pub async fn start_zmq_listener(
                     continue;
                 }
 
-                let seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
+                // Note: We extract the engine's sequence number for logging but use our own
+                // internal monotonic counter for event_id to ensure per-dp_rank monotonicity
+                let engine_seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
 
                 // Decode our batch of events.
                 let batch_result = rmps::from_slice::<KvEventBatch>(&payload);
@@ -506,16 +528,19 @@ pub async fn start_zmq_listener(
                 };
 
                 tracing::trace!(
-                    "ZMQ listener on {} received batch with {} events (seq={}, dp_rank={})",
+                    "ZMQ listener on {} received batch with {} events (engine_seq={}, dp_rank={})",
                     zmq_endpoint,
                     batch.events.len(),
-                    seq,
+                    engine_seq,
                     batch.data_parallel_rank.unwrap_or(0)
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0) as u32;
                 for raw_event in batch.events.into_iter() {
-                    let event = convert_event(raw_event, seq, kv_block_size, dp_rank, &warning_count);
+                    // Use shared monotonic event_id counter instead of engine's sequence number
+                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+
+                    let event = convert_event(raw_event, event_id, kv_block_size, dp_rank, &warning_count);
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         exit_reason = "channel receiver dropped";
@@ -923,7 +948,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 // -------------------------------------------------------------------------
 
 /// Metrics data passed through the channel for NATS publishing
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct WorkerMetrics {
     dp_rank: DpRank,
     active_decode_blocks: u64,
@@ -984,7 +1009,7 @@ impl WorkerMetricsPublisher {
                 };
 
             let mut rx = nats_rx;
-            let mut last_active_decode_blocks: Option<u64> = Some(0);
+            let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;
             let mut publish_timer =
                 Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));
@@ -1003,16 +1028,13 @@ impl WorkerMetricsPublisher {
 
                         let metrics = rx.borrow_and_update().clone();
 
-                        // Check if active_decode_blocks has changed
-                        let has_changed = match last_active_decode_blocks {
-                            Some(last) => last != metrics.active_decode_blocks,
-                            None => true, // First time, consider it changed
-                        };
+                        // Check if metrics have changed
+                        let has_changed = last_metrics.as_ref() != Some(&metrics);
 
-                        // If load metrics changed, schedule a publish
+                        // If metrics changed, schedule a publish
                         if has_changed {
                             pending_publish = Some(metrics.clone());
-                            last_active_decode_blocks = Some(metrics.active_decode_blocks);
+                            last_metrics = Some(metrics);
 
                             // Start the 1ms timer
                             publish_timer.as_mut().reset(
@@ -1560,11 +1582,13 @@ mod tests_startup_helpers {
 
         // Cancellation token so we can stop the listener
         let token = dynamo_runtime::CancellationToken::new();
+        // Event ID counter for the test listener
+        let next_event_id = Arc::new(AtomicU64::new(0));
 
-        // Spawn async listener
+        // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4)
+            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4, next_event_id)
         });
 
         // Give time for the connection to establish

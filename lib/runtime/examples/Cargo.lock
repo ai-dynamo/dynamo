@@ -912,6 +912,7 @@ dependencies = [
  "libc",
  "local-ip-address",
  "log",
+ "lru",
  "nid",
  "nix",
  "notify",
@@ -932,6 +933,7 @@ dependencies = [
  "serde_json",
  "socket2 0.5.9",
  "thiserror 2.0.17",
+ "tmq",
  "tokio",
  "tokio-rayon",
  "tokio-stream",
@@ -945,6 +947,7 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
@@ -2073,6 +2076,15 @@ name = "log"
 version = "0.4.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+
+[[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.2",
+]
 
 [[package]]
 name = "lru-slab"
@@ -3790,6 +3802,19 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tmq"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3f41ac3a42f65436eed7e1afe80dbe8a982dcac2ea4581bf61bc2d3dcfb19a1"
+dependencies = [
+ "futures",
+ "log",
+ "thiserror 1.0.69",
+ "tokio",
+ "zmq",
+]
 
 [[package]]
 name = "tokio"

@@ -37,6 +37,16 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
 
+# Use non-blocking RPC calls; control overhead with backoff sleeps.
+_STATS_TIMEOUT_SEC = 0.01
+_KV_EVENTS_TIMEOUT_SEC = 0.0
+_PUBLISH_MIN_SLEEP_SEC = 0.01
+_PUBLISH_MAX_SLEEP_SEC = 0.1
+_PUBLISH_BACKOFF_FACTOR = 2.0
+_KV_EVENTS_MIN_SLEEP_SEC = 0.005
+_KV_EVENTS_MAX_SLEEP_SEC = 0.02
+_KV_EVENTS_BACKOFF_FACTOR = 1.5
+
 
 def _to_signed_i64(value: int | None) -> int | None:
     """Convert a Python int to signed 64-bit range by two's complement."""
@@ -92,14 +102,16 @@ class ZmqKvEventPublisher:
 
     def publish_stored(
         self,
-        event_id: int,
         token_ids: list[int],
         num_block_tokens: list[int],
         block_hashes: list[int],
         lora_id: int = 0,
         parent_hash: Optional[int] = None,
     ):
-        """Publish a BlockStored event."""
+        """Publish a BlockStored event.
+
+        Note: event_id is managed internally via self.sequence counter.
+        """
         # Convert block hashes to signed i64 format
         block_hashes_signed = [_to_signed_i64(h) for h in block_hashes]
         parent_hash_signed = (
@@ -119,8 +131,11 @@ class ZmqKvEventPublisher:
 
         self._publish_event(event)
 
-    def publish_removed(self, event_id: int, block_hashes: list[int]):
-        """Publish a BlockRemoved event."""
+    def publish_removed(self, block_hashes: list[int]):
+        """Publish a BlockRemoved event.
+
+        Note: event_id is managed internally via self.sequence counter.
+        """
         # Convert block hashes to signed i64 format (vLLM compatibility)
         block_hashes_signed = [_to_signed_i64(h) for h in block_hashes]
 
@@ -297,6 +312,8 @@ class Publisher:
         self.partial_block_hashes: set[int] = set()
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
+        # Track the last engine event_id to assert consecutive event IDs from the engine
+        self._last_engine_event_id: Optional[int] = None
 
         # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
         if zmq_endpoint:
@@ -381,6 +398,32 @@ class Publisher:
             name="publish_kv_cache_events_thread",
         )
 
+    async def _polling_loop(
+        self,
+        fetch_fn,
+        handler_fn,
+        min_sleep: float,
+        max_sleep: float,
+        backoff_factor: float,
+    ):
+        sleep_s = min_sleep
+        while not self._stop_event.is_set():
+            had_data = False
+            try:
+                async for item in fetch_fn():
+                    had_data = True
+                    handler_fn(item)
+            except (asyncio.TimeoutError, TimeoutError, asyncio.QueueEmpty):
+                pass
+            except Exception as e:
+                logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
+
+            if not had_data:
+                await asyncio.sleep(sleep_s)
+                sleep_s = min(max_sleep, sleep_s * backoff_factor)
+            else:
+                sleep_s = min_sleep
+
     async def _publish_stats_task(self):
         """
         Publish stats to the metrics publisher.
@@ -393,15 +436,19 @@ class Publisher:
             logging.error("KV metrics publisher not initialized!")
             return False
 
-        stats = self.engine.llm.get_stats_async(timeout=5)
-        async for stat in stats:
+        def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
-
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-
             # TRT-LLM doesn't use data parallelism currently (dp_rank=None)
             self.metrics_publisher.publish(None, kv_active_blocks)
 
+        await self._polling_loop(
+            lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
+            handle_stat,
+            _PUBLISH_MIN_SLEEP_SEC,
+            _PUBLISH_MAX_SLEEP_SEC,
+            _PUBLISH_BACKOFF_FACTOR,
+        )
         return True
 
     async def _publish_kv_cache_events_task(self):
@@ -418,107 +465,121 @@ class Publisher:
             logging.error("No KV event publisher initialized (neither NATS nor ZMQ)!")
             return
 
-        events = self.engine.llm.get_kv_cache_events_async(timeout=5)
-        async for event in events:
-            logging.debug(f"KV cache event received: {event}")
-            # drop the events that is not emitted from the global attention layer.
-            if self.should_drop_event(event):
-                continue
-
-            event_id = event["event_id"]
-            data = event["data"]
-            if data["type"] == "stored":
-                self.processing_initial_created_events = False
-                parent_hash = _to_signed_i64(data["parent_hash"])
-                token_ids: list[int] = []
-                num_block_tokens: list[int] = []
-                block_hashes: list[int] = []
-                for block in data["blocks"]:
-                    token_num_in_block = len(block["tokens"])
-                    block_hash = _to_signed_i64(block["block_hash"])
-                    if token_num_in_block > self.kv_block_size:
-                        logging.error(
-                            f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self.kv_block_size}"
-                        )
-                        return
-                    if block_hash is None:
-                        logging.warning(
-                            f"Skipping block with None hash containing {token_num_in_block} tokens"
-                        )
-                        continue
-                    if token_num_in_block < self.kv_block_size:
-                        logging.debug(
-                            f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self.kv_block_size}"
-                        )
-                        self.partial_block_hashes.add(block_hash)
-                        break
-                    num_block_tokens.append(token_num_in_block)
-                    block_hashes.append(block_hash)
-                    for token in block["tokens"]:
-                        token_ids.append(int(token["token_id"]))
-
-                # Note: Currently data does not have lora_id.
-                # Using 0 as default value. If later data has
-                # lora_id, we need to verify if this is correct.
-                lora_id = data.get("lora_id", 0)
-
-                logging.debug(
-                    f"publish stored event: event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
-                )
-                # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
-                if self.zmq_kv_event_publisher:
-                    # Consolidator enabled: publish to ZMQ only
-                    self.zmq_kv_event_publisher.publish_stored(
-                        event_id,
-                        token_ids,
-                        num_block_tokens,
-                        block_hashes,
-                        lora_id,
-                        parent_hash,
-                    )
-                elif self.kv_event_publisher:
-                    # No consolidator: publish to NATS (router subscribes directly)
-                    self.kv_event_publisher.publish_stored(
-                        event_id,
-                        token_ids,
-                        num_block_tokens,
-                        block_hashes,
-                        lora_id,
-                        parent_hash,
-                    )
-            elif data["type"] == "removed":
-                self.processing_initial_created_events = False
-                removed_block_hashes: list[int] = []
-                for block_hash in data["block_hashes"]:
-                    block_hash = _to_signed_i64(block_hash)
-                    if block_hash is None:
-                        continue
-                    if block_hash in self.partial_block_hashes:
-                        logging.debug(
-                            f"Skipping removing block hash {block_hash} since it is a partial block"
-                        )
-                        self.partial_block_hashes.remove(block_hash)
-                        continue
-                    removed_block_hashes.append(block_hash)
-
-                logging.debug(
-                    f"publish removed event: event_id: {event_id}, block_hashes: {removed_block_hashes}"
-                )
-                # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
-                if self.zmq_kv_event_publisher:
-                    # Consolidator enabled: publish to ZMQ only
-                    self.zmq_kv_event_publisher.publish_removed(
-                        event_id, removed_block_hashes
-                    )
-                elif self.kv_event_publisher:
-                    # No consolidator: publish to NATS (router subscribes directly)
-                    self.kv_event_publisher.publish_removed(
-                        event_id, removed_block_hashes
-                    )
-            elif data["type"] == "created" and self.processing_initial_created_events:
-                self.update_max_window_size(event)
-
+        await self._polling_loop(
+            lambda: self.engine.llm.get_kv_cache_events_async(
+                timeout=_KV_EVENTS_TIMEOUT_SEC
+            ),
+            self._handle_kv_event,
+            _KV_EVENTS_MIN_SLEEP_SEC,
+            _KV_EVENTS_MAX_SLEEP_SEC,
+            _KV_EVENTS_BACKOFF_FACTOR,
+        )
         return True
+
+    def _handle_kv_event(self, event):
+        logging.debug(f"KV cache event received: {event}")
+        # drop the events that is not emitted from the global attention layer.
+        if self.should_drop_event(event):
+            return
+
+        event_id = event["event_id"]
+
+        # Check for consecutive event IDs from the engine
+        if self._last_engine_event_id is not None:
+            expected_id = self._last_engine_event_id + 1
+            if event_id != expected_id:
+                logging.warning(
+                    f"Non-consecutive engine event_id: expected {expected_id}, got {event_id}"
+                )
+        self._last_engine_event_id = event_id
+
+        data = event["data"]
+        if data["type"] == "stored":
+            self.processing_initial_created_events = False
+            parent_hash = _to_signed_i64(data["parent_hash"])
+            token_ids: list[int] = []
+            num_block_tokens: list[int] = []
+            block_hashes: list[int] = []
+            for block in data["blocks"]:
+                token_num_in_block = len(block["tokens"])
+                block_hash = _to_signed_i64(block["block_hash"])
+                if token_num_in_block > self.kv_block_size:
+                    logging.error(
+                        f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self.kv_block_size}"
+                    )
+                    return
+                if block_hash is None:
+                    logging.warning(
+                        f"Skipping block with None hash containing {token_num_in_block} tokens"
+                    )
+                    continue
+                if token_num_in_block < self.kv_block_size:
+                    logging.debug(
+                        f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self.kv_block_size}"
+                    )
+                    self.partial_block_hashes.add(block_hash)
+                    break
+                num_block_tokens.append(token_num_in_block)
+                block_hashes.append(block_hash)
+                for token in block["tokens"]:
+                    token_ids.append(int(token["token_id"]))
+
+            # Note: Currently data does not have lora_id.
+            # Using 0 as default value. If later data has
+            # lora_id, we need to verify if this is correct.
+            lora_id = data.get("lora_id", 0)
+
+            logging.debug(
+                f"publish stored event: engine_event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
+            )
+            # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
+            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
+            if self.zmq_kv_event_publisher:
+                # Consolidator enabled: publish to ZMQ only
+                self.zmq_kv_event_publisher.publish_stored(
+                    token_ids,
+                    num_block_tokens,
+                    block_hashes,
+                    lora_id,
+                    parent_hash,
+                )
+            elif self.kv_event_publisher:
+                # No consolidator: publish to NATS (router subscribes directly)
+                self.kv_event_publisher.publish_stored(
+                    token_ids,
+                    num_block_tokens,
+                    block_hashes,
+                    lora_id,
+                    parent_hash,
+                )
+        elif data["type"] == "removed":
+            self.processing_initial_created_events = False
+            removed_block_hashes: list[int] = []
+            for block_hash in data["block_hashes"]:
+                block_hash = _to_signed_i64(block_hash)
+                if block_hash is None:
+                    continue
+                if block_hash in self.partial_block_hashes:
+                    logging.debug(
+                        f"Skipping removing block hash {block_hash} since it is a partial block"
+                    )
+                    self.partial_block_hashes.remove(block_hash)
+                    continue
+                removed_block_hashes.append(block_hash)
+
+            logging.debug(
+                f"publish removed event: engine_event_id: {event_id}, block_hashes: {removed_block_hashes}"
+            )
+            # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
+            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
+            if self.zmq_kv_event_publisher:
+                # Consolidator enabled: publish to ZMQ only
+                self.zmq_kv_event_publisher.publish_removed(removed_block_hashes)
+            elif self.kv_event_publisher:
+                # No consolidator: publish to NATS (router subscribes directly)
+                self.kv_event_publisher.publish_removed(removed_block_hashes)
+        elif data["type"] == "created" and self.processing_initial_created_events:
+            self.update_max_window_size(event)
 
     def start(self):
         if (
