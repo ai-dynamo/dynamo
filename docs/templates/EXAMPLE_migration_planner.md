@@ -39,7 +39,7 @@ Read these files to understand the current state:
 
 Create this new structure:
 
-docs/planner/
+docs/components/planner/
 ├── README.md              # Tier 2: Quick Start (80-100 lines)
 ├── planner_guide.md       # Tier 2: Guide (400-500 lines)
 ├── planner_examples.md    # Tier 2: Examples (300-400 lines)

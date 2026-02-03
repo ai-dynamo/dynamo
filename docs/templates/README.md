@@ -11,23 +11,23 @@ Templates for creating consistent Dynamo documentation.
 ### Components (Router, Planner, KVBM, Frontend, Profiler)
 
 ```
-┌─────────────────────────────────────────────────────┐
-│ Tier 1: components/src/dynamo/<component>/README.md │ ← Redirect stub
-│   Content: 1-5 lines pointing to docs/<component>/  │
-│   Template: incode_readme.md                        │
-└─────────────────────┬───────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ Tier 1: components/src/dynamo/<component>/README.md          │ ← Redirect stub
+│   Content: 1-5 lines pointing to docs/components/<component>/│
+│   Template: incode_readme.md                                 │
+└─────────────────────┬────────────────────────────────────────┘
                       ▼
-┌─────────────────────────────────────────────────────┐
-│ Tier 2: docs/<component>/                           │ ← User docs
-│   • README.md ← component_readme.md                 │
-│   • <component>_guide.md ← component_guide.md       │
-│   • <component>_examples.md ← component_examples.md │
-└─────────────────────┬───────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ Tier 2: docs/components/<component>/                         │ ← User docs
+│   • README.md ← component_readme.md                          │
+│   • <component>_guide.md ← component_guide.md                │
+│   • <component>_examples.md ← component_examples.md          │
+└─────────────────────┬────────────────────────────────────────┘
                       ▼
-┌─────────────────────────────────────────────────────┐
-│ Tier 3: docs/design_docs/<component>_design.md      │ ← Contributor docs
-│   Template: component_design.md                     │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ Tier 3: docs/design_docs/<component>_design.md               │ ← Contributor docs
+│   Template: component_design.md                              │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Backends (vLLM, SGLang, TRT-LLM)
@@ -92,12 +92,58 @@ Templates for creating consistent Dynamo documentation.
 └─────────────────────────────────────────────────────┘
 ```
 
+### Deploy (Kubernetes, Helm, Operator)
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Tier 1: N/A                                         │
+│   No in-code README (deployment topics)             │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ Tier 2: docs/deploy/                                │ ← User docs
+│   • README.md (deployment overview)                 │
+│   • installation_guide.md, dynamo_operator.md       │
+│   • helm.md, examples/                              │
+└─────────────────────────────────────────────────────┘
+```
+
+### Performance (Tuning, Benchmarks)
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Tier 1: N/A                                         │
+│   No in-code README (performance topics)            │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ Tier 2: docs/performance/                           │ ← User docs
+│   • README.md (performance overview)                │
+│   • tuning.md, benchmarking.md, etc.                │
+└─────────────────────────────────────────────────────┘
+```
+
+### Infrastructure (Observability, Fault Tolerance, Development)
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Tier 1: N/A                                         │
+│   No in-code README (operations topics)             │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ Tier 2: docs/infrastructure/<topic>/                │ ← User docs
+│   • README.md ← infrastructure_readme.md            │
+│   • <subtopic>.md (detailed guides)                 │
+└─────────────────────────────────────────────────────┘
+```
+
 ## Three-Tier Pattern
 
 | Tier | Purpose | Audience | Location |
 |------|---------|----------|----------|
 | **Tier 1** | Redirect stub (5 lines) | Developers browsing code | `components/src/dynamo/<name>/README.md` |
-| **Tier 2** | User documentation | Users, operators | `docs/<category>/<name>/` |
+| **Tier 2** | User documentation | Users, operators | `docs/<category>/<name>/` (e.g., `docs/components/router/`) |
 | **Tier 3** | Design documentation | Contributors | `docs/design_docs/<name>_design.md` |
 
 ## Template Selection
@@ -108,6 +154,9 @@ Templates for creating consistent Dynamo documentation.
 | New backend | `incode_readme.md` + `backend_*.md` (both) |
 | New feature | `feature_readme.md` + `feature_backend.md` (per backend) |
 | New integration | `integration_readme.md` |
+| New deploy topic | Custom (follows `docs/deploy/` structure) |
+| New performance topic | Custom (follows `docs/performance/` structure) |
+| New infrastructure topic | `infrastructure_readme.md` |
 | Migrating existing docs | Use the template matching your target file |
 
 ## Usage
@@ -118,6 +167,15 @@ Templates for creating consistent Dynamo documentation.
 4. Replace all `<placeholders>` with actual values
 5. Replace `<!-- comments -->` with actual content
 6. Remove sections that don't apply
+
+## Updating Navigation
+
+After adding new documentation:
+
+1. **Sphinx (current):** Update `docs/index.rst` or the appropriate `_sections/*.rst` file to include your new docs in the navigation
+2. **Fern (future):** Update `fern/docs.yml` with your new pages
+
+See [docs/README.md](../README.md) for documentation build instructions.
 
 ## Migrating Existing Docs
 
