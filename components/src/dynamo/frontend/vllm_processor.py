@@ -13,7 +13,11 @@ import uuid
 from argparse import Namespace
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaToolCall
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
@@ -48,7 +52,7 @@ class VllmProcessor:
         input_processor: InputProcessor,
         router,  # Client or KvPushRouter
         output_processor: OutputProcessor,
-        tool_parser_class: type[ToolParser],
+        tool_parser_class: type[ToolParser] | None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -74,7 +78,7 @@ class VllmProcessor:
             # This is not the type the source code declares.
             tokens = self.tokenizer.apply_chat_template(
                 conversation=request["messages"],
-                tools=request["tools"],
+                tools=request["tools"] if "tools" in request else None,
                 tokenize=True,
             )
         except TypeError:
@@ -87,7 +91,7 @@ class VllmProcessor:
             ]
             tokens = self.tokenizer.apply_chat_template(
                 messages=filtered_messages,
-                tools=request["tools"],
+                tools=request["tools"] if "tools" in request else None,
                 tokenize=True,
             )
 
@@ -120,6 +124,9 @@ class VllmProcessor:
             # priority: int = 0,
             # data_parallel_rank: int | None = None,
         )
+        # TODO: Copy this from our request if present
+        # vllm does not set this in process_inputs, but requires it in add_request
+        vllm_preproc.external_req_id = request_id
 
         # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
 
@@ -182,7 +189,9 @@ class VllmProcessor:
             dynamo_stream = await self.router.generate(dynamo_preproc)
 
         # tool parser is stateful, each request needs a fresh one
-        tool_parser = self.tool_parser_class(self.tokenizer)
+        tool_parser = (
+            self.tool_parser_class(self.tokenizer) if self.tool_parser_class else None
+        )
         previous_text = ""
         previous_token_ids = []
         in_progress_tool_call: DeltaToolCall | None = None
@@ -231,18 +240,24 @@ class VllmProcessor:
             # Vec<ChatChoiceStream>
             choices = []
             for output in vllm_out.request_outputs[0].outputs:
-                current_text = previous_text + output.text
+                delta_text = output.text
+                current_text = previous_text + delta_text
                 current_token_ids = previous_token_ids + output.token_ids
 
-                delta_message = tool_parser.extract_tool_calls_streaming(
-                    previous_text=previous_text,
-                    current_text=current_text,
-                    delta_text=output.text,
-                    previous_token_ids=previous_token_ids,
-                    current_token_ids=current_token_ids,
-                    delta_token_ids=output.token_ids,
-                    request=ChatCompletionRequest(**request),
-                )
+                if tool_parser:
+                    delta_message: DeltaMessage | None = (
+                        tool_parser.extract_tool_calls_streaming(
+                            previous_text=previous_text,
+                            current_text=current_text,
+                            delta_text=delta_text,
+                            previous_token_ids=previous_token_ids,
+                            current_token_ids=current_token_ids,
+                            delta_token_ids=output.token_ids,
+                            request=ChatCompletionRequest(**request),
+                        )
+                    )
+                else:
+                    delta_message = DeltaMessage(content=delta_text)
 
                 if delta_message is None:
                     # tokens being held back, might be tool call marker
@@ -253,6 +268,9 @@ class VllmProcessor:
                         # delta_message.tool_calls = DeltaToolCall objects to stream
                         if in_progress_tool_call is None:
                             in_progress_tool_call = delta_message.tool_calls[0]
+                            if not in_progress_tool_call.function.arguments:
+                                # Ensure + works later
+                                in_progress_tool_call.function.arguments = ""
                         else:
                             delta_arg = delta_message.tool_calls[0]
                             in_progress_tool_call.function.arguments += (
@@ -284,7 +302,7 @@ class VllmProcessor:
                     )
 
                 elif in_progress_tool_call:
-                    # No content of any kind. Send any outstanding tool calls.
+                    # Empty content of any kind. Send any outstanding tool calls.
                     choices.append(
                         {
                             "index": output.index,
@@ -306,17 +324,18 @@ class VllmProcessor:
                 previous_text = current_text
                 previous_token_ids = current_token_ids
 
-            # dynamo_out: NvCreateChatCompletionStreamResponse
-            dynamo_out = {
-                "id": request_id,
-                "choices": choices,
-                "created": int(time.time()),
-                "model": request["model"],
-                "object": "chat.completion.chunk",
-                # usage (from output.metrics maybe)
-            }
-            # Rust handles Server Sent Events back to user
-            yield dynamo_out
+            if choices:
+                # dynamo_out: NvCreateChatCompletionStreamResponse
+                dynamo_out = {
+                    "id": request_id,
+                    "choices": choices,
+                    "created": int(time.time()),
+                    "model": request["model"],
+                    "object": "chat.completion.chunk",
+                    # usage (from output.metrics maybe)
+                }
+                # Rust handles Server Sent Events back to user
+                yield dynamo_out
 
 
 class EngineFactory:
@@ -363,9 +382,13 @@ class EngineFactory:
             stream_interval=1,
         )
 
-        tool_parser_class = ToolParserManager.get_tool_parser(
-            self.flags.tool_call_parser or "auto"
+        tool_parser_name = (
+            self.flags.tool_call_parser or mdc.runtime_config()["tool_call_parser"]
         )
+        if tool_parser_name:
+            tool_parser_class = ToolParserManager.get_tool_parser(tool_parser_name)
+        else:
+            tool_parser_class = None
 
         (namespace_name, component_name, endpoint_name) = instance_id.triple()
         generate_endpoint = (
