@@ -55,6 +55,11 @@ show_stats() {
         # Generate timestamp in ISO 8601 format
         local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+        # Output human-readable text format first
+        echo "=== sccache statistics AFTER $1 ==="
+        sccache --show-stats
+        echo ""
+
         # Output JSON markers for deterministic parsing
         echo "=== SCCACHE_JSON_BEGIN ==="
 
