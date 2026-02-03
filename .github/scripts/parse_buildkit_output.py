@@ -621,6 +621,14 @@ def main():
                 file=sys.stderr,
             )
 
+    # Print comprehensive JSON output
+    print("", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print("📋 COMPREHENSIVE BUILD METRICS (JSON)", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(json.dumps(build_data, indent=2), file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()
