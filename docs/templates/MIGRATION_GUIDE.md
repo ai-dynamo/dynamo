@@ -167,6 +167,7 @@ After migrating content, review for FLOW, STYLE, and CONSISTENCY.
 
 ## Related Files
 
+- [SOURCE_TARGET_MAPPING.md](SOURCE_TARGET_MAPPING.md) - Comprehensive file-level source → target mapping
 - [README.md](README.md) - Template overview and selection guide
 - [EXAMPLE_SKILL.md](EXAMPLE_SKILL.md) - Cursor skill for AI-assisted migration
 - [EXAMPLE_migration_planner.md](EXAMPLE_migration_planner.md) - Example migration prompt
