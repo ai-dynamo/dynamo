@@ -19,7 +19,6 @@
 {{- $useDynamo    := default false .Values.epp.useDynamo -}}
 {{- $resolvedDynNs := (include "dynamo-gaie.dynamoNamespace" .) | trim -}}
 {{- $ns           := ternary (required "set dynamoGraphDeploymentName when epp.useDynamo=true" $resolvedDynNs) "" $useDynamo -}}
-{{- $kv           := default "16" .Values.epp.dynamo.kvBlockSize -}}
 {{- $useEtcd      := default false .Values.epp.dynamo.useEtcd -}}
 {{- $std          := .Values.extension.standardImage -}}
 {{- $dyn          := .Values.extension.dynamoImage -}}
@@ -116,8 +115,7 @@ spec:
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYN_NAMESPACE
             value: "{{ $ns }}"
-          - name: DYN_KV_BLOCK_SIZE
-            value: "{{ $kv }}"
+          # Note: DYN_KV_BLOCK_SIZE and DYN_MODEL are auto-discovered from the model card
           - name: USE_STREAMING
             value: "true"
           # HuggingFace token for downloading model config files

@@ -15,11 +15,8 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend-image:my-tag
           env:
-            - name: DYN_KV_BLOCK_SIZE
-              value: "16"
-            - name: DYN_MODEL
-              value: "Qwen/Qwen3-0.6B"  # Match your model
-            - name: DYN_DISCOVERY_TIMEOUT
+            # Note: DYN_KV_BLOCK_SIZE and DYN_MODEL are auto-discovered from the model card
+            - name: DYN_DISCOVERY_TIMEOUT_SEC
               value: "300"
       eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
