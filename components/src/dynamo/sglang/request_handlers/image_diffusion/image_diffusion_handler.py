@@ -48,10 +48,8 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             publisher: Optional metrics publisher (not used for diffusion currently).
             fs: Optional fsspec filesystem for primary image storage.
         """
-        # Call parent constructor for common setup
         super().__init__(component, config, publisher)
 
-        # Image diffusion-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
         self.fs_url = config.dynamo_args.image_diffusion_fs_url
@@ -67,7 +65,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             del self.generator
         torch.cuda.empty_cache()
         logger.info("Image diffusion generator cleanup complete")
-        # Call parent cleanup for any base class cleanup
         super().cleanup()
 
     async def generate(
@@ -95,16 +92,14 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         try:
             req = CreateImageRequest(**request)
 
-            # Extract nvext parameters with defaults
+            # get extra parameters
             nvext = req.nvext or NvExt()
             nvext.num_inference_steps = min(
                 nvext.num_inference_steps or 50, MAX_NUM_INFERENCE_STEPS
             )
 
-            # Parse size
             width, height = self._parse_size(req.size)
 
-            # Generate images (may batch multiple requests at same step)
             images = await self._generate_images(
                 prompt=req.prompt,
                 negative_prompt=nvext.negative_prompt,
@@ -115,16 +110,15 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 seed=nvext.seed,
             )
 
-            # Upload to filesystem and get URLs
-            # Use user ID from request if available, otherwise fallback to context ID
             user_id = req.user if req.user else context.id()
 
             image_data = []
             for img in images:
+                # uploading or encoding the image
                 if req.response_format == "url":
                     url = await self._upload_to_fs(img, user_id, context.id())
                     image_data.append(ImageData(url=url))
-                else:  # b64_json
+                else:
                     b64 = self._encode_base64(img)
                     image_data.append(ImageData(b64_json=b64))
 
@@ -134,7 +128,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         except Exception as e:
             logger.error(f"Error in diffusion generation: {e}", exc_info=True)
-            # Return error response
             error_response = {
                 "created": int(time.time()),
                 "data": [],
@@ -153,8 +146,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         negative_prompt: Optional[str] = None,
     ) -> list[bytes]:
         """Generate images using SGLang DiffGenerator"""
-        # DiffGenerator handles batching internally if multiple images
-        # Run in thread pool to avoid blocking event loop
         args = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -186,7 +177,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 img.save(buf, format="PNG")
                 image_bytes_list.append(buf.getvalue())
             else:
-                # Try to convert numpy array or other formats
                 try:
                     import numpy as np
 
