@@ -28,8 +28,8 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--environment",
         default=SLAPlannerDefaults.environment,
-        choices=["kubernetes", "virtual"],
-        help="Environment type",
+        choices=["kubernetes", "virtual", "global-planner"],
+        help="Environment type: kubernetes (direct K8s scaling), virtual (dynamo runtime scaling), global-planner (delegate to GlobalPlanner)",
     )
     parser.add_argument(
         "--namespace",
@@ -169,35 +169,21 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         help="Model name of deployment (only required for virtual environment)",
     )
 
-    # Planner mode selection
-    parser.add_argument(
-        "--planner-mode",
-        type=str,
-        choices=["local", "delegating"],
-        default="local",
-        help="Planner mode: local (direct scaling), delegating (calls GlobalPlanner)",
-    )
-
-    # For delegating mode
+    # For global-planner environment mode
     parser.add_argument(
         "--global-planner-namespace",
         type=str,
         default=None,
-        help="Namespace of GlobalPlanner component (required for delegating mode)",
-    )
-
-    parser.add_argument(
-        "--global-planner-component",
-        type=str,
-        default="GlobalPlanner",
-        help="Component name of GlobalPlanner (default: GlobalPlanner)",
+        help="Namespace of GlobalPlanner component (required when environment=global-planner)",
     )
 
     return parser
 
 
 def validate_planner_args(args):
-    """Validate planner mode configuration"""
-    if args.planner_mode == "delegating":
+    """Validate planner configuration"""
+    if args.environment == "global-planner":
         if not args.global_planner_namespace:
-            raise ValueError("--global-planner-namespace required for delegating mode")
+            raise ValueError(
+                "--global-planner-namespace required when environment=global-planner"
+            )

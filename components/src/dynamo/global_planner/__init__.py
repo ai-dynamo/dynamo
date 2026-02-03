@@ -15,8 +15,7 @@ Architecture:
 - GlobalPlanner is stateless and can scale horizontally
 
 Usage:
-    python -m dynamo.global_planner \
-        --namespace=global-infra \
+    DYN_NAMESPACE=global-infra python -m dynamo.global_planner \
         --managed-namespaces app-ns-1 app-ns-2
 """
 

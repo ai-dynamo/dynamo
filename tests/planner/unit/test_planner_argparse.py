@@ -18,70 +18,52 @@ pytestmark = [
 ]
 
 
-def test_parser_delegating_mode():
-    """Test parser accepts delegating mode arguments."""
+def test_parser_global_planner_mode():
+    """Test parser accepts global-planner environment mode arguments."""
     parser = create_sla_planner_parser()
     args = parser.parse_args(
         [
             "--namespace",
             "test-ns",
-            "--planner-mode",
-            "delegating",
+            "--environment",
+            "global-planner",
             "--global-planner-namespace",
             "global-ns",
         ]
     )
 
-    assert args.planner_mode == "delegating"
+    assert args.environment == "global-planner"
     assert args.global_planner_namespace == "global-ns"
-    assert args.global_planner_component == "GlobalPlanner"  # default
 
 
-def test_parser_custom_global_component():
-    """Test parser accepts custom GlobalPlanner component name."""
+def test_validate_global_planner_mode_without_namespace():
+    """Test validation fails for global-planner environment without GlobalPlanner namespace."""
     parser = create_sla_planner_parser()
     args = parser.parse_args(
-        [
-            "--namespace",
-            "test-ns",
-            "--planner-mode",
-            "delegating",
-            "--global-planner-namespace",
-            "global-ns",
-            "--global-planner-component",
-            "CustomGlobalPlanner",
-        ]
+        ["--namespace", "test-ns", "--environment", "global-planner"]
     )
-
-    assert args.global_planner_component == "CustomGlobalPlanner"
-
-
-def test_validate_delegating_mode_without_namespace():
-    """Test validation fails for delegating mode without GlobalPlanner namespace."""
-    parser = create_sla_planner_parser()
-    args = parser.parse_args(["--namespace", "test-ns", "--planner-mode", "delegating"])
 
     with pytest.raises(ValueError, match="global-planner-namespace required"):
         validate_planner_args(args)
 
 
-def test_parser_invalid_mode():
-    """Test parser rejects invalid planner mode."""
+def test_parser_invalid_environment():
+    """Test parser rejects invalid environment."""
     parser = create_sla_planner_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--namespace", "test-ns", "--planner-mode", "invalid-mode"])
+        parser.parse_args(
+            ["--namespace", "test-ns", "--environment", "invalid-environment"]
+        )
 
 
 def test_parser_all_existing_args_still_work():
-    """Test that existing planner arguments still work with new mode args."""
+    """Test that existing planner arguments still work."""
     parser = create_sla_planner_parser()
     args = parser.parse_args(
         [
             "--namespace",
             "test-ns",
-            "--planner-mode",
-            "local",
             "--backend",
             "vllm",
             "--environment",
@@ -98,7 +80,6 @@ def test_parser_all_existing_args_still_work():
     )
 
     assert args.namespace == "test-ns"
-    assert args.planner_mode == "local"
     assert args.backend == "vllm"
     assert args.environment == "kubernetes"
     assert args.ttft == 200

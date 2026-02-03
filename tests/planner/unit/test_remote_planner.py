@@ -15,11 +15,7 @@ import pytest
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.global_planner_connector import GlobalPlannerConnector
 from dynamo.planner.remote_planner_client import RemotePlannerClient
-from dynamo.planner.scale_protocol import (
-    ScaleRequest,
-    ScaleResponse,
-    TargetReplicaRequest,
-)
+from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.utils.exceptions import EmptyTargetReplicasError
 
 pytestmark = [
@@ -69,10 +65,10 @@ async def test_send_scale_request_success(mock_runtime):
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=3
             ),
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.DECODE, desired_replicas=5
             ),
         ],
@@ -81,7 +77,7 @@ async def test_send_scale_request_success(mock_runtime):
 
     response = await client.send_scale_request(request)
 
-    assert response.status == "success"
+    assert response.status == ScaleStatus.SUCCESS
     assert response.message == "Scaled successfully"
     assert response.current_replicas["prefill"] == 3
     assert response.current_replicas["decode"] == 5
@@ -122,7 +118,7 @@ async def test_send_scale_request_error():
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=1
             )
         ],
@@ -130,7 +126,7 @@ async def test_send_scale_request_error():
 
     response = await client.send_scale_request(request)
 
-    assert response.status == "error"
+    assert response.status == ScaleStatus.ERROR
     assert "not authorized" in response.message
 
 
@@ -163,7 +159,7 @@ async def test_send_scale_request_no_response():
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=1
             )
         ],
@@ -184,7 +180,7 @@ async def test_multiple_requests_reuse_client(mock_runtime):
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=2
             )
         ],
@@ -195,7 +191,7 @@ async def test_multiple_requests_reuse_client(mock_runtime):
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=4
             )
         ],
@@ -231,7 +227,6 @@ def connector(connector_runtime):
         runtime=connector_runtime,
         dynamo_namespace="test-ns",
         global_planner_namespace="global-ns",
-        global_planner_component="GlobalPlanner",
         model_name="test-model",
     )
 
@@ -275,7 +270,9 @@ async def test_connector_set_replicas_success(connector):
         os.environ, {"DYN_PARENT_DGD_K8S_NAME": "dgd", "POD_NAMESPACE": "ns"}
     ):
         mock_response = ScaleResponse(
-            status="success", message="OK", current_replicas={"prefill": 3, "decode": 5}
+            status=ScaleStatus.SUCCESS,
+            message="OK",
+            current_replicas={"prefill": 3, "decode": 5},
         )
         mock_client = AsyncMock()
         mock_client.send_scale_request = AsyncMock(return_value=mock_response)
@@ -315,7 +312,7 @@ async def test_connector_error_handling(connector):
     # Error response
     with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "d", "POD_NAMESPACE": "n"}):
         mock_response = ScaleResponse(
-            status="error", message="Failed", current_replicas={}
+            status=ScaleStatus.ERROR, message="Failed", current_replicas={}
         )
         mock_client = AsyncMock()
         mock_client.send_scale_request = AsyncMock(return_value=mock_response)

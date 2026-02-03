@@ -5,8 +5,8 @@
 
 import logging
 
-from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
-from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse
+from dynamo.planner import KubernetesConnector
+from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ class ScaleRequestHandler:
                 and request.caller_namespace not in self.managed_namespaces
             ):
                 yield {
-                    "status": "error",
+                    "status": ScaleStatus.ERROR.value,
                     "message": f"Namespace {request.caller_namespace} not authorized",
                     "current_replicas": {},
                 }
@@ -93,19 +93,9 @@ class ScaleRequestHandler:
                 connector = self.connectors[connector_key]
                 logger.debug(f"Reusing cached connector for {connector_key}")
 
-            # Convert request replicas to TargetReplica objects
-            target_replicas = [
-                TargetReplica(
-                    sub_component_type=SubComponentType(r.sub_component_type),
-                    component_name=r.component_name,
-                    desired_replicas=r.desired_replicas,
-                )
-                for r in request.target_replicas
-            ]
-
-            # Execute scaling
+            # Execute scaling (request.target_replicas is already List[TargetReplica])
             await connector.set_component_replicas(
-                target_replicas, blocking=request.blocking
+                request.target_replicas, blocking=request.blocking
             )
 
             # Get current replica counts
@@ -122,11 +112,15 @@ class ScaleRequestHandler:
                 f"Successfully scaled {request.graph_deployment_name}: {current_replicas}"
             )
             yield {
-                "status": "success",
+                "status": ScaleStatus.SUCCESS.value,
                 "message": f"Scaled {request.graph_deployment_name} successfully",
                 "current_replicas": current_replicas,
             }
 
         except Exception as e:
             logger.exception(f"Error processing scale request: {e}")
-            yield {"status": "error", "message": str(e), "current_replicas": {}}
+            yield {
+                "status": ScaleStatus.ERROR.value,
+                "message": str(e),
+                "current_replicas": {},
+            }

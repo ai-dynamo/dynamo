@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
-from dynamo.planner import SubComponentType
-from dynamo.planner.scale_protocol import ScaleRequest, TargetReplicaRequest
+from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.scale_protocol import ScaleRequest
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -38,7 +38,7 @@ async def test_handler_authorization_success(mock_runtime):
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=3
             )
         ],
@@ -91,7 +91,7 @@ async def test_handler_authorization_failure(mock_runtime):
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=3
             )
         ],
@@ -121,7 +121,7 @@ async def test_handler_multiple_dgds(mock_runtime):
         graph_deployment_name="dgd-1",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=2
             )
         ],
@@ -132,7 +132,7 @@ async def test_handler_multiple_dgds(mock_runtime):
         graph_deployment_name="dgd-2",  # Different DGD
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=4
             )
         ],
@@ -174,7 +174,7 @@ async def test_handler_error_handling(mock_runtime):
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=3
             )
         ],
@@ -214,7 +214,7 @@ async def test_handler_blocking_mode(mock_runtime):
         graph_deployment_name="my-dgd",
         k8s_namespace="default",
         target_replicas=[
-            TargetReplicaRequest(
+            TargetReplica(
                 sub_component_type=SubComponentType.PREFILL, desired_replicas=3
             )
         ],

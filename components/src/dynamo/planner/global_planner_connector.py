@@ -12,7 +12,7 @@ from dynamo.planner.defaults import SubComponentType
 from dynamo.planner.kubernetes_connector import TargetReplica
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.planner.remote_planner_client import RemotePlannerClient
-from dynamo.planner.scale_protocol import ScaleRequest, TargetReplicaRequest
+from dynamo.planner.scale_protocol import ScaleRequest, ScaleStatus
 from dynamo.planner.utils.exceptions import EmptyTargetReplicasError
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -26,12 +26,8 @@ class GlobalPlannerConnector(PlannerConnector):
     Connector that delegates scaling decisions to a centralized GlobalPlanner.
 
     This connector wraps RemotePlannerClient and implements the PlannerConnector
-    interface, allowing planner_core.py to treat delegating mode consistently
-    with local and virtual modes.
-
-    The connector converts internal TargetReplica objects (with enum sub_component_type)
-    to TargetReplicaRequest objects (with string sub_component_type) for protocol
-    communication with the GlobalPlanner.
+    interface, allowing planner_core.py to treat global-planner environment mode
+    consistently with kubernetes and virtual modes.
     """
 
     def __init__(
@@ -93,9 +89,7 @@ class GlobalPlannerConnector(PlannerConnector):
         """
         Set component replicas by delegating to GlobalPlanner.
 
-        Converts TargetReplica objects (with enum sub_component_type) to
-        TargetReplicaRequest objects (with string sub_component_type) and
-        sends a ScaleRequest to the GlobalPlanner.
+        Sends a ScaleRequest to the GlobalPlanner with the target replica configurations.
 
         Args:
             target_replicas: List of target replica configurations
@@ -113,17 +107,7 @@ class GlobalPlannerConnector(PlannerConnector):
                 "GlobalPlannerConnector not initialized. Call _async_init() first."
             )
 
-        # Convert TargetReplica (enum) to TargetReplicaRequest (string)
-        target_replica_requests = [
-            TargetReplicaRequest(
-                sub_component_type=tr.sub_component_type.value,  # Convert enum to string
-                component_name=tr.component_name,
-                desired_replicas=tr.desired_replicas,
-            )
-            for tr in target_replicas
-        ]
-
-        # Get DGD info from environment variables (same as old _delegate_scaling)
+        # Get DGD info from environment variables
         graph_deployment_name = os.environ.get("DYN_PARENT_DGD_K8S_NAME", "unknown")
         k8s_namespace = os.environ.get("POD_NAMESPACE", "default")
 
@@ -132,7 +116,7 @@ class GlobalPlannerConnector(PlannerConnector):
             caller_namespace=self.dynamo_namespace,
             graph_deployment_name=graph_deployment_name,
             k8s_namespace=k8s_namespace,
-            target_replicas=target_replica_requests,
+            target_replicas=target_replicas,
             blocking=blocking,
             timestamp=time.time(),
             predicted_load=self.last_predicted_load,
@@ -141,22 +125,22 @@ class GlobalPlannerConnector(PlannerConnector):
         logger.info(
             f"Delegating scale request to GlobalPlanner: "
             f"DGD={graph_deployment_name}, "
-            f"prefill={[r.desired_replicas for r in target_replica_requests if r.sub_component_type == 'prefill']}, "
-            f"decode={[r.desired_replicas for r in target_replica_requests if r.sub_component_type == 'decode']}"
+            f"prefill={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.PREFILL]}, "
+            f"decode={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.DECODE]}"
         )
 
         # Send request to GlobalPlanner
         response = await self.remote_client.send_scale_request(request)
 
         # Check response status
-        if response.status == "success":
+        if response.status == ScaleStatus.SUCCESS:
             logger.info(f"GlobalPlanner scaling successful: {response.message}")
-        elif response.status == "error":
+        elif response.status == ScaleStatus.ERROR:
             logger.error(f"GlobalPlanner scaling failed: {response.message}")
             raise RuntimeError(f"GlobalPlanner scaling failed: {response.message}")
         else:
             logger.warning(
-                f"GlobalPlanner returned status '{response.status}': {response.message}"
+                f"GlobalPlanner returned status '{response.status.value}': {response.message}"
             )
 
     async def add_component(

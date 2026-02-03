@@ -7,11 +7,10 @@ GlobalPlanner - Centralized Scaling Execution Service
 Entry point for the GlobalPlanner component.
 
 Usage:
-    python -m dynamo.global_planner --namespace=global-infra
+    DYN_NAMESPACE=global-infra python -m dynamo.global_planner
 
 With authorization:
-    python -m dynamo.global_planner \\
-        --namespace=global-infra \\
+    DYN_NAMESPACE=global-infra python -m dynamo.global_planner \\
         --managed-namespaces app-ns-1 app-ns-2
 """
 
@@ -56,10 +55,18 @@ async def main(runtime: DistributedRuntime, args):
     # Validate arguments
     validate_args(args)
 
+    # Get Dynamo namespace from environment variable
+    namespace = os.environ.get("DYN_NAMESPACE")
+    if not namespace:
+        raise ValueError(
+            "DYN_NAMESPACE environment variable is required but not set. "
+            "Please set DYN_NAMESPACE to specify the Dynamo namespace for GlobalPlanner."
+        )
+
     logger.info("=" * 60)
     logger.info("Starting GlobalPlanner")
     logger.info("=" * 60)
-    logger.info(f"Namespace: {args.namespace}")
+    logger.info(f"Namespace: {namespace}")
     logger.info(f"Environment: {args.environment}")
 
     if args.managed_namespaces:
@@ -71,7 +78,7 @@ async def main(runtime: DistributedRuntime, args):
     logger.info("=" * 60)
 
     # Create the GlobalPlanner component
-    component = runtime.namespace(args.namespace).component("GlobalPlanner")
+    component = runtime.namespace(namespace).component("GlobalPlanner")
 
     # Get K8s namespace (where GlobalPlanner pod is running)
     k8s_namespace = os.environ.get("POD_NAMESPACE", "default")
@@ -96,7 +103,7 @@ async def main(runtime: DistributedRuntime, args):
         yield {
             "status": "healthy",
             "component": "GlobalPlanner",
-            "namespace": args.namespace,
+            "namespace": namespace,
             "managed_namespaces": args.managed_namespaces or "all",
         }
 

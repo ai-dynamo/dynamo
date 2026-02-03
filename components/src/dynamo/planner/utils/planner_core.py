@@ -137,18 +137,15 @@ class Planner:
             self.runtime = runtime
             self.namespace = args.namespace
 
-            # Set planner mode
-            self.planner_mode = getattr(args, "planner_mode", "local")
-
             if not args.no_operation:
-                # Initialize connector based on mode
-                if self.planner_mode == "delegating":
-                    # Use GlobalPlannerConnector for delegating mode
+                # Initialize connector based on environment
+                if args.environment == "global-planner":
+                    # Use GlobalPlannerConnector to delegate to GlobalPlanner
                     self.connector = GlobalPlannerConnector(
                         runtime,
                         self.namespace,
                         args.global_planner_namespace,
-                        args.global_planner_component,
+                        "GlobalPlanner",
                         getattr(args, "model_name", None),
                     )
                 elif args.environment == "kubernetes":
@@ -819,13 +816,12 @@ class Planner:
 
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
-    # Validate planner mode configuration
-    planner_mode = getattr(args, "planner_mode", "local")
-    if planner_mode == "delegating" and not getattr(
+    # Validate planner configuration
+    if args.environment == "global-planner" and not getattr(
         args, "global_planner_namespace", None
     ):
         raise ValueError(
-            "--global-planner-namespace required for delegating mode. "
+            "--global-planner-namespace required when environment=global-planner. "
             "Please specify the namespace where GlobalPlanner is running."
         )
 

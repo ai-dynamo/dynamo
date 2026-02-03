@@ -3,21 +3,20 @@
 
 """Data structures for scale request/response protocol between delegating and centralized planners."""
 
-from typing import TYPE_CHECKING, List, Optional
+from enum import Enum
+from typing import List, Optional
 
 from pydantic import BaseModel
 
-# Import SubComponentType only for type checking to avoid runtime dependency
-if TYPE_CHECKING:
-    pass
+from dynamo.planner.kubernetes_connector import TargetReplica
 
 
-class TargetReplicaRequest(BaseModel):
-    """Replica target for scaling request"""
+class ScaleStatus(str, Enum):
+    """Status values for scaling operations"""
 
-    sub_component_type: str  # SubComponentType: "prefill" or "decode"
-    component_name: Optional[str] = None
-    desired_replicas: int
+    SUCCESS = "success"
+    ERROR = "error"
+    SCALING = "scaling"
 
 
 class ScaleRequest(BaseModel):
@@ -31,7 +30,7 @@ class ScaleRequest(BaseModel):
     k8s_namespace: str  # K8s namespace
 
     # Scaling targets
-    target_replicas: List[TargetReplicaRequest]
+    target_replicas: List[TargetReplica]
 
     # Execution options
     blocking: bool = False
@@ -44,6 +43,6 @@ class ScaleRequest(BaseModel):
 class ScaleResponse(BaseModel):
     """Response from scaling operation"""
 
-    status: str  # "success", "error", "scaling"
+    status: ScaleStatus
     message: str
     current_replicas: dict  # {"prefill": 3, "decode": 5}

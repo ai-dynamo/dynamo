@@ -49,14 +49,10 @@ class RemotePlannerClient:
             f"decode={[r.desired_replicas for r in request.target_replicas if r.sub_component_type == 'decode']}"
         )
 
-        # Send request via round-robin
+        # Send request to single endpoint
         request_json = request.model_dump_json()
 
-        response_data = None
-        async for response in await self._client.round_robin(request_json):
-            # Take first response
-            response_data = response
-            break
+        response_data = await self._client.scale_request(request_json)
 
         if response_data is None:
             raise RuntimeError("No response from centralized planner")
