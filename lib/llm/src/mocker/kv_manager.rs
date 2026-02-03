@@ -41,10 +41,10 @@ use crate::kv_router::publisher::KvEventPublisher;
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::protocols::{MoveBlock, PrefillCost};
 use crate::mocker::sequence::ActiveSequence;
-use crate::tokens::blocks::UniqueBlock;
-use crate::tokens::{BlockHash, SequenceHash};
 use derive_getters::Getters;
 use dynamo_runtime::component::Component;
+use dynamo_tokens::blocks::UniqueBlock;
+use dynamo_tokens::{BlockHash, SequenceHash};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -91,7 +91,7 @@ impl KvManager {
                 "Initializing KV event publisher for DP rank {dp_rank} with block_size {block_size}, enable_local_indexer={enable_local_indexer}"
             );
             Arc::new(
-                KvEventPublisher::new_with_local_indexer(comp, block_size as u32, None, enable_local_indexer)
+                KvEventPublisher::new_with_local_indexer(comp, block_size as u32, None, enable_local_indexer, dp_rank)
                     .expect("Failed to create KV event publisher"),
             )
         });

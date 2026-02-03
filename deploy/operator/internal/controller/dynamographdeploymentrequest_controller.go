@@ -52,14 +52,14 @@ import (
 )
 
 const (
-	// State constants
-	StateEmpty             = ""
-	StatePending           = "Pending"
-	StateProfiling         = "Profiling"
-	StateDeploying         = "Deploying"
-	StateReady             = "Ready"
-	StateDeploymentDeleted = "DeploymentDeleted"
-	StateFailed            = "Failed"
+	// DGDR state constants
+	DGDRStateEmpty             = ""
+	DGDRStatePending           = "Pending"
+	DGDRStateProfiling         = "Profiling"
+	DGDRStateDeploying         = "Deploying"
+	DGDRStateReady             = "Ready"
+	DGDRStateDeploymentDeleted = "DeploymentDeleted"
+	DGDRStateFailed            = "Failed"
 
 	// Condition types
 	ConditionTypeValidation      = "Validation"
@@ -297,8 +297,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	// Check for spec changes (immutability enforcement)
 	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
 		// Spec changed after initial processing
-		if dgdr.Status.State == StateProfiling || dgdr.Status.State == StateDeploying ||
-			dgdr.Status.State == StateReady || dgdr.Status.State == StateDeploymentDeleted {
+		if dgdr.Status.State == DGDRStateProfiling || dgdr.Status.State == DGDRStateDeploying ||
+			dgdr.Status.State == DGDRStateReady || dgdr.Status.State == DGDRStateDeploymentDeleted {
 			logger.Info("Spec change detected in immutable state",
 				"state", dgdr.Status.State,
 				"observedGeneration", dgdr.Status.ObservedGeneration,
@@ -314,23 +314,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	}
 	// State machine: handle different states
 	switch dgdr.Status.State {
-	case StateEmpty:
+	case DGDRStateEmpty:
 		return r.handleInitialState(ctx, dgdr)
-	case StatePending:
+	case DGDRStatePending:
 		return r.handlePendingState(ctx, dgdr)
-	case StateProfiling:
+	case DGDRStateProfiling:
 		return r.handleProfilingState(ctx, dgdr)
-	case StateDeploying:
+	case DGDRStateDeploying:
 		return r.handleDeployingState(ctx, dgdr)
-	case StateReady:
+	case DGDRStateReady:
 		return r.handleReadyState(ctx, dgdr)
-	case StateDeploymentDeleted:
+	case DGDRStateDeploymentDeleted:
 		return r.handleDeploymentDeletedState(ctx, dgdr)
-	case StateFailed:
+	case DGDRStateFailed:
 		return r.handleFailedState(ctx, dgdr)
 	default:
 		logger.Info("Unknown state", "state", dgdr.Status.State)
-		return r.updateStateAndRequeue(ctx, dgdr, StateFailed, MessageInvalidState)
+		return r.updateStateAndRequeue(ctx, dgdr, DGDRStateFailed, MessageInvalidState)
 	}
 }
 
@@ -342,7 +342,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 	// Validate the spec
 	if err := r.validateSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonValidationFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, StateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
 	}
 
 	// Set observedGeneration to track the spec we're processing
@@ -353,7 +353,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 
 	// Initialize status
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonInitialized, MessageInitialized)
-	return r.updateStateAndRequeue(ctx, dgdr, StatePending, MessageInitialized)
+	return r.updateStateAndRequeue(ctx, dgdr, DGDRStatePending, MessageInitialized)
 }
 
 // handlePendingState starts the profiling process
@@ -364,7 +364,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	// Create profiling job (online or AIC)
 	if err := r.createProfilingJob(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonProfilingJobFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, StateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
 
 	// Record event with appropriate message
@@ -375,7 +375,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	}
 
 	// Update to Profiling state with Running status
-	return r.updateStateWithCondition(ctx, dgdr, StateProfiling, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
+	return r.updateStateWithCondition(ctx, dgdr, DGDRStateProfiling, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
 }
 
 // handleProfilingState monitors profiling progress and generates spec when complete
@@ -389,7 +389,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	if err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, err.Error())
 		// Job failed - transition to Failed state
-		return r.updateStateWithCondition(ctx, dgdr, StateFailed, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
 	}
 
 	if !completed {
@@ -410,7 +410,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// Retrieve profiling results and generate spec
 	if err := r.generateDGDSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, StateFailed, ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
 	}
 
 	// Record spec generation event
@@ -432,11 +432,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// If autoApply is enabled, transition to Deploying state
 	if dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying state")
-		return r.updateStateWithCondition(ctx, dgdr, StateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
 	}
 
 	// Otherwise, transition to Ready state
-	return r.updateStateWithCondition(ctx, dgdr, StateReady, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecAvailable)
+	return r.updateStateWithCondition(ctx, dgdr, DGDRStateReady, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecAvailable)
 }
 
 // handleReadyState handles DGDR in Ready state
@@ -469,11 +469,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 	dgdr.Status.Deployment.State = dgd.Status.State
 
 	// Check if DGD degraded from Ready
-	if dgd.Status.State != "Ready" {
+	if dgd.Status.State != string(DGDStateReady) {
 		logger.Info("DGD degraded, transitioning back to Deploying",
 			"dgdState", dgd.Status.State)
 
-		dgdr.Status.State = StateDeploying
+		dgdr.Status.State = DGDRStateDeploying
 
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDegraded,
 			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, dgd.Status.State))
@@ -497,7 +497,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	if !dgdr.Spec.AutoApply {
 		// Shouldn't be in this state without autoApply
 		logger.Info("AutoApply not enabled, transitioning to Ready")
-		dgdr.Status.State = StateReady
+		dgdr.Status.State = DGDRStateReady
 		return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 	}
 
@@ -526,9 +526,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	dgdr.Status.Deployment.State = dgd.Status.State
 
 	// Check if DGD is Ready
-	if dgd.Status.State == "Ready" {
+	if dgd.Status.State == string(DGDStateReady) {
 		logger.Info("DGD is Ready, transitioning to Ready state")
-		dgdr.Status.State = StateReady
+		dgdr.Status.State = DGDRStateReady
 
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonDeploymentReady,
 			fmt.Sprintf(MessageDeploymentReady, dgd.Name))
@@ -556,8 +556,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	logger := log.FromContext(ctx)
 	logger.Info("DGD was deleted by user, transitioning to DeploymentDeleted state")
 
-	dgdr.Status.State = StateDeploymentDeleted
-	dgdr.Status.Deployment.State = "Deleted"
+	dgdr.Status.State = DGDRStateDeploymentDeleted
+	dgdr.Status.Deployment.State = ""
 
 	r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDeleted,
 		fmt.Sprintf(MessageDeploymentDeleted, dgdr.Status.Deployment.Name))
@@ -669,7 +669,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 				Name:      dgdName,
 				Namespace: dgdNamespace,
-				State:     "Pending",
+				State:     string(DGDStatePending),
 				Created:   true,
 			}
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
@@ -682,7 +682,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 		Name:      dgdName,
 		Namespace: dgdNamespace,
-		State:     "Pending",
+		State:     string(DGDStatePending),
 		Created:   true,
 	}
 

@@ -7,9 +7,6 @@ metadata:
   name: vllm-dsr1
 spec:
   backendFramework: vllm
-  envs:
-    - name: HF_HOME
-      value: /model-cache
   pvcs:
     - name: model-cache
       create: false
@@ -17,6 +14,9 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -73,7 +73,7 @@ spec:
           args:
             - |
               exec python3 -m dynamo.vllm \
-                --model deepseek-ai/DeepSeek-R1 \
+                --model /model-cache/deepseek-r1 \
                 --served-model-name deepseek-ai/DeepSeek-R1 \
                 --all2all-backend deepep_low_latency \
                 --data-parallel-hybrid-lb \
@@ -87,7 +87,7 @@ spec:
                 --enable-eplb \
                 --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
                 --max-num-seqs 512 \
-                --compilation_config '{"pass_config":{"enable_fusion":true,"enable_attn_fusion":true,"enable_noop":true},"custom_ops":["+rms_norm"],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+                --compilation_config '{"pass_config":{"fuse_norm_quant":true,"eliminate_noops":true},"cudagraph_mode":"FULL_DECODE_ONLY"}'
     prefill:
       componentType: worker
       subComponentType: prefill
@@ -132,7 +132,7 @@ spec:
           args:
             - |
               exec python3 -m dynamo.vllm \
-                --model deepseek-ai/DeepSeek-R1 \
+                --model /model-cache/deepseek-r1 \
                 --is-prefill-worker \
                 --served-model-name deepseek-ai/DeepSeek-R1 \
                 --all2all-backend deepep_high_throughput \

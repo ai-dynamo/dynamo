@@ -242,6 +242,12 @@ def parse_args():
         help="Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.",
     )
     parser.add_argument(
+        "--active-prefill-tokens-threshold-frac",
+        type=float,
+        default=None,
+        help="Fraction of max_num_batched_tokens for busy detection. Worker is busy when active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). Uses OR logic with --active-prefill-tokens-threshold.",
+    )
+    parser.add_argument(
         "--model-name",
         type=validate_model_name,
         help="Model name as a string (e.g., 'Llama-3.2-1B-Instruct')",
@@ -301,6 +307,13 @@ def parse_args():
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
     parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
+    )
+    parser.add_argument(
         "--exp-python-factory",
         action="store_true",
         default=False,
@@ -334,7 +347,7 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
-
+    os.environ["DYN_EVENT_PLANE"] = flags.event_plane
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
@@ -351,8 +364,14 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
-    # Enable NATS for KV router mode when kv_events are used (when --no-kv-events is not set)
-    enable_nats = (flags.router_mode == "kv") and flags.use_kv_events
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    enable_nats = flags.request_plane == "nats" or (
+        flags.event_plane == "nats"
+        and flags.router_mode == "kv"
+        and (flags.use_kv_events or flags.router_replica_sync)
+    )
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
@@ -395,6 +414,7 @@ async def async_main():
             kv_router_config,
             active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
             active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
             enforce_disagg=flags.enforce_disagg,
         ),
     }

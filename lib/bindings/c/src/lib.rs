@@ -57,6 +57,18 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
+/// Default timeout for discovery sync (seconds).
+const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 10;
+
+/// Get discovery timeout from environment variable or use default.
+/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
+fn get_discovery_timeout_secs() -> u64 {
+    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SEC)
+}
+
 /// Wait for the discovery daemon to sync and return at least one instance.
 /// This ensures list() calls will have data available.
 /// Returns the number of instances found, or 0 if timed out.
@@ -120,7 +132,8 @@ pub unsafe extern "C" fn dynamo_llm_init(
                 // This is needed because dynamo_create_worker_selection_pipeline() is called
                 // immediately after, and it needs discovery.list() to return data
                 // the discovery daemon takes time to query K8s and returns async, so we need to wait.
-                let instance_count = wait_for_discovery_sync(drt, 10).await;
+                let timeout_secs = get_discovery_timeout_secs();
+                let instance_count = wait_for_discovery_sync(drt, timeout_secs).await;
                 if instance_count == 0 {
                     tracing::error!(
                         "Discovery sync failed: no worker instances found. Is the backend running?"
@@ -937,6 +950,7 @@ pub unsafe extern "C" fn dynamo_router_add_request(
                 overlap_blocks,
                 None,
                 worker,
+                None, // lora_name not exposed in C API yet
             )
             .await;
 
@@ -1361,7 +1375,8 @@ pub async fn create_worker_selection_pipeline_chat(
     // Only wait for discovery sync if we just initialized the DRT
     // (dynamo_llm_init already does this when it initializes)
     if needs_sync {
-        let instance_count = wait_for_discovery_sync(distributed_runtime, 10).await;
+        let timeout_secs = get_discovery_timeout_secs();
+        let instance_count = wait_for_discovery_sync(distributed_runtime, timeout_secs).await;
         if instance_count == 0 {
             return Err(anyhow::anyhow!(
                 "Discovery sync failed: no worker instances found. Is the backend running?"
@@ -1383,8 +1398,11 @@ pub async fn create_worker_selection_pipeline_chat(
     let router_config = dynamo_llm::entrypoint::RouterConfig {
         router_mode,
         kv_router_config: kv_router_config.unwrap_or_default(),
-        active_decode_blocks_threshold: busy_threshold,
-        active_prefill_tokens_threshold: None,
+        load_threshold_config: dynamo_llm::discovery::LoadThresholdConfig {
+            active_decode_blocks_threshold: busy_threshold,
+            active_prefill_tokens_threshold: None,
+            active_prefill_tokens_threshold_frac: None,
+        },
         enforce_disagg,
     };
     // Create metrics for migration tracking (not exposed via /metrics in C bindings)
@@ -1481,7 +1499,16 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Create worker monitor if busy_threshold is set
     // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
-    let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t, 1000000));
+    let worker_monitor = busy_threshold.map(|t| {
+        KvWorkerMonitor::new(
+            client.clone(),
+            dynamo_llm::discovery::LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(t),
+                active_prefill_tokens_threshold: None,
+                active_prefill_tokens_threshold_frac: None,
+            },
+        )
+    });
 
     // Clone chooser before passing to build_routed_pipeline (which takes ownership)
     let kv_router = chooser.clone();
