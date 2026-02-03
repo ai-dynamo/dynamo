@@ -59,12 +59,9 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
    :hidden:
 
    Overview <self>
-   Motivation <kvbm_motivation.md>
-   Architecture <kvbm_architecture.md>
-   Components <kvbm_components.md>
-   Design Deep Dive <kvbm_design_deepdive.md>
-   Integrations <kvbm_integrations.md>
-   KVBM in vLLM <vllm-setup.md>
-   KVBM in TRTLLM <trtllm-setup.md>
-   LMCache Integration <../backends/vllm/LMCache_Integration>
-   Further Reading <kvbm_reading.md>
+   Quick Start <README.md>
+   User Guide <kvbm_guide.md>
+   Design <kvbm_design.md>
+   LMCache Integration <../integrations/lmcache_integration.md>
+   FlexKV Integration <../integrations/flexkv_integration.md>
+   SGLang HiCache <../integrations/sglang_hicache.md>
