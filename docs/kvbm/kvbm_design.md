@@ -100,7 +100,7 @@ Implementation-wise, `KvBlockManagerState` holds the logic: it's initialized by 
 
 Each block is a 2D array `[num_layers][page_size × inner_dim]`. The `BlockLayout` trait abstracts the memory layout. The default implementation, `FullyContiguous`, stores all layers for all blocks in one region with alignment-aware stride computation:
 
-```
+```text
 block_stride_in_bytes = align_up(num_layers × layer_stride, alignment);
 ```
 

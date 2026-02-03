@@ -119,7 +119,7 @@ curl localhost:8000/v1/chat/completions \
 
 The `--hicache-ratio` parameter controls how much host memory is allocated relative to GPU memory for KV cache:
 
-```
+```text
 Host KV Cache Size = Device KV Cache Size × hicache-ratio
 ```
 
@@ -442,7 +442,7 @@ Look for HiCache-related log messages indicating:
 
 - **[SGLang Backend Guide](../backends/sglang/README.md)**: Complete guide for running SGLang with Dynamo
 - **[KV Cache Routing](../router/kv_cache_routing.md)**: Understanding KV-aware routing for multi-worker deployments
-- **[KVBM Architecture](../kvbm/kvbm_architecture.md)**: Dynamo's KV Block Manager and NIXL integration
+- **[KVBM Design](../kvbm/kvbm_design.md)**: Dynamo's KV Block Manager architecture and NIXL integration
 - **[Disaggregated Serving](../backends/sglang/sglang-disaggregation.md)**: Prefill/decode separation with SGLang
 - **[NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)**: NIXL communication library details
 - **[SGLang HiCache Benchmarks](https://github.com/sgl-project/sglang/tree/main/benchmark/hicache)**: Upstream SGLang HiCache benchmark results

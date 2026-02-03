@@ -47,7 +47,7 @@ See the [support matrix](../reference/support-matrix.md) for version compatibili
 
 ### Build from Source
 
-To build KVBM from source, see the detailed instructions in the [KVBM bindings README](../../lib/bindings/kvbm/readme.md#build-from-source).
+To build KVBM from source, see the detailed instructions in the [KVBM bindings README](../../lib/bindings/kvbm/README.md#build-from-source).
 
 ## Run KVBM in Dynamo with vLLM
 

@@ -66,13 +66,6 @@ FLEXKV_CPU_CACHE_GB=32 \
   python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector flexkv
 ```
 
-Or use the provided launch script:
-
-```bash
-cd $DYNAMO_HOME/examples/backends/vllm/launch
-./agg_flexkv.sh
-```
-
 ### With KV-Aware Routing
 
 For multi-worker deployments with KV-aware routing to maximize cache reuse:
@@ -106,12 +99,6 @@ python -m dynamo.vllm \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 ```
 
-Or use the provided script:
-
-```bash
-./agg_flexkv_router.sh
-```
-
 ## Disaggregated Serving
 
 FlexKV can be used with disaggregated prefill/decode serving. The prefill worker uses FlexKV for KV cache offloading, while NIXL handles KV transfer between prefill and decode workers.
@@ -133,12 +120,6 @@ CUDA_VISIBLE_DEVICES=1 \
   --model Qwen/Qwen3-0.6B \
   --is-prefill-worker \
   --connector nixl flexkv
-```
-
-Or use the provided script (requires at least 2 GPUs):
-
-```bash
-./disagg_flexkv.sh
 ```
 
 ## Configuration
