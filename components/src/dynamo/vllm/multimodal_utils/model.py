@@ -152,14 +152,18 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
         # TODO(gluo/dsocek): Remove this monkey patch once vLLM upstream adds
         # get_language_model_spec to Qwen VL model classes.
         # Monkey patch to vLLM's Qwen 2.5 VL class to add get_language_model_spec
-        from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
         from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+        from vllm.model_executor.models.qwen2_5_vl import (
+            Qwen2_5_VLForConditionalGeneration,
+        )
 
         @classmethod
         def get_language_model_spec(cls):
             return (Qwen2ForCausalLM, "language_model")
 
-        Qwen2_5_VLForConditionalGeneration.get_language_model_spec = get_language_model_spec
+        Qwen2_5_VLForConditionalGeneration.get_language_model_spec = (
+            get_language_model_spec
+        )
 
         # Load only the vision model via vLLM
         vllm_model = LLM(
