@@ -135,9 +135,6 @@ enum ResponseProcessingError {
 
     #[error("deserialize error: {0}")]
     DeserializeError(String),
-
-    #[error("offload error: {0}")]
-    OffloadError(String),
 }
 
 #[async_trait::async_trait]
@@ -266,13 +263,6 @@ where
                                 );
                                 msg
                             }
-                            ResponseProcessingError::OffloadError(e) => {
-                                let msg = format!(
-                                    "critical error: failed to offload the python async generator to a new thread: {}",
-                                    e
-                                );
-                                msg
-                            }
                         };
 
                         Annotated::from_error(msg)
@@ -340,10 +330,9 @@ where
     ))?;
 
     // Deserialize WITHOUT GIL
-    let response = serde_json::from_str::<Resp>(&json_str)
-        .map_err(|e| ResponseProcessingError::DeserializeError(
-            format!("JSON deserialization failed: {}", e)
-        ))?;
+    let response = serde_json::from_str::<Resp>(&json_str).map_err(|e| {
+        ResponseProcessingError::DeserializeError(format!("JSON deserialization failed: {}", e))
+    })?;
 
     Ok(Annotated::from_data(response))
 }
