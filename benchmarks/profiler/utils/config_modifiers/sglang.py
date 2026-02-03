@@ -291,29 +291,8 @@ class SGLangConfigModifier(BaseConfigModifier):
             )
             return DEFAULT_MODEL_NAME, DEFAULT_MODEL_NAME
 
-        model_name = DEFAULT_MODEL_NAME
         args = break_arguments(args)
-        # Check for --served-model-name first (API model name)
-        for i, arg in enumerate(args):
-            if arg == "--served-model-name" and i + 1 < len(args):
-                model_name = args[i + 1]
-                break
-
-        model_path = model_name
-        # Fall back to --model-path only if --served-model-name not found
-        for i, arg in enumerate(args):
-            if arg == "--model-path" and i + 1 < len(args):
-                model_path = args[i + 1]
-                break
-
-        if model_name == DEFAULT_MODEL_NAME and model_path == DEFAULT_MODEL_NAME:
-            logger.warning(
-                f"Model name not found in configuration args, using default model name: {DEFAULT_MODEL_NAME}"
-            )
-            return DEFAULT_MODEL_NAME, DEFAULT_MODEL_NAME
-        elif model_name == DEFAULT_MODEL_NAME:
-            model_name = model_path
-        return model_name, model_path
+        return cls._get_model_name_and_path_from_args(args, DEFAULT_MODEL_NAME, logger)
 
     @classmethod
     def get_port(cls, config: dict) -> int:
