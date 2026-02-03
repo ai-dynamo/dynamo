@@ -596,3 +596,4 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
