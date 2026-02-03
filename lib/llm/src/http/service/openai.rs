@@ -1593,16 +1593,19 @@ async fn images(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    // issue the generate call on the engine
+    // Issue the generate call on the engine
+    // Note: This uses ServerStreamingEngine for internal routing/distribution,
+    // NOT for client-facing SSE streaming. The stream is immediately folded into
+    // a single response below.
     let stream = engine
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate images"))?;
 
-    // Process stream to collect metrics and drop http_queue_guard on first token
+    // Process stream to collect metrics and drop http_queue_guard on first response
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
-        // Calls observe_response() on each token - drops http_queue_guard on first token
+        // Calls observe_response() on each item - drops http_queue_guard on first item
         process_response_and_observe_metrics(
             response,
             &mut response_collector,
@@ -1610,8 +1613,8 @@ async fn images(
         );
     });
 
-    // Images are typically returned as a single response (non-streaming)
-    // so we fold the stream into a single response
+    // Images are returned as a single response (non-streaming to client)
+    // Fold the internal stream into a single response
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
