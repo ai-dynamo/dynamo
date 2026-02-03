@@ -13,7 +13,6 @@ from PIL import Image
 
 from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
     ImageDiffusionWorkerHandler,
-    ImageStoragePathResolver,
 )
 
 pytestmark = [
@@ -45,7 +44,7 @@ def mock_config():
     config = MagicMock()
     config.dynamo_args = MagicMock()
     config.dynamo_args.image_diffusion_fs_url = "file:///tmp/images"
-    config.dynamo_args.image_diffusion_base_url = None
+    config.dynamo_args.image_diffusion_base_url = "file:///tmp/images"
     return config
 
 
@@ -69,7 +68,9 @@ def mock_context():
 
 
 @pytest.fixture
-def handler(mock_component, mock_generator, mock_config, mock_fs):
+def handler(
+    mock_component, mock_generator, mock_config, mock_fs
+) -> ImageDiffusionWorkerHandler:
     """Create ImageDiffusionWorkerHandler instance."""
     return ImageDiffusionWorkerHandler(
         component=mock_component,
@@ -88,7 +89,7 @@ class TestImageDiffusionWorkerHandler:
         assert handler.generator == mock_generator
         assert handler.fs == mock_fs
         assert handler.fs_url == "file:///tmp/images"
-        assert handler.url_base is None
+        assert handler.base_url == "file:///tmp/images"
 
     def test_initialization_with_url_base(
         self, mock_component, mock_generator, mock_fs
@@ -107,7 +108,7 @@ class TestImageDiffusionWorkerHandler:
             fs=mock_fs,
         )
 
-        assert handler.url_base == "http://localhost:8008/images"
+        assert handler.base_url == "http://localhost:8008/images"
         assert handler.fs_url == "s3://my-bucket/images"
 
     @patch("torch.cuda.empty_cache")
@@ -154,11 +155,13 @@ class TestImageDiffusionWorkerHandler:
             "model": "test-model",
             "size": "256x256",
             "response_format": "url",
-            "num_inference_steps": 10,
-            "guidance_scale": 7.5,
-            "seed": 42,
-            "negative_prompt": None,
             "user": "test-user",
+            "nvext": {
+                "num_inference_steps": 10,
+                "guidance_scale": 7.5,
+                "seed": 42,
+                "negative_prompt": None,
+            },
         }
 
         # Execute generation
@@ -191,11 +194,13 @@ class TestImageDiffusionWorkerHandler:
             "model": "test-model",
             "size": "256x256",
             "response_format": "b64_json",
-            "num_inference_steps": 10,
-            "guidance_scale": 7.5,
-            "seed": 42,
-            "negative_prompt": None,
             "user": "test-user",
+            "nvext": {
+                "num_inference_steps": 10,
+                "guidance_scale": 7.5,
+                "seed": 42,
+                "negative_prompt": None,
+            },
         }
 
         # Execute generation
@@ -228,9 +233,6 @@ class TestImageDiffusionWorkerHandler:
             "model": "test-model",
             "size": "256x256",
             "response_format": "b64_json",
-            "guidance_scale": 7.5,
-            "seed": 42,
-            "negative_prompt": None,
             "user": "test-user",
         }
 
@@ -238,10 +240,6 @@ class TestImageDiffusionWorkerHandler:
         results = []
         async for result in handler.generate(request, mock_context):
             results.append(result)
-
-        # Verify default was applied
-        assert "num_inference_steps" in request
-        assert request["num_inference_steps"] == 50
 
     @pytest.mark.asyncio
     async def test_generate_error_handling(self, handler, mock_context):
@@ -254,11 +252,13 @@ class TestImageDiffusionWorkerHandler:
             "model": "test-model",
             "size": "256x256",
             "response_format": "url",
-            "num_inference_steps": 10,
-            "guidance_scale": 7.5,
-            "seed": 42,
-            "negative_prompt": None,
             "user": "test-user",
+            "nvext": {
+                "num_inference_steps": 10,
+                "guidance_scale": 7.5,
+                "seed": 42,
+                "negative_prompt": None,
+            },
         }
 
         # Execute generation
@@ -346,133 +346,42 @@ class TestImageDiffusionWorkerHandler:
         assert len(images) == 1
         assert images[0] == img_bytes
 
+    @pytest.mark.asyncio
+    async def test_generate_with_nvext(self, handler, mock_context):
+        """Test that nvext parameters are passed to the generator."""
+        test_image = Image.new("RGB", (256, 256), color="yellow")
 
-class TestImageStoragePathResolver:
-    """Test suite for ImageStoragePathResolver."""
-
-    def test_file_protocol_initialization(self):
-        """Test initialization with file:// protocol."""
-        resolver = ImageStoragePathResolver("file:///tmp/images")
-        assert resolver.fs_base_url == "file:///tmp/images"
-        assert resolver.fs_root == "/tmp/images"
-
-    def test_s3_protocol_initialization(self):
-        """Test initialization with s3:// protocol."""
-        resolver = ImageStoragePathResolver("s3://my-bucket/images")
-        assert resolver.fs_base_url == "s3://my-bucket/images"
-        assert resolver.fs_root is None
-
-    def test_get_path_with_file_protocol(self):
-        """Test get_path with file:// protocol."""
-        resolver = ImageStoragePathResolver("file:///tmp/images")
-        storage_path = "users/user123/image.png"
-        result = resolver.get_path(storage_path)
-        assert result == "/tmp/images/users/user123/image.png"
-
-    def test_get_path_with_s3_protocol(self):
-        """Test get_path with S3 protocol returns storage path as-is."""
-        resolver = ImageStoragePathResolver("s3://my-bucket/images")
-        storage_path = "users/user123/image.png"
-        result = resolver.get_path(storage_path)
-        assert result == storage_path
-
-    def test_get_fs_url_with_s3(self):
-        """Test get_fs_url generates correct S3 URL."""
-        resolver = ImageStoragePathResolver("s3://my-bucket/path")
-        storage_path = "users/user123/image.png"
-        result = resolver.get_fs_url(storage_path)
-        assert (
-            result == "https://my-bucket.s3.amazonaws.com/path/users/user123/image.png"
+        handler._generate_images = Mock(return_value=[test_image.tobytes()])
+        handler._get_trace_header = Mock(
+            return_value={"traceparent": "00-1234567890-1234567890-01"}
         )
 
-    def test_get_fs_url_with_s3_and_region(self):
-        """Test get_fs_url with AWS region."""
-        with patch.dict(os.environ, {"AWS_REGION": "us-west-2"}):
-            resolver = ImageStoragePathResolver("s3://my-bucket/path")
-            storage_path = "users/user123/image.png"
-            result = resolver.get_fs_url(storage_path)
-            assert (
-                result
-                == "https://my-bucket.s3.us-west-2.amazonaws.com/path/users/user123/image.png"
-            )
+        request = {
+            "prompt": "A yellow square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "user": "test-user",
+            "nvext": {
+                "num_inference_steps": 10,
+                "guidance_scale": 7.5,
+                "seed": 42,
+                "negative_prompt": "negative",
+            },
+        }
 
-    def test_get_fs_url_with_gcs(self):
-        """Test get_fs_url generates correct GCS URL."""
-        resolver = ImageStoragePathResolver("gs://my-bucket/path")
-        storage_path = "users/user123/image.png"
-        result = resolver.get_fs_url(storage_path)
-        assert (
-            result
-            == "https://storage.googleapis.com/my-bucket/path/users/user123/image.png"
+        # Execute generation
+        results = []
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
+
+        # Verify results
+        handler._generate_images.assert_called_once_with(
+            prompt="A yellow square",
+            width=256,
+            height=256,
+            num_inference_steps=10,
+            guidance_scale=7.5,
+            seed=42,
+            negative_prompt="negative",
         )
-
-    def test_get_fs_url_with_azure(self):
-        """Test get_fs_url generates correct Azure URL."""
-        resolver = ImageStoragePathResolver("az://container@account/path")
-        storage_path = "users/user123/image.png"
-        result = resolver.get_fs_url(storage_path)
-        assert (
-            result
-            == "https://account.blob.core.windows.net/container/path/users/user123/image.png"
-        )
-
-    def test_get_fs_url_with_file_protocol(self):
-        """Test get_fs_url with file:// protocol."""
-        resolver = ImageStoragePathResolver("file:///tmp/images")
-        storage_path = "users/user123/image.png"
-        result = resolver.get_fs_url(storage_path)
-        assert result == "file:///tmp/images/users/user123/image.png"
-
-    def test_get_fs_url_unknown_protocol(self):
-        """Test get_fs_url raises error for unknown protocol."""
-        resolver = ImageStoragePathResolver("unknown://something")
-        storage_path = "users/user123/image.png"
-        with pytest.raises(ValueError, match="Unknown filesystem type"):
-            resolver.get_fs_url(storage_path)
-
-    def test_get_url_with_url_base(self):
-        """Test get_url uses url_base when configured."""
-        resolver = ImageStoragePathResolver(
-            "file:///tmp/images", url_base="http://localhost:8008/images"
-        )
-        storage_path = "users/user123/image.png"
-        result = resolver.get_url(storage_path)
-        assert result == "http://localhost:8008/images/users/user123/image.png"
-
-    def test_get_url_without_url_base(self):
-        """Test get_url falls back to filesystem URL when url_base not set."""
-        resolver = ImageStoragePathResolver("s3://my-bucket/images")
-        storage_path = "users/user123/image.png"
-        result = resolver.get_url(storage_path)
-        # Should return S3 URL
-        assert result.startswith("https://my-bucket.s3.amazonaws.com/")
-
-    def test_get_url_with_trailing_slash_in_base(self):
-        """Test get_url handles trailing slashes correctly."""
-        resolver = ImageStoragePathResolver(
-            "file:///tmp/images", url_base="http://localhost:8008/images/"
-        )
-        storage_path = "users/user123/image.png"
-        result = resolver.get_url(storage_path)
-        # Should not have double slash
-        assert result == "http://localhost:8008/images/users/user123/image.png"
-        assert "//" not in result.replace("http://", "")
-
-    def test_get_url_with_s3_protocol_and_url_base(self):
-        """Test get_url with s3 protocol and url base redirecting to other service."""
-        resolver = ImageStoragePathResolver(
-            "s3://my-bucket/images", url_base="http://localhost:8008/images/"
-        )
-        storage_path = "users/user123/image.png"
-        result = resolver.get_url(storage_path)
-        # Should not have double slash
-        assert result == "http://localhost:8008/images/users/user123/image.png"
-
-    def test_get_url_with_leading_slash_in_path(self):
-        """Test get_url handles leading slashes in storage path."""
-        resolver = ImageStoragePathResolver(
-            "file:///tmp/images", url_base="http://localhost:8008/images"
-        )
-        storage_path = "/users/user123/image.png"
-        result = resolver.get_url(storage_path)
-        assert result == "http://localhost:8008/images/users/user123/image.png"
