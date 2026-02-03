@@ -8,10 +8,6 @@
 name: CI Test Suite
 
 on:
-  # TODO: Remove the push trigger before merging this change
-  push:
-    branches:
-      - dtokarev-fix-trtll-cuda-version-in-ci
   workflow_call:
     inputs:
       pipeline_type:
@@ -72,7 +68,7 @@ defaults:
 
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
-  IMAGE_PREFIX: ${{ inputs.image_prefix || 'remove-me' }}  # TODO remove dummy value before merging
+  IMAGE_PREFIX: ${{ inputs.image_prefix }}
 ############################## BUILD JOBS ##############################
 
 jobs:
