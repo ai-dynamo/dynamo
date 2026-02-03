@@ -15,11 +15,13 @@ from PIL import Image
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
+from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
+
+MAX_NUM_INFERENCE_STEPS = 50
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -91,10 +93,13 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 
         try:
-            # Default to 50 steps if not provided
-            request["num_inference_steps"] = request.get("num_inference_steps", 50)
-
             req = CreateImageRequest(**request)
+
+            # Extract nvext parameters with defaults
+            nvext = req.nvext or NvExt()
+            nvext.num_inference_steps = min(
+                nvext.num_inference_steps or 50, MAX_NUM_INFERENCE_STEPS
+            )
 
             # Parse size
             width, height = self._parse_size(req.size)
@@ -102,12 +107,12 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             # Generate images (may batch multiple requests at same step)
             images = await self._generate_images(
                 prompt=req.prompt,
-                negative_prompt=req.negative_prompt,
+                negative_prompt=nvext.negative_prompt,
                 width=width,
                 height=height,
-                num_inference_steps=req.num_inference_steps,
-                guidance_scale=req.guidance_scale,
-                seed=req.seed,
+                num_inference_steps=nvext.num_inference_steps,
+                guidance_scale=nvext.guidance_scale,
+                seed=nvext.seed,
             )
 
             # Upload to filesystem and get URLs
