@@ -76,7 +76,6 @@ jobs:
       run_tests: false
       copy_to_acr: false
       push_image: false
-      show_summary: false
     secrets: inherit
 
 
