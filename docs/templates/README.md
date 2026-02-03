@@ -181,7 +181,20 @@ See [docs/README.md](../README.md) for documentation build instructions.
 
 For migrating existing documentation to the new structure:
 
-1. See [EXAMPLE_migration_planner.md](EXAMPLE_migration_planner.md) for a complete migration prompt
-2. Copy and adapt the example for your component
-3. Use with Claude 4.5 Opus Max mode for best results
-4. Follow the phased approach with STOP points for review
+### Quick Reference
+
+- [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) - Comprehensive migration guide with link update checklist
+- [EXAMPLE_SKILL.md](EXAMPLE_SKILL.md) - AI-assisted migration skill (works with Cursor and Claude)
+- [EXAMPLE_migration_planner.md](EXAMPLE_migration_planner.md) - Example migration prompt for Planner
+
+### Using the AI Skill
+
+1. **Cursor IDE:** Copy `EXAMPLE_SKILL.md` to `.cursor/skills/docs-migration/SKILL.md`
+2. **Claude/Other AI:** Copy the skill content into your conversation as context
+3. Follow the phased approach with STOP points for review
+
+### Manual Migration
+
+1. Read [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) for the full process
+2. Use the link update checklist to update Sphinx and Fern navigation
+3. Apply style guidelines for FLOW, STYLE, and CONSISTENCY
