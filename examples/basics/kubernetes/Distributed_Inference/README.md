@@ -37,7 +37,7 @@ kubectl apply -f agg_router.yaml --namespace ${NAMESPACE}
 4. Testing the deployment and run benchmarks
 After deployment, forward the frontend service to access the API:
 ```sh
-kubectl port-forward deployment/vllm-agg-router-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/vllm-agg-router-frontend 8000:8000 -n ${NAMESPACE}
 ```
 and use following request to test the deployed model
 ```sh
@@ -65,9 +65,9 @@ pip3 install aiconfigurator
 ```
 2. Assume we have 2 GPU nodes with 16 H200 in total, and we want to deploy Llama 3.1-70B-Instruct model with an optimal disaggregated serving configuration. Run AI configurator for this model
 ```sh
-aiconfigurator cli --model LLAMA3.1_70B --total_gpus 16 --system h200_sxm
+aiconfigurator cli default --model LLAMA3.1_70B --total_gpus 16 --system h200_sxm
 ```
-and from the output, you can see the Pareto curve with suggest P/D settings
+and from the output, you can see the Pareto curve with the suggested P/D settings
 ![text](images/pareto.png)
 3. Start the serving with 1 prefill worker with tensor parallelism 4 and 1 decoding worker with tensor parallelism 8 as AI Configurator suggested. Update the `my-tag` in `disagg_router.yaml` with the latest Dynamo version and your local cache folder path and run following command.
 ![text](images/settings.png)
