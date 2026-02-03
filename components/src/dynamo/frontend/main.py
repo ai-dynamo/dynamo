@@ -182,13 +182,13 @@ def parse_args():
         "--namespace",
         type=str,
         default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
-        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery). Mutually exclusive with --namespace-prefix.",
+        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
     )
     parser.add_argument(
         "--namespace-prefix",
         type=str,
         default=os.environ.get(DYN_NAMESPACE_PREFIX_ENV_VAR),
-        help="Dynamo namespace prefix for multi-pool discovery. Discovers workers from all namespaces starting with this prefix. Traffic is distributed across pools weighted by worker count. Mutually exclusive with --namespace.",
+        help="Dynamo namespace prefix for multi-pool discovery. Discovers workers from all namespaces starting with this prefix. Traffic is distributed across pools weighted by worker count. Overrides --namespace.",
     )
     parser.add_argument(
         "--router-replica-sync",
@@ -334,11 +334,6 @@ def parse_args():
     if flags.custom_backend_metrics_polling_interval < 0:
         parser.error(
             "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
-        )
-    if flags.namespace and flags.namespace_prefix:
-        parser.error(
-            "--namespace and --namespace-prefix are mutually exclusive. "
-            "Use --namespace for exact match or --namespace-prefix for multi-pool discovery."
         )
 
     return flags

@@ -81,7 +81,6 @@ pub struct ModelManager {
     runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
 
     /// Multi-pool managers per model name for prefix-mode routing.
-    /// Only populated when using --namespace-prefix mode.
     multi_pool_managers: DashMap<String, Arc<MultiPoolManager>>,
 }
 
