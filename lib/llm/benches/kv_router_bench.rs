@@ -1597,6 +1597,16 @@ async fn main() -> Result<()> {
             }
         };
 
+        let try_simple_fallback = |path: &str| -> Option<PromptRenderer> {
+            let config = load_tokenizer_config(path).ok()??;
+            let template = config.chat_template?;
+            Some(PromptRenderer::Simple(ChatTemplateRenderer::new(
+                template,
+                config.bos_token_str(),
+                config.eos_token_str(),
+            )))
+        };
+
         if let Some(contents) = contents {
             match serde_json::from_str::<ChatTemplate>(&contents) {
                 Ok(chat_template) => {
@@ -1612,16 +1622,7 @@ async fn main() -> Result<()> {
                             println!(
                                 "           Using fallback Simple renderer (may not match frontend)"
                             );
-                            // Fallback to simple renderer
-                            if let Ok(Some(config)) = load_tokenizer_config(tokenizer_path) {
-                                let bos = config.bos_token_str();
-                                let eos = config.eos_token_str();
-                                if let Some(template) = config.chat_template {
-                                    prompt_renderer = Some(PromptRenderer::Simple(
-                                        ChatTemplateRenderer::new(template, bos, eos),
-                                    ));
-                                }
-                            }
+                            prompt_renderer = try_simple_fallback(tokenizer_path);
                         }
                     }
                 }
@@ -1631,16 +1632,7 @@ async fn main() -> Result<()> {
                         e
                     );
                     println!("           Using fallback Simple renderer (may not match frontend)");
-                    // Fallback to simple renderer
-                    if let Ok(Some(config)) = load_tokenizer_config(tokenizer_path) {
-                        let bos = config.bos_token_str();
-                        let eos = config.eos_token_str();
-                        if let Some(template) = config.chat_template {
-                            prompt_renderer = Some(PromptRenderer::Simple(
-                                ChatTemplateRenderer::new(template, bos, eos),
-                            ));
-                        }
-                    }
+                    prompt_renderer = try_simple_fallback(tokenizer_path);
                 }
             }
         } else {
