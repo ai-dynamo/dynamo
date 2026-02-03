@@ -136,7 +136,7 @@ def parse_args():
         type=str,
         choices=["round-robin", "random", "kv", "direct"],
         default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
-        help="How to route the request. Can be set via DYN_ROUTER_MODE env var. Use 'direct' when an external orchestrator (e.g., EPP) handles worker selection.",
+        help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
     )
     parser.add_argument(
         "--kv-overlap-score-weight",

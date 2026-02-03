@@ -77,11 +77,9 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
-    /// KV-aware routing (scoring based on KV cache overlap)
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
-    /// Mutually exclusive with KV and other routing modes.
     Direct,
 }
 
@@ -377,7 +375,6 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        //InstanceSource::Static => self.r#static(request).await,
         match self.router_mode {
             RouterMode::Random => self.random(request).await,
             RouterMode::RoundRobin => self.round_robin(request).await,
@@ -385,7 +382,9 @@ where
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }
             RouterMode::Direct => {
-                anyhow::bail!("Direct routing should use DirectRoutingRouter, not PushRouter");
+                anyhow::bail!(
+                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                );
             }
         }
     }

@@ -232,7 +232,6 @@ pub enum RouterMode {
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
-    /// Mutually exclusive with KV routing.
     #[value(name = "direct")]
     Direct,
 }

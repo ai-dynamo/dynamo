@@ -72,7 +72,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	}
 
 	// EPP-specific environment variables
-	// Note: DYN_KV_BLOCK_SIZE and DYN_MODEL are auto-discovered from the model card
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			// DYN_DISCOVERY_TIMEOUT_SEC is how long to wait for workers to register (in seconds)

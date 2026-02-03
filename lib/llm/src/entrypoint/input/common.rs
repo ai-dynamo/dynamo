@@ -270,15 +270,12 @@ where
         .await?;
 
     let service_backend = match router_mode {
-        // Direct routing - reads worker IDs from requests, external orchestrator handles selection
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
         }
-        // Normal non-KV routing (round-robin, random)
         RouterMode::Random | RouterMode::RoundRobin => {
             ServiceBackend::from_engine(Arc::new(router))
         }
-        // KV-aware routing with scoring
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
