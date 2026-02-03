@@ -34,6 +34,8 @@ use crate::{
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine,
+            images::OpenAIImagesStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -62,10 +64,12 @@ pub enum ModelManagerError {
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
-    // We read a lot and write rarely, so these three are RwLock
+    // We read a lot and write rarely, so these are RwLock
     completion_engines: RwLock<ModelEngines<OpenAICompletionsStreamingEngine>>,
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
+    images_engines: RwLock<ModelEngines<OpenAIImagesStreamingEngine>>,
+    videos_engines: RwLock<ModelEngines<OpenAIVideosStreamingEngine>>,
     tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
     // Prefill models don't have engines - they're only tracked for discovery/lifecycle
     prefill_engines: RwLock<ModelEngines<()>>,
@@ -91,6 +95,8 @@ impl ModelManager {
             completion_engines: RwLock::new(ModelEngines::default()),
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
+            images_engines: RwLock::new(ModelEngines::default()),
+            videos_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
             prefill_engines: RwLock::new(ModelEngines::default()),
             cards: DashMap::new(),
@@ -113,6 +119,8 @@ impl ModelManager {
                 ModelType::Chat => self.chat_completion_engines.read().checksum(model_name),
                 ModelType::Completions => self.completion_engines.read().checksum(model_name),
                 ModelType::Embedding => self.embeddings_engines.read().checksum(model_name),
+                ModelType::Images => self.images_engines.read().checksum(model_name),
+                ModelType::Videos => self.videos_engines.read().checksum(model_name),
                 ModelType::TensorBased => self.tensor_engines.read().checksum(model_name),
                 ModelType::Prefill => self.prefill_engines.read().checksum(model_name),
                 _ => {
@@ -190,6 +198,14 @@ impl ModelManager {
         self.prefill_engines.read().list()
     }
 
+    pub fn list_images_models(&self) -> Vec<String> {
+        self.images_engines.read().list()
+    }
+
+    pub fn list_videos_models(&self) -> Vec<String> {
+        self.videos_engines.read().list()
+    }
+
     pub fn add_completions_model(
         &self,
         model: &str,
@@ -239,6 +255,26 @@ impl ModelManager {
         clients.add(model, card_checksum, ())
     }
 
+    pub fn add_images_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIImagesStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.images_engines.write();
+        clients.add(model, card_checksum, engine)
+    }
+
+    pub fn add_videos_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIVideosStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.videos_engines.write();
+        clients.add(model, card_checksum, engine)
+    }
+
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.completion_engines.write();
         clients.remove(model)
@@ -261,6 +297,16 @@ impl ModelManager {
 
     pub fn remove_prefill_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.prefill_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_images_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.images_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_videos_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.videos_engines.write();
         clients.remove(model)
     }
 
@@ -302,6 +348,28 @@ impl ModelManager {
         model: &str,
     ) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.tensor_engines
+            .read()
+            .get(model)
+            .cloned()
+            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn get_images_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
+        self.images_engines
+            .read()
+            .get(model)
+            .cloned()
+            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn get_videos_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
+        self.videos_engines
             .read()
             .get(model)
             .cloned()

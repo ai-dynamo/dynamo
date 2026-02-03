@@ -14,11 +14,13 @@ pub mod chat_completions;
 pub mod common_ext;
 pub mod completions;
 pub mod embeddings;
+pub mod images;
 pub mod models;
 pub mod nvext;
 pub mod responses;
 pub mod tools;
 pub mod validate;
+pub mod videos;
 
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,

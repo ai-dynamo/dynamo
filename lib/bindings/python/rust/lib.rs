@@ -519,6 +519,14 @@ impl ModelType {
     const Prefill: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Prefill,
     };
+    #[classattr]
+    const Images: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Images,
+    };
+    #[classattr]
+    const Videos: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Videos,
+    };
 
     fn __or__(&self, other: &Self) -> Self {
         ModelType {

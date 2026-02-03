@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import asyncio
-import dataclasses
+import copy
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -38,6 +38,9 @@ from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
+from dynamo.trtllm.request_handlers.base_generative_handler import (
+    BaseGenerativeHandler,
+)
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -70,9 +73,13 @@ class RequestHandlerConfig:
     shutdown_event: Optional[asyncio.Event] = None
 
 
-class HandlerBase:
+class HandlerBase(BaseGenerativeHandler):
     """
-    Base class for request handlers.
+    Base class for LLM request handlers.
+
+    Inherits from BaseGenerativeHandler to share the common interface with
+    video/image diffusion handlers. Contains LLM-specific logic for disaggregation,
+    multimodal processing, and TensorRT-LLM engine interaction.
     """
 
     def __init__(self, config: RequestHandlerConfig):
@@ -198,12 +205,11 @@ class HandlerBase:
             )
 
             # Abort the generation
-            # Temporary:
-            #   Disable calling abort() on the engine, which may get stuck if a
-            #   sufficiently large number of concurrent requests is cancelled.
-            # Note to restore:
-            #   call `generation_result.abort()`; and then
-            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
+            # Temporary: Disabled on DECODE workers to prevent engine hangs in
+            # disaggregated setups where abort() may cause the engine to get stuck
+            if self.disaggregation_mode != DisaggregationMode.DECODE:
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
 
             # Clean up any remaining background task
             for task in pending:
@@ -616,9 +622,13 @@ class HandlerBase:
 
         num_output_tokens_so_far = 0
 
-        sampling_params = self._override_sampling_params(
-            self.default_sampling_params, request
-        )
+        sampling_params = copy.deepcopy(self.default_sampling_params)
+
+        for key, value in request["sampling_options"].items():
+            if not value:
+                continue
+            if hasattr(sampling_params, key):
+                setattr(sampling_params, key, value)
 
         # Additional sampling params in output options
         output_options = request.get("output_options", {})
@@ -815,16 +825,3 @@ class HandlerBase:
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
-
-    @staticmethod
-    def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
-        overrides = {
-            key: value
-            for key, value in request["sampling_options"].items()
-            if value is not None
-        }
-
-        # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
-        # 1. it catches unsupported fields / attributes.
-        # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
-        return dataclasses.replace(sampling_params, **overrides)
