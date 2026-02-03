@@ -501,7 +501,8 @@ class ManagedDeployment:
     _in_cluster: bool = False
     _logger: logging.Logger = logging.getLogger()
     _port_forward: Optional[Any] = None
-    _deployment_name: Optional[str] = None
+    # Initialized from deployment_spec.name in __post_init__; placeholder needed for dataclass ordering
+    _deployment_name: str = field(default="")
     _apps_v1: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
 
