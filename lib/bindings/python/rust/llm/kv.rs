@@ -992,9 +992,8 @@ async fn create_kv_router_from_endpoint(
     let namespace = endpoint_id.namespace.to_lowercase();
     let component = endpoint_id.component.to_lowercase();
     let name = endpoint_id.name.to_lowercase();
-    let endpoint_is_prefill = namespace.contains("prefill")
-        || component.contains("prefill")
-        || name.contains("prefill");
+    let endpoint_is_prefill =
+        namespace.contains("prefill") || component.contains("prefill") || name.contains("prefill");
     let track_active_blocks = kv_router_config
         .as_ref()
         .map(|cfg| cfg.router_track_active_blocks)
@@ -1122,7 +1121,6 @@ impl KvPushRouter {
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
     ) -> PyResult<Self> {
-
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async move {
             let client = endpoint.inner.client().await.map_err(to_pyerr)?;
