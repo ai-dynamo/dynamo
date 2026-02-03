@@ -281,7 +281,7 @@ jobs:
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64-run-${{ github.run_id }}
-            ${{ matrix.framework == 'trtllm' && format('{0}:{1}-{2}-amd64', env.REGISTRY_IMAGE, env.IMAGE_PREFIX, matrix.framework) || '' }}
+            ${{ matrix.framework == 'trtllm' && format('{0}:{1}-{2}-arm64', env.REGISTRY_IMAGE, env.IMAGE_PREFIX, matrix.framework) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
