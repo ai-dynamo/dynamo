@@ -106,13 +106,16 @@ jobs:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
           PLATFORM: ${{ inputs.platform }}
         run: |
+          echo "********* EXTRA_TAGS: $EXTRA_TAGS"
           if [ -n "$EXTRA_TAGS" ]; then
             RESULT=""
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
+                echo "********* tag: $tag"
                 RESULT+="${tag}-${PLATFORM}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
+            echo "********* RESULT: $RESULT"
             echo "tags<<EOF" >> $GITHUB_OUTPUT
             echo "$RESULT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
