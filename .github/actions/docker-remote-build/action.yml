@@ -67,7 +67,7 @@ inputs:
   use_sccache:
     description: 'Use SCCache for caching'
     required: false
-    default: 'false'
+    default: 'true'
   ci:
     description: 'CI mode: for frontend target, uses existing buildx builder and pushes EPP image to ECR'
     required: false
@@ -158,7 +158,7 @@ runs:
           EXTRA_ARGS+=" --no-cache"
         fi
         if [ "${{ inputs.use_sccache }}" == "true" ]; then
-          EXTRA_ARGS+=" --build-arg CARGO_BUILD_JOBS=4 --use-sccache"
+          EXTRA_ARGS+=" --build-arg CARGO_BUILD_JOBS=16 --build-arg CARGO_INCREMENTAL=0 --use-sccache"
         fi
         if [ "${{ inputs.push_image }}" == "true" ]; then
           EXTRA_ARGS+=" --push --no-load"
