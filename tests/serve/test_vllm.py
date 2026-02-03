@@ -315,6 +315,7 @@ vllm_configs = {
             "--model",
             "Qwen/Qwen3-VL-2B-Instruct",
             "--frontend-decoding",
+            "--max-model-len=32000",
         ],
         request_payloads=[
             chat_payload(
