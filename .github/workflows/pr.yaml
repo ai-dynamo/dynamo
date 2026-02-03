@@ -58,7 +58,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
+    if: startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -135,7 +135,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    if: startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +213,7 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    if: startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -232,7 +232,7 @@ jobs:
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    if: startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -250,7 +250,7 @@ jobs:
 
   deploy-operator:
     runs-on: prod-default-v1
-    if: needs.changed-files.outputs.core == 'true'
+    if: startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -515,7 +515,7 @@ jobs:
   # - Run rest of jobs only on push to main or manual trigger
   deploy-test-vllm-disagg-router:
     runs-on: prod-default-v1
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
