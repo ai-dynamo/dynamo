@@ -23,6 +23,7 @@ on:
         required: true
         type: boolean
       image_prefix:
+        default: 'remove-me' # TODO: Remove default before merging
         description: 'Prefix for image tags (nightly or main)'
         required: true
         type: string
