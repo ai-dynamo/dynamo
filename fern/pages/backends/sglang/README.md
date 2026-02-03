@@ -135,9 +135,8 @@ We are in the process of shipping pre-built docker containers that contain insta
 
 ```bash
 cd $DYNAMO_ROOT
-./container/build.sh \
-  --framework SGLANG \
-  --tag dynamo-sglang:latest \
+./container/render.py --framework sglang
+docker build -f container/rendered.Dockerfile -t dynamo:latest-sglang .
 ```
 
 And then run it using
@@ -154,7 +153,7 @@ docker run \
     --ulimit nofile=65536:65536 \
     --cap-add CAP_SYS_PTRACE \
     --ipc host \
-    dynamo-sglang:latest
+    dynamo:latest-sglang
 ```
 
 </details>

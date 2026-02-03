@@ -115,10 +115,10 @@ The `run.sh` script and rendering scripts are convenience that simplify common D
 ### 1. runtime target (runs as non-root dynamo user):
 ```bash
 # Build runtime image
-./render.py --framework vllm --target runtime
+container/render.py --framework vllm --target runtime
 
 # Run runtime container
-./run.sh --image dynamo:latest-vllm-runtime -it
+container/run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
 ### 2. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
@@ -133,10 +133,10 @@ Use VS Code/Cursor Dev Container Extension with devcontainer.json configuration.
 
 ### render.py - Docker Image Generator
 
-The `render.py` script is responsible for generating Docker images for different AI inference frameworks. It supports multiple frameworks and configurations:
+The `render.py` script is responsible for generating Dockerfiles for different AI inference frameworks. It supports multiple frameworks and configurations:
 
 **Purpose:**
-- Generates Docker images for NVIDIA Dynamo with support for vLLM, TensorRT-LLM, SGLang, or standalone configurations
+- Generates Dockerfiles for NVIDIA Dynamo with support for vLLM, TensorRT-LLM, SGLang, or standalone configurations
 - Handles framework-specific dependencies and optimizations
 - Manages build contexts, caching, and multi-stage builds
 - Configures development vs production targets
@@ -154,16 +154,16 @@ The `render.py` script is responsible for generating Docker images for different
 
 ```bash
 # Build vLLM dev image called dynamo:latest-vllm (default). This runs as root and is for development.
-./render.py --framework=vllm --target=dev
+container/render.py --framework=vllm --target=dev
 docker build -t dynamo:vllm-dev -f rendered.Dockerfile .
 
 # Build a local-dev image. The local-dev image will run as `dynamo` with UID/GID matched to your host user,
 # which is useful when mounting partitions for development.
-./render.py --framework=vllm --target=local-dev
+container/render.py --framework=vllm --target=local-dev
 docker build -t dynamo:vllm-local-dev -f rendered.Dockerfile .
 
 # Build TensorRT-LLM development image called dynamo:latest-trtllm
-./render.py --framework=trtllm --target=runtime
+container/render.py --framework=trtllm --target=runtime
 docker build -t dynamo:trtllm-runtime -f rendered.Dockerfile .
 ```
 
@@ -175,7 +175,7 @@ The frontend image is a specialized container that includes the Dynamo component
 
 ```bash
 # Build the frontend image (automatically builds EPP image as a dependency)
-./render.py --framework=dynamo --target=frontend
+container/render.py --framework=dynamo --target=frontend
 docker build -t dynamo:frontend -f rendered.Dockerfile .
 ```
 
@@ -223,34 +223,34 @@ The `run.sh` script launches Docker containers with the appropriate configuratio
 
 ```bash
 # Basic container launch with dev image (runs as root by default, non-interactive)
-./run.sh --image dynamo:latest-vllm -v $HOME/.cache:/root/.cache
+container/run.sh --image dynamo:latest-vllm -v $HOME/.cache:/root/.cache
 
 # Interactive development with workspace mounted using dev image (runs as root)
-./run.sh --image dynamo:latest-vllm --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
 
 # Interactive development with local-dev image (runs as dynamo user with matched host UID/GID)
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
 
 # Use specific image and framework for development
-./run.sh --image v0.1.0.dev.08cc44965-vllm-local-dev --framework vllm --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image v0.1.0.dev.08cc44965-vllm-local-dev --framework vllm --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
 
 # Interactive development shell with workspace mounted (local-dev)
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -it -- bash
+container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -it -- bash
 
 # Development with custom environment variables
-./run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
 
 # Dry run to see docker command
-./run.sh --dry-run
+container/run.sh --dry-run
 
 # Development with custom volume mounts
-./run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
 
 # Run runtime image as non-root dynamo user (for production)
-./run.sh --image dynamo:latest-vllm-runtime -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm-runtime -v $HOME/.cache:/home/dynamo/.cache
 
 # Run dev image as specific user (override default root)
-./run.sh --image dynamo:latest-vllm --user dynamo -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm --user dynamo -v $HOME/.cache:/home/dynamo/.cache
 ```
 
 ### Network Configuration Options
@@ -260,8 +260,8 @@ The `run.sh` script supports different networking modes via the `--network` flag
 #### Host Networking (Default)
 ```bash
 # Examples with dynamo user
-./run.sh --image dynamo:latest-vllm-local-dev --network host -v $HOME/.cache:/home/dynamo/.cache
-./run.sh --image dynamo:latest-vllm-local-dev -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm-local-dev --network host -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm-local-dev -v $HOME/.cache:/home/dynamo/.cache
 ```
 **Use cases:**
 - High-performance ML inference (default for GPU workloads)
@@ -274,7 +274,7 @@ The `run.sh` script supports different networking modes via the `--network` flag
 #### Bridge Networking (Isolated)
 ```bash
 # CI/testing with isolated bridge networking and host cache sharing (no -it for automated CI)
-./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache
 ```
 **Use cases:**
 - Secure isolation from host network
@@ -287,10 +287,10 @@ The `run.sh` script supports different networking modes via the `--network` flag
 #### No Networking ⚠️ **LIMITED FUNCTIONALITY**
 ```bash
 # Complete network isolation - no external connectivity
-./run.sh --image dynamo:latest-vllm --network none --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm --network none --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
 
 # Same with local-dev image (dynamo user with matched host UID/GID)
-./run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
 ```
 **⚠️ WARNING: `--network none` severely limits Dynamo functionality:**
 - **No model downloads** - HuggingFace models cannot be downloaded
@@ -337,12 +337,12 @@ See Docker documentation for custom network creation and management.
 ### Development Workflow
 ```bash
 # 1. Build local-dev image (builds runtime, then dev as intermediate, then local-dev as final image)
-./render.py --framework=vllm --target=local-dev
+container/render.py --framework=vllm --target=local-dev
 docker build -t dynamo:latest-vllm-local-dev -f rendered.Dockerfile .
 
 # 2. Run development container using the local-dev image
 # RECOMMENDED: --mount-workspace for live editing in dev and local-dev images
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -it
+container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -it
 
 # 3. Inside container, run inference (requires both frontend and backend)
 # Start frontend
@@ -355,21 +355,21 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ### Production Workflow
 ```bash
 # 1. Build production runtime image (runs as non-root dynamo user)
-./render.py --framework=vllm --target=runtime
+container/render.py --framework=vllm --target=runtime
 docker build -t dynamo:latest-vllm-runtime -f rendered.Dockerfile .
 
 # 2. Run production container as non-root dynamo user
-./run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/home/dynamo/.cache
+container/run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/home/dynamo/.cache
 ```
 
 ### Testing Workflow
 ```bash
 # 1. Build dev image
-./render.py --framework=vllm --target=dev
+container/render.py --framework=vllm --target=dev
 docker build -t dynamo:latest-vllm-dev -f rendered.Dockerfile .
 
 # 2. Run tests with network isolation for reproducible results (no -it needed for CI)
-./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache -- python -m pytest tests/
+container/run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache -- python -m pytest tests/
 
 # 3. Inside the container with bridge networking, start services
 # Note: Services are only accessible from the same container - no port conflicts with host
