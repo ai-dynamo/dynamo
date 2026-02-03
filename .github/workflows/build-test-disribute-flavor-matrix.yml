@@ -91,7 +91,7 @@ jobs:
       no_cache: ${{ inputs.no_cache }}
       builder_name: ${{ inputs.builder_name }}
       build_image: ${{ inputs.build_image }}
-      run_tests: ${{ inputs.run_tests }}
-      copy_to_acr: ${{ inputs.copy_to_acr && matrix.platform == 'amd64' }}
+      run_tests: ${{ inputs.run_tests && !(inputs.framework == 'trtllm' && matrix.platform == 'arm64') }} # trtllm tests on arm64 are not supported
+      copy_to_acr: ${{ inputs.copy_to_acr && matrix.platform == 'amd64' }} # no reason to copy ARM images to ACR
       push_image: ${{ inputs.push_image }}
     secrets: inherit

@@ -47,7 +47,6 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-      ecr_image_base: ${{ steps.export-builder-name.outputs.ecr_image_base }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -62,8 +61,6 @@ jobs:
         id: export-builder-name
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
-          echo "ecr_image_base=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo" >> $GITHUB_OUTPUT
-
 
   backend-status-check:
     runs-on: ubuntu-latest
@@ -88,9 +85,7 @@ jobs:
       IMAGE_REGISTRY: ai-dynamo
       IMAGE_REPOSITORY: dynamo
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-      ECR_DEFAULT_IMAGE_BASE: ${{ needs.changed-files.outputs.ecr_image_base }}
     outputs:
-      operator_default_image_name: ${{ steps.build-and-push-image.outputs.operator_default_image_name }}
       operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
     steps:
       - name: Checkout code
@@ -132,7 +127,10 @@ jobs:
         id: build-and-push-image
         shell: bash
         working-directory: ./deploy/operator
+        env:
+          NO_CACHE_FLAG: ${{ github.ref_name == 'main' && 'true' || 'false' }}
         run: |
+          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           NO_CACHE_FLAG=""
@@ -151,12 +149,11 @@ jobs:
             )
           fi
 
-          echo "operator_default_image_name=${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${DEFAULT_TAG}" >> $GITHUB_OUTPUT
           echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
-          if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
+          if [[ "$NO_CACHE_FLAG" == "true" ]]; then
             NO_CACHE_FLAG="--no-cache"
           fi
           docker buildx build --push \
@@ -191,7 +188,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: ${{ github.ref_name == 'main' && 'true' || 'false' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
       run_tests: true
@@ -212,7 +209,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: ${{ github.ref_name == 'main' && 'true' || 'false' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: true
       copy_to_acr: true
@@ -231,7 +228,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trt-llm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: ${{ github.ref_name == 'main' && 'true' || 'false' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: true
       copy_to_acr: true
@@ -245,7 +242,7 @@ jobs:
 
   deploy-operator:
     runs-on: prod-default-small-v2
-    if: needs.changed-files.outputs.core == 'true'
+    # if: needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator]
     outputs:
       NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}

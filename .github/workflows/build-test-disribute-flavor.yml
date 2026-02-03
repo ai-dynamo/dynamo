@@ -52,6 +52,11 @@ on:
         required: false
         type: boolean
         default: true
+      no_load:
+        description: 'Do not load the image into docker (you must have dind installed if you want to load the image)'
+        required: false
+        type: boolean
+        default: true
       show_summary:
         description: 'Show summary'
         required: false
@@ -106,24 +111,19 @@ jobs:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
           PLATFORM: ${{ inputs.platform }}
         run: |
-          echo "********* EXTRA_TAGS: $EXTRA_TAGS"
           if [ -n "$EXTRA_TAGS" ]; then
             RESULT=""
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                echo "********* tag: $tag"
                 RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-${PLATFORM}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
-            echo "********* RESULT: $RESULT"
             echo "tags<<EOF" >> $GITHUB_OUTPUT
             echo "$RESULT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           else
             echo "tags=" >> $GITHUB_OUTPUT
           fi
-          echo "********* tags output: $GITHUB_OUTPUT"
-
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -145,7 +145,6 @@ jobs:
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
 
-
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
@@ -153,7 +152,6 @@ jobs:
           flavor: ${{ inputs.framework }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
-
 
       - name: Print Build Container inputs
         run: |
@@ -166,7 +164,7 @@ jobs:
           echo "no_cache: ${{ inputs.no_cache }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ inputs.push_image }}"
-          echo "no_load: true"
+          echo "no_load: ${{ inputs.no_load }}"
 
       - name: Build Container
         id: build-image
@@ -186,7 +184,7 @@ jobs:
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
-          no_load: true
+          no_load: ${{ inputs.no_load }}
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image && inputs.show_summary }}
@@ -260,7 +258,6 @@ jobs:
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
-        if: ${{ inputs.framework != 'trtllm' || inputs.platform == 'amd64' }} # trtllm tests on arm64 are not supported
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
@@ -275,7 +272,7 @@ jobs:
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
-        if: ${{ inputs.platform == 'amd64' && (inputs.framework != 'trtllm' || inputs.platform == 'amd64') }}
+        if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
@@ -292,11 +289,10 @@ jobs:
 # ============================================================================
   copy-to-acr:
     needs: [build, test]
-    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped) AND platform is amd64
+    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped) 
     if: |
       always() &&
       inputs.copy_to_acr &&
-      inputs.platform == 'amd64' &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
     name: copy ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
