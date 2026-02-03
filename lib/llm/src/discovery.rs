@@ -7,6 +7,9 @@ pub use model_manager::{ModelManager, ModelManagerError};
 pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigs, RuntimeConfigsSubscriber};
 
+mod multi_pool_manager;
+pub use multi_pool_manager::MultiPoolManager;
+
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
@@ -16,3 +19,6 @@ pub use worker_monitor::{
     WORKER_ACTIVE_PREFILL_TOKENS_GAUGE, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL, WorkerLoadState,
     register_worker_load_metrics,
 };
+
+mod worker_pool;
+pub use worker_pool::{WorkerInfo, WorkerPool};

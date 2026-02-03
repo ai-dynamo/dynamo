@@ -46,7 +46,7 @@ use crate::{
 };
 
 use super::ModelManager;
-use crate::namespace::is_global_namespace;
+use crate::namespace::NamespaceFilter;
 
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
@@ -108,13 +108,8 @@ impl ModelWatcher {
         }
     }
 
-    /// Common watch logic with optional namespace filtering
-    pub async fn watch(
-        &self,
-        mut discovery_stream: DiscoveryStream,
-        target_namespace: Option<&str>,
-    ) {
-        let global_namespace = target_namespace.is_none_or(is_global_namespace);
+    /// Common watch logic with namespace filtering
+    pub async fn watch(&self, mut discovery_stream: DiscoveryStream, namespace_filter: NamespaceFilter) {
 
         while let Some(result) = discovery_stream.next().await {
             let event = match result {
@@ -161,39 +156,46 @@ impl ModelWatcher {
                         }
                     };
 
-                    // Filter by namespace if target_namespace is specified
-                    if !global_namespace
-                        && let Some(target_ns) = target_namespace
-                        && mcid.namespace != target_ns
-                    {
+                    // Filter by namespace based on the filter mode
+                    if !namespace_filter.matches(&mcid.namespace) {
                         tracing::debug!(
                             model_namespace = mcid.namespace,
-                            target_namespace = target_ns,
-                            "Skipping model from different namespace"
+                            namespace_filter = ?namespace_filter,
+                            "Skipping model that doesn't match namespace filter"
                         );
                         continue;
                     }
 
-                    // If we already have a worker for this model, and the ModelDeploymentCard
-                    // cards don't match, alert, and don't add the new instance
-                    let can_add =
-                        self.manager
-                            .is_valid_checksum(card.model_type, card.name(), card.mdcsum());
-                    if can_add.is_some_and(|is_valid| !is_valid) {
-                        tracing::error!(
+                    // In multi-pool (prefix) mode, skip global checksum validation.
+                    // Different pools (namespaces) can have different MDC checksums.
+                    // In exact or global mode, enforce that all workers have matching checksums.
+                    if !namespace_filter.is_prefix() {
+                        let can_add =
+                            self.manager
+                                .is_valid_checksum(card.model_type, card.name(), card.mdcsum());
+                        if can_add.is_some_and(|is_valid| !is_valid) {
+                            tracing::error!(
+                                model_name = card.name(),
+                                "Checksum for new model does not match existing model."
+                            );
+
+                            // TODO: mark that instance down in clients
+                            // Not obvious how to do that given the current design
+                            // Instances come from an `InstanceSource` in a `Client` in a `PushRouter`.
+                            // Calling `report_instance_down` on the Client should do it (although
+                            // needs more testing).
+                            // The `PushRouter` is in `ModelMananger` (`self.manager` here), but inside
+                            // interface `AsyncEngine` which only has a `generate` method.
+
+                            continue;
+                        }
+                    } else {
+                        tracing::debug!(
                             model_name = card.name(),
-                            "Checksum for new model does not match existing model."
+                            namespace = mcid.namespace,
+                            mdcsum = card.mdcsum(),
+                            "Multi-pool mode: accepting worker with potentially different MDC"
                         );
-
-                        // TODO: mark that instance down in clients
-                        // Not obvious how to do that given the current design
-                        // Instances come from an `InstanceSource` in a `Client` in a `PushRouter`.
-                        // Calling `report_instance_down` on the Client should do it (although
-                        // needs more testing).
-                        // The `PushRouter` is in `ModelMananger` (`self.manager` here), but inside
-                        // interface `AsyncEngine` which only has a `generate` method.
-
-                        continue;
                     }
 
                     match self.handle_put(&mcid, &mut card).await {
@@ -228,7 +230,7 @@ impl ModelWatcher {
                     };
 
                     match self
-                        .handle_delete(model_card_instance_id, target_namespace, global_namespace)
+                        .handle_delete(model_card_instance_id, &namespace_filter)
                         .await
                     {
                         Ok(Some(model_name)) => {
@@ -251,8 +253,7 @@ impl ModelWatcher {
     async fn handle_delete(
         &self,
         mcid: &ModelCardInstanceId,
-        target_namespace: Option<&str>,
-        is_global_namespace: bool,
+        namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<String>> {
         let key = mcid.to_path();
         let card = match self.manager.remove_model_card(&key) {
@@ -263,13 +264,13 @@ impl ModelWatcher {
         };
         let model_name = card.name().to_string();
         let active_instances = self
-            .cards_for_model(&model_name, target_namespace, is_global_namespace)
+            .cards_for_model(&model_name, namespace_filter)
             .await
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
             tracing::debug!(
                 model_name,
-                target_namespace = ?target_namespace,
+                namespace_filter = ?namespace_filter,
                 active_instance_count = active_instances.len(),
                 "Model has other active instances, not removing"
             );
@@ -722,17 +723,12 @@ impl ModelWatcher {
     pub async fn cards_for_model(
         &self,
         model_name: &str,
-        target_namespace: Option<&str>,
-        is_global_namespace: bool,
+        namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Vec<ModelDeploymentCard>> {
         let mut all = self.all_cards().await?;
         all.retain(|(endpoint_id, card)| {
             let matches_name = card.name() == model_name;
-            let matches_namespace = match (is_global_namespace, target_namespace) {
-                (true, _) => true,
-                (false, None) => true,
-                (false, Some(target_ns)) => endpoint_id.namespace == target_ns,
-            };
+            let matches_namespace = namespace_filter.matches(&endpoint_id.namespace);
             matches_name && matches_namespace
         });
         Ok(all.into_iter().map(|(_eid, card)| card).collect())

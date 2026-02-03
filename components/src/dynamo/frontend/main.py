@@ -43,6 +43,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from . import __version__
 
 DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+DYN_NAMESPACE_PREFIX_ENV_VAR = "DYN_NAMESPACE_PREFIX"
 CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
     "CUSTOM_BACKEND_METRICS_POLLING_INTERVAL"
 )
@@ -181,7 +182,13 @@ def parse_args():
         "--namespace",
         type=str,
         default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
-        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
+        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery). Mutually exclusive with --namespace-prefix.",
+    )
+    parser.add_argument(
+        "--namespace-prefix",
+        type=str,
+        default=os.environ.get(DYN_NAMESPACE_PREFIX_ENV_VAR),
+        help="Dynamo namespace prefix for multi-pool discovery. Discovers workers from all namespaces starting with this prefix. Traffic is distributed across pools weighted by worker count. Mutually exclusive with --namespace.",
     )
     parser.add_argument(
         "--router-replica-sync",
@@ -328,6 +335,11 @@ def parse_args():
         parser.error(
             "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
         )
+    if flags.namespace and flags.namespace_prefix:
+        parser.error(
+            "--namespace and --namespace-prefix are mutually exclusive. "
+            "Use --namespace for exact match or --namespace-prefix for multi-pool discovery."
+        )
 
     return flags
 
@@ -429,6 +441,8 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.namespace_prefix:
+        kwargs["namespace_prefix"] = flags.namespace_prefix
     if flags.kserve_grpc_server and flags.grpc_metrics_port:
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
     if flags.custom_backend_metrics_endpoint:

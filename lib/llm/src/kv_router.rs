@@ -30,6 +30,7 @@ pub use dynamo_kv_router::approx;
 pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
+pub mod pool_scheduler;
 pub mod prefill_router;
 pub mod publisher;
 pub mod recorder;
@@ -497,7 +498,6 @@ impl KvRouter {
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
     /// Now also takes optional context_id for request tracking
-    #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
         &self,
         context_id: Option<&str>,
@@ -565,7 +565,6 @@ impl KvRouter {
         Ok((best_worker, overlap_amount))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_request(
         &self,
         request_id: String,
@@ -785,9 +784,6 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
 
-        // Extract LORA name from routing hints
-        let lora_name = routing.and_then(|r| r.lora_name.clone());
-
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
         let Some(id) = (match phase {
             RequestPhase::Prefill => {
@@ -800,6 +796,8 @@ impl KvPushRouter {
         }) else {
             // No preselected worker - find the best match
             // Don't update states if this is a query-only request
+            // Extract LORA name from routing hints
+            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -842,6 +840,8 @@ impl KvPushRouter {
 
         // Perform add_request if this router handles local updates
         if !is_query_only && handle_local_updates {
+            // Extract LORA name from routing hints
+            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
             self.chooser
                 .add_request(
                     context_id.to_string(),

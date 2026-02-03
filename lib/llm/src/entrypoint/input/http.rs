@@ -9,7 +9,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, EngineFactoryCallback, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
-    namespace::is_global_namespace,
+    namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -71,19 +71,14 @@ pub async fn run(
 
             let router_config = model.router_config();
             // Listen for models registering themselves, add them to HTTP service
-            // Check if we should filter by namespace (based on the local model's namespace)
-            // Get namespace from the model, fallback to endpoint_id namespace if not set
-            let namespace = model.namespace().unwrap_or("");
-            let target_namespace = if is_global_namespace(namespace) {
-                None
-            } else {
-                Some(namespace.to_string())
-            };
+            // Construct namespace filter based on the local model's namespace or namespace_prefix
+            let namespace_filter =
+                NamespaceFilter::from_options(model.namespace(), model.namespace_prefix());
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
                 router_config.clone(),
-                target_namespace,
+                namespace_filter,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
                 engine_factory.clone(),
@@ -195,7 +190,7 @@ async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
-    target_namespace: Option<String>,
+    namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     engine_factory: Option<EngineFactoryCallback>,
@@ -230,9 +225,7 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj
-            .watch(discovery_stream, target_namespace.as_deref())
-            .await;
+        watch_obj.watch(discovery_stream, namespace_filter).await;
     });
 
     Ok(())
