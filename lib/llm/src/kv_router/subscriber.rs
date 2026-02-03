@@ -698,11 +698,6 @@ pub async fn start_kv_router_background(
     Ok(())
 }
 
-/// Timeout for waiting for a worker's runtime config after discovery.
-/// This handles the race condition where a worker is discovered before its
-/// runtime config (containing enable_local_indexer) has been received.
-const CONFIG_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
-
 /// Handle a worker discovery event (added or removed).
 async fn handle_worker_discovery(
     event: DiscoveryEvent,
@@ -716,19 +711,6 @@ async fn handle_worker_discovery(
             tracing::info!(
                 "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
             );
-
-            // Wait for the worker's runtime config to be available.
-            // There's a race between worker discovery and runtime config discovery,
-            // so the config may not be immediately available when a worker is first seen.
-            if !worker_query_client
-                .wait_for_config(worker_id, CONFIG_WAIT_TIMEOUT)
-                .await
-            {
-                tracing::warn!(
-                    "Worker {worker_id} runtime config not available after {CONFIG_WAIT_TIMEOUT:?}, skipping recovery"
-                );
-                return;
-            }
 
             match recover_from_worker(
                 worker_query_client,

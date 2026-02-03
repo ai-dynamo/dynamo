@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use dynamo_runtime::component::Component;
@@ -48,16 +47,6 @@ impl WorkerQueryClient {
         self.subscriber.wait_for_some().await
     }
 
-    /// Check if a worker has a runtime config available (regardless of local indexer setting).
-    /// Returns false if the config hasn't been received yet.
-    pub fn has_config(&self, worker_id: WorkerId) -> bool {
-        self.subscriber
-            .configs
-            .get(&worker_id)
-            .map(|entry| entry.value().is_some())
-            .unwrap_or(false)
-    }
-
     /// Check if a worker has local indexer enabled
     pub fn has_local_indexer(&self, worker_id: WorkerId) -> bool {
         self.subscriber
@@ -65,49 +54,6 @@ impl WorkerQueryClient {
             .get(&worker_id)
             .and_then(|entry| entry.value().as_ref().map(|c| c.enable_local_indexer))
             .unwrap_or(false)
-    }
-
-    /// Wait for a worker's runtime config to become available, up to a timeout.
-    ///
-    /// This is used to handle the race condition where a worker is discovered
-    /// before its runtime config has been received by the RuntimeConfigs watcher.
-    ///
-    /// Returns true if the config became available, false if timeout was reached.
-    pub async fn wait_for_config(&self, worker_id: WorkerId, timeout: Duration) -> bool {
-        // Fast path: config already available
-        if self.has_config(worker_id) {
-            return true;
-        }
-
-        // Clone the watch receiver so we can wait on it without &mut self
-        let mut change_rx = self.subscriber.change_rx.clone();
-
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return false;
-            }
-
-            // Wait for a config change notification or timeout
-            match tokio::time::timeout(remaining, change_rx.changed()).await {
-                Ok(Ok(())) => {
-                    // Config changed, check if our worker now has config
-                    if self.has_config(worker_id) {
-                        return true;
-                    }
-                    // Not our worker, keep waiting
-                }
-                Ok(Err(_)) => {
-                    // Channel closed (sender dropped)
-                    return false;
-                }
-                Err(_) => {
-                    // Timeout
-                    return false;
-                }
-            }
-        }
     }
 
     /// Query a specific worker's local KV indexer and return its buffered events.
