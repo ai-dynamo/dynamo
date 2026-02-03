@@ -37,11 +37,6 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
 
-# Qwen2-VL image token ID in TRT-LLM KV events.
-# TRT-LLM replaces the original image token (151655) with vocab_size + 1 (151937).
-# TODO: Make this configurable for different multimodal models
-IMAGE_TOKEN_ID = 151937
-
 
 def _to_signed_i64(value: int | None) -> int | None:
     """Convert a Python int to signed 64-bit range by two's complement."""

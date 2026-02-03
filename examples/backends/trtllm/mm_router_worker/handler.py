@@ -12,11 +12,7 @@ from dynamo._core import KvIndexer, compute_block_hash_for_seq_py
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .mm_processor import (
-    build_block_mm_infos,
-    extract_image_urls,
-    process_multimodal,
-)
+from .mm_processor import build_block_mm_infos, extract_image_urls, process_multimodal
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
