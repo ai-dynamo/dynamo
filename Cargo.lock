@@ -2359,6 +2359,7 @@ dependencies = [
  "itertools 0.14.0",
  "json-five",
  "lazy_static",
+ "loom-rs",
  "memfile",
  "minijinja",
  "minijinja-contrib",
@@ -4850,9 +4851,9 @@ checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
 
 [[package]]
 name = "loom-rs"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42bcf9202eb68459194f9bc718d4a16d34e74d099f04701b3e77f0beb0023719"
+checksum = "b8a4958ac6d4c045b8f5f936c76c6099a6ac1ff0cdaabe9bd537de1cbc47d4cc"
 dependencies = [
  "clap 4.5.53",
  "core_affinity",

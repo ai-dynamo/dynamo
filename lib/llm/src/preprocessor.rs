@@ -185,7 +185,9 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + Send
+            + Sync,
     >(
         &self,
         request: &R,
@@ -193,48 +195,54 @@ impl OpenAIPreprocessor {
         let mut builder = self.builder(request)?;
         let mut annotations = HashMap::new();
 
-        // Check if this is a text input that needs template rendering + tokenization
-        if let PromptInput::Text(_) = request.prompt_input_type()
-            && let Some(TextInput::Single(_)) = request.extract_text()
-        {
-            // Extract data for offload (cheap, on async thread)
-            let input = compute::PreprocessInput::from_request(request);
-            let formatter = self.formatter.clone();
-            let tokenizer = self.tokenizer.clone();
+        loom_rs::current_runtime()
+            .expect("Failed to get current runtime")
+            .scope_compute(|_| {
+                // Check if this is a text input that needs template rendering + tokenization
+                if let PromptInput::Text(_) = request.prompt_input_type()
+                    && let Some(TextInput::Single(_)) = request.extract_text()
+                {
+                    // Extract data for offload (cheap, on async thread)
+                    let input = compute::PreprocessInput::from_request(request);
+                    let formatter = self.formatter.clone();
+                    let tokenizer = self.tokenizer.clone();
 
-            // Single offload for template rendering + tokenization
-            let output = dynamo_runtime::compute::spawn_compute(move || {
-                compute::preprocess_sync(&*formatter, &*tokenizer, &input)
-            })
-            .await
-            .with_context(|| "Failed to preprocess request")?;
+                    // Single offload for template rendering + tokenization
+                    let output = compute::preprocess_sync(&*formatter, &*tokenizer, &input)
+                        .with_context(|| "Failed to preprocess request")?;
 
-            // Apply results (cheap, on async thread)
-            if let Some(ref formatted) = output.formatted_prompt {
-                if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
-                    annotations.insert(ANNOTATION_FORMATTED_PROMPT.to_string(), formatted.clone());
+                    // Apply results (cheap, on async thread)
+                    if let Some(ref formatted) = output.formatted_prompt {
+                        if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
+                            annotations
+                                .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), formatted.clone());
+                        }
+                    }
+
+                    if request.has_annotation(ANNOTATION_TOKEN_IDS)
+                        && !output.used_pre_provided_tokens
+                    {
+                        annotations.insert(
+                            ANNOTATION_TOKEN_IDS.to_string(),
+                            serde_json::to_string(&output.token_ids)?,
+                        );
+                    }
+
+                    builder.token_ids(output.token_ids);
+                } else {
+                    // Token input or batch: use existing gather_tokens_with_offload
+                    let formatted_prompt = self
+                        .apply_template(request)
+                        .with_context(|| "Failed to apply prompt template")?;
+
+                    annotations = self
+                        .gather_tokens(request, &mut builder, formatted_prompt)
+                        .with_context(|| "Failed to gather tokens")?;
                 }
-            }
 
-            if request.has_annotation(ANNOTATION_TOKEN_IDS) && !output.used_pre_provided_tokens {
-                annotations.insert(
-                    ANNOTATION_TOKEN_IDS.to_string(),
-                    serde_json::to_string(&output.token_ids)?,
-                );
-            }
-
-            builder.token_ids(output.token_ids);
-        } else {
-            // Token input or batch: use existing gather_tokens_with_offload
-            let formatted_prompt = self
-                .apply_template(request)
-                .with_context(|| "Failed to apply prompt template")?;
-
-            annotations = self
-                .gather_tokens_with_offload(request, &mut builder, formatted_prompt)
-                .await
-                .with_context(|| "Failed to gather tokens")?;
-        }
+                anyhow::Ok(())
+            })
+            .await?;
 
         // Multimodal data (already async)
         self.gather_multi_modal_data(request, &mut builder)
@@ -418,136 +426,6 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    /// Gather tokens with offloaded tokenization.
-    ///
-    /// This is the async version that offloads CPU-intensive tokenization to the
-    /// compute pool, keeping the tokio runtime responsive for I/O operations.
-    pub async fn gather_tokens_with_offload<
-        R: OAIChatLikeRequest
-            + AnnotationsProvider
-            + SamplingOptionsProvider
-            + StopConditionsProvider
-            + OutputOptionsProvider
-            + NvExtProvider,
-    >(
-        &self,
-        request: &R,
-        builder: &mut PreprocessedRequestBuilder,
-        formatted_prompt: Option<String>,
-    ) -> Result<HashMap<String, String>> {
-        let mut annotations = HashMap::new();
-
-        match request.prompt_input_type() {
-            PromptInput::Tokens(_) => {
-                // Token input: no tokenization needed, just copy
-                if let Some(token_input) = request.extract_tokens() {
-                    match token_input {
-                        TokenInput::Single(tokens) => {
-                            builder.token_ids(tokens);
-                        }
-                        TokenInput::Batch(token_batches) => {
-                            if token_batches.len() == 1 {
-                                builder.token_ids(token_batches[0].clone());
-                            } else {
-                                bail!(
-                                    "Batch token input not supported for more than one token in requests (got {})",
-                                    token_batches.len()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            PromptInput::Text(_) => {
-                if let Some(text_input) = request.extract_text() {
-                    match text_input {
-                        TextInput::Single(raw_prompt) => {
-                            if let Some(f) = formatted_prompt.as_ref()
-                                && request.has_annotation(ANNOTATION_FORMATTED_PROMPT)
-                            {
-                                annotations
-                                    .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), f.to_string());
-                            }
-
-                            // Completions will use raw_prompt, no template
-                            let prompt = formatted_prompt.unwrap_or(raw_prompt);
-
-                            // Check if backend_instance_id is present and token_data is provided
-                            let has_backend_instance_id = request
-                                .nvext()
-                                .and_then(|ext| ext.backend_instance_id)
-                                .is_some();
-
-                            let token_data =
-                                request.nvext().and_then(|ext| ext.token_data.as_ref());
-
-                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
-                                if let Some(tokens) = token_data {
-                                    tracing::trace!(
-                                        "Using provided tokens from EPP: {} ids",
-                                        tokens.len()
-                                    );
-                                    (tokens.clone(), true)
-                                } else {
-                                    tracing::warn!(
-                                        "backend_instance_id provided but no token_data; tokenizing prompt"
-                                    );
-                                    // Offload tokenization to compute pool
-                                    let tokenizer = self.tokenizer.clone();
-                                    let token_ids =
-                                        dynamo_runtime::compute::spawn_compute(move || {
-                                            compute::tokenize_prompt(&*tokenizer, &prompt)
-                                        })
-                                        .await?;
-                                    (token_ids, false)
-                                }
-                            } else {
-                                // Normal flow: offload tokenization to compute pool
-                                let tokenizer = self.tokenizer.clone();
-                                let token_ids =
-                                    dynamo_runtime::compute::spawn_compute(move || {
-                                        compute::tokenize_prompt(&*tokenizer, &prompt)
-                                    })
-                                    .await?;
-                                (token_ids, false)
-                            };
-
-                            if request.has_annotation(ANNOTATION_TOKEN_IDS)
-                                && !skip_token_annotation
-                            {
-                                annotations.insert(
-                                    ANNOTATION_TOKEN_IDS.to_string(),
-                                    serde_json::to_string(&tokens_vec)?,
-                                );
-                            }
-
-                            builder.token_ids(tokens_vec);
-                        }
-                        TextInput::Batch(texts) => {
-                            if texts.len() == 1 {
-                                // Offload tokenization to compute pool
-                                let tokenizer = self.tokenizer.clone();
-                                let text = texts[0].clone();
-                                let token_ids =
-                                    dynamo_runtime::compute::spawn_compute(move || {
-                                        compute::tokenize_prompt(&*tokenizer, &text)
-                                    })
-                                    .await?;
-                                builder.token_ids(token_ids);
-                            } else {
-                                bail!(
-                                    "Batch text input not supported for more than one text in requests (got {})",
-                                    texts.len()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(annotations)
-    }
-
     /// Gather tokens synchronously (for use in sync contexts or when offloading isn't needed).
     ///
     /// For async contexts, prefer `gather_tokens_with_offload` which offloads the
@@ -675,28 +553,29 @@ impl OpenAIPreprocessor {
 
         let all_token_ids = match &request.inner.input {
             dynamo_async_openai::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
-                vec![encoding.token_ids().to_vec()]
-            }
-            dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
-                let input_strs: Vec<String> = arr.to_vec();
-
-                // Unified compute offload: uses loom's MAB scheduler when available,
-                // falls back to tokio-rayon otherwise. This amortizes scheduling
-                // overhead and lets MAB learn the optimal inline vs offload strategy.
-                let encodings = {
-                    let tokenizer = self.tokenizer.clone();
-                    let strs = input_strs.clone();
-                    dynamo_runtime::compute::spawn_compute(move || {
-                        tokenizer.encode_batch(&strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                loom_rs::current_runtime()
+                    .expect("failed to get runtime")
+                    .scope_compute(|_| {
+                        let encoding = self.tokenizer.encode(s)?;
+                        anyhow::Ok(vec![encoding.token_ids().to_vec()])
                     })
                     .await?
-                };
-                let token_arrays: Vec<Vec<u32>> = encodings
-                    .into_iter()
-                    .map(|encoding| encoding.token_ids().to_vec())
-                    .collect();
-                token_arrays
+            }
+            dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
+                loom_rs::current_runtime()
+                    .expect("failed to get runtime")
+                    .scope_compute(|_| {
+                        let input_strs: Vec<String> = arr.to_vec();
+                        let encodings = self.tokenizer.encode_batch(
+                            &input_strs.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        )?;
+                        let token_arrays: Vec<Vec<u32>> = encodings
+                            .into_iter()
+                            .map(|encoding| encoding.token_ids().to_vec())
+                            .collect();
+                        anyhow::Ok(token_arrays)
+                    })
+                    .await?
             }
             dynamo_async_openai::types::EmbeddingInput::IntegerArray(token_ids) => {
                 vec![token_ids.clone()]
@@ -1283,7 +1162,9 @@ impl
             HashMap::new()
         } else {
             // Normal path: tokenize the prompt (offloaded to compute pool)
-            self.gather_tokens_with_offload(&request, &mut builder, None)
+            loom_rs::current_runtime()
+                .expect("Failed to get current runtime")
+                .scope_compute(|_| self.gather_tokens(&request, &mut builder, None))
                 .await?
         };
 
