@@ -46,7 +46,7 @@ use crate::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
-            LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
+            DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
             TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
@@ -80,8 +80,13 @@ pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
 
 // for worker-local kvindexer query
-pub const WORKER_KV_INDEXER_QUERY_ENDPOINT: &str = "worker_kv_indexer_query";
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
+
+/// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
+/// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
+pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
+    format!("worker_kv_indexer_query_dp{dp_rank}")
+}
 
 // for router discovery registration
 pub const KV_ROUTER_COMPONENT: &str = "kv-router";
@@ -627,6 +632,7 @@ impl KvRouter {
     pub async fn query_worker_local_kv(
         &self,
         worker_id: WorkerId,
+        dp_rank: DpRank,
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
@@ -636,11 +642,11 @@ impl KvRouter {
             .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
 
         query_client
-            .query_worker(worker_id, start_event_id, end_event_id)
+            .query_worker(worker_id, dp_rank, start_event_id, end_event_id)
             .await
     }
 
-    /// Recover missed KV events from a specific worker.
+    /// Recover missed KV events from a specific worker's dp_rank.
     ///
     /// Queries the worker's local KV indexer for events starting from
     /// `start_event_id` and applies them to the router's indexer.
@@ -648,11 +654,13 @@ impl KvRouter {
     /// # Arguments
     ///
     /// * `worker_id` - The worker to recover from
+    /// * `dp_rank` - The data parallel rank to recover from
     /// * `start_event_id` - First event ID to fetch (inclusive), or None to start from beginning
     /// * `end_event_id` - Last event ID to fetch (inclusive), or None for all
     pub async fn recover_from_worker(
         &self,
         worker_id: WorkerId,
+        dp_rank: DpRank,
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<usize> {
@@ -668,14 +676,9 @@ impl KvRouter {
             }
         };
 
-        subscriber::recover_from_worker(
-            query_client,
-            worker_id,
-            start_event_id,
-            end_event_id,
-            &event_tx,
-        )
-        .await
+        query_client
+            .recover_from_worker(worker_id, dp_rank, start_event_id, end_event_id, &event_tx)
+            .await
     }
 }
 

@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-    indexer::{DumpRequest, GetWorkersRequest, WorkerKvQueryResponse},
-    protocols::{RouterEvent, WorkerId},
+    indexer::{DumpRequest, GetWorkersRequest},
+    protocols::{DpRank, RouterEvent, WorkerId},
     router_discovery_query,
     worker_query::WorkerQueryClient,
 };
@@ -46,10 +46,6 @@ const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
-
-// Worker query retry configuration
-const WORKER_QUERY_MAX_RETRIES: u32 = 8;
-const WORKER_QUERY_INITIAL_BACKOFF_MS: u64 = 200;
 
 // ============================================================================
 // Discovery Helpers
@@ -77,205 +73,6 @@ async fn get_instance_discovery_stream(
     std::pin::Pin::new(&mut stream).peek().await;
 
     Ok(Box::pin(stream))
-}
-
-// ============================================================================
-// Local KvIndexer-based Recovery
-// ============================================================================
-
-/// Recover missed events from all workers with local indexers.
-///
-/// This function should be called on router startup to catch up on any events
-/// that were missed while the router was offline.
-///
-/// # Arguments
-///
-/// * `worker_query_client` - Client for querying worker local indexers
-/// * `last_received_event_ids` - Map of worker ID to last received event ID
-/// * `worker_ids` - List of worker IDs to recover from
-/// * `event_tx` - Channel to send recovered events to the indexer
-///
-/// # Returns
-///
-/// Total number of events recovered across all workers
-pub async fn recover_from_all_workers(
-    worker_query_client: &WorkerQueryClient,
-    last_received_event_ids: &HashMap<WorkerId, u64>,
-    worker_ids: &Vec<WorkerId>,
-    event_tx: &mpsc::Sender<RouterEvent>,
-) -> usize {
-    let mut total_recovered = 0;
-    let mut successful_workers = 0;
-    let mut failed_workers = 0;
-
-    for &worker_id in worker_ids {
-        // Skip workers without local indexer
-        if !worker_query_client.has_local_indexer(worker_id) {
-            tracing::debug!(
-                "Skipping recovery - worker {worker_id} does not have local indexer enabled"
-            );
-            continue;
-        }
-
-        // If we haven't seen any events from this worker, start from beginning (None)
-        // If we've seen events, start from last_known_id + 1
-        let start_event_id = last_received_event_ids
-            .get(&worker_id)
-            .map(|&last_id| last_id + 1);
-
-        match recover_from_worker(
-            worker_query_client,
-            worker_id,
-            start_event_id,
-            None, // Get all events after start_event_id
-            event_tx,
-        )
-        .await
-        {
-            Ok(count) => {
-                total_recovered += count;
-                if count > 0 {
-                    successful_workers += 1;
-                }
-            }
-            Err(_) => {
-                failed_workers += 1;
-            }
-        }
-    }
-
-    // Log summary
-    if total_recovered > 0 || failed_workers > 0 {
-        tracing::info!(
-            "Startup recovery completed: {total_recovered} events recovered from {successful_workers} workers, {failed_workers} workers failed"
-        );
-    }
-
-    total_recovered
-}
-
-/// Recover missed KV events from a specific worker.
-///
-/// # Arguments
-///
-/// * `worker_query_client` - Client for querying worker local indexers
-/// * `worker_id` - The worker to recover from
-/// * `start_event_id` - First event ID to fetch (inclusive), or None to start from beginning
-/// * `end_event_id` - Last event ID to fetch (inclusive), or None for all
-/// * `event_tx` - Channel to send recovered events to the indexer
-///
-/// # Returns
-///
-/// Number of events recovered, or error if recovery failed
-pub async fn recover_from_worker(
-    worker_query_client: &WorkerQueryClient,
-    worker_id: WorkerId,
-    start_event_id: Option<u64>,
-    end_event_id: Option<u64>,
-    event_tx: &mpsc::Sender<RouterEvent>,
-) -> Result<usize> {
-    if worker_query_client.has_local_indexer(worker_id) {
-        tracing::debug!(
-            "Attempting recovery from worker {worker_id}, start_event_id: {start_event_id:?}, end_event_id: {end_event_id:?}"
-        );
-    } else {
-        tracing::warn!("Worker {worker_id} does not have local indexer enabled, skipping recovery");
-        return Ok(0);
-    }
-
-    // Query worker for events in range, with retry logic for transient failures
-    // (e.g., worker's query service not yet re-subscribed after NATS restart)
-    let mut response = None;
-    let mut last_error = None;
-
-    for attempt in 0..WORKER_QUERY_MAX_RETRIES {
-        match worker_query_client
-            .query_worker(worker_id, start_event_id, end_event_id)
-            .await
-        {
-            Ok(resp) => {
-                if attempt > 0 {
-                    tracing::info!("Worker {worker_id} query succeeded after retry {attempt}");
-                }
-                response = Some(resp);
-                break;
-            }
-            Err(e) => {
-                last_error = Some(e);
-                if attempt < WORKER_QUERY_MAX_RETRIES - 1 {
-                    let backoff_ms = WORKER_QUERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
-                    tracing::warn!(
-                        "Worker {worker_id} query failed on attempt {attempt}, retrying after {backoff_ms}ms"
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                }
-            }
-        }
-    }
-
-    let response = match response {
-        Some(r) => r,
-        None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No response"))),
-    };
-
-    // Handle response variants
-    let events = match response {
-        WorkerKvQueryResponse::Events(events) => {
-            tracing::debug!(
-                "Got {count} buffered events from worker {worker_id}",
-                count = events.len()
-            );
-            events
-        }
-        WorkerKvQueryResponse::TreeDump(events) => {
-            tracing::info!(
-                "Got tree dump from worker {worker_id} (range too old or unspecified), count: {count}",
-                count = events.len()
-            );
-            events
-        }
-        WorkerKvQueryResponse::TooNew {
-            requested_start,
-            requested_end,
-            newest_available,
-        } => {
-            tracing::warn!(
-                "Worker {worker_id} requested range is newer than available data: requested_start: {requested_start:?}, requested_end: {requested_end:?}, newest_available: {newest_available}"
-            );
-            return Ok(0);
-        }
-        WorkerKvQueryResponse::InvalidRange { start_id, end_id } => {
-            anyhow::bail!("Invalid range: end_id ({end_id}) < start_id ({start_id})");
-        }
-        WorkerKvQueryResponse::Error(message) => {
-            anyhow::bail!("Worker {worker_id} query failed: {message}");
-        }
-    };
-
-    let events_count = events.len();
-
-    if events_count == 0 {
-        tracing::debug!(
-            "No events to recover from worker {worker_id}, start_event_id: {start_event_id:?}"
-        );
-        return Ok(0);
-    }
-
-    tracing::info!(
-        "Recovered {events_count} events from worker {worker_id}, start_event_id: {start_event_id:?}"
-    );
-
-    // Apply recovered events to the indexer
-    for event in events {
-        if let Err(e) = event_tx.send(event).await {
-            tracing::error!(
-                "Failed to send recovered event to indexer for worker {worker_id}: {e}"
-            );
-            anyhow::bail!("Failed to send recovered event: {e}");
-        }
-    }
-
-    Ok(events_count)
 }
 
 // ============================================================================
@@ -712,25 +509,14 @@ async fn handle_worker_discovery(
                 "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
             );
 
-            match recover_from_worker(
-                worker_query_client,
-                worker_id,
-                None, // Start from beginning
-                None, // Get all events
-                kv_events_tx,
-            )
-            .await
-            {
-                Ok(count) => {
-                    tracing::info!(
-                        "Successfully dumped worker {worker_id}'s local indexer, recovered {count} events"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to dump worker {worker_id}'s local indexer (may not have local indexer enabled): {e}"
-                    );
-                }
+            let total_recovered = worker_query_client
+                .recover_all_dp_ranks(worker_id, kv_events_tx)
+                .await;
+
+            if total_recovered > 0 {
+                tracing::info!(
+                    "DISCOVERY: Worker {worker_id} total recovered {total_recovered} events"
+                );
             }
         }
         DiscoveryEvent::Removed(id) => {
@@ -801,19 +587,12 @@ pub async fn start_kv_router_background_event_plane(
         ready_workers.len()
     );
 
-    // Recover initial state from all ready workers
+    // Recover initial state from all ready workers (all dp_ranks)
     for worker_id in &ready_workers {
         if worker_query_client.has_local_indexer(*worker_id) {
-            match recover_from_worker(&worker_query_client, *worker_id, None, None, &kv_events_tx)
-                .await
-            {
-                Ok(count) => {
-                    tracing::info!("Successfully recovered {count} events from worker {worker_id}");
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to recover from worker {worker_id}: {e}");
-                }
-            }
+            worker_query_client
+                .recover_all_dp_ranks(*worker_id, &kv_events_tx)
+                .await;
         }
     }
 
@@ -822,8 +601,9 @@ pub async fn start_kv_router_background_event_plane(
         get_instance_discovery_stream(&component, &cancellation_token).await?;
 
     tokio::spawn(async move {
-        // Track last received event ID per worker for gap detection
-        let mut last_event_ids: HashMap<WorkerId, u64> = HashMap::new();
+        // Track last received event ID per (worker, dp_rank) for gap detection
+        // Each dp_rank has its own monotonic event ID sequence
+        let mut last_event_ids: HashMap<(WorkerId, DpRank), u64> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -860,7 +640,9 @@ pub async fn start_kv_router_background_event_plane(
                     };
 
                     let worker_id = event.worker_id;
+                    let dp_rank = event.event.dp_rank;
                     let event_id = event.event.event_id;
+                    let event_key = (worker_id, dp_rank);
 
                     // Use envelope metadata for additional debugging
                     tracing::trace!(
@@ -869,9 +651,9 @@ pub async fn start_kv_router_background_event_plane(
                         envelope.sequence
                     );
 
-                    // Gap detection: check if event ID is monotonically increasing per worker
+                    // Gap detection: check if event ID is monotonically increasing per (worker, dp_rank)
                     // Note: event_id <= last_id is duplicate/out-of-order, apply anyway (idempotent)
-                    if let Some(&last_id) = last_event_ids.get(&worker_id)
+                    if let Some(&last_id) = last_event_ids.get(&event_key)
                         && event_id > last_id + 1
                     {
                         // Gap detected - recover missing events before processing current
@@ -879,32 +661,29 @@ pub async fn start_kv_router_background_event_plane(
                         let gap_end = event_id - 1;
                         let gap_size = gap_end - gap_start + 1;
                         tracing::warn!(
-                            "Event ID gap detected for worker {worker_id}, recovering events [{gap_start}, {gap_end}], gap_size: {gap_size}"
+                            "Event ID gap detected for worker {worker_id} dp_rank {dp_rank}, recovering events [{gap_start}, {gap_end}], gap_size: {gap_size}"
                         );
 
                         // Note: While recovering, new events may queue in the subscriber's
                         // internal buffer. We don't explicitly buffer them here for simplicity.
                         // The subscriber will process them in order after recovery completes.
-                        if let Err(e) = recover_from_worker(
-                            &worker_query_client,
-                            worker_id,
-                            Some(gap_start),
-                            Some(gap_end),
-                            &kv_events_tx,
-                        ).await {
+                        if let Err(e) = worker_query_client
+                            .recover_from_worker(worker_id, dp_rank, Some(gap_start), Some(gap_end), &kv_events_tx)
+                            .await
+                        {
                             tracing::error!(
-                                "Failed to recover gap events for worker {worker_id} (gap_start: {gap_start}, gap_end: {gap_end}); proceeding with current event anyway: {e}"
+                                "Failed to recover gap events for worker {worker_id} dp_rank {dp_rank} (gap_start: {gap_start}, gap_end: {gap_end}); proceeding with current event anyway: {e}"
                             );
                             // Note: If recovery fails, we still apply the current event.
                             // The tree will have a gap, but it's better than dropping the event.
                         }
                     }
-                    // First event from this worker is always valid - we accept whatever ID it has.
+                    // First event from this (worker, dp_rank) is always valid - we accept whatever ID it has.
                     // This handles initial startup and worker restarts without requiring event 0.
 
                     // Update last seen event ID (use max to handle out-of-order)
                     last_event_ids
-                        .entry(worker_id)
+                        .entry(event_key)
                         .and_modify(|id| *id = (*id).max(event_id))
                         .or_insert(event_id);
 
