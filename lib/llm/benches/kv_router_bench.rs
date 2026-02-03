@@ -1226,16 +1226,79 @@ async fn publish_events_at_rate(
     let interval = Duration::from_secs_f64(1.0 / rate);
     let start = Instant::now();
     let duration = Duration::from_secs(duration_secs);
-    let mut event_id = 1000000u64; // Start high to avoid collision with tree construction
+    let start_id = 1000000u64; // Start high to avoid collision with tree construction
+    let mut event_id = start_id;
+
+    // Failure tracking
+    let mut publish_failures: u64 = 0;
+    let mut encode_failures: u64 = 0;
+    let mut last_publish_error: Option<String> = None;
+    let mut last_encode_error: Option<String> = None;
+
+    // Periodic reporting interval (every 10 seconds)
+    let report_interval = Duration::from_secs(10);
+    let mut last_report = Instant::now();
 
     while start.elapsed() < duration {
         let seq = &sequences[(event_id as usize) % sequences.len()];
         let event = seq.to_router_event(event_id);
-        if let Ok(data) = encode_event_with_envelope(&event, KV_EVENT_SUBJECT) {
-            let _ = nats_client.publish(subject.clone(), data.into()).await;
+
+        match encode_event_with_envelope(&event, KV_EVENT_SUBJECT) {
+            Ok(data) => {
+                if let Err(e) = nats_client.publish(subject.clone(), data.into()).await {
+                    publish_failures += 1;
+                    last_publish_error = Some(format!("{:?}", e));
+                }
+            }
+            Err(e) => {
+                encode_failures += 1;
+                last_encode_error = Some(format!("{:?}", e));
+            }
         }
+
         event_id += 1;
+
+        // Periodic failure report
+        if last_report.elapsed() >= report_interval {
+            let total_attempts = event_id - start_id;
+            let total_failures = publish_failures + encode_failures;
+            if total_failures > 0 {
+                eprintln!(
+                    "  [publish_events] Periodic report: {} failures / {} attempts ({} publish, {} encode)",
+                    total_failures, total_attempts, publish_failures, encode_failures
+                );
+            }
+            last_report = Instant::now();
+        }
+
         tokio::time::sleep(interval).await;
+    }
+
+    // Final failure report
+    let total_attempts = event_id - start_id;
+    let total_failures = publish_failures + encode_failures;
+    if total_failures > 0 {
+        eprintln!(
+            "  [publish_events] Final report: {} failures / {} attempts ({:.2}% failure rate)",
+            total_failures,
+            total_attempts,
+            (total_failures as f64 / total_attempts as f64) * 100.0
+        );
+        eprintln!(
+            "    Publish failures: {}, Encode failures: {}",
+            publish_failures, encode_failures
+        );
+        if let Some(ref err) = last_publish_error {
+            eprintln!("    Last publish error: {}", err);
+        }
+        if let Some(ref err) = last_encode_error {
+            eprintln!("    Last encode error: {}", err);
+        }
+    } else {
+        println!(
+            "  [publish_events] Completed: {} events published with no failures",
+            total_attempts
+        );
     }
 }
 
@@ -1708,8 +1771,6 @@ async fn main() -> Result<()> {
         )
         .await?
     };
-
-    // return Ok(());
 
     // Phase 4: Stress Test
     println!("\nPhase 4: Stress Test");

@@ -1047,6 +1047,9 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
 
     // Collect results
     drop(result_tx);
+    if timed_out > 0 {
+        result_rx.close();
+    }
     let mut results = Vec::new();
     while let Some(r) = result_rx.recv().await {
         results.push(r);
@@ -1288,6 +1291,39 @@ fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
 }
 
 async fn run_stress_mode(args: StressArgs) {
+    // Validate inputs before proceeding
+    if args.common.depth == 0 {
+        eprintln!("Error: depth must be > 0");
+        std::process::exit(1);
+    }
+    if args.common.num_workers == 0 {
+        eprintln!("Error: num_workers must be > 0");
+        std::process::exit(1);
+    }
+    if args.common.size < args.common.depth {
+        eprintln!(
+            "Error: size ({}) must be >= depth ({})",
+            args.common.size, args.common.depth
+        );
+        std::process::exit(1);
+    }
+    if !(0.0..=1.0).contains(&args.prefix_share_ratio) {
+        eprintln!(
+            "Error: prefix_share_ratio ({}) must be in range 0.0..=1.0",
+            args.prefix_share_ratio
+        );
+        std::process::exit(1);
+    }
+    if args.arrival_rate <= 0.0 {
+        eprintln!("Error: arrival_rate must be > 0.0");
+        std::process::exit(1);
+    }
+    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::Both) && args.num_shards == 0
+    {
+        eprintln!("Error: num_shards must be > 0 when using Sharded or Both indexer type");
+        std::process::exit(1);
+    }
+
     let num_sequences = args.common.size / args.common.depth;
 
     println!("Queue Saturation Stress Test");

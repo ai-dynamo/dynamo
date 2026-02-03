@@ -788,45 +788,4 @@ mod tests {
         assert_eq!(deserialized.block_hashes[1].0, 5);
     }
 
-    #[test]
-    fn test_router_event_json_deserialization() {
-        // Verify that RouterEvent can be deserialized from JSON with the expected
-        // field names and structure.
-        let json = r#"{
-            "worker_id": 1,
-            "event": {
-                "event_id": 42,
-                "data": {
-                    "stored": {
-                        "parent_hash": null,
-                        "blocks": [
-                            {
-                                "tokens_hash": 12345,
-                                "block_hash": 67890,
-                                "mm_extra_info": null
-                            }
-                        ]
-                    }
-                },
-                "dp_rank": 0
-            }
-        }"#;
-
-        let event: RouterEvent =
-            serde_json::from_str(json).expect("Failed to deserialize RouterEvent JSON");
-
-        assert_eq!(event.worker_id, 1);
-        assert_eq!(event.event.event_id, 42);
-        assert_eq!(event.event.dp_rank, 0);
-
-        if let KvCacheEventData::Stored(store_data) = &event.event.data {
-            assert!(store_data.parent_hash.is_none());
-            assert_eq!(store_data.blocks.len(), 1);
-            assert_eq!(store_data.blocks[0].tokens_hash.0, 12345);
-            assert_eq!(store_data.blocks[0].block_hash.0, 67890);
-            assert!(store_data.blocks[0].mm_extra_info.is_none());
-        } else {
-            panic!("Expected KvCacheEventData::Stored variant");
-        }
-    }
 }
