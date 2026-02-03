@@ -11,4 +11,4 @@ mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
 mod worker_monitor;
-pub use worker_monitor::{KvWorkerMonitor, WorkerLoadState};
+pub use worker_monitor::{KvWorkerMonitor, LoadThresholdConfig, WorkerLoadState};
