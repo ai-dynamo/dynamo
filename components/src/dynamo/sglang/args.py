@@ -131,6 +131,26 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
         "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
+    "image-diffusion-worker": {
+        "flags": ["--image-diffusion-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as image diffusion worker for image generation",
+    },
+    "image-diffusion-fs-url": {
+        "flags": ["--image-diffusion-fs-url"],
+        "type": str,
+        "default": None,
+        "help": "Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
+    },
+    "image-diffusion-base-url": {
+        "flags": ["--image-diffusion-base-url"],
+        "type": str,
+        "default": os.environ.get(
+            "DYN_IMAGE_DIFFUSION_BASE_URL", "http://localhost:8008/"
+        ),
+        "help": "Base URL for rewriting image URLs in responses (e.g., http://localhost:8008/). When set, generated image URLs will use this base instead of filesystem URLs. Can be set via DYN_IMAGE_DIFFUSION_URL_BASE env var.",
+    },
 }
 
 
@@ -172,6 +192,11 @@ class DynamoArgs:
     enable_local_indexer: bool = False
     # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
     use_kv_events: bool = False
+
+    # image diffusion options
+    image_diffusion_worker: bool = False
+    image_diffusion_fs_url: Optional[str] = None
+    image_diffusion_base_url: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -443,6 +468,8 @@ async def parse_args(args: list[str]) -> Config:
     if endpoint is None:
         if parsed_args.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
+        elif getattr(parsed_args, "image_diffusion_worker", False):
+            endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
             and parsed_args.disaggregation_mode == "prefill"
@@ -521,7 +548,36 @@ async def parse_args(args: list[str]) -> Config:
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
     # contain code to download a model, it should only parse the args.
-    server_args = ServerArgs.from_cli_args(parsed_args)
+
+    # For diffusion workers, create a minimal dummy ServerArgs since diffusion
+    # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
+    image_diffusion_worker = getattr(parsed_args, "image_diffusion_worker", False)
+
+    if image_diffusion_worker:
+        logging.info(f"Image diffusion worker detected with model: {model_path}")
+
+        # Need to use ServerArgs not intended for sglang[diffusion], multimodal_gen has its own ServerArgs.
+        server_args = ServerArgs("none")  # HACK: Avoid triggering __post_init__
+
+        server_args.model_path = model_path
+        server_args.served_model_name = parsed_args.served_model_name
+        server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
+        server_args.log_level = getattr(parsed_args, "log_level", "info")
+        server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
+        server_args.speculative_algorithm = None
+        server_args.disaggregation_mode = None
+        server_args.dllm_algorithm = False
+        server_args.tp_size = getattr(parsed_args, "tensor_parallel_size", 1)
+        server_args.dp_size = getattr(parsed_args, "data_parallel_size", 1)
+
+        parsed_args.use_sglang_tokenizer = True
+        parsed_args.dyn_endpoint_types = "images"
+
+        logging.info(
+            f"Created stub ServerArgs for diffusion: model_path={server_args.model_path}"
+        )
+    else:
+        server_args = ServerArgs.from_cli_args(parsed_args)
 
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
     # tokens since last output), not cumulative tokens. When stream_output=True,
@@ -576,6 +632,9 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
         diffusion_worker=diffusion_worker,
+        image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
+        image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
+        image_diffusion_base_url=getattr(parsed_args, "image_diffusion_base_url", None),
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
         use_kv_events=use_kv_events,
