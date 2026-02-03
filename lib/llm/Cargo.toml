@@ -25,7 +25,7 @@ block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-nixl = ["dep:nixl-sys" "dep:flate2"]
+media-nixl = ["dep:nixl-sys", "dep:flate2"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
 kv-router-stress = ["dep:clap", "dep:indicatif"]
 
