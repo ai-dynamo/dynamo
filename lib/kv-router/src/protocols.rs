@@ -787,5 +787,4 @@ mod tests {
         assert_eq!(deserialized.block_hashes[0].0, 4);
         assert_eq!(deserialized.block_hashes[1].0, 5);
     }
-
 }

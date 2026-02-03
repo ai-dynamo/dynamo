@@ -561,13 +561,9 @@ impl KvIndexer {
                             let event_for_prune = prune_manager.is_some().then(|| event.clone());
                             let result = trie.apply_event(event);
                             let result_is_ok = result.is_ok();
+                            let tree_size = trie.current_size();
                             tracing::trace!(
-                                "Applied KV event to global radix tree: event_type={:?}, event_id={}, worker_id={}, success={}, global_radix_tree_size={}",
-                                event_type,
-                                event_id,
-                                worker_id,
-                                result_is_ok,
-                                trie.current_size()
+                                "Applied KV event to global radix tree: event_type={event_type}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
                             );
                             metrics.increment_event_applied(event_type, result);
 
