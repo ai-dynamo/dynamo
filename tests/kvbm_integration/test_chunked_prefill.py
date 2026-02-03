@@ -103,7 +103,6 @@ def tester(llm_server_kvbm):  # noqa: F811
         {
             "model": KVBM_TEST_MODEL,
             "max_num_batched_tokens": MAX_NUM_BATCHED_TOKENS,
-            "enable_chunked_prefill": True,
             "gpu_blocks": 50,  # Need enough for chunked prefill (256 tokens = 16 blocks per chunk)
         }
     ],
