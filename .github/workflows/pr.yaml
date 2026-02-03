@@ -189,10 +189,10 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ github.ref_name == 'main' && format('{0}:main-vllm', needs.changed-files.outputs.ecr_image_base) || '' }}
-        ${{ github.ref_name == 'main' && format('{0}:main-vllm-{1}', needs.changed-files.outputs.ecr_image_base, github.sha) || '' }}
-        ${{ github.ref_name == 'ops-2572' && format('{0}:ops-2572-vllm', needs.changed-files.outputs.ecr_image_base) || '' }}
-        ${{ github.ref_name == 'ops-2572' && format('{0}:ops-2572-vllm-{1}', needs.changed-files.outputs.ecr_image_base, github.sha) || '' }}
+        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+        ${{ github.ref_name == 'ops-2572' && 'ops-2572-vllm' || '' }}
+        ${{ github.ref_name == 'ops-2572' && format('ops-2572-vllm-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
@@ -214,6 +214,8 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+        ${{ github.ref_name == 'ops-2572' && 'ops-2572-sglang' || '' }}
+        ${{ github.ref_name == 'ops-2572' && format('ops-2572-sglang-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: true

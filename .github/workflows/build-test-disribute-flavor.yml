@@ -112,7 +112,7 @@ jobs:
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
                 echo "********* tag: $tag"
-                RESULT+="${tag}-${PLATFORM}"$'\n'
+                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-${PLATFORM}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
             echo "********* RESULT: $RESULT"
@@ -122,6 +122,7 @@ jobs:
           else
             echo "tags=" >> $GITHUB_OUTPUT
           fi
+          echo "********* tags output: $GITHUB_OUTPUT"
 
       - name: Docker Login
         uses: ./.github/actions/docker-login
