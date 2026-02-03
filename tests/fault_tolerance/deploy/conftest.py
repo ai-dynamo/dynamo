@@ -17,8 +17,31 @@ import pytest
 
 from tests.fault_tolerance.deploy.scenarios import scenarios
 
-# Note: All CLI options are defined in tests/conftest.py.
-# This file provides fixtures with fault-tolerance-specific defaults.
+# Shared CLI options are defined in tests/conftest.py.
+def pytest_addoption(parser):
+    parser.addoption("--image", type=str, default=None)
+    parser.addoption("--namespace", type=str, default="fault-tolerance-test")
+    parser.addoption(
+        "--client-type",
+        type=str,
+        default=None,
+        choices=["aiperf", "legacy"],
+        help="Client type for load generation: 'aiperf' (default) or 'legacy'",
+    )
+    parser.addoption(
+        "--include-custom-build",
+        action="store_true",
+        default=False,
+        help="Include tests that require custom builds (e.g., MoE models). "
+        "By default, these tests are excluded.",
+    )
+    parser.addoption(
+        "--skip-service-restart",
+        action="store_true",
+        default=False,
+        help="Skip restarting NATS and etcd services before deployment. "
+        "By default, these services are restarted.",
+    )
 
 
 def pytest_generate_tests(metafunc):

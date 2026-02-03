@@ -44,6 +44,30 @@ import pytest
 from tests.utils.managed_deployment import DeploymentSpec, _get_workspace_dir
 
 
+# Shared CLI options are defined in tests/conftest.py.
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add deploy-specific command-line options.
+
+    These options control which deployment configurations are tested.
+    Shared options (--image, --namespace, --skip-service-restart) are
+    defined in tests/conftest.py.
+    """
+    parser.addoption(
+        "--framework",
+        type=str,
+        default=None,
+        help="Framework to test (e.g., vllm, sglang, trtllm). "
+        "If not specified, runs all discovered frameworks.",
+    )
+    parser.addoption(
+        "--profile",
+        type=str,
+        default=None,
+        help="Deployment profile to test (e.g., agg, disagg, disagg_router). "
+        "If not specified, runs all profiles for the selected framework.",
+    )
+
+
 # -----------------------------------------------------------------------------
 # DeploymentTarget: The core abstraction for test parametrization
 # -----------------------------------------------------------------------------
@@ -179,7 +203,6 @@ DEPLOY_TEST_MATRIX = _build_test_matrix(ALL_DEPLOYMENT_TARGETS)
 
 # -----------------------------------------------------------------------------
 # Pytest Configuration: Test parametrization
-# (CLI options are defined in tests/conftest.py)
 # -----------------------------------------------------------------------------
 
 
