@@ -11,12 +11,14 @@ import sglang as sgl
 import uvloop
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
+    ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -25,11 +27,15 @@ from dynamo.sglang.publisher import (
     setup_prometheus_registry,
     setup_sgl_metrics,
 )
-from dynamo.sglang.register import register_llm_with_readiness_gate
+from dynamo.sglang.register import (
+    register_image_diffusion_model,
+    register_llm_with_readiness_gate,
+)
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
     DiffusionWorkerHandler,
     EmbeddingWorkerHandler,
+    ImageDiffusionWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
     MultimodalProcessorHandler,
@@ -113,7 +119,9 @@ async def worker():
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    if config.dynamo_args.embedding_worker:
+    if config.dynamo_args.image_diffusion_worker:
+        await init_image_diffusion(runtime, config)
+    elif config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
     elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
@@ -128,6 +136,7 @@ async def worker():
         await init_diffusion(runtime, config)
     elif config.serving_mode != DisaggregationMode.PREFILL:
         await init(runtime, config)
+
     else:
         await init_prefill(runtime, config)
 
@@ -443,6 +452,87 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
         except asyncio.CancelledError:
             logging.info("Metrics task successfully cancelled")
             pass
+        handler.cleanup()
+
+
+async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
+    """Initialize image diffusion worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    # Initialize DiffGenerator (not sgl.Engine)
+    from sglang.multimodal_gen import DiffGenerator
+
+    if not server_args.model_path:
+        raise ValueError("--model is required for diffusion workers")
+
+    # Parallelism configuration
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    num_gpus = tp_size * dp_size
+
+    # Distributed configuration
+    dist_timeout = getattr(server_args, "dist_timeout", None)
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=server_args.model_path,
+        # Parallelism configuration
+        num_gpus=num_gpus,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        # Distributed configuration
+        dist_timeout=dist_timeout,
+    )
+
+    # Initialize fsspec filesystems for image storage
+    fs_url = dynamo_args.image_diffusion_fs_url
+
+    # Initialize primary filesystem
+    if not fs_url:
+        raise ValueError("--image-diffusion-fs-url is required for diffusion workers")
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # Image diffusion doesn't have metrics publisher like LLM
+    # Could add custom metrics for images/sec, steps/sec later
+
+    handler = ImageDiffusionWorkerHandler(
+        component,
+        generator,
+        config,
+        publisher=None,
+        fs=get_fs(fs_url),
+    )
+
+    # Create proper health check payload that sends a minimal diffusion request
+    health_check_payload = ImageDiffusionHealthCheckPayload(
+        model_path=server_args.model_path
+    ).to_dict()
+
+    ready_event = asyncio.Event()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[],  # No LLM metrics labels
+                health_check_payload=health_check_payload,
+            ),
+            register_image_diffusion_model(
+                generator,
+                generate_endpoint,
+                server_args,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve image diffusion endpoints: {e}")
+        raise
+    finally:
         handler.cleanup()
 
 

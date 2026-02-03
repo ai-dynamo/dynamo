@@ -18,8 +18,82 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
 
-class BaseWorkerHandler(ABC):
-    """Abstract base class for SGLang worker handlers."""
+class BaseGenerativeHandler(ABC):
+    """Minimal base class for all generative handlers (LLM, diffusion, etc.).
+
+    Provides common infrastructure for:
+    - Component and configuration management
+    - Metrics and KV event publishing
+    - Distributed tracing integration
+    """
+
+    def __init__(
+        self,
+        component: Component,
+        config: Config,
+        publisher: Optional[DynamoSglangPublisher] = None,
+    ) -> None:
+        """Initialize base generative handler.
+
+        Args:
+            component: The Dynamo runtime component.
+            config: SGLang and Dynamo configuration.
+            publisher: Optional metrics publisher for the worker.
+        """
+        self.component = component
+        self.config = config
+
+        # Set up metrics and KV publishers
+        if publisher is not None:
+            self.metrics_publisher = publisher.metrics_publisher
+            self.kv_publisher = publisher.kv_publisher
+        else:
+            self.metrics_publisher = None
+            self.kv_publisher = None
+
+    @abstractmethod
+    async def generate(
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Generate response from request.
+
+        Args:
+            request: Request dict with input and parameters.
+            context: Context object for cancellation handling.
+
+        Yields:
+            Response data (format varies by handler implementation).
+        """
+        pass
+
+    def cleanup(self) -> None:
+        """Cleanup resources. Override in subclasses as needed."""
+        pass
+
+    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
+        """Get trace header dict for passing to generation functions.
+
+        Args:
+            context: Dynamo Context object containing trace information.
+
+        Returns:
+            Dict with traceparent header if trace context available, None otherwise.
+        """
+        trace_id = context.trace_id
+        span_id = context.span_id
+        if not trace_id or not span_id:
+            return None
+        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+
+
+class BaseWorkerHandler(BaseGenerativeHandler):
+    """Abstract base class for SGLang LLM worker handlers.
+
+    Extends BaseGenerativeHandler with LLM-specific functionality:
+    - SGLang Engine integration
+    - Tokenization and input parameter management
+    - Disaggregated serving support
+    """
 
     def __init__(
         self,
@@ -38,7 +112,10 @@ class BaseWorkerHandler(ABC):
             publisher: Optional metrics publisher for the worker.
             generate_endpoint: The endpoint handle for discovery registration.
         """
-        self.component = component
+        # Call parent constructor
+        super().__init__(component, config, publisher)
+
+        # LLM-specific initialization
         self.engine = engine
         self.config = config
         self.generate_endpoint = generate_endpoint
@@ -273,21 +350,6 @@ class BaseWorkerHandler(ABC):
             bootstrap_host = f"[{bootstrap_host}]"
 
         return bootstrap_host, bootstrap_port
-
-    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
-        """Get trace header dict for passing to SGLang's external_trace_header parameter.
-
-        Args:
-            context: Dynamo Context object containing trace information.
-
-        Returns:
-            Dict with traceparent header if trace context available, None otherwise.
-        """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
     async def _handle_cancellation(
         self, request_id_future: asyncio.Future, context: Context
