@@ -230,6 +230,11 @@ pub struct ModelDeploymentCard {
     /// `Text` for engines that take care of pre-processing themselves.
     pub model_input: ModelInput,
 
+    /// Optional LoRA adapter name for this model card.
+    /// Present when this card represents a LoRA adapter registered on top of a base model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_name: Option<String>,
+
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
@@ -651,6 +656,7 @@ impl ModelDeploymentCard {
             migration_limit: 0,
             model_type: Default::default(),  // set later
             model_input: Default::default(), // set later
+            lora_name: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             media_decoder: None,

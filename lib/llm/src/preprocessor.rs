@@ -113,6 +113,7 @@ pub struct OpenAIPreprocessor {
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
     model_info: Arc<dyn ModelInfo>,
+    lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
@@ -136,13 +137,18 @@ impl OpenAIPreprocessor {
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
-        let Some(model_info) = mdc.model_info else {
+        let lora_name = mdc.lora_name.clone();
+        let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+
+        if let Some(ref lora_name) = lora_name {
+            tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
+        }
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
@@ -158,6 +164,7 @@ impl OpenAIPreprocessor {
             tokenizer,
             model_info,
             mdcsum,
+            lora_name,
             runtime_config,
             tool_call_parser,
             #[cfg(feature = "media-nixl")]
@@ -237,6 +244,8 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
+        let lora_name = self.lora_name.clone();
+
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
@@ -247,8 +256,15 @@ impl OpenAIPreprocessor {
                 dp_rank: None, // dp_rank is set later in the pipeline
                 enable_local_updates: nvext.enable_local_updates,
                 expected_output_tokens: nvext.expected_output_tokens,
+                lora_name,
             };
             builder.routing(Some(routing));
+        } else if lora_name.is_some() {
+            // Ensure LoRA-aware routing still gets hints even when nvext is absent.
+            builder.routing(Some(RoutingHints {
+                lora_name,
+                ..Default::default()
+            }));
         }
 
         Ok(builder)

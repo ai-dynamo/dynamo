@@ -146,6 +146,29 @@ spec:
         {{- if .Values.webhook.enabled }}
           - --enable-webhooks=true
         {{- end }}
+        {{- if .Values.checkpoint.enabled }}
+          - --checkpoint-enabled=true
+          - --checkpoint-storage-type={{ .Values.checkpoint.storage.type }}
+          - --checkpoint-signal-host-path={{ .Values.checkpoint.storage.signalHostPath }}
+          - --checkpoint-criu-timeout={{ .Values.checkpoint.criu.timeout }}
+          - --checkpoint-init-container-image={{ .Values.checkpoint.initContainerImage }}
+          {{- if eq .Values.checkpoint.storage.type "pvc" }}
+          - --checkpoint-pvc-name={{ .Values.checkpoint.storage.pvc.pvcName }}
+          - --checkpoint-pvc-base-path={{ .Values.checkpoint.storage.pvc.basePath }}
+          {{- end }}
+          {{- if eq .Values.checkpoint.storage.type "s3" }}
+          - --checkpoint-s3-uri={{ .Values.checkpoint.storage.s3.uri }}
+          {{- if .Values.checkpoint.storage.s3.credentialsSecretRef }}
+          - --checkpoint-s3-credentials-secret={{ .Values.checkpoint.storage.s3.credentialsSecretRef }}
+          {{- end }}
+          {{- end }}
+          {{- if eq .Values.checkpoint.storage.type "oci" }}
+          - --checkpoint-oci-uri={{ .Values.checkpoint.storage.oci.uri }}
+          {{- if .Values.checkpoint.storage.oci.credentialsSecretRef }}
+          - --checkpoint-oci-credentials-secret={{ .Values.checkpoint.storage.oci.credentialsSecretRef }}
+          {{- end }}
+          {{- end }}
+        {{- end }}
         command:
         - /manager
         env:

@@ -35,28 +35,38 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False)
 
 
 def terminate_process_tree(
-    pid, logger=logging.getLogger(), immediate_kill=False, timeout=2
+    pid, logger=logging.getLogger(), immediate_kill=False, timeout=10
 ):
     try:
         parent = psutil.Process(pid)
-        for child in parent.children(recursive=True):
-            terminate_process(child, logger, immediate_kill)
-
-        terminate_process(parent, logger, immediate_kill)
-
-        for child in parent.children(recursive=True):
-            try:
-                child.wait(timeout)
-            except psutil.TimeoutExpired:
-                terminate_process(child, logger, immediate_kill=True)
-        try:
-            parent.wait(timeout)
-        except psutil.TimeoutExpired:
-            terminate_process(parent, logger, immediate_kill=True)
-
     except psutil.NoSuchProcess:
-        # Process already terminated
-        pass
+        return
+
+    # 1. Snapshot children before signaling parent
+    children = parent.children(recursive=True)
+
+    # 2. Terminate parent first (graceful)
+    terminate_process(parent, logger, immediate_kill=immediate_kill)
+
+    # 3. Wait for parent to exit
+    try:
+        parent.wait(timeout=timeout)
+    except psutil.TimeoutExpired:
+        logger.warning("Parent process did not exit within timeout")
+        terminate_process(parent, logger, immediate_kill=True)
+
+    # 4. Terminate children if still alive
+    for child in children:
+        terminate_process(child, logger, immediate_kill=immediate_kill)
+
+    # 5. Wait for all processes to exit
+    all_procs = [parent] + children
+    gone, alive = psutil.wait_procs(all_procs, timeout=timeout)
+
+    # 6. Escalate remaining alive processes if needed
+    for p in alive:
+        terminate_process(p, logger, immediate_kill=True)
+    psutil.wait_procs(alive, timeout=timeout)
 
 
 @dataclass
@@ -75,6 +85,7 @@ class ManagedProcess:
     stragglers: List[str] = field(default_factory=list)
     straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
+    display_name: Optional[str] = None
 
     # Ensure attributes exist even if startup fails early
     proc: Optional[subprocess.Popen] = None
@@ -107,7 +118,11 @@ class ManagedProcess:
     def __enter__(self):
         try:
             self._logger = logging.getLogger(self.__class__.__name__)
-            self._command_name = self.command[0]
+            # self._command_name = self.command[0]
+            if self.display_name:
+                self._command_name = self.display_name
+            else:
+                self._command_name = self.command[0]
 
             # Keep test logs out of the git working tree: many tests pass a relative
             # `log_dir` derived from `request.node.name`, which otherwise creates a large
@@ -610,6 +625,7 @@ class DynamoFrontendProcess(ManagedProcess):
         extra_env: Optional[dict[str, str]] = None,
         # Default to false so pytest-xdist workers don't kill each other's frontends.
         terminate_existing: bool = False,
+        display_name: Optional[str] = None,
     ):
         # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
         # use this shared implementation (and delete the copies):
@@ -659,6 +675,7 @@ class DynamoFrontendProcess(ManagedProcess):
             display_output=True,
             terminate_existing=terminate_existing,
             log_dir=log_dir,
+            display_name=display_name,
         )
 
     def __exit__(self, exc_type, exc_val, exc_tb):

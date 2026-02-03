@@ -84,6 +84,9 @@ type Config struct {
 	// When true, controllers skip validation (webhooks handle it)
 	// When false, controllers perform validation (defense in depth)
 	WebhooksEnabled bool
+
+	// Checkpoint configuration for checkpoint/restore functionality
+	Checkpoint CheckpointConfig
 }
 
 // RBACConfig holds configuration for RBAC management
@@ -94,6 +97,65 @@ type RBACConfig struct {
 	DGDRProfilingClusterRoleName string
 	// EPPClusterRoleName is the name of the ClusterRole for EPP (cluster-wide mode only)
 	EPPClusterRoleName string
+}
+
+// CheckpointConfig holds configuration for checkpoint/restore functionality
+type CheckpointConfig struct {
+	// Enabled indicates if checkpoint functionality is enabled
+	Enabled bool
+	// Storage holds storage backend configuration
+	Storage CheckpointStorageConfig
+	// CRIUTimeout is the CRIU timeout in seconds (required for CUDA checkpoints/restores)
+	CRIUTimeout string
+	// InitContainerImage is the image used for init containers (e.g., signal file cleanup)
+	// Defaults to "busybox:latest" if not specified
+	InitContainerImage string
+}
+
+// Checkpoint storage type constants
+const (
+	CheckpointStorageTypePVC = "pvc"
+	CheckpointStorageTypeS3  = "s3"
+	CheckpointStorageTypeOCI = "oci"
+)
+
+// CheckpointStorageConfig holds storage backend configuration for checkpoints
+type CheckpointStorageConfig struct {
+	// Type is the storage backend type: pvc, s3, or oci
+	Type string
+	// SignalHostPath is the host path for signal files (used for checkpoint job coordination)
+	SignalHostPath string
+	// PVC configuration (used when Type=pvc)
+	PVC CheckpointPVCConfig
+	// S3 configuration (used when Type=s3)
+	S3 CheckpointS3Config
+	// OCI configuration (used when Type=oci)
+	OCI CheckpointOCIConfig
+}
+
+// CheckpointPVCConfig holds PVC storage configuration
+type CheckpointPVCConfig struct {
+	// PVCName is the name of the PVC
+	PVCName string
+	// BasePath is the base directory within the PVC
+	BasePath string
+}
+
+// CheckpointS3Config holds S3 storage configuration
+type CheckpointS3Config struct {
+	// URI is the S3 URI (s3://[endpoint/]bucket/prefix)
+	URI string
+	// CredentialsSecretRef is the name of the credentials secret
+	// (should contain AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION)
+	CredentialsSecretRef string
+}
+
+// CheckpointOCIConfig holds OCI registry storage configuration
+type CheckpointOCIConfig struct {
+	// URI is the OCI URI (oci://registry/repository)
+	URI string
+	// CredentialsSecretRef is the name of the docker config secret
+	CredentialsSecretRef string
 }
 
 type IngressConfig struct {
