@@ -17,8 +17,8 @@ impl ModelDeploymentCard {
     // Previously called "from_local_path"
     #[staticmethod]
     fn load(path: String, model_name: String) -> PyResult<ModelDeploymentCard> {
-        let card =
-            RsModelDeploymentCard::load_from_disk(&path, None, Some(&model_name)).map_err(to_pyerr)?;
+        let mut card = RsModelDeploymentCard::load_from_disk(&path, None).map_err(to_pyerr)?;
+        card.set_name(&model_name);
         Ok(ModelDeploymentCard { inner: card })
     }
 
