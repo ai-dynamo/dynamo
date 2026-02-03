@@ -87,12 +87,25 @@ class TrtllmConfigModifier(BaseConfigModifier):
                     )
                     continue
 
-        # set metadata name
+        # set metadata name (short to avoid Grove 45-char limit for multinode)
         cfg.metadata.name = "agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
+
+        # Rename services to shorter names to avoid Grove 45-char naming limit for multinode
+        # TRTLLMDecodeWorker (18 chars) -> dec (3 chars)
+        # TRTLLMPrefillWorker (18 chars) -> pre (3 chars)
+        old_decode_name = "TRTLLMDecodeWorker"
+        old_prefill_name = "TRTLLMPrefillWorker"
+        new_decode_name = "dec"
+        new_prefill_name = "pre"
+
+        if old_decode_name in cfg.spec.services:
+            cfg.spec.services[new_decode_name] = cfg.spec.services.pop(old_decode_name)
+        if old_prefill_name in cfg.spec.services:
+            cfg.spec.services[new_prefill_name] = cfg.spec.services.pop(old_prefill_name)
 
         if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
