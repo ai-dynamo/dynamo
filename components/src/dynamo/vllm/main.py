@@ -279,6 +279,7 @@ def setup_kv_event_publisher(
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
             enable_local_indexer=config.enable_local_indexer,
+            dp_rank=dp_rank,
         )
         kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
         kv_publishers.append(kv_publisher)

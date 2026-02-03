@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, Tuple
 
 from benchmarks.profiler.utils.config import (
     Config,
@@ -69,7 +69,7 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def get_model_name(cls, config: dict) -> str:
+    def get_model_name(cls, config: dict) -> Tuple[str, str]:
         ...
 
     @classmethod
@@ -131,6 +131,51 @@ class BaseConfigModifier:
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
+
+    @classmethod
+    def _get_model_name_and_path_from_args(
+        cls, args: list[str], default_model_name: str, logger
+    ) -> tuple[str, str]:
+        """
+        Extract model name and path from worker args.
+
+        Checks --served-model-name first (API name), then falls back to
+        backend-specific path argument (--model-path or --model).
+
+        Args:
+            args: Broken argument list
+            default_model_name: Default to use if neither arg found
+            logger: Logger instance for warnings
+
+        Returns:
+            Tuple of (model_name, model_path)
+        """
+        model_name = default_model_name
+
+        # Check for --served-model-name first (API model name)
+        for i, arg in enumerate(args):
+            if arg == cls.WORKER_SERVED_MODEL_NAME_ARG and i + 1 < len(args):
+                model_name = args[i + 1]
+                break
+
+        # Check for backend-specific path argument
+        model_path = model_name
+        for i, arg in enumerate(args):
+            if arg == cls.WORKER_MODEL_PATH_ARG and i + 1 < len(args):
+                model_path = args[i + 1]
+                break
+
+        # If model_name not found, use model_path as model_name
+        if model_name == default_model_name and model_path != default_model_name:
+            model_name = model_path
+
+        # Warn if neither argument was found
+        if model_name == default_model_name and model_path == default_model_name:
+            logger.warning(
+                f"Model name not found in configuration args, using default model name: {default_model_name}"
+            )
+
+        return model_name, model_path
 
     @classmethod
     def _normalize_model_path(cls, pvc_mount_path: str, pvc_path: str) -> str:
