@@ -16,113 +16,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 
-def parse_sccache_from_log(log_content: str, debug: bool = False) -> Dict[str, Any]:
-    """
-    Parse sccache statistics from build log output.
-
-    In BuildKit logs, lines are prefixed with step numbers like:
-    #43 103.6 === sccache statistics AFTER Dynamo ===
-    #43 103.6 Compile requests                    2097
-    #43 103.6 Cache hits                          1670
-    #43 103.6 Cache hits rate                   100.00 %
-    """
-    sccache_data = {}
-
-    # Find sccache statistics section(s) - get the last one
-    # The section ends at the next DONE/CACHED marker or end of content
-    sections = re.findall(
-        r"=== sccache statistics AFTER ([^=]+) ===(.*?)(?=#\d+\s+DONE|#\d+\s+CACHED|#\d+\s+\[|$)",
-        log_content,
-        re.DOTALL,
-    )
-
-    if not sections:
-        if debug:
-            print("DEBUG: No sccache sections found in log", file=sys.stderr)
-        return {}
-
-    # Use the last sccache section (final stats)
-    build_name, stats_block = sections[-1]
-    sccache_data["build_name"] = build_name.strip()
-
-    if debug:
-        print(
-            f"DEBUG: Found sccache section for '{build_name.strip()}'", file=sys.stderr
-        )
-        print(
-            f"DEBUG: Stats block (first 1000 chars):\n{stats_block[:1000]}",
-            file=sys.stderr,
-        )
-
-    # Parse each statistic line
-    for line in stats_block.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-
-        # Remove BuildKit prefix if present: "#43 103.6 " or "#43 "
-        line = re.sub(r"^#\d+\s+[\d.]+\s+", "", line)
-        line = re.sub(r"^#\d+\s+", "", line)
-        line = line.strip()
-
-        if not line:
-            continue
-
-        # Skip section headers like "Non-cacheable reasons:"
-        if line.endswith(":"):
-            if debug:
-                print(f"DEBUG: Skipping section header: '{line}'", file=sys.stderr)
-            continue
-
-        # Match pattern: "Key Name    Value" or "Key Name    Value unit"
-        # Examples:
-        #   Compile requests                    2097
-        #   Cache hits (C/C++)                   890
-        #   Non-cacheable calls                  411
-        #   Cache hits rate                   100.00 %
-        #   Average cache read hit             0.050 s
-        #
-        # Note: there may be a space before the unit: "100.00 %" or "0.050 s"
-        # Key can contain: letters, numbers, (), /, space, hyphen, plus
-        match = re.match(
-            r"^([A-Za-z][A-Za-z0-9() /+\-]+?)\s{2,}([\d.]+)\s*(%|s)?\s*$", line
-        )
-        if match:
-            key_raw = match.group(1).strip()
-            value_str = match.group(2)
-            unit = match.group(3)
-
-            # Convert key to snake_case
-            key = key_raw.lower()
-            key = re.sub(r"[+()]", "", key)  # Remove plus and parentheses
-            key = re.sub(r"[/\-\s]+", "_", key)  # Replace /, -, spaces with _
-            key = re.sub(r"_+", "_", key)  # Collapse multiple underscores
-            key = key.strip("_")  # Remove leading/trailing underscores
-
-            # Add unit suffix
-            if unit == "%":
-                key = key + "_percent"
-            elif unit == "s":
-                key = key + "_seconds"
-
-            # Convert value to number
-            try:
-                if "." in value_str:
-                    sccache_data[key] = float(value_str)
-                else:
-                    sccache_data[key] = int(value_str)
-            except ValueError:
-                sccache_data[key] = value_str
-
-            if debug:
-                print(f"DEBUG: Parsed: {key} = {sccache_data[key]}", file=sys.stderr)
-        elif debug and line and any(c.isalpha() for c in line):
-            # Print non-matching lines in debug mode for troubleshooting
-            print(f"DEBUG: No match for line: '{line}'", file=sys.stderr)
-
-    return sccache_data
-
-
 def parse_sccache_json_from_log(
     log_content: str, debug: bool = False
 ) -> List[Dict[str, Any]]:
@@ -620,14 +513,6 @@ def main():
                 f"     • {section_name}: {requests} requests, {hits} hits ({hit_rate:.1f}%)",
                 file=sys.stderr,
             )
-
-    # Print comprehensive JSON output
-    print("", file=sys.stderr)
-    print("=" * 80, file=sys.stderr)
-    print("📋 COMPREHENSIVE BUILD METRICS (JSON)", file=sys.stderr)
-    print("=" * 80, file=sys.stderr)
-    print(json.dumps(build_data, indent=2), file=sys.stderr)
-    print("=" * 80, file=sys.stderr)
 
 
 if __name__ == "__main__":
