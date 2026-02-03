@@ -21,10 +21,7 @@
 {{- $ns           := ternary (required "set dynamoGraphDeploymentName when epp.useDynamo=true" $resolvedDynNs) "" $useDynamo -}}
 {{- $kv           := default "16" .Values.epp.dynamo.kvBlockSize -}}
 {{- $useEtcd      := default false .Values.epp.dynamo.useEtcd -}}
-{{- $std          := .Values.extension.standardImage -}}
-{{- $dyn          := .Values.extension.dynamoImage -}}
-{{- $fallback     := ternary $dyn $std .Values.epp.useDynamo -}}
-{{- $eppImage     := default $fallback .Values.extension.image }}
+{{- $eppImage     := required "extension.image is required - set via --set-string extension.image=$EPP_IMAGE or in values file" .Values.extension.image }}
 
 ---
 # Deployment for the EPP (Endpoint Picker Plugin)
