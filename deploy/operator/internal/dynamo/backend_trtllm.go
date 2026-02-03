@@ -17,6 +17,17 @@ type TRTLLMBackend struct {
 	MpiRunSecretName string
 }
 
+// shellQuote quotes a string for safe use in shell commands.
+// It wraps the string in single quotes and escapes any single quotes within.
+func shellQuote(s string) string {
+	// If string contains spaces, special chars, or quotes, wrap in single quotes
+	// and escape any single quotes by ending the quote, adding escaped quote, and restarting
+	if strings.ContainsAny(s, " \t\n'\"\\{}[]$`!") {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	return s
+}
+
 func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Check for volumeMounts with useAsCompilationCache=true
 	for _, volumeMount := range component.VolumeMounts {
@@ -111,12 +122,15 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
-		var parts []string
-		parts = append(parts, container.Command...)
-		if len(container.Args) > 0 {
-			parts = append(parts, container.Args...)
+		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
+		var quotedParts []string
+		for _, part := range container.Command {
+			quotedParts = append(quotedParts, shellQuote(part))
 		}
-		originalCommand = strings.Join(parts, " ")
+		for _, part := range container.Args {
+			quotedParts = append(quotedParts, shellQuote(part))
+		}
+		originalCommand = strings.Join(quotedParts, " ")
 	} else if len(container.Args) > 0 {
 		// Shell command (sh -c): args contains the full command
 		originalCommand = strings.Join(container.Args, " ")
