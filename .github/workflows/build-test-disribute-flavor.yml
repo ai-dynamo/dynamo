@@ -87,7 +87,7 @@ jobs:
   # ============================================================================
   build:
     if: inputs.build_image
-    name: build ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: Build ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: prod-builder-v2
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
@@ -200,7 +200,7 @@ jobs:
   test:
     if: inputs.run_tests
     needs: [build]
-    name: test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
