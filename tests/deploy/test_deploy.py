@@ -21,7 +21,7 @@ to chat completion requests correctly.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 import requests
@@ -32,8 +32,6 @@ from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 
 logger = logging.getLogger(__name__)
 
-# Test prompt for realistic load testing
-# This prompt is substantial enough to generate meaningful responses
 TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
 lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
 beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
@@ -41,53 +39,10 @@ known for your unparalleled curiosity and courage, who has stumbled upon an anci
 the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
 and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
 
-# Default test parameters
 DEFAULT_MAX_TOKENS = 30
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
 MIN_RESPONSE_CONTENT_LENGTH = 10
-
-
-def send_test_request(
-    base_url: str,
-    model: str,
-    prompt: str = TEST_PROMPT,
-    max_tokens: int = DEFAULT_MAX_TOKENS,
-    temperature: float = DEFAULT_TEMPERATURE,
-    timeout: int = DEFAULT_REQUEST_TIMEOUT,
-    endpoint: str = "/v1/chat/completions",
-) -> requests.Response:
-    """Send a chat completion request to the model endpoint.
-
-    Args:
-        base_url: Base URL for the service (e.g., "http://localhost:8000")
-        model: Model name to use for the request
-        prompt: User prompt for the chat completion
-        max_tokens: Maximum tokens to generate
-        temperature: Sampling temperature
-        timeout: Request timeout in seconds
-        endpoint: API endpoint path (default: "/v1/chat/completions")
-
-    Returns:
-        Response object from the API
-
-    Raises:
-        requests.RequestException: If the request fails
-    """
-    url = f"{base_url}{endpoint}"
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": False,
-    }
-
-    logger.info(f"Sending test request to {url} with model '{model}'")
-    response = send_request(url, payload, timeout=float(timeout), method="POST")
-    logger.info(f"Received response with status code {response.status_code}")
-
-    return response
 
 
 def validate_chat_response(
@@ -114,13 +69,11 @@ def validate_chat_response(
         f"Response: {response.text[:500]}"
     )
 
-    # Parse JSON
     try:
         data = response.json()
     except ValueError as e:
         pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
 
-    # Validate response structure
     assert "choices" in data, f"Response missing 'choices' field: {data}"
     assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
 
@@ -139,7 +92,6 @@ def validate_chat_response(
         f"Content: {content[:200]}"
     )
 
-    # Validate model name
     assert "model" in data, f"Response missing 'model' field: {data}"
     assert (
         data["model"] == expected_model
@@ -151,18 +103,6 @@ def validate_chat_response(
     )
 
     return data
-
-
-def _get_model_from_spec(deployment_spec: DeploymentSpec) -> Optional[str]:
-    """Extract model name from deployment spec.
-
-    Searches through services to find a service with a model configured.
-    """
-    for service in deployment_spec.services:
-        model = service.model
-        if model:
-            return model
-    return None
 
 
 @pytest.mark.k8s
@@ -196,8 +136,7 @@ async def test_deployment(
     framework = deployment_target.framework
     profile = deployment_target.profile
 
-    # Extract model name from deployment spec
-    model = _get_model_from_spec(deployment_spec)
+    model = next((s.model for s in deployment_spec.services if s.model), None)
     if not model:
         pytest.fail(
             f"Could not determine model name from deployment spec for "
@@ -253,14 +192,15 @@ async def test_deployment(
         ), f"Model '{model}' did not become available within the timeout period"
 
         # Send test request
-        response = send_test_request(
-            base_url=base_url,
-            model=model,
-            prompt=TEST_PROMPT,
-            max_tokens=DEFAULT_MAX_TOKENS,
-            temperature=DEFAULT_TEMPERATURE,
-            endpoint=endpoint,
-        )
+        url = f"{base_url}{endpoint}"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": TEST_PROMPT}],
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "temperature": DEFAULT_TEMPERATURE,
+            "stream": False,
+        }
+        response = send_request(url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST")
 
         # Validate response
         validate_chat_response(
