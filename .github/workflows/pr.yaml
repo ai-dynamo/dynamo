@@ -17,13 +17,13 @@ on:
         type: boolean
         default: false
 
-# concurrency:
-#     # The group name is a ternary operation. If the ref_name is 'main',
-#     # then the group name uses the run_id to ensure a unique group for
-#     # 'main' pushes. Otherwise, the group name is the ref_name, so that
-#     # workflows on the same PR/branch have the same group name for cancelling.
-#     group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-#     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+concurrency:
+    # The group name is a ternary operation. If the ref_name is 'main',
+    # then the group name uses the run_id to ensure a unique group for
+    # 'main' pushes. Otherwise, the group name is the ref_name, so that
+    # workflows on the same PR/branch have the same group name for cancelling.
+    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
+    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}${{ github.run_attempt }}
