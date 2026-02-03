@@ -512,26 +512,13 @@ async fn handle_worker_added(
 ) {
     tracing::info!("DISCOVERY: Worker {worker_id} added, dumping local indexer into router");
 
-    match recover_from_worker(worker_query_client, worker_id, None, None, kv_events_tx).await {
-        Ok(count) => {
-            tracing::info!(
-                "Successfully dumped worker {worker_id}'s local indexer, recovered {count} events"
-            );
+    let total_recovered = worker_query_client
+        .recover_all_dp_ranks(worker_id, kv_events_tx)
+        .await;
 
-            let total_recovered = worker_query_client
-                .recover_all_dp_ranks(worker_id, kv_events_tx)
-                .await;
-
-            if total_recovered > 0 {
-                tracing::info!(
-                    "DISCOVERY: Worker {worker_id} total recovered {total_recovered} events"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to dump worker {worker_id}'s local indexer: {e}");
-        }
-    }
+    tracing::info!(
+        "DISCOVERY: Worker {worker_id} recovered {total_recovered} events from local indexer"
+    );
 }
 
 /// Start a simplified background task for event consumption using the event plane.
