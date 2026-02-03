@@ -23,7 +23,6 @@ on:
         required: true
         type: boolean
       image_prefix:
-        default: 'remove-me' # TODO: Remove default before merging
         description: 'Prefix for image tags (nightly or main)'
         required: true
         type: string
@@ -73,8 +72,7 @@ defaults:
 
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
-  IMAGE_PREFIX: ${{ inputs.image_prefix }}
-
+  IMAGE_PREFIX: ${{ inputs.image_prefix || 'remove-me' }}  # TODO remove dummy value before merging
 ############################## BUILD JOBS ##############################
 
 jobs:
