@@ -14,21 +14,23 @@
 //! - `worker_blocks`: worker -> seq_hash -> (position, local_hash)
 //!   Per-worker reverse lookup for efficient remove operations.
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 use flume::unbounded;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
-    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent,
-    WorkerId, WorkerWithDpRank, TokensWithHashes, compute_seq_hash_for_block,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId,
+    WorkerWithDpRank, compute_seq_hash_for_block,
 };
 
-use crate::indexer::{KvIndexerInterface, KvRouterError, MatchRequest};
 use crate::compute_block_hash_for_seq;
+use crate::indexer::{KvIndexerInterface, KvRouterError, MatchRequest};
 
 /// Entry for the innermost level of the index.
 ///
@@ -153,11 +155,13 @@ impl SeqEntry {
     }
 }
 
-struct PositionalIndexer {
+type LevelIndex = DashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>;
+
+pub(crate) struct PositionalIndexer {
     index: Arc<DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>>,
     /// Per-worker reverse lookup: worker -> seq_hash -> (position, local_hash)
     /// Enables efficient remove operations without global flat reverse map.
-    worker_blocks: Arc<DashMap<WorkerWithDpRank, DashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>>>,
+    worker_blocks: Arc<DashMap<WorkerWithDpRank, LevelIndex>>,
 
     worker_assignments: Arc<DashMap<WorkerId, usize>>,
     worker_assignment_count: AtomicUsize,
@@ -172,6 +176,11 @@ struct PositionalIndexer {
     /// With weight=0.2 and 100 blocks, search starts at position 20.
     /// Lower values are better when expecting shorter prefix matches.
     search_weight: f64,
+
+    /// Cancellation token to signal worker threads to shut down.
+    cancel_token: CancellationToken,
+    /// Handles to worker threads for joining on shutdown.
+    thread_handles: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl PositionalIndexer {
@@ -193,6 +202,8 @@ impl PositionalIndexer {
         let index = Arc::new(DashMap::new());
         let worker_blocks = Arc::new(DashMap::new());
         let mut worker_event_senders = Vec::new();
+        let mut thread_handles = Vec::new();
+        let cancel_token = CancellationToken::new();
 
         let (worker_request_channel_tx, worker_request_channel_rx) = unbounded::<MatchRequest>();
 
@@ -202,9 +213,9 @@ impl PositionalIndexer {
 
             let worker_request_channel_rx = worker_request_channel_rx.clone();
             let index = Arc::clone(&index);
-            let search_weight = search_weight;
+            let cancel_token = cancel_token.clone();
 
-            std::thread::spawn(move || {
+            let handle = std::thread::spawn(move || {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -213,6 +224,10 @@ impl PositionalIndexer {
                         loop {
                             tokio::select! {
                                 biased;
+
+                                _ = cancel_token.cancelled() => {
+                                    break;
+                                }
 
                                 Ok(_event) = event_receiver.recv_async() => {
                                     // Event processing handled elsewhere
@@ -231,6 +246,7 @@ impl PositionalIndexer {
                         }
                     });
             });
+            thread_handles.push(handle);
         }
 
         Self {
@@ -243,6 +259,8 @@ impl PositionalIndexer {
             num_workers,
             kv_block_size,
             search_weight,
+            cancel_token,
+            thread_handles: Mutex::new(thread_handles),
         }
     }
 }
@@ -282,12 +300,10 @@ impl KvIndexerInterface for PositionalIndexer {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        let shard = self.worker_assignments.entry(event.worker_id).or_insert_with(|| {
-            let shard = self.worker_assignment_count.fetch_add(1, Ordering::Relaxed) % self.num_workers;
-            shard
-        });
-
-        self.worker_event_channels[*shard].send(event).unwrap();
+        // Process events synchronously since DashMap is thread-safe
+        if let Err(e) = self.apply_event_sync(event) {
+            tracing::warn!("Failed to apply event: {:?}", e);
+        }
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
@@ -295,7 +311,21 @@ impl KvIndexerInterface for PositionalIndexer {
     }
 
     fn shutdown(&self) {
-        unimplemented!()
+        // Signal all worker threads to stop
+        self.cancel_token.cancel();
+
+        // Take ownership of thread handles and join them
+        let handles = std::mem::take(
+            &mut *self
+                .thread_handles
+                .lock()
+                .expect("thread_handles mutex poisoned"),
+        );
+        for handle in handles {
+            if let Err(e) = handle.join() {
+                tracing::error!("Worker thread panicked during shutdown: {:?}", e);
+            }
+        }
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
@@ -304,8 +334,8 @@ impl KvIndexerInterface for PositionalIndexer {
 
     async fn process_routing_decision_for_request(
         &self,
-        tokens_with_hashes: &mut TokensWithHashes,
-        worker: WorkerWithDpRank,
+        _tokens_with_hashes: &mut TokensWithHashes,
+        _worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
         // TODO(jthomson04): Nothing to do here, right?
         Ok(())
@@ -319,7 +349,11 @@ impl PositionalIndexer {
 
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
-        tracing::trace!(id, "PositionalIndexer::apply_event_sync: operation: {:?}", op);
+        tracing::trace!(
+            id,
+            "PositionalIndexer::apply_event_sync: operation: {:?}",
+            op
+        );
 
         match op {
             KvCacheEventData::Stored(store_data) => {
@@ -365,14 +399,14 @@ impl PositionalIndexer {
                     let seq_hash = block_data.block_hash;
 
                     // Insert into index: position -> local_hash -> seq_hash -> worker
-                    let pos_map = self.index.entry(position).or_insert_with(DashMap::new);
+                    let pos_map = self.index.entry(position).or_default();
                     pos_map
                         .entry(local_hash)
                         .and_modify(|entry| entry.insert(seq_hash, worker))
                         .or_insert_with(|| SeqEntry::new(seq_hash, worker));
 
                     // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
-                    let worker_map = self.worker_blocks.entry(worker).or_insert_with(DashMap::new);
+                    let worker_map = self.worker_blocks.entry(worker).or_default();
                     worker_map.insert(seq_hash, (position, local_hash));
                 }
 
@@ -419,14 +453,13 @@ impl PositionalIndexer {
                     };
 
                     // Remove from index
-                    if let Some(pos_map) = self.index.get(&position) {
-                        if let Some(mut entry) = pos_map.get_mut(&local_hash) {
-                            if entry.remove(seq_hash, worker) {
-                                // Entry is empty, remove it
-                                drop(entry);
-                                pos_map.remove(&local_hash);
-                            }
-                        }
+                    if let Some(pos_map) = self.index.get(&position)
+                        && let Some(mut entry) = pos_map.get_mut(&local_hash)
+                        && entry.remove(seq_hash, worker)
+                    {
+                        // Entry is empty, remove it
+                        drop(entry);
+                        pos_map.remove(&local_hash);
                     }
                 }
 
@@ -468,14 +501,13 @@ impl PositionalIndexer {
                     let seq_hash = *entry.key();
                     let (position, local_hash) = *entry.value();
 
-                    if let Some(pos_map) = self.index.get(&position) {
-                        if let Some(mut seq_entry) = pos_map.get_mut(&local_hash) {
-                            if seq_entry.remove(seq_hash, worker) {
-                                // Entry is empty, remove it
-                                drop(seq_entry);
-                                pos_map.remove(&local_hash);
-                            }
-                        }
+                    if let Some(pos_map) = self.index.get(&position)
+                        && let Some(mut seq_entry) = pos_map.get_mut(&local_hash)
+                        && seq_entry.remove(seq_hash, worker)
+                    {
+                        // Entry is empty, remove it
+                        drop(seq_entry);
+                        pos_map.remove(&local_hash);
                     }
                 }
             }
@@ -676,11 +708,25 @@ impl PositionalIndexer {
         // Collect workers from all matching positions (0..boundary)
         if early_exit {
             // For early exit, just check position 0
-            Self::update_scores_at_position(index, 0, local_hashes[0], seq_hashes[0], &mut scores, false);
+            Self::update_scores_at_position(
+                index,
+                0,
+                local_hashes[0],
+                seq_hashes[0],
+                &mut scores,
+                false,
+            );
         } else {
             // Scan all matching positions
             for pos in 0..boundary {
-                Self::update_scores_at_position(index, pos, local_hashes[pos], seq_hashes[pos], &mut scores, true);
+                Self::update_scores_at_position(
+                    index,
+                    pos,
+                    local_hashes[pos],
+                    seq_hashes[pos],
+                    &mut scores,
+                    true,
+                );
             }
         }
 
