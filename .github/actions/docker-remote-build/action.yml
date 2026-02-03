@@ -275,7 +275,8 @@ runs:
         chmod +x .github/scripts/parse_buildkit_output.py
 
         # Check for build logs and build stage arguments dynamically
-        BUILD_LOG="build-logs/single-stage-build.log"
+        # Use the BUILD_LOG_FILE set during the build step, fallback to pattern-based path
+        BUILD_LOG="${BUILD_LOG_FILE:-build-logs/build-${{ inputs.framework }}-${PLATFORM_ARCH}.log}"
 
         # Path to container metadata created in previous step
         CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
