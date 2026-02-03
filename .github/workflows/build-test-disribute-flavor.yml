@@ -270,6 +270,7 @@ jobs:
           enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
+          dind_as_sidecar: 'true'
 
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
