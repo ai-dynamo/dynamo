@@ -21,7 +21,6 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from aiperf.dataset.synthesis import RollingHasher
-
 from prefix_data_generator.graph_utils import (
     CACHE_END,
     END_NODE,
