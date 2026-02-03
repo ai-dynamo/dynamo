@@ -1,14 +1,10 @@
 ## Inference Gateway Setup with Dynamo
 
-When integrating Dynamo with the Inference Gateway it is recommended to use the custom Dynamo EPP image.
+When integrating Dynamo with the Inference Gateway you must use the custom Dynamo EPP image.
 
-1. **Dynamo EPP (Recommended):** The custom Dynamo EPP image integrates the Dynamo router directly into the gateway's endpoint picker. Using the `dyn-kv` plugin, it selects the optimal worker based on KV cache state and tokenized prompt before routing the request. The integration moves intelligent routing upstream to the gateway layer.
+The custom Dynamo EPP image integrates the Dynamo router directly into the gateway's endpoint picker. Using the `dyn-kv` plugin, it selects the optimal worker based on KV cache state and tokenized prompt before routing the request. The integration moves intelligent routing upstream to the gateway layer.
 
-2. **Standard EPP (Fallback):** You can use the default GAIE EPP image, which treats the Dynamo deployment as a black box and routes requests round-robin. Routing intelligence remains within the Dynamo graph itself. Use this approach if you have a single Dynamo graph and don't need the custom EPP image.
-
-EPP’s default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
-
-The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
+EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving.
 If you want to use LoRA deploy Dynamo without the Inference Gateway or in the BlackBox approach with the Inference Gateway.
@@ -177,10 +173,8 @@ Do not forget docker registry secret if needed.
 ```bash
 cd deploy/inference-gateway/standalone
 
-# Export the Dynamo image you have used when deploying your model in Step 3.
-export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
-# Export the FrontEnd image tag provided by Dynamo (recommended) or build the Dynamo EPP image by following the commands later in this README.
-export EPP_IMAGE=<the-epp-image-you-built>
+# Export the EPP image - use the Dynamo FrontEnd image or build your own EPP image (see section 4)
+export EPP_IMAGE=<the-epp-image>
 ```
 
 ```bash
@@ -203,32 +197,22 @@ Key configurations include:
 
 
 **Configuration**
-You can configure the plugin by setting environment vars in your [values-dynamo-epp.yaml].
+You can configure the plugin by setting environment variables in the EPP component of your DGD in case of the operator-managed installation or in your [values.yaml](standalone/helm/dynamo-gaie/values.yaml).
 
-- Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
-- Set `DYNAMO_BUSY_THRESHOLD` to configure the upper bound on how “full” a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYNAMO_ENFORCE_DISAGG=true` if you want to enforce every request being served in the disaggregated manner. By default it is false meaning if the the prefill worker is not available the request will be served in the aggregated manner.
-- By default the Dynamo plugin uses KV routing. You can expose `DYNAMO_USE_KV_ROUTING=false`  in your [values-dynamo-epp.yaml] if you prefer to route in the round-robin fashion.
+Common Vars for Routing Configuration:
+- Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
+- Set `DYN_ENFORCE_DISAGG=true` if you want to enforce every request being served in the disaggregated manner. By default it is false meaning if the the prefill worker is not available the request will be served in the aggregated manner.
+- By default the Dynamo plugin uses KV routing. You can expose `DYN_USE_KV_ROUTING=false` in your [values.yaml](standalone/helm/dynamo-gaie/values.yaml) if you prefer to route in the round-robin fashion.
 - If using kv-routing:
-  - Overwrite the `DYN_KV_BLOCK_SIZE` in your [values-dynamo-epp.yaml](./values-dynamo-epp.yaml) to match your model's block size.The `DYN_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
-  - Set `DYNAMO_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
-  - Set `DYNAMO_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-  - Set `DYNAMO_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing
+  - Overwrite the `DYN_KV_BLOCK_SIZE` in your [values.yaml](standalone/helm/dynamo-gaie/values.yaml) to match your model's block size. The `DYN_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
+  - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
+  - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
+  - Set `DYN_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing
   - See the [KV cache routing design](../../docs/router/kv_cache_routing.md) for details.
 
 
-**Note**
-You can also use the standard EPP image i.e. `us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v1.2.1` for the basic black box integration.
-
-```bash
-cd deploy/inference-gateway
-helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
-
-# Optionally export the standard EPP image if you do not want to use the default we suggest.
-export EPP_IMAGE=us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
-helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set epp.useDynamo=false --set-string extension.image=$EPP_IMAGE
-# Optionally overwrite the image --set-string extension.image=$EPP_IMAGE
-```
+Stand-Alone installation only:
+- Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
 
 ### 6. Verify Installation ###
 

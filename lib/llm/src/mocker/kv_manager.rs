@@ -91,7 +91,7 @@ impl KvManager {
                 "Initializing KV event publisher for DP rank {dp_rank} with block_size {block_size}, enable_local_indexer={enable_local_indexer}"
             );
             Arc::new(
-                KvEventPublisher::new_with_local_indexer(comp, block_size as u32, None, enable_local_indexer)
+                KvEventPublisher::new_with_local_indexer(comp, block_size as u32, None, enable_local_indexer, dp_rank)
                     .expect("Failed to create KV event publisher"),
             )
         });

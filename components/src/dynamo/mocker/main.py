@@ -16,7 +16,7 @@ import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
-from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
+from dynamo.llm import EngineType, EntrypointArgs, fetch_llm, make_engine, run_input
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -35,6 +35,24 @@ async def graceful_shutdown(runtimes: list):
     for runtime in runtimes:
         runtime.shutdown()
     logger.info("DistributedRuntime shutdown complete")
+
+
+async def prefetch_model(model_path: str) -> None:
+    """Pre-fetch model from HuggingFace to avoid rate limiting with many workers."""
+
+    if Path(model_path).exists():
+        logger.info(f"Using local model path: {model_path}")
+        return
+
+    logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
+    try:
+        local_path = await fetch_llm(model_path, ignore_weights=True)
+        logger.info(f"Model cached at: {local_path}")
+    except Exception as e:
+        logger.warning(
+            f"Failed to pre-fetch model: {e}. "
+            "Workers will attempt individual downloads (may cause rate limiting)."
+        )
 
 
 async def worker():
@@ -59,6 +77,10 @@ async def worker():
         extra_engine_args_path = create_temp_engine_args_file(args)
         logger.info("Created MockEngineArgs from CLI arguments")
 
+    # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
+    if args.num_workers > 1 and args.model_path:
+        await prefetch_model(args.model_path)
+
     try:
         logger.info(
             f"Launching {args.num_workers} mocker worker(s) with isolated DistributedRuntime instances"
@@ -76,6 +98,28 @@ async def worker():
         del profile_data_result  # Triggers tmpdir cleanup via __del__
 
 
+def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
+    """Compute the stagger delay based on worker count to give the frontend time to process registrations.
+    Returns the delay in seconds between worker launches.
+    """
+    if stagger_delay >= 0:
+        return stagger_delay
+
+    if stagger_delay != -1:
+        raise ValueError(
+            f"Invalid --stagger-delay value: {stagger_delay}. "
+            "Use -1 for auto mode, 0 to disable, or a positive value for explicit delay."
+        )
+
+    # Auto mode: stagger based on worker count
+    if num_workers <= 32:
+        return 0.0
+    elif num_workers <= 128:
+        return 0.1
+    else:
+        return 0.2
+
+
 async def launch_workers(args, extra_engine_args_path):
     """Launch mocker worker(s) with isolated DistributedRuntime instances.
 
@@ -89,6 +133,21 @@ async def launch_workers(args, extra_engine_args_path):
     futures = []
     runtimes = []
     per_worker_temp_files: list[Path] = []
+
+    stagger_delay = compute_stagger_delay(args.num_workers, args.stagger_delay)
+    batch_size = 32
+    batch_pause = 2.0
+
+    if stagger_delay > 0:
+        total_time = (args.num_workers - 1) * stagger_delay
+        if args.num_workers > batch_size:
+            num_batches = (args.num_workers + batch_size - 1) // batch_size
+            total_time += batch_pause * (num_batches - 1)
+        logger.info(
+            f"Staggering {args.num_workers} worker launches: "
+            f"{stagger_delay}s between workers, {batch_pause}s pause every {batch_size} workers "
+            f"(estimated total: {total_time:.1f}s)"
+        )
 
     # Load base engine args if we need to create per-worker files with bootstrap_port
     base_engine_args = None
@@ -136,6 +195,17 @@ async def launch_workers(args, extra_engine_args_path):
         # run_input returns a Rust Future (not a Python coroutine)
         future = run_input(runtime, args.endpoint, engine_config)
         futures.append(future)
+
+        # Stagger worker launches for large deployments
+        if stagger_delay > 0 and worker_id < args.num_workers - 1:
+            await asyncio.sleep(stagger_delay)
+            # Add extra pause between batches to let frontend catch up
+            if (worker_id + 1) % batch_size == 0:
+                logger.info(
+                    f"Batch {(worker_id + 1) // batch_size} complete, "
+                    f"pausing {batch_pause}s for frontend to process..."
+                )
+                await asyncio.sleep(batch_pause)
 
     logger.info(f"All {args.num_workers} mocker worker(s) created and running")
 
