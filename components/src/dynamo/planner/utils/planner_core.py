@@ -887,7 +887,6 @@ async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespac
             "Please specify the namespace where GlobalPlanner is running."
         )
 
-    planner = Planner(runtime, args)
     mode = getattr(args, "mode", "disagg")
     if mode == "disagg":
         planner = DisaggPlanner(runtime, args)
