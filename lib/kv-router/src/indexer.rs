@@ -32,6 +32,7 @@
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 #[cfg(feature = "metrics")]
 pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 #[cfg(feature = "metrics")]
@@ -64,7 +65,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::approx::{BlockEntry, PruneConfig, PruneManager};
-use crate::nested_map::NestedMap;
+// use crate::nested_map::NestedMap;
 use crate::protocols::*;
 pub use crate::radix_tree::RadixTree;
 use dynamo_tokens::SequenceHash;
@@ -82,83 +83,83 @@ use dynamo_tokens::SequenceHash;
 /// - `get_workers`: Get all tracked workers
 /// - `dump_tree_as_events`: Dump state as events
 /// - `current_size`: Get total (worker, block) pairs
-pub enum KvIndex {
-    Tree(RadixTree),
-    Flat(NestedMap),
-}
+// pub enum KvIndex {
+//     Tree(RadixTree),
+//     Flat(NestedMap),
+// }
 
-impl KvIndex {
-    /// Create a new KvIndex using RadixTree.
-    pub fn new_tree() -> Self {
-        KvIndex::Tree(RadixTree::new())
-    }
+// impl KvIndex {
+//     /// Create a new KvIndex using RadixTree.
+//     pub fn new_tree() -> Self {
+//         KvIndex::Tree(RadixTree::new())
+//     }
 
-    /// Create a new KvIndex using RadixTree with frequency tracking.
-    pub fn new_tree_with_frequency(expiration_duration: Option<std::time::Duration>) -> Self {
-        KvIndex::Tree(RadixTree::new_with_frequency(expiration_duration))
-    }
+//     /// Create a new KvIndex using RadixTree with frequency tracking.
+//     pub fn new_tree_with_frequency(expiration_duration: Option<std::time::Duration>) -> Self {
+//         KvIndex::Tree(RadixTree::new_with_frequency(expiration_duration))
+//     }
 
-    /// Create a new KvIndex using NestedMap.
-    pub fn new_flat() -> Self {
-        KvIndex::Flat(NestedMap::new())
-    }
+//     /// Create a new KvIndex using NestedMap.
+//     pub fn new_flat() -> Self {
+//         KvIndex::Flat(NestedMap::new())
+//     }
 
-    /// Find matches for a sequence of local block hashes.
-    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
-        match self {
-            KvIndex::Tree(tree) => tree.find_matches(sequence, early_exit),
-            KvIndex::Flat(map) => map.find_matches(sequence, early_exit),
-        }
-    }
+//     /// Find matches for a sequence of local block hashes.
+//     pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
+//         match self {
+//             KvIndex::Tree(tree) => tree.find_matches(sequence, early_exit),
+//             KvIndex::Flat(map) => map.find_matches(sequence, early_exit),
+//         }
+//     }
 
-    /// Apply a RouterEvent to the index.
-    pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
-        match self {
-            KvIndex::Tree(tree) => tree.apply_event(event),
-            KvIndex::Flat(map) => map.apply_event(event),
-        }
-    }
+//     /// Apply a RouterEvent to the index.
+//     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+//         match self {
+//             KvIndex::Tree(tree) => tree.apply_event(event),
+//             KvIndex::Flat(map) => map.apply_event(event),
+//         }
+//     }
 
-    /// Remove a worker and all their blocks from the index.
-    pub fn remove_worker(&mut self, worker_id: WorkerId) {
-        match self {
-            KvIndex::Tree(tree) => tree.remove_worker(worker_id),
-            KvIndex::Flat(map) => map.remove_worker(worker_id),
-        }
-    }
+//     /// Remove a worker and all their blocks from the index.
+//     pub fn remove_worker(&mut self, worker_id: WorkerId) {
+//         match self {
+//             KvIndex::Tree(tree) => tree.remove_worker(worker_id),
+//             KvIndex::Flat(map) => map.remove_worker(worker_id),
+//         }
+//     }
 
-    /// Clear all blocks for a worker but keep the worker tracked.
-    pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
-        match self {
-            KvIndex::Tree(tree) => tree.clear_all_blocks(worker_id),
-            KvIndex::Flat(map) => map.clear_all_blocks(worker_id),
-        }
-    }
+//     /// Clear all blocks for a worker but keep the worker tracked.
+//     pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
+//         match self {
+//             KvIndex::Tree(tree) => tree.clear_all_blocks(worker_id),
+//             KvIndex::Flat(map) => map.clear_all_blocks(worker_id),
+//         }
+//     }
 
-    /// Get all worker IDs currently tracked.
-    pub fn get_workers(&self) -> Vec<WorkerId> {
-        match self {
-            KvIndex::Tree(tree) => tree.get_workers(),
-            KvIndex::Flat(map) => map.get_workers(),
-        }
-    }
+//     /// Get all worker IDs currently tracked.
+//     pub fn get_workers(&self) -> Vec<WorkerId> {
+//         match self {
+//             KvIndex::Tree(tree) => tree.get_workers(),
+//             KvIndex::Flat(map) => map.get_workers(),
+//         }
+//     }
 
-    /// Dump the index as a series of RouterEvents.
-    pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
-        match self {
-            KvIndex::Tree(tree) => tree.dump_tree_as_events(),
-            KvIndex::Flat(map) => map.dump_tree_as_events(),
-        }
-    }
+//     /// Dump the index as a series of RouterEvents.
+//     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+//         match self {
+//             KvIndex::Tree(tree) => tree.dump_tree_as_events(),
+//             KvIndex::Flat(map) => map.dump_tree_as_events(),
+//         }
+//     }
 
-    /// Returns the total number of (worker, block) pairs stored.
-    pub fn current_size(&self) -> usize {
-        match self {
-            KvIndex::Tree(tree) => tree.current_size(),
-            KvIndex::Flat(map) => map.current_size(),
-        }
-    }
-}
+//     /// Returns the total number of (worker, block) pairs stored.
+//     pub fn current_size(&self) -> usize {
+//         match self {
+//             KvIndex::Tree(tree) => tree.current_size(),
+//             KvIndex::Flat(map) => map.current_size(),
+//         }
+//     }
+// }
 
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
@@ -327,11 +328,11 @@ impl KvIndexerMetrics {
 /// A request to find matches in the Radix Tree.
 pub struct MatchRequest {
     /// A vector of `LocalBlockHash` representing the sequence to match.
-    sequence: Vec<LocalBlockHash>,
+    pub sequence: Vec<LocalBlockHash>,
     /// A boolean indicating whether to exit early if a single match is found.
-    early_exit: bool,
+    pub early_exit: bool,
     /// A channel sender to send the `OverlapScores` response.
-    resp: oneshot::Sender<OverlapScores>,
+    pub resp: oneshot::Sender<OverlapScores>,
 }
 
 /// A request to dump the tree as events
@@ -381,17 +382,17 @@ pub trait KvIndexerInterface {
     /// ### Arguments
     ///
     /// * `event` - The `RouterEvent` to apply.
-    async fn apply_event(&mut self, event: RouterEvent);
+    async fn apply_event(&self, event: RouterEvent);
 
     /// Remove a worker's entries from the trie.
     ///
     /// ### Arguments
     ///
     /// * `worker` - The worker to remove from the trie.
-    async fn remove_worker(&mut self, worker: WorkerId);
+    async fn remove_worker(&self, worker: WorkerId);
 
     /// Shutdown the KV Indexer.
-    fn shutdown(&mut self);
+    fn shutdown(&self);
 
     /// Dump the entire tree as RouterEvents.
     ///
@@ -773,15 +774,15 @@ impl KvIndexerInterface for KvIndexer {
         self.find_matches(sequence).await
     }
 
-    async fn apply_event(&mut self, event: RouterEvent) {
+    async fn apply_event(&self, event: RouterEvent) {
         self.event_tx.send(event).await.unwrap();
     }
 
-    async fn remove_worker(&mut self, worker: WorkerId) {
+    async fn remove_worker(&self, worker: WorkerId) {
         self.remove_worker_tx.send(worker).await.unwrap();
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&self) {
         self.cancel.cancel();
     }
 
@@ -1091,16 +1092,16 @@ impl KvIndexerInterface for LocalKvIndexer {
         self.indexer.find_matches_for_request(tokens).await
     }
 
-    async fn apply_event(&mut self, event: RouterEvent) {
+    async fn apply_event(&self, event: RouterEvent) {
         // Use the buffering version
         let _ = self.apply_event_with_buffer(event).await;
     }
 
-    async fn remove_worker(&mut self, worker: WorkerId) {
+    async fn remove_worker(&self, worker: WorkerId) {
         let _ = self.indexer.remove_worker_sender().send(worker).await;
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&self) {
         // Note: Since indexer is Arc<KvIndexer>, we can't call mutable methods directly.
         // The indexer will be shut down when the CancellationToken is cancelled
         // or when the last Arc reference is dropped.
@@ -1149,15 +1150,15 @@ pub struct KvIndexerSharded {
     cancel: CancellationToken,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
-    worker_assignments: HashMap<WorkerId, usize>,
-    worker_counts: Vec<usize>,
+    worker_assignments: DashMap<WorkerId, usize>,
+    worker_counts: Arc<Mutex<Vec<usize>>>,
 
     event_tx: Vec<mpsc::Sender<RouterEvent>>,
     request_broadcast_tx: broadcast::Sender<ShardedMatchRequest>,
     remove_worker_tx: Vec<mpsc::Sender<WorkerId>>,
     dump_tx: Vec<mpsc::Sender<DumpRequest>>,
     routing_tx: Vec<mpsc::Sender<RoutingDecisionRequest>>,
-    tasks: Vec<JoinHandle<()>>,
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl KvIndexerSharded {
@@ -1182,15 +1183,15 @@ impl KvIndexerSharded {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
-        let worker_assignments: HashMap<WorkerId, usize> = HashMap::new();
-        let worker_counts: Vec<usize> = vec![0; num_shards];
+        let worker_assignments = DashMap::new();
+        let worker_counts = Arc::new(Mutex::new(vec![0; num_shards]));
 
         let mut event_tx = Vec::new();
         let mut remove_worker_tx = Vec::new();
         let mut get_workers_tx = Vec::new();
         let mut dump_tx = Vec::new();
         let mut routing_tx = Vec::new();
-        let mut tasks = Vec::new();
+        let tasks = Arc::new(Mutex::new(Vec::new()));
 
         let (request_broadcast_tx, _) = broadcast::channel::<ShardedMatchRequest>(1048576);
 
@@ -1220,7 +1221,7 @@ impl KvIndexerSharded {
                 .build()
                 .unwrap();
 
-            tasks.push(std::thread::spawn(move || {
+            tasks.lock().unwrap().push(std::thread::spawn(move || {
                 runtime.block_on(async move {
                     let mut trie = RadixTree::new_with_frequency(expiration_duration);
 
@@ -1491,41 +1492,42 @@ impl KvIndexerInterface for KvIndexerSharded {
         self.find_matches(sequence).await
     }
 
-    async fn apply_event(&mut self, event: RouterEvent) {
-        #[allow(clippy::map_entry)]
-        if !self.worker_assignments.contains_key(&event.worker_id) {
+    async fn apply_event(&self, event: RouterEvent) {
+        let shard = self.worker_assignments.entry(event.worker_id).or_insert_with(|| {
             // Get the shard with the smallest amount of workers.
-            let selected_shard = self
-                .worker_counts
+            let worker_counts = self.worker_counts.lock().unwrap();
+            let selected_shard = worker_counts
                 .iter()
                 .enumerate()
                 .min_by_key(|&(_, value)| value)
                 .unwrap()
                 .0;
+            drop(worker_counts);
 
-            self.worker_assignments
-                .insert(event.worker_id, selected_shard);
-            self.worker_counts[selected_shard] += 1;
-        }
+            // Increment the count for this shard
+            self.worker_counts.lock().unwrap()[selected_shard] += 1;
+            selected_shard
+        });
 
-        self.event_tx[self.worker_assignments[&event.worker_id]]
+        self.event_tx[*shard]
             .send(event)
             .await
             .unwrap();
     }
 
-    async fn remove_worker(&mut self, worker: WorkerId) {
-        if let Some((_, shard)) = self.worker_assignments.remove_entry(&worker) {
-            self.worker_counts[shard] -= 1;
+    async fn remove_worker(&self, worker: WorkerId) {
+        if let Some((_, shard)) = self.worker_assignments.remove(&worker) {
+            self.worker_counts.lock().unwrap()[shard] -= 1;
             self.remove_worker_tx[shard].send(worker).await.unwrap();
         }
     }
 
     /// Shutdown the KV Indexer.
-    fn shutdown(&mut self) {
+    fn shutdown(&self) {
         self.cancel.cancel();
-        while !self.tasks.is_empty() {
-            self.tasks.pop().unwrap().join().unwrap();
+        let mut tasks = self.tasks.lock().unwrap();
+        while !tasks.is_empty() {
+            tasks.pop().unwrap().join().unwrap();
         }
     }
 
@@ -1582,9 +1584,7 @@ impl KvIndexerSharded {
         // Route to the appropriate shard based on worker assignment
         let shard_idx = self
             .worker_assignments
-            .get(&worker.worker_id)
-            .copied()
-            .unwrap_or(0);
+            .get(&worker.worker_id).map(|shard_idx| *shard_idx).unwrap_or_default();
 
         self.routing_tx[shard_idx]
             .send(RoutingDecisionRequest {
@@ -2380,306 +2380,306 @@ mod tests {
     }
 }
 
-/// Tests for KvIndex enum (parametrized over RadixTree and NestedMap variants).
-#[cfg(test)]
-mod kv_index_tests {
-    use super::*;
-    use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash, compute_seq_hash_for_block};
-    use rstest::rstest;
-    use rstest_reuse::{self, *};
+// /// Tests for KvIndex enum (parametrized over RadixTree and NestedMap variants).
+// #[cfg(test)]
+// mod kv_index_tests {
+//     use super::*;
+//     use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash, compute_seq_hash_for_block};
+//     use rstest::rstest;
+//     use rstest_reuse::{self, *};
 
-    /// Create a store event with proper sequence hashes computed from local hashes.
-    fn make_store_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
-        let local_block_hashes: Vec<LocalBlockHash> =
-            local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-        let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
+//     /// Create a store event with proper sequence hashes computed from local hashes.
+//     fn make_store_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
+//         let local_block_hashes: Vec<LocalBlockHash> =
+//             local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
+//         let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
-        RouterEvent {
-            worker_id,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: local_block_hashes
-                        .iter()
-                        .zip(seq_hashes.iter())
-                        .map(|(&local, &seq)| KvCacheStoredBlockData {
-                            tokens_hash: local,
-                            block_hash: ExternalSequenceBlockHash(seq),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        }
-    }
+//         RouterEvent {
+//             worker_id,
+//             event: KvCacheEvent {
+//                 event_id: 0,
+//                 data: KvCacheEventData::Stored(KvCacheStoreData {
+//                     parent_hash: None,
+//                     blocks: local_block_hashes
+//                         .iter()
+//                         .zip(seq_hashes.iter())
+//                         .map(|(&local, &seq)| KvCacheStoredBlockData {
+//                             tokens_hash: local,
+//                             block_hash: ExternalSequenceBlockHash(seq),
+//                             mm_extra_info: None,
+//                         })
+//                         .collect(),
+//                 }),
+//                 dp_rank: 0,
+//             },
+//         }
+//     }
 
-    /// Create a remove event for blocks with given local hashes.
-    fn make_remove_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
-        let local_block_hashes: Vec<LocalBlockHash> =
-            local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-        let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
+//     /// Create a remove event for blocks with given local hashes.
+//     fn make_remove_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
+//         let local_block_hashes: Vec<LocalBlockHash> =
+//             local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
+//         let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
-        RouterEvent {
-            worker_id,
-            event: KvCacheEvent {
-                event_id: 0,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: seq_hashes
-                        .iter()
-                        .map(|&h| ExternalSequenceBlockHash(h))
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        }
-    }
+//         RouterEvent {
+//             worker_id,
+//             event: KvCacheEvent {
+//                 event_id: 0,
+//                 data: KvCacheEventData::Removed(KvCacheRemoveData {
+//                     block_hashes: seq_hashes
+//                         .iter()
+//                         .map(|&h| ExternalSequenceBlockHash(h))
+//                         .collect(),
+//                 }),
+//                 dp_rank: 0,
+//             },
+//         }
+//     }
 
-    #[template]
-    #[rstest]
-    fn kv_index_template(#[values("tree", "flat")] variant: &str) {}
+//     #[template]
+//     #[rstest]
+//     fn kv_index_template(#[values("tree", "flat")] variant: &str) {}
 
-    fn make_kv_index(variant: &str) -> KvIndex {
-        match variant {
-            "tree" => KvIndex::new_tree(),
-            "flat" => KvIndex::new_flat(),
-            _ => panic!("Unknown variant: {}", variant),
-        }
-    }
+//     fn make_kv_index(variant: &str) -> KvIndex {
+//         match variant {
+//             "tree" => KvIndex::new_tree(),
+//             "flat" => KvIndex::new_flat(),
+//             _ => panic!("Unknown variant: {}", variant),
+//         }
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_store_and_find(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_store_and_find(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        // Store a sequence for worker 0
-        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+//         // Store a sequence for worker 0
+//         index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
 
-        assert_eq!(index.current_size(), 3);
+//         assert_eq!(index.current_size(), 3);
 
-        // Find matches using local hashes
-        let scores = index.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert_eq!(scores.scores.len(), 1);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
-    }
+//         // Find matches using local hashes
+//         let scores = index.find_matches(
+//             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+//             false,
+//         );
+//         assert_eq!(scores.scores.len(), 1);
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_partial_match(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_partial_match(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        // Store [1, 2, 3] for worker 0
-        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+//         // Store [1, 2, 3] for worker 0
+//         index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
 
-        // Find matches for [1, 2, 999] - should match first 2 then stop
-        let scores = index.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(999)],
-            false,
-        );
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
-    }
+//         // Find matches for [1, 2, 999] - should match first 2 then stop
+//         let scores = index.find_matches(
+//             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(999)],
+//             false,
+//         );
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_remove(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_remove(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        // Store sequence for worker 0
-        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
-        assert_eq!(index.current_size(), 3);
+//         // Store sequence for worker 0
+//         index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+//         assert_eq!(index.current_size(), 3);
 
-        // Remove all blocks
-        index.apply_event(make_remove_event(0, &[1, 2, 3])).unwrap();
-        assert_eq!(index.current_size(), 0);
+//         // Remove all blocks
+//         index.apply_event(make_remove_event(0, &[1, 2, 3])).unwrap();
+//         assert_eq!(index.current_size(), 0);
 
-        // Find should return nothing
-        let scores = index.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert!(scores.scores.is_empty());
-    }
+//         // Find should return nothing
+//         let scores = index.find_matches(
+//             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+//             false,
+//         );
+//         assert!(scores.scores.is_empty());
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_multiple_workers_shared_prefix(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_multiple_workers_shared_prefix(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        // Worker 0 has [1, 2], Worker 1 has [1, 3]
-        // Since sequence hashes are cumulative, [1] has same hash for both,
-        // but [1, 2] and [1, 3] have different hashes.
-        index.apply_event(make_store_event(0, &[1, 2])).unwrap();
-        index.apply_event(make_store_event(1, &[1, 3])).unwrap();
+//         // Worker 0 has [1, 2], Worker 1 has [1, 3]
+//         // Since sequence hashes are cumulative, [1] has same hash for both,
+//         // but [1, 2] and [1, 3] have different hashes.
+//         index.apply_event(make_store_event(0, &[1, 2])).unwrap();
+//         index.apply_event(make_store_event(1, &[1, 3])).unwrap();
 
-        // Query [1] - both workers should match
-        let scores = index.find_matches(vec![LocalBlockHash(1)], false);
-        assert_eq!(scores.scores.len(), 2);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 1);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+//         // Query [1] - both workers should match
+//         let scores = index.find_matches(vec![LocalBlockHash(1)], false);
+//         assert_eq!(scores.scores.len(), 2);
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 1);
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
 
-        // Query [1, 2] - worker 0 matches both, worker 1 matches only first block
-        let scores = index.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
-        assert_eq!(scores.scores.len(), 2);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
-    }
+//         // Query [1, 2] - worker 0 matches both, worker 1 matches only first block
+//         let scores = index.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+//         assert_eq!(scores.scores.len(), 2);
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_remove_worker(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_remove_worker(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
-        index.apply_event(make_store_event(1, &[1, 2, 3])).unwrap();
-        assert_eq!(index.current_size(), 6);
+//         index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+//         index.apply_event(make_store_event(1, &[1, 2, 3])).unwrap();
+//         assert_eq!(index.current_size(), 6);
 
-        index.remove_worker(0);
-        assert_eq!(index.current_size(), 3);
+//         index.remove_worker(0);
+//         assert_eq!(index.current_size(), 3);
 
-        let scores = index.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert_eq!(scores.scores.len(), 1);
-        assert!(scores.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
-    }
+//         let scores = index.find_matches(
+//             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+//             false,
+//         );
+//         assert_eq!(scores.scores.len(), 1);
+//         assert!(scores.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_get_workers(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_get_workers(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        index.apply_event(make_store_event(0, &[1])).unwrap();
-        index.apply_event(make_store_event(2, &[1])).unwrap();
-        index.apply_event(make_store_event(1, &[1])).unwrap();
+//         index.apply_event(make_store_event(0, &[1])).unwrap();
+//         index.apply_event(make_store_event(2, &[1])).unwrap();
+//         index.apply_event(make_store_event(1, &[1])).unwrap();
 
-        let workers = index.get_workers();
-        assert_eq!(workers, vec![0, 1, 2]);
-    }
+//         let workers = index.get_workers();
+//         assert_eq!(workers, vec![0, 1, 2]);
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_early_exit(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_early_exit(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        // Worker 0 has [0, 1, 2], Worker 1 has [0] only
-        index.apply_event(make_store_event(0, &[0, 1, 2])).unwrap();
-        index.apply_event(make_store_event(1, &[0])).unwrap();
+//         // Worker 0 has [0, 1, 2], Worker 1 has [0] only
+//         index.apply_event(make_store_event(0, &[0, 1, 2])).unwrap();
+//         index.apply_event(make_store_event(1, &[0])).unwrap();
 
-        // Query [0, 1, 2] with early_exit=true
-        // Should stop after [0, 1] since only worker 0 has block 1
-        let scores = index.find_matches(
-            vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(2)],
-            true,
-        );
+//         // Query [0, 1, 2] with early_exit=true
+//         // Should stop after [0, 1] since only worker 0 has block 1
+//         let scores = index.find_matches(
+//             vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(2)],
+//             true,
+//         );
 
-        // Both workers should appear in results
-        assert_eq!(scores.scores.len(), 2);
-        // Worker 0 got 2 points (blocks 0 and 1, stopped early)
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
-        // Worker 1 got 1 point (block 0 only)
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+//         // Both workers should appear in results
+//         assert_eq!(scores.scores.len(), 2);
+//         // Worker 0 got 2 points (blocks 0 and 1, stopped early)
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+//         // Worker 1 got 1 point (block 0 only)
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
 
-        // Without early_exit, worker 0 should get all 3 blocks
-        let scores = index.find_matches(
-            vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(2)],
-            false,
-        );
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
-    }
+//         // Without early_exit, worker 0 should get all 3 blocks
+//         let scores = index.find_matches(
+//             vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(2)],
+//             false,
+//         );
+//         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_large_stores(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_large_stores(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        // Test sequences of increasing sizes
-        for i in 0..10 {
-            let len = 1 << i; // 1, 2, 4, 8, ..., 512
-            let worker_id = i;
-            let sequence: Vec<u64> = (1..=len).map(|x| x + (i * 10000)).collect();
-            index
-                .apply_event(make_store_event(worker_id, &sequence))
-                .unwrap();
-            assert!(index.current_size() > 0);
-        }
-    }
+//         // Test sequences of increasing sizes
+//         for i in 0..10 {
+//             let len = 1 << i; // 1, 2, 4, 8, ..., 512
+//             let worker_id = i;
+//             let sequence: Vec<u64> = (1..=len).map(|x| x + (i * 10000)).collect();
+//             index
+//                 .apply_event(make_store_event(worker_id, &sequence))
+//                 .unwrap();
+//             assert!(index.current_size() > 0);
+//         }
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_dump_and_restore(variant: &str) {
-        // Skip for flat variant - dump_tree_as_events not implemented
-        if variant == "flat" {
-            return;
-        }
+//     #[apply(kv_index_template)]
+//     fn test_dump_and_restore(variant: &str) {
+//         // Skip for flat variant - dump_tree_as_events not implemented
+//         if variant == "flat" {
+//             return;
+//         }
 
-        let mut index = make_kv_index(variant);
+//         let mut index = make_kv_index(variant);
 
-        // Store some data
-        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
-        index.apply_event(make_store_event(1, &[1, 2, 4])).unwrap();
+//         // Store some data
+//         index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+//         index.apply_event(make_store_event(1, &[1, 2, 4])).unwrap();
 
-        let original_size = index.current_size();
-        let workers_before = index.get_workers();
+//         let original_size = index.current_size();
+//         let workers_before = index.get_workers();
 
-        // Dump the tree as events
-        let events = index.dump_tree_as_events();
-        assert!(!events.is_empty());
+//         // Dump the tree as events
+//         let events = index.dump_tree_as_events();
+//         assert!(!events.is_empty());
 
-        // Create a new index and replay events
-        let mut restored = make_kv_index(variant);
-        for event in events {
-            let _ = restored.apply_event(event);
-        }
+//         // Create a new index and replay events
+//         let mut restored = make_kv_index(variant);
+//         for event in events {
+//             let _ = restored.apply_event(event);
+//         }
 
-        // Verify the restored index has same size and workers
-        assert_eq!(restored.current_size(), original_size);
-        assert_eq!(restored.get_workers(), workers_before);
+//         // Verify the restored index has same size and workers
+//         assert_eq!(restored.current_size(), original_size);
+//         assert_eq!(restored.get_workers(), workers_before);
 
-        // Verify find_matches produces same results
-        let original_scores = index.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
-        let restored_scores =
-            restored.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
-        assert_eq!(original_scores.scores, restored_scores.scores);
-    }
+//         // Verify find_matches produces same results
+//         let original_scores = index.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+//         let restored_scores =
+//             restored.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+//         assert_eq!(original_scores.scores, restored_scores.scores);
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_clear_all_blocks(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_clear_all_blocks(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        // Store some data for two workers
-        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
-        index.apply_event(make_store_event(1, &[1, 2, 3])).unwrap();
-        assert_eq!(index.current_size(), 6);
+//         // Store some data for two workers
+//         index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+//         index.apply_event(make_store_event(1, &[1, 2, 3])).unwrap();
+//         assert_eq!(index.current_size(), 6);
 
-        // Clear worker 0's blocks
-        index.clear_all_blocks(0);
+//         // Clear worker 0's blocks
+//         index.clear_all_blocks(0);
 
-        // Worker 0's blocks should be gone, worker 1's remain
-        assert_eq!(index.current_size(), 3);
+//         // Worker 0's blocks should be gone, worker 1's remain
+//         assert_eq!(index.current_size(), 3);
 
-        let scores = index.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert_eq!(scores.scores.len(), 1);
-        assert!(scores.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
-    }
+//         let scores = index.find_matches(
+//             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+//             false,
+//         );
+//         assert_eq!(scores.scores.len(), 1);
+//         assert!(scores.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_empty_query(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_empty_query(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+//         index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
 
-        // Empty query should return empty scores
-        let scores = index.find_matches(vec![], false);
-        assert!(scores.scores.is_empty());
-    }
+//         // Empty query should return empty scores
+//         let scores = index.find_matches(vec![], false);
+//         assert!(scores.scores.is_empty());
+//     }
 
-    #[apply(kv_index_template)]
-    fn test_miss_query(variant: &str) {
-        let mut index = make_kv_index(variant);
+//     #[apply(kv_index_template)]
+//     fn test_miss_query(variant: &str) {
+//         let mut index = make_kv_index(variant);
 
-        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+//         index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
 
-        // Query for non-existent blocks
-        let scores = index.find_matches(vec![LocalBlockHash(999), LocalBlockHash(998)], false);
-        assert!(scores.scores.is_empty());
-    }
-}
+//         // Query for non-existent blocks
+//         let scores = index.find_matches(vec![LocalBlockHash(999), LocalBlockHash(998)], false);
+//         assert!(scores.scores.is_empty());
+//     }
+// }
