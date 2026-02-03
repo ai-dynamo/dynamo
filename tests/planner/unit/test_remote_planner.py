@@ -41,15 +41,14 @@ def mock_runtime():
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
-    # Mock round_robin to return a response
-    async def mock_round_robin(request_json):
-        yield {
+    # Mock scale_request to return a response
+    client_mock.scale_request = AsyncMock(
+        return_value={
             "status": "success",
             "message": "Scaled successfully",
             "current_replicas": {"prefill": 3, "decode": 5},
         }
-
-    client_mock.round_robin = AsyncMock(side_effect=mock_round_robin)
+    )
 
     return runtime, client_mock
 
@@ -101,15 +100,14 @@ async def test_send_scale_request_error():
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
-    # Mock round_robin to return error response
-    async def mock_round_robin_error(request_json):
-        yield {
+    # Mock scale_request to return error response
+    client_mock.scale_request = AsyncMock(
+        return_value={
             "status": "error",
             "message": "Namespace not authorized",
             "current_replicas": {},
         }
-
-    client_mock.round_robin = AsyncMock(side_effect=mock_round_robin_error)
+    )
 
     client = RemotePlannerClient(runtime, "central-ns", "Planner")
 
@@ -145,12 +143,8 @@ async def test_send_scale_request_no_response():
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
-    # Mock round_robin to return nothing
-    async def mock_round_robin_empty(request_json):
-        return
-        yield  # Make it a generator but never yield anything
-
-    client_mock.round_robin = AsyncMock(side_effect=mock_round_robin_empty)
+    # Mock scale_request to return None
+    client_mock.scale_request = AsyncMock(return_value=None)
 
     client = RemotePlannerClient(runtime, "central-ns", "Planner")
 
