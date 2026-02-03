@@ -28,6 +28,8 @@ on:
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}${{ github.run_attempt }}
+  ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  ECR_DEFAULT_IMAGE_BASE: "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo"
 
 jobs:
 
@@ -82,8 +84,6 @@ jobs:
     # if: needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-default-v2
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
       operator_default_image_name: ${{ steps.build-and-push-image.outputs.operator_default_image_name }}
       operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
@@ -132,7 +132,7 @@ jobs:
           IMAGE_REPOSITORY: dynamo
         run: |
           DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
-          ECR_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          ECR_IMAGE_BASE="${{ env.ECR_DEFAULT_IMAGE_BASE }}"
           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           NO_CACHE_FLAG=""
           IMAGE_URIS=(
@@ -188,10 +188,10 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-        ${{ github.ref_name == 'ops-2572' && 'ops-2572-vllm' || '' }}
-        ${{ github.ref_name == 'ops-2572' && format('ops-2572-vllm-{0}', github.sha) || '' }}
+        "${{ env.ECR_DEFAULT_IMAGE_BASE }}:${{ github.ref_name == 'main' && 'main-vllm' || '' }}"
+        "${{ env.ECR_DEFAULT_IMAGE_BASE }}:${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}"
+        "${{ env.ECR_DEFAULT_IMAGE_BASE }}:${{ github.ref_name == 'ops-2572' && 'ops-2572-vllm' || '' }}"
+        "${{ env.ECR_DEFAULT_IMAGE_BASE }}:${{ github.ref_name == 'ops-2572' && format('ops-2572-vllm-{0}', github.sha) || '' }}"
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
