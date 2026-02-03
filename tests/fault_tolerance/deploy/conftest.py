@@ -17,31 +17,8 @@ import pytest
 
 from tests.fault_tolerance.deploy.scenarios import scenarios
 
-
-def pytest_addoption(parser):
-    parser.addoption("--image", type=str, default=None)
-    parser.addoption("--namespace", type=str, default="fault-tolerance-test")
-    parser.addoption(
-        "--client-type",
-        type=str,
-        default=None,
-        choices=["aiperf", "legacy"],
-        help="Client type for load generation: 'aiperf' (default) or 'legacy'",
-    )
-    parser.addoption(
-        "--include-custom-build",
-        action="store_true",
-        default=False,
-        help="Include tests that require custom builds (e.g., MoE models). "
-        "By default, these tests are excluded.",
-    )
-    parser.addoption(
-        "--skip-service-restart",
-        action="store_true",
-        default=False,
-        help="Skip restarting NATS and etcd services before deployment. "
-        "By default, these services are restarted.",
-    )
+# Note: All CLI options are defined in tests/conftest.py.
+# This file provides fixtures with fault-tolerance-specific defaults.
 
 
 def pytest_generate_tests(metafunc):
@@ -109,7 +86,9 @@ def image(request):
 
 @pytest.fixture
 def namespace(request):
-    return request.config.getoption("--namespace")
+    """Get Kubernetes namespace from CLI option, with fault-tolerance-specific default."""
+    value = request.config.getoption("--namespace")
+    return value if value is not None else "fault-tolerance-test"
 
 
 @pytest.fixture
@@ -120,5 +99,14 @@ def client_type(request):
 
 @pytest.fixture
 def skip_service_restart(request):
-    """Get skip restart services flag from command line."""
-    return request.config.getoption("--skip-service-restart")
+    """Whether to skip restarting NATS and etcd services.
+
+    Fault tolerance tests default to RESTARTING services (for clean state).
+    The --skip-service-restart flag can override this behavior.
+
+    Returns:
+        If --skip-service-restart is passed: True (skip restart)
+        If flag not passed: False (FT tests restart by default)
+    """
+    value = request.config.getoption("--skip-service-restart")
+    return value if value is not None else False  # Default: restart for FT tests

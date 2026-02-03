@@ -189,43 +189,9 @@ DEPLOY_TEST_MATRIX = _build_test_matrix(ALL_DEPLOYMENT_TARGETS)
 
 
 # -----------------------------------------------------------------------------
-# Pytest Configuration: CLI options and test parametrization
+# Pytest Configuration: Test parametrization
+# (CLI options are defined in tests/conftest.py)
 # -----------------------------------------------------------------------------
-
-
-def pytest_addoption(parser: pytest.Parser) -> None:
-    """Add command-line options for deployment tests."""
-    parser.addoption(
-        "--image",
-        type=str,
-        default=None,
-        help="Container image to use for deployment (overrides YAML default)",
-    )
-    parser.addoption(
-        "--namespace",
-        type=str,
-        default="deploy-test",
-        help="Kubernetes namespace for deployment",
-    )
-    parser.addoption(
-        "--framework",
-        type=str,
-        default=None,
-        choices=list(DEPLOY_TEST_MATRIX.keys()) if DEPLOY_TEST_MATRIX else None,
-        help="Framework to test (e.g., vllm, sglang, trtllm)",
-    )
-    parser.addoption(
-        "--profile",
-        type=str,
-        default=None,
-        help="Deployment profile to test (e.g., agg, disagg, disagg_router)",
-    )
-    parser.addoption(
-        "--restart-services",
-        action="store_true",
-        default=False,
-        help="Restart NATS and etcd services before deployment (default: skip restart)",
-    )
 
 
 def _filter_targets(
@@ -334,8 +300,17 @@ def namespace(request: pytest.FixtureRequest) -> str:
 
 @pytest.fixture
 def skip_service_restart(request: pytest.FixtureRequest) -> bool:
-    """Whether to skip restarting NATS and etcd services (default: True)."""
-    return not request.config.getoption("--restart-services")
+    """Whether to skip restarting NATS and etcd services.
+
+    Deploy tests default to SKIPPING restart (for speed).
+    The --skip-service-restart flag can override this behavior.
+
+    Returns:
+        If --skip-service-restart is passed: True (skip restart)
+        If flag not passed: True (deploy tests skip by default)
+    """
+    value = request.config.getoption("--skip-service-restart")
+    return value if value is not None else True  # Default: skip for deploy tests
 
 
 @pytest.fixture

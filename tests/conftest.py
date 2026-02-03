@@ -68,6 +68,72 @@ def pytest_configure(config):
         config.addinivalue_line("markers", marker)
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add shared command-line options for all tests.
+
+    This is the SINGLE place where CLI options are defined.
+    Subdirectory conftest.py files provide fixtures with local defaults.
+    """
+    # -------------------------------------------------------------------------
+    # Shared Deployment Options (used by multiple test suites)
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--image",
+        type=str,
+        default=None,
+        help="Container image to use for deployment (overrides YAML default)",
+    )
+    parser.addoption(
+        "--namespace",
+        type=str,
+        default=None,  # No default here - subdirectories provide their own
+        help="Kubernetes namespace for deployment",
+    )
+    parser.addoption(
+        "--skip-service-restart",
+        action="store_true",
+        default=None,  # None = use fixture's default behavior
+        help="Skip restarting NATS and etcd services before deployment. "
+        "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
+
+    # -------------------------------------------------------------------------
+    # Deploy Test Options (tests/deploy/)
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--framework",
+        type=str,
+        default=None,
+        help="Framework to test (e.g., vllm, sglang, trtllm). "
+        "If not specified, runs all discovered frameworks.",
+    )
+    parser.addoption(
+        "--profile",
+        type=str,
+        default=None,
+        help="Deployment profile to test (e.g., agg, disagg, disagg_router). "
+        "If not specified, runs all profiles for the selected framework.",
+    )
+
+    # -------------------------------------------------------------------------
+    # Fault Tolerance Test Options (tests/fault_tolerance/deploy/)
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--client-type",
+        type=str,
+        default=None,
+        choices=["aiperf", "legacy"],
+        help="Client type for load generation: 'aiperf' (default) or 'legacy'",
+    )
+    parser.addoption(
+        "--include-custom-build",
+        action="store_true",
+        default=False,
+        help="Include tests that require custom builds (e.g., MoE models). "
+        "By default, these tests are excluded.",
+    )
+
+
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
