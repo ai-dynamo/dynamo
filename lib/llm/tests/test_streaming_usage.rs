@@ -195,7 +195,7 @@ fn create_chat_request(
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_streaming_without_usage() {
     // Create request without stream_options (usage should not be included)
     let request = create_chat_request(None, None);
@@ -254,7 +254,7 @@ async fn test_streaming_without_usage() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_streaming_with_usage_compliance() {
     // Create request with stream_options.include_usage = true
     let request = create_chat_request(Some(true), None);
@@ -327,7 +327,7 @@ async fn test_streaming_with_usage_compliance() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_streaming_with_continuous_usage() {
     // Create request with stream_options.include_usage = true, stream_options.continuous_usage_stats = true
     let request = create_chat_request(Some(true), Some(true));
@@ -418,7 +418,7 @@ async fn test_streaming_with_continuous_usage() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_streaming_with_usage_false() {
     // Create request with stream_options.include_usage = false (explicitly disabled)
     let request = create_chat_request(Some(false), None);
@@ -525,7 +525,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_nonstreaming_has_usage_field() {
     let mut request = create_nonstreaming_chat_request();
     assert_eq!(
@@ -596,7 +596,7 @@ async fn test_nonstreaming_has_usage_field() {
     );
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_cmpl_streaming_with_usage_true_no_backend_usage() {
     // Completions: stream=true, include_usage=true, but backend does not send completion_usage
     let request = create_cmpl_request(Some(true), true);
@@ -658,7 +658,7 @@ async fn test_cmpl_streaming_with_usage_true_no_backend_usage() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_cmpl_streaming_with_cached_tokens_propagation() {
     // Completions: include_usage=true, backend provides cached_tokens -> must propagate
     let request = create_cmpl_request(Some(true), true);
@@ -703,7 +703,7 @@ async fn test_cmpl_streaming_with_cached_tokens_propagation() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_chat_streaming_with_cached_tokens_propagation() {
     // Chat Completions: include_usage=true, backend provides cached_tokens -> must propagate
     let request = create_chat_request(Some(true), Some(true));
@@ -740,7 +740,7 @@ async fn test_chat_streaming_with_cached_tokens_propagation() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_cmpl_nonstreaming_has_usage_and_cached_tokens() {
     // Non-streaming completions must include usage in final aggregated response and propagate cached_tokens
     let mut request = create_cmpl_request(None, false);

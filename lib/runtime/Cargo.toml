@@ -87,7 +87,8 @@ percent-encoding = { version = "2.3.2" } # also used by tonic, reqwest, axum, et
 rayon = { version = "1.10" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
-tokio-rayon = { version = "2.1" }
+
+loom-rs = { git = "https://github.com/ryanolson/loom-rs", branch = "ryan/api-updates" }
 
 # Kubernetes discovery backend
 kube = { version = "2.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "aws-lc-rs"] }

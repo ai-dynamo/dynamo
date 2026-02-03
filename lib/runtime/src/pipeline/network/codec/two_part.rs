@@ -542,7 +542,7 @@ mod tests {
     }
 
     /// Test simulating reading from a byte stream like a TCP socket.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_streaming_read() {
         // Create messages
         let header_data = Bytes::from("header data");
@@ -572,7 +572,7 @@ mod tests {
     }
 
     /// Test simulating partial reads from a TCP socket
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_streaming_partial_reads() {
         // Create messages
         let header_data = Bytes::from("header data");
@@ -635,7 +635,7 @@ mod tests {
     }
 
     /// Test handling of corrupted data in a stream
-    #[tokio::test]
+    #[loom_rs::test]
     // Checksum only computed in debug mode, so only test in debug mode.
     #[cfg(debug_assertions)]
     async fn test_streaming_corrupted_data() {
@@ -674,7 +674,7 @@ mod tests {
     }
 
     /// Test handling of empty streams
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_empty_stream() {
         let codec = TwoPartCodec::new(None);
 
@@ -692,7 +692,7 @@ mod tests {
     }
 
     /// Test decoding of multiple messages from a stream
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_streaming_multiple_messages() {
         let header_data1 = Bytes::from("header1");
         let data1 = Bytes::from("data1");

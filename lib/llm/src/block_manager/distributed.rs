@@ -154,7 +154,7 @@ mod tests {
         Ok((leader, workers))
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[rstest]
     #[case(1)]
     #[case(2)]
@@ -203,7 +203,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[rstest]
     #[case(1)]
     #[case(2)]

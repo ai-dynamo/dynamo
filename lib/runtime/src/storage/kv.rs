@@ -522,7 +522,7 @@ mod tests {
         crate::logging::init();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_memory_storage() -> anyhow::Result<()> {
         init();
 
@@ -588,7 +588,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_broadcast_stream() -> anyhow::Result<()> {
         init();
 

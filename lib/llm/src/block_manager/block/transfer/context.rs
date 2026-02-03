@@ -483,7 +483,7 @@ pub mod v2 {
             TransferContext::new(nixl_agent, stream, handle)
         }
 
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_basic_event_synchronization() {
             let ctx = setup_context();
 
@@ -496,7 +496,7 @@ pub mod v2 {
             event.synchronize().await.expect("Async sync failed");
         }
 
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_context_cloning_works() {
             let ctx = setup_context();
             let ctx_clone = ctx.clone();
@@ -519,7 +519,7 @@ pub mod v2 {
                 .expect("Cloned context sync failed");
         }
 
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_concurrent_synchronization() {
             let ctx = setup_context();
             let tracker = TaskTracker::new();
@@ -542,7 +542,7 @@ pub mod v2 {
             tracker.wait().await;
         }
 
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_error_handling() {
             let ctx = setup_context();
 
@@ -562,7 +562,7 @@ pub mod v2 {
             }
         }
 
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_resource_cleanup() {
             // Test that contexts and events can be dropped properly
             let ctx = setup_context();

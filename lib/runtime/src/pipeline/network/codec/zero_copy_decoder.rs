@@ -303,7 +303,7 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_zero_copy_decoder_basic() {
         // Create a test message with headers
         let endpoint = "test/endpoint";
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(msg.headers().len(), 0); // Empty headers
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_zero_copy_decoder_large_payload() {
         // Create a large payload (200KB)
         let endpoint = "large/endpoint";
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(msg.payload().len(), payload.len());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_zero_copy_decoder_total_size_limit() {
         // Test that the decoder validates total message size, not just payload size
         // Create a message where total_len exceeds max but payload alone might not
@@ -398,7 +398,7 @@ mod tests {
         assert!(err.to_string().contains("1024")); // max_message_size
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_zero_copy_decoder_with_headers() {
         // Test header parsing with actual header data
         let endpoint = "api/v1/inference";
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(headers_bytes, &headers_json[..]);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_zero_copy_decoder_empty_vs_populated_headers() {
         // Test both empty and populated headers in sequence to ensure proper parsing
         let endpoint = "test/endpoint";

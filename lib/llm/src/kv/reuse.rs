@@ -753,7 +753,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_basic_sequence_matching() {
         let pool = AvailableBlocks::new().await;
 
@@ -800,7 +800,7 @@ pub(crate) mod tests {
         assert_eq!(pool.available_blocks(), 2);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_equal_priority_taking() {
         let pool = AvailableBlocks::new().await;
 
@@ -842,7 +842,7 @@ pub(crate) mod tests {
         assert_eq!(blocks[3].token_block.tokens()[0], 1);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_priority_taking() {
         let pool = AvailableBlocks::new().await;
 
@@ -887,7 +887,7 @@ pub(crate) mod tests {
         assert_eq!(blocks[3].token_block.tokens()[0], 5);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_priority_taking_after_update() {
         let pool = AvailableBlocks::new().await;
 
@@ -952,7 +952,7 @@ pub(crate) mod tests {
         assert_eq!(blocks[3].token_block.tokens()[0], 5);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reset_all() {
         let pool = AvailableBlocks::new().await;
 
@@ -996,7 +996,7 @@ pub(crate) mod tests {
         assert_eq!(matched.len(), 0);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reset_block2() {
         let pool = AvailableBlocks::new().await;
 

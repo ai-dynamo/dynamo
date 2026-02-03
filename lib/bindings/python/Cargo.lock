@@ -797,7 +797,7 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "rand 0.9.2",
- "rand_distr",
+ "rand_distr 0.5.1",
  "rayon",
  "safetensors",
  "thiserror 1.0.69",
@@ -1082,6 +1082,17 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core_affinity"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
+dependencies = [
+ "libc",
+ "num_cpus",
+ "winapi 0.3.9",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -1454,6 +1465,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "diatomic-waker"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab03c107fafeb3ee9f5925686dbb7a73bc76e3932abb0d2b365cb64b169cf04c"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1615,7 +1632,7 @@ dependencies = [
  "async-trait",
  "dynamo-runtime",
  "dynamo-tokens",
- "prometheus",
+ "prometheus 0.14.0",
  "rand 0.9.2",
  "serde",
  "thiserror 2.0.17",
@@ -1685,7 +1702,7 @@ dependencies = [
  "offset-allocator",
  "oneshot",
  "parking_lot",
- "prometheus",
+ "prometheus 0.14.0",
  "prost 0.13.5",
  "rand 0.9.2",
  "rayon",
@@ -1774,7 +1791,7 @@ dependencies = [
  "futures",
  "once_cell",
  "parking_lot",
- "prometheus",
+ "prometheus 0.14.0",
  "pyo3",
  "pyo3-async-runtimes",
  "pythonize",
@@ -1824,6 +1841,7 @@ dependencies = [
  "libc",
  "local-ip-address",
  "log",
+ "loom-rs",
  "lru",
  "nid",
  "nix 0.29.0",
@@ -1835,7 +1853,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parking_lot",
  "percent-encoding",
- "prometheus",
+ "prometheus 0.14.0",
  "rand 0.9.2",
  "rayon",
  "regex",
@@ -1847,7 +1865,6 @@ dependencies = [
  "thiserror 2.0.17",
  "tmq",
  "tokio",
- "tokio-rayon",
  "tokio-stream",
  "tokio-util",
  "tower",
@@ -2186,6 +2203,7 @@ dependencies = [
  "pear",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "toml 0.8.23",
  "uncased",
@@ -2741,7 +2759,7 @@ dependencies = [
  "crunchy",
  "num-traits",
  "rand 0.9.2",
- "rand_distr",
+ "rand_distr 0.5.1",
  "zerocopy",
 ]
 
@@ -3737,6 +3755,42 @@ name = "log"
 version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
+
+[[package]]
+name = "loom-macros"
+version = "0.3.1"
+source = "git+https://github.com/ryanolson/loom-rs?branch=ryan%2Fapi-updates#332d5ddb8735eaa9620cc2c1ff697e8c6183ee77"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.110",
+]
+
+[[package]]
+name = "loom-rs"
+version = "0.3.1"
+source = "git+https://github.com/ryanolson/loom-rs?branch=ryan%2Fapi-updates#332d5ddb8735eaa9620cc2c1ff697e8c6183ee77"
+dependencies = [
+ "clap",
+ "core_affinity",
+ "crossbeam-queue",
+ "diatomic-waker",
+ "figment",
+ "futures-core",
+ "libc",
+ "loom-macros",
+ "parking_lot",
+ "pin-project-lite",
+ "prometheus 0.13.4",
+ "rand 0.8.5",
+ "rand_distr 0.4.3",
+ "rayon",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
 
 [[package]]
 name = "loop9"
@@ -5235,6 +5289,20 @@ dependencies = [
 
 [[package]]
 name = "prometheus"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d33c28a30771f7f96db69893f78b857f7450d7e0237e9c8fc6427a81bae7ed1"
+dependencies = [
+ "cfg-if 1.0.4",
+ "fnv",
+ "lazy_static",
+ "memchr",
+ "parking_lot",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "prometheus"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ca5326d8d0b950a9acd87e6a3f94745394f62e4dae1b1ee22b2bc0c394af43a"
@@ -5695,6 +5763,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "rand_distr"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
+dependencies = [
+ "num-traits",
+ "rand 0.8.5",
 ]
 
 [[package]]

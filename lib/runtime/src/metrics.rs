@@ -1157,7 +1157,7 @@ mod test_metricsregistry_prefixes {
     use crate::distributed::distributed_test_utils::create_test_drt_async;
     use prometheus::core::Collector;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_hierarchical_prefixes_and_parent_hierarchies() {
         let drt = create_test_drt_async().await;
 
@@ -1251,7 +1251,7 @@ mod test_metricsregistry_prefixes {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_expfmt_callback_only_registered_on_endpoint_is_included_once() {
         // Sanity test: if an expfmt callback is registered only on the endpoint registry,
         // scraping from the root (DRT) should still include it exactly once via the
@@ -1282,7 +1282,7 @@ mod test_metricsregistry_prefixes {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_recursive_namespace() {
         // Create a distributed runtime for testing
         let drt = create_test_drt_async().await;
@@ -1335,7 +1335,7 @@ mod test_metricsregistry_prometheus_fmt_outputs {
     use prometheus::Counter;
     use std::sync::Arc;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_prometheusfactory_using_metrics_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
         let drt = create_test_drt_async().await;
@@ -1569,7 +1569,7 @@ dynamo_component_errors_total 5"#;
         println!("✓ All refactored filter functions work correctly!");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_same_metric_name_different_endpoints() {
         // Test that the same metric name can exist in different endpoints without collision.
         // This validates the multi-registry approach: each endpoint has its own registry,
@@ -1616,7 +1616,7 @@ dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep
         println!("✓ Multi-registry prevents Prometheus collisions!");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_duplicate_series_warning() {
         // Test that duplicate series (same metric name + same labels) are detected and deduplicated.
         // This should log a warning and keep only one of the duplicate series.

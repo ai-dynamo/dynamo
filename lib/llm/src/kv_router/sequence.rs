@@ -1262,7 +1262,7 @@ mod tests {
         assert_eq!(seq_manager.active_tokens(), 0);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore]
     async fn test_multi_worker_cross_instance_sync() -> Result<()> {
         // Initialize logging once
@@ -1433,7 +1433,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore]
     async fn test_multi_worker_no_token_sequence_sync() -> Result<()> {
         // Initialize logging once

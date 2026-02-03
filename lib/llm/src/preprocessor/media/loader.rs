@@ -171,7 +171,7 @@ mod tests {
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_fetch_and_decode() {
         let test_image_bytes =
             include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");

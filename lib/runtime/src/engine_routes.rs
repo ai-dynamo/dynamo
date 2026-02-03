@@ -57,7 +57,7 @@ impl EngineRouteRegistry {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_registry_basic() {
         let registry = EngineRouteRegistry::new();
 
@@ -77,7 +77,7 @@ mod tests {
         assert!(routes.contains(&"test".to_string()));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_callback_execution() {
         let registry = EngineRouteRegistry::new();
 
@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(result["output"], "processed: test");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_clone_shares_routes() {
         let registry = EngineRouteRegistry::new();
 

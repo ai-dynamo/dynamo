@@ -464,7 +464,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_engine_type_erasure_and_downcast() {
         // 3. Create a typed engine
         let typed_engine: Arc<dyn AsyncEngine<Req1, Resp1, Err1>> = Arc::new(MockEngine);

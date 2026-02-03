@@ -1684,7 +1684,7 @@ mod tests {
     ) {
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[apply(indexer_template)]
     async fn test_kv_indexer_new(num_shards: usize, kv_block_size: u32) {
         setup();
@@ -1692,7 +1692,7 @@ mod tests {
         let _ = make_indexer(&token, num_shards, kv_block_size);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[apply(indexer_template)]
     async fn test_find_matches(num_shards: usize, kv_block_size: u32) {
         setup();
@@ -1705,7 +1705,7 @@ mod tests {
         assert!(scores.unwrap().scores.is_empty());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[apply(indexer_template)]
     async fn test_find_matches_for_request(num_shards: usize, kv_block_size: u32) {
         setup();
@@ -1718,7 +1718,7 @@ mod tests {
         assert!(scores.unwrap().scores.is_empty());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[apply(indexer_template)]
     async fn test_apply_event(num_shards: usize, kv_block_size: u32) {
         setup();
@@ -1733,7 +1733,7 @@ mod tests {
         // No assertion here, just ensuring it runs without panic
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[apply(indexer_template)]
     async fn test_shutdown(num_shards: usize, kv_block_size: u32) {
         setup();
@@ -1743,7 +1743,7 @@ mod tests {
         kv_indexer.shutdown();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[apply(indexer_template)]
     async fn test_frequency(num_shards: usize, kv_block_size: u32) {
         const ONE_MILLIS: Duration = Duration::from_millis(1);
@@ -1849,7 +1849,7 @@ mod tests {
         assert_eq!(overlap.frequencies, vec![3, 3, 3, 2]);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_dump_tree_as_events_round_trip() {
         setup();
 
@@ -2093,7 +2093,7 @@ mod tests {
         indexer
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn returns_slice_within_range() {
         let indexer = make_indexer_with_events(&[1, 2, 3, 4, 5]);
 
@@ -2133,7 +2133,7 @@ mod tests {
         assert!(matches!(result, WorkerKvQueryResponse::InvalidRange { .. }));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_get_events_in_id_range_all_cases() {
         // Create indexer with small buffer (5 events max)
         // This way older events will only be in the tree, not the buffer
@@ -2310,7 +2310,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_local_indexer_buffer_and_serialization() {
         // Tests components of the LocalKvIndexer query without using nats
 

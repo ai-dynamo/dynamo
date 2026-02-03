@@ -25,10 +25,12 @@ use super::{CancellationToken, Runtime, RuntimeConfig};
 use futures::Future;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
+use std::mem::ManuallyDrop;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::{signal, task::JoinHandle};
 
-static RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
+static RT: OnceCell<loom_rs::LoomRuntime> = OnceCell::new();
 static RTHANDLE: OnceCell<tokio::runtime::Handle> = OnceCell::new();
 static INIT: OnceCell<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>> = OnceCell::new();
 
@@ -72,23 +74,25 @@ impl Worker {
             anyhow::anyhow!("Failed to create worker; Only a single Worker should ever be created")
         })?;
 
-        let runtime = Runtime::from_handle(rt.handle().clone())?;
+        let runtime = Runtime::new(RT.get().unwrap().clone())?;
         Ok(Worker { runtime, config })
     }
 
     pub fn runtime_from_existing() -> anyhow::Result<Runtime> {
         if let Some(rt) = RT.get() {
-            Ok(Runtime::from_handle(rt.handle().clone())?)
+            Ok(Runtime::new(rt.clone())?)
         } else if let Some(rt) = RTHANDLE.get() {
-            Ok(Runtime::from_handle(rt.clone())?)
+            unimplemented!()
         } else {
             Runtime::from_settings()
         }
     }
 
     pub fn tokio_runtime(&self) -> anyhow::Result<&'static tokio::runtime::Runtime> {
-        RT.get()
-            .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))
+        Ok(RT
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))?
+            .tokio_runtime())
     }
 
     pub fn runtime(&self) -> &Runtime {
@@ -195,14 +199,14 @@ impl Worker {
             .expect("Application initialized; but another thread is awaiting it; Worker.execute() can only be called once")
     }
 
-    pub fn from_current() -> anyhow::Result<Worker> {
-        if RT.get().is_some() || RTHANDLE.get().is_some() {
-            return Err(anyhow::anyhow!("Worker already initialized"));
-        }
-        let runtime = Runtime::from_current()?;
-        let config = RuntimeConfig::from_settings()?;
-        Ok(Worker { runtime, config })
-    }
+    // pub fn from_current() -> anyhow::Result<Worker> {
+    //     if RT.get().is_some() || RTHANDLE.get().is_some() {
+    //         return Err(anyhow::anyhow!("Worker already initialized"));
+    //     }
+    //     let runtime = Runtime::from_current()?;
+    //     let config = RuntimeConfig::from_settings()?;
+    //     Ok(Worker { runtime, config })
+    // }
 }
 
 /// Catch signals and trigger a shutdown

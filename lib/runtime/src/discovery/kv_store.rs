@@ -598,7 +598,7 @@ mod tests {
     use super::*;
     use crate::component::TransportType;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_kv_store_discovery_register_endpoint() {
         let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
@@ -623,7 +623,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_kv_store_discovery_list() {
         let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(comp1.len(), 2);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_kv_store_discovery_watch() {
         let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();

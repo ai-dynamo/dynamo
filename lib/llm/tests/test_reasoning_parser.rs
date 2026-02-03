@@ -94,7 +94,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reasoning_parser_with_basic_parser() {
         // Basic Parser test <think> </think> tags
         // <think> This is reasoning content </think> Here's my answer.
@@ -144,7 +144,7 @@ mod tests {
         assert_choice(output_choice_2, Some(" Here's my answer."), None);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reasoning_parser_with_only_reasoning_content() {
         // Create a mock runtime config with basic reasoning parser
         let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
@@ -189,7 +189,7 @@ mod tests {
         assert_choice(output_choice_2, None, Some(" here"));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reasoning_parser_with_only_normal_content() {
         // Create a mock runtime config with basic reasoning parser
         let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
@@ -227,7 +227,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reasoning_parser_with_invalid_parser_name() {
         // Create a mock runtime config with invalid reasoning parser
         let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
@@ -266,7 +266,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reasoning_parser_with_mistral_parser() {
         // Create a mock runtime config with mistral reasoning parser
         let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
@@ -321,7 +321,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reasoning_parser_with_gpt_oss_parser() {
         let input_chunks = vec![
             // Chunk 1: Start of analysis channel
@@ -401,7 +401,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reasoning_parser_with_kimi_parser() {
         // Create a mock runtime config with Kimi reasoning parser
         let runtime_config = dynamo_llm::local_model::runtime_config::ModelRuntimeConfig {
@@ -456,7 +456,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_nemotron_with_reasoning_and_tool_calls() {
         let input_chunks = vec![
             // Chunk 1: Start of reasoning
@@ -574,7 +574,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore]
     // (TODO: Ayush) Fix this test
     async fn test_gpt_oss_with_reasoning_and_tool_calls_full() {

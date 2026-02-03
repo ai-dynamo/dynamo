@@ -391,7 +391,7 @@ fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result
 }
 
 #[rstest]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_p2p(
     #[values(LayoutType::FC, LayoutType::LW)] src_layout: LayoutType,
     #[values(
@@ -444,7 +444,7 @@ async fn test_p2p(
 }
 
 #[rstest]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_roundtrip(
     #[values(LayoutType::FC, LayoutType::LW)] src_layout: LayoutType,
     #[values(StorageKind::System, StorageKind::Pinned, StorageKind::Device(0))]
@@ -502,7 +502,7 @@ async fn test_roundtrip(
 #[rstest]
 #[case(StorageKind::Device(0), StorageKind::Disk(0))]
 #[case(StorageKind::Disk(0), StorageKind::Device(0))]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_gds(
     #[case] src_kind: StorageKind,
     #[values(LayoutType::FC, LayoutType::LW)] src_layout: LayoutType,
@@ -545,7 +545,7 @@ async fn test_gds(
 #[rstest]
 #[case(StorageKind::Device(0), StorageKind::Disk(0))]
 #[case(StorageKind::Disk(0), StorageKind::Device(0))]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_buffered_transfer(
     #[case] src_kind: StorageKind,
     #[values(LayoutType::FC, LayoutType::LW)] src_layout: LayoutType,
@@ -592,7 +592,7 @@ async fn test_buffered_transfer(
 #[case(4096)]
 #[case(8192)]
 #[case(16384)]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_large_block_counts(#[case] block_count: usize) {
     let agent = create_test_agent(&format!("test_large_block_counts_{}", block_count));
 
@@ -635,7 +635,7 @@ async fn test_large_block_counts(#[case] block_count: usize) {
 #[case(StorageKind::System, StorageKind::Pinned, "sys_pin")]
 #[case(StorageKind::Pinned, StorageKind::System, "pin_sys")]
 #[case(StorageKind::Pinned, StorageKind::Device(0), "pin_dev")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_bounce_with_guards_fc_fc_full(
     #[case] host_storage: StorageKind,
     #[case] bounce_storage: StorageKind,
@@ -657,7 +657,7 @@ async fn test_bounce_with_guards_fc_fc_full(
 #[case(StorageKind::System, StorageKind::Pinned, "sys_pin")]
 #[case(StorageKind::Pinned, StorageKind::System, "pin_sys")]
 #[case(StorageKind::Pinned, StorageKind::Device(0), "pin_dev")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_bounce_with_guards_fc_lw_full(
     #[case] host_storage: StorageKind,
     #[case] bounce_storage: StorageKind,
@@ -679,7 +679,7 @@ async fn test_bounce_with_guards_fc_lw_full(
 #[case(StorageKind::System, StorageKind::Pinned, "sys_pin")]
 #[case(StorageKind::Pinned, StorageKind::System, "pin_sys")]
 #[case(StorageKind::Pinned, StorageKind::Device(0), "pin_dev")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_bounce_with_guards_lw_fc_full(
     #[case] host_storage: StorageKind,
     #[case] bounce_storage: StorageKind,
@@ -701,7 +701,7 @@ async fn test_bounce_with_guards_lw_fc_full(
 #[case(StorageKind::System, StorageKind::Pinned, "sys_pin")]
 #[case(StorageKind::Pinned, StorageKind::System, "pin_sys")]
 #[case(StorageKind::Pinned, StorageKind::Device(0), "pin_dev")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_bounce_with_guards_lw_lw_full(
     #[case] host_storage: StorageKind,
     #[case] bounce_storage: StorageKind,
@@ -721,7 +721,7 @@ async fn test_bounce_with_guards_lw_lw_full(
 
 #[rstest]
 #[case(StorageKind::Pinned, StorageKind::Device(0), "pin_dev")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_bounce_with_guards_fc_fc_layer0(
     #[case] host_storage: StorageKind,
     #[case] bounce_storage: StorageKind,
@@ -741,7 +741,7 @@ async fn test_bounce_with_guards_fc_fc_layer0(
 
 #[rstest]
 #[case(StorageKind::Pinned, StorageKind::Device(0), "pin_dev")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_bounce_with_guards_lw_lw_layer0(
     #[case] host_storage: StorageKind,
     #[case] bounce_storage: StorageKind,
@@ -854,7 +854,7 @@ async fn test_bounce_with_guards_impl(
 #[case(StorageKind::Pinned, StorageKind::Pinned, "pin_pin")]
 #[case(StorageKind::System, StorageKind::Pinned, "sys_pin")]
 #[case(StorageKind::Pinned, StorageKind::System, "pin_sys")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_direct_transfer_fc_fc_full(
     #[case] src_storage: StorageKind,
     #[case] dst_storage: StorageKind,
@@ -875,7 +875,7 @@ async fn test_direct_transfer_fc_fc_full(
 #[rstest]
 #[case(StorageKind::System, StorageKind::Pinned, "sys_pin")]
 #[case(StorageKind::Pinned, StorageKind::System, "pin_sys")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_direct_transfer_fc_lw_layer0(
     #[case] src_storage: StorageKind,
     #[case] dst_storage: StorageKind,
@@ -895,7 +895,7 @@ async fn test_direct_transfer_fc_lw_layer0(
 
 #[rstest]
 #[case(StorageKind::Pinned, StorageKind::Pinned, "pin_pin")]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_direct_transfer_lw_lw_layer1(
     #[case] src_storage: StorageKind,
     #[case] dst_storage: StorageKind,

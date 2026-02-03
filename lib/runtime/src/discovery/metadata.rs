@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(deserialized.model_cards.len(), 0);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_concurrent_registration() {
         use tokio::sync::RwLock;
 
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(meta.endpoints.len(), 10);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_metadata_accessors() {
         let mut metadata = DiscoveryMetadata::new();
 
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(metadata.get_all().len(), 5);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_event_channel_registration() {
         use crate::discovery::EventTransport;
 
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(metadata.get_all_event_channels().len(), 2);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_mixed_instances() {
         use crate::discovery::EventTransport;
 

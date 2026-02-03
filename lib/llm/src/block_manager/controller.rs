@@ -101,7 +101,7 @@ mod tests {
     use super::super::tests::create_reference_block_manager_with_counts;
     use super::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reset_cache_level() {
         dynamo_runtime::logging::init();
 

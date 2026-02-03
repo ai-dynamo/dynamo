@@ -157,7 +157,7 @@ fn validate_unique_tool_call_ids(tool_calls: &[ToolCallResponse]) {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_parallel_tool_call_integration() {
     // Create the mock request
     let request = create_mock_chat_completion_request();
@@ -192,7 +192,7 @@ async fn test_parallel_tool_call_integration() {
     assert!(response_content.contains("fahrenheit"));
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_parallel_tool_call_parsing() {
     let response_content = get_mock_response_content();
 
@@ -229,7 +229,7 @@ async fn test_parallel_tool_call_parsing() {
     validate_unique_tool_call_ids(&sorted_calls);
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_parallel_tool_call_with_explicit_parser() {
     let response_content = get_mock_response_content();
 
@@ -264,7 +264,7 @@ async fn test_parallel_tool_call_with_explicit_parser() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_tool_call_json_structure() {
     let response_content = get_mock_response_content();
 
@@ -285,7 +285,7 @@ async fn test_tool_call_json_structure() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_openai_compatibility_structure() {
     let response_content = get_mock_response_content();
 
@@ -325,7 +325,7 @@ async fn test_openai_compatibility_structure() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_parallel_tool_call_error_handling() {
     // Test with malformed content
     let malformed_content = r#"<tool_call>
@@ -364,7 +364,7 @@ async fn test_parallel_tool_call_error_handling() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_empty_tool_calls() {
     let content_without_tools = "This is just a regular response without any tool calls.";
 
@@ -384,7 +384,7 @@ async fn test_empty_tool_calls() {
     assert_eq!(remaining_content.unwrap(), content_without_tools);
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_deepseek_v3_1_tool_call_parsing() {
     let response_content = r#"I'll help you understand this codebase. Let me start by exploring the structure and key
   files to provide you with a comprehensive

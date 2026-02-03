@@ -764,7 +764,7 @@ mod tests {
     }
 
     /// Demonstrates how framed codec enables testability without actual TCP connections
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_framed_codec_integration() {
         use futures::{SinkExt, StreamExt};
         use std::io::Cursor;
@@ -801,7 +801,7 @@ mod tests {
     }
 
     /// Demonstrates testing partial message handling
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_framed_codec_partial_messages() {
         use futures::StreamExt;
         use std::io::Cursor;

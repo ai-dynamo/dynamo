@@ -934,7 +934,7 @@ mod tests {
     }
 
     // Integration test for object store data operations using bincode
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore] // Requires NATS server to be running
     async fn test_object_store_data_operations() {
         // Create test data
@@ -982,7 +982,7 @@ mod tests {
     }
 
     // Integration test for broadcast pattern with purging
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore]
     async fn test_nats_queue_broadcast_with_purge() {
         use uuid::Uuid;

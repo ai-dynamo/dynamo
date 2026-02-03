@@ -609,7 +609,7 @@ mod tests {
     use tokio::time::Duration;
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_server_lifecycle() {
         let cancel_token = CancellationToken::new();
         let cancel_token_for_server = cancel_token.clone();
@@ -652,7 +652,7 @@ mod integration_tests {
     use std::sync::Arc;
     use tokio::time::Duration;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_uptime_from_system_health() {
         // Test that uptime is available from SystemHealth
         temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
@@ -671,7 +671,7 @@ mod integration_tests {
         .await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
         temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
@@ -700,7 +700,7 @@ mod integration_tests {
         .await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_uptime_gauge_updates() {
         // Test that the uptime gauge is properly updated and increases over time
         temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
@@ -732,7 +732,7 @@ mod integration_tests {
         .await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_requests_fail_when_system_disabled() {
         // Test that system status server is not running when disabled
         temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
@@ -768,7 +768,7 @@ mod integration_tests {
         Some("/custom/live"),
         5
     )]
-    #[tokio::test]
+    #[loom_rs::test]
     #[cfg(feature = "integration")]
     async fn test_health_endpoints(
         #[case] starting_health_status: &'static str,
@@ -862,7 +862,7 @@ mod integration_tests {
         .await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_health_endpoint_tracing() -> Result<()> {
         use std::sync::Arc;
 
@@ -917,7 +917,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_health_endpoint_with_changing_health_status() {
         // Test health endpoint starts in not ready status, then becomes ready
         // when endpoints are created (DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=generate)
@@ -1027,7 +1027,7 @@ mod integration_tests {
         .await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_spawn_system_status_server_endpoints() {
         // use reqwest for HTTP requests
         temp_env::async_with_vars(
@@ -1077,7 +1077,7 @@ mod integration_tests {
     }
 
     #[cfg(feature = "integration")]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_health_check_with_payload_and_timeout() {
         // Test the complete health check flow with the new canary-based system:
         crate::logging::init();

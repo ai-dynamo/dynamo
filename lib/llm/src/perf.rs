@@ -410,7 +410,7 @@ pub mod tests {
         assert_eq!(recorded.total_duration(), Duration::from_millis(150));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_recording_stream_scan_mode() {
         use futures::StreamExt;
 
@@ -442,7 +442,7 @@ pub mod tests {
         assert!(recorded.total_duration() > Duration::from_nanos(0));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_recording_stream_sink_mode() {
         use futures::StreamExt;
 
@@ -472,7 +472,7 @@ pub mod tests {
         assert!(recorded.total_duration() > Duration::from_nanos(0));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_recording_stream_from_response_stream() {
         use futures::StreamExt;
 

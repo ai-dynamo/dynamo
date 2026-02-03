@@ -576,7 +576,7 @@ mod tests {
     use super::*;
     use tokio::time::{Duration, sleep};
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_request_context_creation() {
         let ctx = HttpRequestContext::new();
         assert!(!ctx.id().is_empty());
@@ -584,7 +584,7 @@ mod tests {
         assert!(!ctx.is_killed());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_request_context_child() {
         let parent = HttpRequestContext::new();
         let child = parent.child();
@@ -601,7 +601,7 @@ mod tests {
         assert!(child.cancellation_token().is_cancelled());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_request_context_child_with_id() {
         let parent = HttpRequestContext::new();
         let child_id = "test-child";
@@ -615,7 +615,7 @@ mod tests {
         assert!(child.cancellation_token().is_cancelled());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_request_context_cancellation() {
         let ctx = HttpRequestContext::new();
         let cancel_token = ctx.cancellation_token();
@@ -627,7 +627,7 @@ mod tests {
         assert!(cancel_token.is_cancelled());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_request_context_kill() {
         let ctx = HttpRequestContext::new();
 
@@ -638,7 +638,7 @@ mod tests {
         assert!(ctx.is_stopped());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_request_context_async_cancellation() {
         let ctx = HttpRequestContext::new();
 

@@ -330,7 +330,7 @@ mod tests {
     use super::*;
     use crate::pipeline::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_pipeline_source_no_edge() {
         let source = ServiceFrontend::<SingleIn<()>, ManyOut<()>>::new();
         let stream = source.generate(().into()).await;

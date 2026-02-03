@@ -73,7 +73,7 @@ mod tests {
     use super::*;
     use crate::pipeline::{ManyOut, SingleIn, error::PipelineErrorExt};
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_frontend_no_edge() {
         let source = Frontend::<SingleIn<()>, ManyOut<()>>::default();
         let error = source

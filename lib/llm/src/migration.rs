@@ -499,7 +499,7 @@ mod tests {
     /// Tests the normal case where the RetryManager successfully processes all responses
     /// from a single stream without any failures or need for retries/migration.
     /// Expected behavior: All 10 responses should be received successfully.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_retry_manager_no_migration() {
         dynamo_runtime::logging::init();
         let context_id = uuid::Uuid::new_v4().to_string();
@@ -549,7 +549,7 @@ mod tests {
     /// fails on the first call with a "No responders available" error, then succeeds
     /// on subsequent calls, simulating a worker becoming available after initial failure.
     /// Expected behavior: All 10 responses should be received successfully after retry.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_retry_manager_new_request_migration() {
         dynamo_runtime::logging::init();
         let context_id = uuid::Uuid::new_v4().to_string();
@@ -599,7 +599,7 @@ mod tests {
     /// the RetryManager to detect the failure (via "Stream ended before generation completed" error),
     /// create a new stream, and continue from where it left off.
     /// Expected behavior: 5 responses from first stream + 5 responses from retry stream = 10 total.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_retry_manager_ongoing_request_migration() {
         dynamo_runtime::logging::init();
 
@@ -651,7 +651,7 @@ mod tests {
     /// Tests the scenario where a worker becomes unreachable for new requests indefinitely.
     /// The RetryManager should exhaust all retries and return the original error from the first attempt.
     /// Expected behavior: Should receive an error after all retries are exhausted, with the original error.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_retry_manager_new_request_migration_indefinite_failure() {
         dynamo_runtime::logging::init();
         let context_id = uuid::Uuid::new_v4().to_string();
@@ -691,7 +691,7 @@ mod tests {
     /// Tests the scenario where a worker fails mid-stream indefinitely during ongoing requests.
     /// The RetryManager should exhaust all retries and return the original stream disconnection error.
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure() {
         dynamo_runtime::logging::init();
         let context_id = uuid::Uuid::new_v4().to_string();
@@ -751,7 +751,7 @@ mod tests {
     /// Tests the scenario where a worker fails mid-stream indefinitely during ongoing requests,
     /// and all retry attempts also fail with stream errors instead of NATS errors.
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure_stream_error() {
         dynamo_runtime::logging::init();
         let context_id = uuid::Uuid::new_v4().to_string();
@@ -811,7 +811,7 @@ mod tests {
     /// Tests the scenario where context.stop_generating() is called when creating a new stream.
     /// The RetryManager should detect that the context is stopped and abort creating new streams.
     /// Expected behavior: Should fail to build RetryManager with "Context is stopped or killed" error.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_retry_manager_context_stopped_before_stream() {
         dynamo_runtime::logging::init();
         let context_id = uuid::Uuid::new_v4().to_string();

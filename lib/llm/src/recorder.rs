@@ -433,7 +433,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_recorder_streams_events_to_file() {
         // Create a temporary directory for output files
         let dir = tempdir().unwrap();
@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[ignore]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn load_test_100k_events() {
         // Create a temporary directory for output files
         let dir = tempdir().unwrap();

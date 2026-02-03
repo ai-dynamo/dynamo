@@ -706,7 +706,7 @@ pub trait TaskScheduler {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_scheduler_lifecycle() {
         let cancel_token = CancellationToken::new();
         let (mut scheduler, mut worker_client, _transfer_client) = Scheduler::new(cancel_token);
@@ -731,7 +731,7 @@ mod tests {
         assert!(scheduler.iteration_complete);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_transfer_immediate_arrives_first() {
         dynamo_runtime::logging::init();
 
@@ -825,7 +825,7 @@ mod tests {
 
     /// This test verifies that the scheduler can handle the case where the transfer engine's
     /// immediate result arrives after the worker has scheduled the operation.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_transfer_immediate_arrives_last() {
         dynamo_runtime::logging::init();
 
@@ -907,7 +907,7 @@ mod tests {
     }
 
     // this test verifies that the scheduler can handle the case where the transfer engine's   /// in this case, the request arrives first via the worker client, meaning it traverse
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_transfer_scheduled_arrives_first() {
         dynamo_runtime::logging::init();
 
@@ -986,7 +986,7 @@ mod tests {
         assert!(worker_client.slots.get("test").unwrap().is_complete());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_transfer_scheduled_arrives_last() {
         dynamo_runtime::logging::init();
 
@@ -1064,7 +1064,7 @@ mod tests {
         assert!(worker_client.slots.get("test").unwrap().is_complete());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_coordinate_scheduled_transfer_execution() {
         dynamo_runtime::logging::init();
 

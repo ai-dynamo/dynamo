@@ -145,7 +145,7 @@ mod tests {
         SequenceHash::from(x)
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_basic_frequency_filter() {
         let filter = make_filter(2, 100);
 
@@ -155,7 +155,7 @@ mod tests {
         assert!(!filter.should_offload(hash(2)));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_decay() {
         let filter = make_filter(4, 2);
 
@@ -179,7 +179,7 @@ mod tests {
         assert!(!filter.should_offload(hash(1)));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_time_based_decay() {
         let cancel_token = CancellationToken::new();
         let runtime = Handle::current();
@@ -221,7 +221,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multi_prune_decay() {
         let filter = make_filter(10, 2);
 

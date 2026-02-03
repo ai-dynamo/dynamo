@@ -40,7 +40,7 @@ mod tests {
     use crate::block_manager::v2::physical::transfer::tests::cuda::CudaSleep;
     use std::time::{Duration, Instant};
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_cuda_event_delayed_notification() {
         let agent = NixlAgent::require_backends("test_agent", &[]).unwrap();
         let manager = TransportManager::builder()

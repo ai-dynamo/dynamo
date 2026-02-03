@@ -256,7 +256,7 @@ mod tests {
     }
 
     /// Validate basic insert / expiry behaviour of [`PruneManager`].
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_prune_manager_expiry() {
         const TTL: Duration = Duration::from_millis(50);
         let prune_config = PruneConfig {
@@ -281,7 +281,7 @@ mod tests {
     }
 
     /// Validate that reinserting an existing key extends its TTL and prevents premature expiry.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_prune_manager_update_resets_ttl() {
         // Validate that reinserting an existing key extends its TTL and prevents premature expiry.
         const TTL: Duration = Duration::from_millis(50);
@@ -326,7 +326,7 @@ mod tests {
     ///   1. No matches before routing decision
     ///   2. Matches appear after `process_routing_decision`
     ///   3. Matches disappear after TTL expiry
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_approx_kv_indexer_basic_flow() {
         const TTL: Duration = Duration::from_millis(200);
         let cancel = CancellationToken::new();
@@ -381,7 +381,7 @@ mod tests {
     }
 
     /// Verify that `remove_worker` clears all entries for the specified worker.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_remove_worker() {
         const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
         let cancel = CancellationToken::new();
@@ -432,7 +432,7 @@ mod tests {
     }
 
     /// After removing one of multiple workers that share the same block, the remaining worker's entries should persist.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_remove_worker_preserves_other_workers() {
         const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
 
@@ -504,7 +504,7 @@ mod tests {
     }
 
     /// Two sequences with a shared prefix should yield overlap scores reflecting the common blocks.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_common_prefix_overlap() {
         const TTL: Duration = Duration::from_secs(5);
 
@@ -563,7 +563,7 @@ mod tests {
     }
 
     /// When the same block resides on multiple workers, all should appear in the overlap scores.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_workers_same_block() {
         const TTL: Duration = Duration::from_secs(5);
 
@@ -635,7 +635,7 @@ mod tests {
     }
 
     /// Test that pruning returns empty when tree size is within the max tree size.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_prune_manager_no_prune_when_within_bounds() {
         const TTL: Duration = Duration::from_secs(10);
         let prune_config = PruneConfig {
@@ -660,7 +660,7 @@ mod tests {
     }
 
     /// Test that pruning removes the oldest entries first.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_prune_manager_prune_removes_oldest_first() {
         const TTL: Duration = Duration::from_secs(10);
         let prune_config = PruneConfig {
@@ -695,7 +695,7 @@ mod tests {
     }
 
     /// Test that pruning fails gracefully when config is None.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_prune_manager_prune_fails_without_config() {
         const TTL: Duration = Duration::from_secs(10);
         let prune_config = PruneConfig {
@@ -742,7 +742,7 @@ mod tests {
     ///   3. Insert 6th block (exceeds threshold, triggers reactive pruning)
     ///   4. Verify pruning occurred: 4 oldest blocks removed
     ///   5. Verify 2 newest blocks remain
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_approx_indexer_e2e_pruning() {
         const TTL: Duration = Duration::from_secs(60); // Long TTL to avoid expiry
         let prune_config = PruneConfig {
@@ -825,7 +825,7 @@ mod tests {
     }
 
     /// Test that re-inserting a key updates its position in the pruning queue.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_prune_manager_prune_reinsertion_updates_position() {
         const TTL: Duration = Duration::from_secs(10);
         let prune_config = PruneConfig {

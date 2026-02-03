@@ -3503,7 +3503,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_basic_task_execution(basic_tracker: TaskTracker) {
         // Test successful task execution
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -3531,7 +3531,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_task_failure(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -3552,7 +3552,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_semaphore_concurrency_limit(log_policy: Arc<LogOnlyPolicy>) {
         // Test that semaphore limits concurrent execution
         let limited_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2)))); // Only 2 concurrent tasks
@@ -3610,7 +3610,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_cancel_on_error_policy() {
         // Test that CancelOnError policy works correctly
         let error_policy = cancel_policy();
@@ -3633,7 +3633,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tracker_cancellation() {
         // Test manual cancellation of tracker with CancelOnError policy
         let error_policy = cancel_policy();
@@ -3665,7 +3665,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_child_tracker_independence(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -3692,7 +3692,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_independent_metrics(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -3717,7 +3717,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_cancel_on_error_hierarchy() {
         // Test that child error policy cancellation doesn't affect parent
         let parent_error_policy = cancel_policy();
@@ -3778,7 +3778,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_graceful_shutdown(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -3818,7 +3818,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_semaphore_scheduler_permit_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // Test that SemaphoreScheduler properly tracks permits
         let semaphore = Arc::new(Semaphore::new(3));
@@ -3863,7 +3863,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_builder_pattern(log_policy: Arc<LogOnlyPolicy>) {
         // Test that TaskTracker builder works correctly
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
@@ -3886,7 +3886,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_all_trackers_have_cancellation_tokens(log_policy: Arc<LogOnlyPolicy>) {
         // Test that all trackers (root and children) have cancellation tokens
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
@@ -3918,7 +3918,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_spawn_cancellable_task(log_policy: Arc<LogOnlyPolicy>) {
         // Test cancellable task spawning with proper result handling
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
@@ -3971,7 +3971,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_cancellable_task_metrics_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // Test that properly cancelled tasks increment cancelled metrics, not failed metrics
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
@@ -4053,7 +4053,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_cancellable_vs_error_metrics_distinction(log_policy: Arc<LogOnlyPolicy>) {
         // Test that we properly distinguish between cancellation and actual errors
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
@@ -4083,7 +4083,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_spawn_cancellable_error_handling(log_policy: Arc<LogOnlyPolicy>) {
         // Test error handling in cancellable tasks
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
@@ -4101,7 +4101,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_cancellation_before_execution(log_policy: Arc<LogOnlyPolicy>) {
         // Test that spawning on a cancelled tracker panics (new behavior)
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(1))));
@@ -4143,7 +4143,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_semaphore_scheduler_with_cancellation(log_policy: Arc<LogOnlyPolicy>) {
         // Test that SemaphoreScheduler respects cancellation tokens
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(1))));
@@ -4179,7 +4179,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_child_tracker_cancellation_independence(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4206,7 +4206,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parent_cancellation_propagates_to_children(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4231,7 +4231,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_issued_counter_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // Test that issued counter is incremented when tasks are spawned
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2))));
@@ -4278,7 +4278,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_child_tracker_builder(log_policy: Arc<LogOnlyPolicy>) {
         // Test that child tracker builder allows custom policies
         let parent_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
@@ -4303,7 +4303,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_hierarchical_metrics_aggregation(log_policy: Arc<LogOnlyPolicy>) {
         // Test that child metrics aggregate up to parent
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
@@ -4350,7 +4350,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_scheduler_queue_depth_calculation(log_policy: Arc<LogOnlyPolicy>) {
         // Test that we can calculate tasks queued in scheduler
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2)))); // Only 2 concurrent tasks
@@ -4427,7 +4427,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_hierarchical_metrics_failure_aggregation(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4453,7 +4453,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_metrics_independence_between_tracker_instances(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4477,7 +4477,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_hierarchical_join_waits_for_all(log_policy: Arc<LogOnlyPolicy>) {
         // Test that parent.join() waits for child tasks too
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
@@ -4553,7 +4553,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_hierarchical_join_waits_for_children(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4586,7 +4586,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_hierarchical_join_operations(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4610,7 +4610,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_unlimited_scheduler() {
         // Test that UnlimitedScheduler executes tasks immediately
         let scheduler = UnlimitedScheduler::new();
@@ -4632,7 +4632,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_threshold_cancel_policy(semaphore_scheduler: Arc<SemaphoreScheduler>) {
         // Test that ThresholdCancelPolicy now uses per-task failure counting
         let error_policy = ThresholdCancelPolicy::with_threshold(2); // Cancel after 2 failures per task
@@ -4656,7 +4656,7 @@ mod tests {
         // through continuations (which would require a more complex test setup)
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_policy_constructors() {
         // Test that all constructors follow the new clean API patterns
         let _unlimited = UnlimitedScheduler::new();
@@ -4674,7 +4674,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_child_creation_fails_after_join(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4703,7 +4703,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_child_builder_fails_after_join(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4732,7 +4732,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_child_creation_succeeds_before_join(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -4757,7 +4757,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_custom_error_response_with_cancellation_token(
         semaphore_scheduler: Arc<SemaphoreScheduler>,
     ) {
@@ -5097,7 +5097,7 @@ mod tests {
     // ========================================
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_end_to_end_continuation_execution(
         unlimited_scheduler: Arc<UnlimitedScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -5167,7 +5167,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_end_to_end_multiple_continuations(
         unlimited_scheduler: Arc<UnlimitedScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -5256,7 +5256,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_end_to_end_continuation_failure(
         unlimited_scheduler: Arc<UnlimitedScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -5320,7 +5320,7 @@ mod tests {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_end_to_end_all_action_result_variants(
         unlimited_scheduler: Arc<UnlimitedScheduler>,
     ) {
@@ -5450,7 +5450,7 @@ mod tests {
         false,  // Actually fails - ActionResult::Fail accepts the error and fails the task
         "Global policy with max_failures=2 allows error but ActionResult::Fail still fails the task"
     )]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_continuation_loop_with_global_threshold_policy(
         unlimited_scheduler: Arc<UnlimitedScheduler>,
         #[case] max_failures: usize,
@@ -5598,7 +5598,7 @@ mod tests {
 
     /// Simple test to understand ThresholdCancelPolicy behavior with per-task context
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_simple_threshold_policy_behavior(unlimited_scheduler: Arc<UnlimitedScheduler>) {
         // Test with max_failures=2 - now uses per-task failure counting
         let policy = ThresholdCancelPolicy::with_threshold(2);
@@ -5640,7 +5640,7 @@ mod tests {
     ///
     /// This test shows that with OnErrorContext, each task has independent failure tracking.
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_per_task_context_limitation_demo(unlimited_scheduler: Arc<UnlimitedScheduler>) {
         // Create a policy that should allow 2 failures per task
         let policy = ThresholdCancelPolicy::with_threshold(2);
@@ -5700,7 +5700,7 @@ mod tests {
         "Policy allows continuations up to 2 attempts - should succeed"
     )]
     #[case(0, false, "Policy allows 0 attempts - should fail immediately")]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_allow_continuation_policy_control(
         unlimited_scheduler: Arc<UnlimitedScheduler>,
         #[case] max_attempts: u32,
@@ -5852,7 +5852,7 @@ mod tests {
     /// 2. TaskHandle provides access to the task's cancellation token
     /// 3. Individual task cancellation works correctly
     /// 4. TaskHandle methods (abort, is_finished) work as expected
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_task_handle_functionality() {
         let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
 
@@ -5938,7 +5938,7 @@ mod tests {
     }
 
     /// Test TaskHandle with cancellable tasks
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_task_handle_with_cancellable_tasks() {
         let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
 
@@ -6003,7 +6003,7 @@ mod tests {
     /// 1. from_fn creates working continuations from simple closures
     /// 2. from_cancellable creates working continuations from cancellable closures
     /// 3. Both helpers integrate correctly with the task execution system
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_continuation_helpers() {
         let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
 
@@ -6060,7 +6060,7 @@ mod tests {
     #[rstest]
     #[case(false, 1, "Policy requests no rescheduling - should reuse guard")]
     #[case(true, 2, "Policy requests rescheduling - should re-acquire guard")]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_should_reschedule_policy_control(
         #[case] should_reschedule: bool,
         #[case] expected_acquisitions: u32,
@@ -6217,7 +6217,7 @@ mod tests {
     #[rstest]
     #[case(1, true, "Custom action with 1 retry should succeed")]
     #[case(3, true, "Custom action with 3 retries should succeed")]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_continuation_loop_with_custom_action_policy(
         unlimited_scheduler: Arc<UnlimitedScheduler>,
         #[case] max_retries: u32,
@@ -6410,7 +6410,7 @@ mod tests {
     /// This test verifies that both task-provided continuations and policy-provided
     /// continuations can work together in the same execution flow
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_mixed_continuation_sources(
         unlimited_scheduler: Arc<UnlimitedScheduler>,
         log_policy: Arc<LogOnlyPolicy>,
@@ -6480,7 +6480,7 @@ mod tests {
 
     /// Debug test to understand the threshold policy behavior in retry loop
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn debug_threshold_policy_in_retry_loop(unlimited_scheduler: Arc<UnlimitedScheduler>) {
         let policy = ThresholdCancelPolicy::with_threshold(2);
         let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();

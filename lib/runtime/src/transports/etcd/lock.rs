@@ -258,7 +258,7 @@ mod tests {
     /// 2. Write lock fails when readers are active
     /// 3. Write lock succeeds when no locks are held
     /// 4. Read lock waits for write lock to be released
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_distributed_rwlock() {
         // Setup: Create etcd client
         let runtime = Runtime::from_settings().unwrap();

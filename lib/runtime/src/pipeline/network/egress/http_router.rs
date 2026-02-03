@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(client.config.request_timeout, Duration::from_secs(8));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http_client_send_request_invalid_url() {
         let client = HttpRequestClient::new().unwrap();
         let result = client
@@ -291,7 +291,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http2_client_server_integration() {
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use hyper_util::server::conn::auto::Builder as ConnBuilder;
@@ -373,7 +373,7 @@ mod tests {
         server_handle.abort();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http2_headers_propagation() {
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use hyper_util::server::conn::auto::Builder as ConnBuilder;
@@ -469,7 +469,7 @@ mod tests {
         server_handle.abort();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http2_concurrent_requests() {
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use hyper_util::server::conn::auto::Builder as ConnBuilder;
@@ -558,7 +558,7 @@ mod tests {
         server_handle.abort();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_http2_performance_benchmark() {
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use hyper_util::server::conn::auto::Builder as ConnBuilder;

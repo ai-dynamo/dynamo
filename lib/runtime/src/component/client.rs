@@ -281,7 +281,7 @@ mod tests {
 
     /// Test that instances removed via report_instance_down are restored after
     /// the reconciliation interval elapses.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_instance_reconciliation() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /// Test that report_instance_down correctly removes an instance from instance_avail.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_report_instance_down() {
         let rt = Runtime::from_current().unwrap();
         // Use process_local config to avoid needing etcd/nats
@@ -360,7 +360,7 @@ mod tests {
     }
 
     /// Test that instance_avail_watcher receives updates when instances change.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_instance_avail_watcher() {
         let rt = Runtime::from_current().unwrap();
         // Use process_local config to avoid needing etcd/nats

@@ -222,7 +222,7 @@ pub async fn connect_to_prefill(host: &str, port: u16, room_id: u64) -> Result<(
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_prefill_completes_first() {
         let cancel_token = CancellationToken::new();
         let server = BootstrapServer::start(0, cancel_token.clone())
@@ -242,7 +242,7 @@ mod tests {
         cancel_token.cancel();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_decode_connects_first() {
         let cancel_token = CancellationToken::new();
         let server = BootstrapServer::start(0, cancel_token.clone())
@@ -268,7 +268,7 @@ mod tests {
         cancel_token.cancel();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_interleaved_ordering() {
         let cancel_token = CancellationToken::new();
         let server = BootstrapServer::start(0, cancel_token.clone())
@@ -296,7 +296,7 @@ mod tests {
         cancel_token.cancel();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_rooms_concurrent() {
         let cancel_token = CancellationToken::new();
         let server = BootstrapServer::start(0, cancel_token.clone())
@@ -344,7 +344,7 @@ mod tests {
         cancel_token.cancel();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_decode_timeout_no_prefill() {
         let cancel_token = CancellationToken::new();
         let server = BootstrapServer::start(0, cancel_token.clone())

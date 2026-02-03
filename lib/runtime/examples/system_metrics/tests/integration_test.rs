@@ -14,7 +14,7 @@ use std::env;
 use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, backend};
 use tokio::time::{Duration, sleep};
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_backend_with_metrics() -> Result<()> {
     // Set environment variable for dynamic port allocation (0 = auto-assign)
     env::set_var(env_system::DYN_SYSTEM_PORT, "0");

@@ -323,7 +323,7 @@ fn validate_finish_reason(
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_gpt_oss_e2e_with_no_tool_calls_vllm() {
         // E2E Parsing test for GPT-OSS. The input stream does not contain tool calls.
         // Just content and reasoning content.
@@ -380,7 +380,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_gpt_oss_e2e_with_tool_calls_vllm() {
         // E2E Parsing test for GPT-OSS. The input stream contains tool calls.
         // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
@@ -442,7 +442,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_qwen_e2e_with_no_tools_vllm() {
         // E2E Parsing test for Qwen with no tools.
 
@@ -491,7 +491,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_qwen_e2e_with_tools_vllm() {
         // E2E Parsing test for Qwen with tools.
         // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
@@ -549,7 +549,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_gpt_oss_e2e_with_no_tool_calls_sglang() {
         // SGLang Parsing test for GPT-OSS without tool calls.
 
@@ -611,7 +611,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_gpt_oss_e2e_with_tool_calls_sglang() {
         // SGLang Parsing test for GPT-OSS with tool calls.
 
@@ -673,7 +673,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_qwen_e2e_with_no_tools_sglang() {
         // SGLang Parsing test for Qwen with no tools.
 
@@ -732,7 +732,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_qwen_e2e_with_tools_sglang() {
         // SGLang Parsing test for Qwen with tools.
 
@@ -792,7 +792,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_nemotron_e2e_with_tools_vllm() {
         // E2E Parsing test for Nemotron with tools.
         // Test will call both reasoning parsing logic and tool calling parsing logic and verify the output
@@ -850,7 +850,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_qwen_finish_reason_length_vllm() {
         let file_paths = vec![
             format!(
@@ -885,7 +885,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_deepseek_v3_e2e_with_tools_vllm() {
         // E2E Parsing test for DeepSeek V3 with tools.
         let file_path = format!(
@@ -941,7 +941,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_deepseek_v3_1_e2e_with_tools_vllm() {
         // E2E Parsing test for DeepSeek V3.1 with tools.
         let file_path = format!(
@@ -997,7 +997,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_deepseek_v3_e2e_with_no_tools_vllm() {
         // E2E Parsing test for DeepSeek V3 without tools.
         let file_path = format!(
@@ -1046,7 +1046,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_deepseek_v3_1_e2e_with_no_tools_vllm() {
         // E2E Parsing test for DeepSeek V3.1 without tools.
         let file_path = format!(

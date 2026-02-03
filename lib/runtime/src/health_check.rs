@@ -445,7 +445,7 @@ mod integration_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_initialization() {
         let drt = create_test_drt_async().await;
 
@@ -463,7 +463,7 @@ mod integration_tests {
         assert_eq!(manager.config.request_timeout, request_timeout);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_payload_registration() {
         let drt = create_test_drt_async().await;
 
@@ -498,7 +498,7 @@ mod integration_tests {
         assert!(endpoints.contains(&endpoint.to_string()));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_spawn_per_endpoint_tasks() {
         let drt = create_test_drt_async().await;
 
@@ -540,7 +540,7 @@ mod integration_tests {
         assert!(endpoints.contains(&"test.endpoint.2".to_string()));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_endpoint_health_check_notifier_created() {
         let drt = create_test_drt_async().await;
 

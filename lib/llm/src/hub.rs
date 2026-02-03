@@ -180,7 +180,7 @@ fn get_model_express_cache_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_from_hf_with_model_express() {
         let test_path = PathBuf::from("test-model");
         let _result: anyhow::Result<PathBuf> = from_hf(test_path, false).await;

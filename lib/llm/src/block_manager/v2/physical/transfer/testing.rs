@@ -252,7 +252,7 @@ mod tests {
         todo!("Create test context - requires CUDA/NIXL setup")
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_round_trip_host_to_host() {
         // Create three layouts: source, intermediate, destination
         let (src_layout, _src_mem) = create_test_layout(4);
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(result.num_blocks(), 4);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_round_trip_different_block_ids() {
         // Create layouts with enough blocks
         let (src_layout, _src_mem) = create_test_layout(8);

@@ -350,7 +350,7 @@ mod tests {
             .join("")
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_passthrough_forwards_chunks_unchanged() {
         // Input chunks should pass through exactly as-is
         let chunks = vec![
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(reconstruct_content(&results), "Hello World");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_empty_stream_handling() {
         // Empty stream should not panic and should provide fallback response
         let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = vec![];
@@ -393,7 +393,7 @@ mod tests {
         // Should get fallback response, not panic
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_single_chunk_stream() {
         // Single chunk should pass through and aggregate correctly
         let chunks = vec![create_mock_chunk("Single chunk".to_string(), 0)];
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(final_resp.object, "chat.completion");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_chunks_with_metadata_preserved() {
         // Test that metadata (id, event, comment) is preserved through passthrough
         let chunk_with_metadata = Annotated {
@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(results[0].comment, Some(vec!["test-comment".to_string()]));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_concurrent_futures() {
         // Test that multiple concurrent audit streams don't interfere
         let chunks1 = vec![create_mock_chunk("Stream 1".to_string(), 0)];

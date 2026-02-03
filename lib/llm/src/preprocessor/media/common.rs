@@ -55,7 +55,7 @@ impl EncodedMediaData {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_from_base64() {
         // Simple base64 encoded "test" string: dGVzdA==
         let data_url = url::Url::parse("data:text/plain;base64,dGVzdA==").unwrap();
@@ -71,7 +71,7 @@ mod tests {
         assert_eq!(decoded, b"test");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_from_empty_base64() {
         let data_url = url::Url::parse("data:text/plain;base64,").unwrap();
         let client = reqwest::Client::new();
@@ -80,7 +80,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_from_invalid_base64() {
         let data_url = url::Url::parse("data:invalid").unwrap();
         let client = reqwest::Client::new();
@@ -89,7 +89,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_from_url_http() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -112,7 +112,7 @@ mod tests {
         mock.assert_async().await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_from_url_http_404() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -129,7 +129,7 @@ mod tests {
         mock.assert_async().await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_from_unsupported_scheme() {
         let ftp_url = url::Url::parse("ftp://example.com/image.png").unwrap();
         let client = reqwest::Client::new();

@@ -138,7 +138,7 @@ mod tests {
         messages
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore] // Manual testing only - requires NATS on localhost:4222
     async fn test_audit_nats_basic_flow() {
         const TEST_SUBJECT: &str = "test.audit.basic";
@@ -192,7 +192,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore] // Manual testing only - requires NATS on localhost:4222
     async fn test_audit_nats_store_flag() {
         // Test that store flag controls whether records are audited

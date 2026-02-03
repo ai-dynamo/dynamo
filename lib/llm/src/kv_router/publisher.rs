@@ -1235,7 +1235,7 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test start_event_processor
     //--------------------------------------------------------------------
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_start_event_processor() {
         let (component, published) = MockComponent::new();
 
@@ -1268,7 +1268,7 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test start_event_processor with local indexer
     //--------------------------------------------------------------------
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_start_event_processor_with_local_indexer() {
         let (component, published) = MockComponent::new();
 
@@ -1360,7 +1360,7 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test BlockRemoved event with local indexer
     //--------------------------------------------------------------------
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_event_processor_block_removed_with_local_indexer() {
         let (component, published) = MockComponent::new();
 
@@ -1441,7 +1441,7 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test AllBlocksCleared event with local indexer
     //--------------------------------------------------------------------
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_event_processor_all_blocks_cleared_with_local_indexer() {
         let (component, published) = MockComponent::new();
 
@@ -1520,7 +1520,7 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test that local indexer failure doesn't break NATS publishing
     //--------------------------------------------------------------------
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_event_processor_local_indexer_failure_continues() {
         let (component, published) = MockComponent::new();
 
@@ -1567,7 +1567,7 @@ mod tests_startup_helpers {
     // Test start_zmq_listener without a real socket
     //   (feed it frames through a ZMQ PAIR tcp socket)
     //--------------------------------------------------------------------
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_start_zmq_listener_pushes_to_channel() {
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<KvCacheEvent>();
@@ -1654,7 +1654,7 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test distributed recovery: Router queries worker's LocalKvIndexer after outage
     //--------------------------------------------------------------------
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_distributed_kvindexer_recovery_from_outage() {
         let worker_1_id = 1u64;
         let block_size = 4u32;
@@ -1915,7 +1915,7 @@ mod test_integration_publisher {
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::transports::event_plane::EventSubscriber;
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_metrics_publishing_behavior() -> Result<()> {
         // Set up runtime and namespace

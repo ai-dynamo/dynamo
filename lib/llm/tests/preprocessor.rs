@@ -121,7 +121,7 @@ async fn make_mdcs() -> Vec<ModelDeploymentCard> {
 // }
 
 // #[ignore]
-// #[tokio::test]
+// #[loom_rs::test]
 // async fn create_mdc_from_repo() {
 //     for repo in NGC_MODEL_REPOS.iter() {
 //         println!("Creating MDC for {}", repo);
@@ -289,7 +289,7 @@ impl Request {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_single_turn() {
     if let Err(e) = get_hf_token() {
         println!("HF_TOKEN is not set, skipping test: {}", e);
@@ -321,7 +321,7 @@ async fn test_single_turn() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_single_turn_with_tools() {
     if let Err(e) = get_hf_token() {
         println!("HF_TOKEN is not set, skipping test: {}", e);
@@ -358,7 +358,7 @@ async fn test_single_turn_with_tools() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_mulit_turn_without_system() {
     if let Err(e) = get_hf_token() {
         println!("HF_TOKEN is not set, skipping test: {}", e);
@@ -390,7 +390,7 @@ async fn test_mulit_turn_without_system() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_mulit_turn_with_system() {
     if let Err(e) = get_hf_token() {
         println!("HF_TOKEN is not set, skipping test: {}", e);
@@ -428,7 +428,7 @@ async fn test_mulit_turn_with_system() {
 }
 
 /// Test the prompt formatter with a multi-turn conversation that includes system message and tools
-#[tokio::test]
+#[loom_rs::test]
 async fn test_multi_turn_with_system_with_tools() {
     if let Err(e) = get_hf_token() {
         println!("HF_TOKEN is not set, skipping test: {}", e);
@@ -466,7 +466,7 @@ async fn test_multi_turn_with_system_with_tools() {
 }
 
 /// Test the prompt formatter with a multi-turn conversation that includes a continuation
-#[tokio::test]
+#[loom_rs::test]
 async fn test_multi_turn_with_continuation() {
     if let Err(e) = get_hf_token() {
         println!("HF_TOKEN is not set, skipping test: {}", e);
@@ -512,7 +512,7 @@ pub mod openai_preprocessor_tests {
     pub use super::*;
     use std::collections::HashSet;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_stop_condition() {
         if let Err(e) = get_hf_token() {
             println!("HF_TOKEN is not set, skipping test: {}", e);
@@ -595,7 +595,7 @@ fn build_message(text: &str, chunks: &[(&str, usize)]) -> String {
 #[case::three_images(&[("image_url", 3)])]
 // Mixed media types
 #[case::mixed_multiple(&[("image_url", 2), ("video_url", 1), ("audio_url", 2)])]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
     if let Err(e) = get_hf_token() {
         println!("HF_TOKEN is not set, skipping test: {}", e);

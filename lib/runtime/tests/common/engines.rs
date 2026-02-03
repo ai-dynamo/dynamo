@@ -171,7 +171,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_async_processor() {
         let processor = AsyncProcessor::new(move |x: i32| {
             async move {
@@ -189,7 +189,7 @@ mod tests {
         println!("{}", result2); // Output: Processed value: 100
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_generator() {
         let generator = AsyncGenerator::<String, String>::new(|(req, stream)| async move {
             let chars = req.chars().collect::<Vec<char>>();

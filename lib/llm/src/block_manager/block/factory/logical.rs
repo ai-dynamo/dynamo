@@ -81,7 +81,7 @@ mod tests {
     const TEST_BLOCK_SET_ID: usize = 42;
     const TEST_WORKER_ID: WorkerID = 1337;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_logical_block_factory() {
         let layout_config = LayoutConfig::builder()
             .num_blocks(10)

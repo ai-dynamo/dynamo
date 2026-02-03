@@ -241,7 +241,7 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_mock_discovery_add_and_remove() {
         let registry = SharedMockRegistry::new();
         let client1 = MockDiscovery::new(Some(1), registry.clone());

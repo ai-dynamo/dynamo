@@ -398,7 +398,7 @@ mod tests {
     use tokio_stream::StreamExt;
     use tokio_util::sync::CancellationToken;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_worker_kv_query_engine_returns_buffered_events() {
         let worker_id = 7u64;
         let token = CancellationToken::new();

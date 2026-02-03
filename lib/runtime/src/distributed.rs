@@ -708,7 +708,7 @@ mod tests {
     use super::RequestPlaneMode;
     use super::distributed_test_utils::create_test_drt_async;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
         use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server disabled
@@ -735,7 +735,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
         use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server enabled

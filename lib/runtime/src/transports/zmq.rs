@@ -354,7 +354,7 @@ mod tests {
     use super::*;
     use tokio::time::timeout;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_basic_communication() -> Result<()> {
         let context = Context::new();
         let address = "tcp://127.0.0.1:1337";
@@ -394,13 +394,13 @@ mod tests {
         Ok(())
     }
 
-    // #[tokio::test]
+    // #[loom_rs::test]
     // async fn test_multiple_streams() -> Result<()> {
     //     // Similar to above but with multiple clients/streams
     //     Ok(())
     // }
 
-    // #[tokio::test]
+    // #[loom_rs::test]
     // async fn test_error_handling() -> Result<()> {
     //     // Test various error conditions
     //     Ok(())

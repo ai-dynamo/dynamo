@@ -6,7 +6,7 @@ use tempfile::tempdir;
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_model_info_from_hf_like_local_repo() {
     let mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
     let info = mdc.model_info.unwrap().get_model_info().unwrap();
@@ -17,14 +17,14 @@ async fn test_model_info_from_hf_like_local_repo() {
     assert_eq!(info.vocab_size(), Some(32000));
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_model_info_from_non_existent_local_repo() {
     let path = "tests/data/sample-models/this-model-does-not-exist";
     let result = ModelDeploymentCard::load_from_disk(path, None);
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_tokenizer_from_hf_like_local_repo() {
     let mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
     // Verify tokenizer file was found
@@ -33,7 +33,7 @@ async fn test_tokenizer_from_hf_like_local_repo() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_prompt_formatter_from_hf_like_local_repo() {
     let mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
     // Verify prompt formatter was found
@@ -43,7 +43,7 @@ async fn test_prompt_formatter_from_hf_like_local_repo() {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_missing_required_files() {
     // Create empty temp directory
     let temp_dir = tempdir().unwrap();
