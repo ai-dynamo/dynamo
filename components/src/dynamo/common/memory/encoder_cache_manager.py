@@ -47,9 +47,6 @@ class EncoderCacheManager:
         Args:
             capacity_bytes: Maximum cache capacity in bytes.
         """
-        if capacity_bytes <= 0:
-            raise ValueError("capacity_bytes must be positive")
-
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._capacity_bytes = capacity_bytes
         self._current_bytes = 0
