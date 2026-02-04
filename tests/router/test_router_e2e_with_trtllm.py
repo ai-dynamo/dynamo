@@ -156,6 +156,10 @@ class TRTLLMProcess:
             if max_seq_len is not None:
                 command.extend(["--max-seq-len", str(max_seq_len)])
 
+            # Local indexer is enabled by default; use --durable-kv-events to use JetStream mode
+            if not enable_local_indexer:
+                command.append("--durable-kv-events")
+
             # Each TRT-LLM worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
             # See examples/backends/trtllm/launch/disagg_same_gpu.sh for reference.
             system_port = 8081 + worker_idx
@@ -173,10 +177,6 @@ class TRTLLMProcess:
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
                 env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
-
-            # Local indexer is enabled by default; disable for JetStream mode
-            if not enable_local_indexer:
-                env_vars["DYN_LOCAL_INDEXER"] = "false"
 
             env.update(env_vars)
 

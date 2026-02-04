@@ -159,9 +159,9 @@ def _build_mocker_command(
         command.extend(["--watermark", str(mocker_args["watermark"])])
     if "dp_size" in mocker_args:
         command.extend(["--data-parallel-size", str(mocker_args["dp_size"])])
-    # local_indexer is enabled by default; use --disable-local-indexer to disable
+    # local_indexer is enabled by default; use --durable-kv-events to disable it and use JetStream
     if mocker_args.get("enable_local_indexer") is False:
-        command.append("--disable-local-indexer")
+        command.append("--durable-kv-events")
     if "bootstrap_ports" in mocker_args:
         command.extend(["--bootstrap-ports", mocker_args["bootstrap_ports"]])
 

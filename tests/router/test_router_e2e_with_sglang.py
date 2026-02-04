@@ -182,6 +182,10 @@ class SGLangProcess:
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
+            # Local indexer is enabled by default; use --durable-kv-events to use JetStream mode
+            if not enable_local_indexer:
+                command.append("--durable-kv-events")
+
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
                 "CUDA_VISIBLE_DEVICES": gpu_device,
@@ -193,10 +197,6 @@ class SGLangProcess:
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
                 env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
-
-            # Local indexer is enabled by default; disable for JetStream mode
-            if not enable_local_indexer:
-                env_vars["DYN_LOCAL_INDEXER"] = "false"
 
             env.update(env_vars)
 

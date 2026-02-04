@@ -296,11 +296,11 @@ def parse_args() -> Config:
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--disable-local-indexer",
+        "--durable-kv-events",
         action="store_true",
-        dest="disable_local_indexer",
-        default=os.environ.get("DYN_LOCAL_INDEXER", "true").lower() != "true",
-        help="Disable worker-local KV indexer for tracking this worker's own KV cache state. By default, local indexer is enabled. Can also be set via DYN_LOCAL_INDEXER=false env var.",
+        dest="durable_kv_events",
+        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     )
     parser.add_argument(
         "--use-vllm-tokenizer",
@@ -459,7 +459,7 @@ def parse_args() -> Config:
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
-    config.enable_local_indexer = not args.disable_local_indexer
+    config.enable_local_indexer = not args.durable_kv_events
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
     config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config

@@ -124,11 +124,11 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_EVENT_PLANE", "nats"),
         "help": "Determines how events are published [nats|zmq]",
     },
-    "disable-local-indexer": {
-        "flags": ["--disable-local-indexer"],
+    "durable-kv-events": {
+        "flags": ["--durable-kv-events"],
         "action": "store_true",
-        "default": os.environ.get("DYN_LOCAL_INDEXER", "true").lower() != "true",
-        "help": "Disable worker-local KV indexer for tracking this worker's own KV cache state. By default, local indexer is enabled. Can also be set via DYN_LOCAL_INDEXER=false env var.",
+        "default": os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        "help": "Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     },
     "image-diffusion-worker": {
         "flags": ["--image-diffusion-worker"],
@@ -640,7 +640,7 @@ async def parse_args(args: list[str]) -> Config:
         image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
         image_diffusion_base_url=getattr(parsed_args, "image_diffusion_base_url", None),
         dump_config_to=parsed_args.dump_config_to,
-        enable_local_indexer=not parsed_args.disable_local_indexer,
+        enable_local_indexer=not parsed_args.durable_kv_events,
         use_kv_events=use_kv_events,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")

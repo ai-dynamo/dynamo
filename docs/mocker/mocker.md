@@ -90,7 +90,7 @@ python -m dynamo.mocker \
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--is-prefill-worker` | False | Prefill-only mode |
 | `--is-decode-worker` | False | Decode-only mode |
-| `--disable-local-indexer` | False | Disable local KV indexer (enabled by default) |
+| `--durable-kv-events` | False | Enable durable KV events via JetStream (disables local indexer) |
 | `--bootstrap-ports` | None | Ports for P/D rendezvous |
 
 ## Architecture
