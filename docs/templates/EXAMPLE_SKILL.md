@@ -165,7 +165,7 @@ For components, create redirect stub:
 
 <One-sentence description.>
 
-See [docs/components/<name>/](../../docs/components/<name>/) for documentation.
+See `docs/components/<name>/` for documentation.
 ```
 
 ---

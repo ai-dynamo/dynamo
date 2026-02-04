@@ -12,8 +12,10 @@ orphan: true
 
 ## Guides
 
-- [Guide 1](./<subtopic1>.md)
-- [Guide 2](./<subtopic2>.md)
+| Guide | Path |
+|-------|------|
+| Guide 1 | `<subtopic1>.md` |
+| Guide 2 | `<subtopic2>.md` |
 
 ## Reference
 
@@ -21,5 +23,7 @@ orphan: true
 
 ## See Also
 
-- [Related topic 1](../related/)
-- [Related topic 2](../other/)
+| Topic | Path |
+|-------|------|
+| Related topic 1 | `../related/` |
+| Related topic 2 | `../other/` |
