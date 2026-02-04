@@ -261,7 +261,7 @@ mod tests {
             index,
             delta: ChatCompletionStreamResponseDelta {
                 role: Some(Role::Assistant),
-                content: Some(content),
+                content: Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(content)),
                 tool_calls: None,
                 function_call: None,
                 refusal: None,
@@ -337,7 +337,10 @@ mod tests {
             .as_ref()
             .and_then(|d| d.choices.first())
             .and_then(|c| c.delta.content.as_ref())
-            .cloned()
+            .and_then(|content| match content {
+                dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => Some(text.clone()),
+                dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => None,
+            })
             .unwrap_or_default()
     }
 
@@ -423,7 +426,7 @@ mod tests {
                         index: 0,
                         delta: ChatCompletionStreamResponseDelta {
                             role: Some(Role::Assistant),
-                            content: Some("Content".to_string()),
+                            content: Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text("Content".to_string())),
                             tool_calls: None,
                             function_call: None,
                             refusal: None,

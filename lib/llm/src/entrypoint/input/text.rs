@@ -140,9 +140,18 @@ async fn main_loop(
                     let entry = data.choices.first();
                     let chat_comp = entry.as_ref().unwrap();
                     if let Some(c) = &chat_comp.delta.content {
-                        let _ = stdout.write(c.as_bytes());
-                        let _ = stdout.flush();
-                        assistant_message += c;
+                        match c {
+                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => {
+                                let _ = stdout.write(text.as_bytes());
+                                let _ = stdout.flush();
+                                assistant_message += text;
+                            }
+                            dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => {
+                                // Multimodal content - for now just print a placeholder
+                                let _ = stdout.write(b"[multimodal content]");
+                                let _ = stdout.flush();
+                            }
+                        }
                     }
                     if let Some(reason) = chat_comp.finish_reason {
                         tracing::trace!("finish reason: {reason:?}");

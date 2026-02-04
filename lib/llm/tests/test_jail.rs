@@ -16,6 +16,15 @@ mod tests {
     // Test utilities module - shared test infrastructure
     pub(crate) mod test_utils {
         use super::*;
+        use dynamo_async_openai::types::ChatCompletionMessageContent;
+
+        /// Helper to extract text from ChatCompletionMessageContent
+        pub fn extract_text(content: &ChatCompletionMessageContent) -> &str {
+            match content {
+                ChatCompletionMessageContent::Text(text) => text.as_str(),
+                ChatCompletionMessageContent::Parts(_) => "",
+            }
+        }
 
         /// Helper function to create a mock chat response chunk
         pub fn create_mock_response_chunk(
@@ -27,7 +36,7 @@ mod tests {
                 index,
                 delta: ChatCompletionStreamResponseDelta {
                     role: Some(Role::Assistant),
-                    content: Some(content),
+                    content: Some(ChatCompletionMessageContent::Text(content)),
                     tool_calls: None,
                     function_call: None,
                     refusal: None,
@@ -338,7 +347,10 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
-                .cloned()
+                .and_then(|content| match content {
+                    ChatCompletionMessageContent::Text(text) => Some(text.clone()),
+                    ChatCompletionMessageContent::Parts(_) => None,
+                })
                 .unwrap_or_default()
         }
 
@@ -1298,11 +1310,11 @@ mod tests {
         assert!(content.is_some(), "Should have accumulated content");
         let content = content.as_ref().unwrap();
         assert!(
-            content.contains("<tool_call>"),
+            test_utils::extract_text(content).contains("<tool_call>"),
             "Should contain jail start marker in accumulated content"
         );
         assert!(
-            content.contains("incomplete_call"),
+            test_utils::extract_text(content).contains("incomplete_call"),
             "Should contain accumulated incomplete content"
         );
     }
@@ -1860,7 +1872,7 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
-                .map(|content| content.contains("Need to use function get_current_weather."))
+                .map(|content| test_utils::extract_text(content).contains("Need to use function get_current_weather."))
                 .unwrap_or(false)
         });
         assert!(has_analysis_text, "Should contain extracted analysis text");
@@ -1912,7 +1924,7 @@ mod tests {
             for choice in data.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
-                        !content.contains("<｜tool▁calls▁end｜>"),
+                        !test_utils::extract_text(content).contains("<｜tool▁calls▁end｜>"),
                         "Should not contain deepseek special tokens in content"
                     );
                 }
@@ -1986,7 +1998,7 @@ mod tests {
             for choice in data.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
-                        !content.contains("<｜tool▁calls▁end｜>"),
+                        !test_utils::extract_text(content).contains("<｜tool▁calls▁end｜>"),
                         "Should not contain deepseek special tokens in content"
                     );
                 }
@@ -2184,7 +2196,7 @@ mod tests {
                     .and_then(|c| c.delta.content.as_ref())
             })
             .filter(|content| {
-                content.contains("<tool_call>") || content.contains("should not jail")
+                test_utils::extract_text(content).contains("<tool_call>") || test_utils::extract_text(content).contains("should not jail")
             })
             .collect();
 
@@ -2202,7 +2214,7 @@ mod tests {
                     .and_then(|d| d.choices.first())
                     .and_then(|c| c.delta.content.as_ref())
             })
-            .find(|content| content.contains("[[START]]") && content.contains("jailed content"));
+            .find(|content| test_utils::extract_text(content).contains("[[START]]") && test_utils::extract_text(content).contains("jailed content"));
 
         assert!(
             jailed_chunk.is_some(),
@@ -2592,7 +2604,7 @@ mod parallel_jail_tests {
                     c.delta
                         .content
                         .as_ref()
-                        .is_some_and(|content| content.contains("I'll check the weather"))
+                        .is_some_and(|content| test_utils::extract_text(content).contains("I'll check the weather"))
                 })
             })
         });
@@ -2622,7 +2634,7 @@ mod parallel_jail_tests {
                     c.delta
                         .content
                         .as_ref()
-                        .is_some_and(|content| content.contains("Let me get that information"))
+                        .is_some_and(|content| test_utils::extract_text(content).contains("Let me get that information"))
                 })
             })
         });
@@ -2982,8 +2994,8 @@ mod parallel_jail_tests {
             r.data.as_ref().is_some_and(|d| {
                 d.choices.iter().any(|c| {
                     c.delta.content.as_ref().is_some_and(|content| {
-                        content.contains("I'll help you")
-                            || content.contains("don't need any tools")
+                        test_utils::extract_text(content).contains("I'll help you")
+                            || test_utils::extract_text(content).contains("don't need any tools")
                     })
                 })
             })
