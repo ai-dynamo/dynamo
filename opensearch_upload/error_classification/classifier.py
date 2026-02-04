@@ -318,8 +318,8 @@ class ErrorClassifier:
 
         Criteria:
         - Infrastructure/build errors (high impact)
-        - Job-blocking failures
-        - NOT individual test failures (defer to batch)
+        - Job-blocking failures (imports, collection errors, setup failures)
+        - NOT individual test assertion failures (defer to batch)
 
         Args:
             error_context: Error context
@@ -339,11 +339,34 @@ class ErrorClassifier:
         # Classify infrastructure and build errors in real-time
         source_type = error_context.source_type
 
-        if source_type in ["buildkit", "github_annotation", "infrastructure_error"]:
+        if source_type in ["buildkit", "github_annotation", "infrastructure_error", "github_job_log"]:
             return True
 
-        # Don't classify individual test failures in real-time
-        if source_type == "pytest" and error_context.test_name:
-            return False
+        # For pytest errors, check if they're infrastructure issues
+        if source_type == "pytest":
+            error_text = error_context.error_text.lower()
+
+            # Critical infrastructure errors that prevent tests from running
+            infrastructure_indicators = [
+                "importerror",
+                "modulenotfounderror",
+                "error collecting",
+                "collection error",
+                "error importing",
+                "cannot import",
+                "no module named",
+                "setup failed",
+                "fixture error",
+                "fixture not found",
+                "session fixture failed",
+                "conftest",
+            ]
+
+            if any(indicator in error_text for indicator in infrastructure_indicators):
+                return True
+
+            # Regular test assertion failures - defer to batch
+            if error_context.test_name:
+                return False
 
         return False

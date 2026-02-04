@@ -63,6 +63,7 @@ def extract_ci_errors() -> List[ErrorContext]:
     Looks for:
     - test-results/*.xml (pytest JUnit)
     - build-logs/*.log (BuildKit logs)
+    - GitHub job logs (via API, for step failures)
     """
     extractor = ErrorExtractor()
     errors = []
@@ -99,7 +100,87 @@ def extract_ci_errors() -> List[ErrorContext]:
             errors.extend(build_errors)
             print(f"  Found {len(build_errors)} errors")
 
+    # Extract from GitHub job logs (for step failures without artifacts)
+    # Only do this if we haven't found any errors yet
+    if not errors:
+        print("📋 No artifacts found, checking GitHub job logs...")
+        github_errors = extract_from_github_job_logs(extractor, context)
+        if github_errors:
+            errors.extend(github_errors)
+            print(f"  Found {len(github_errors)} errors from job logs")
+
     return errors
+
+
+def extract_from_github_job_logs(
+    extractor: ErrorExtractor,
+    context: Dict[str, Any]
+) -> List[ErrorContext]:
+    """
+    Extract errors from GitHub job logs via API.
+
+    This catches step failures that don't produce artifacts.
+    """
+    import requests
+
+    github_token = os.getenv("GITHUB_TOKEN")
+    repo = os.getenv("GITHUB_REPOSITORY")
+    run_id = os.getenv("GITHUB_RUN_ID")
+
+    if not all([github_token, repo, run_id]):
+        print("  ⚠️  Missing GitHub context, skipping job log extraction")
+        return []
+
+    try:
+        # Get jobs for this workflow run
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+        jobs_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs"
+        response = requests.get(jobs_url, headers=headers, timeout=10)
+
+        if response.status_code != 200:
+            print(f"  ⚠️  Failed to fetch jobs: HTTP {response.status_code}")
+            return []
+
+        jobs_data = response.json()
+
+        # Find the current job (the one that's failing)
+        current_job_name = os.getenv("GITHUB_JOB")
+        current_job = None
+
+        for job in jobs_data.get("jobs", []):
+            if job.get("name") == current_job_name or job.get("conclusion") == "failure":
+                current_job = job
+                break
+
+        if not current_job:
+            print("  ⚠️  Could not find current job")
+            return []
+
+        # Get job logs
+        logs_url = current_job.get("logs_url")
+        if not logs_url:
+            # Try constructing the URL
+            job_id = current_job.get("id")
+            logs_url = f"https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs"
+
+        log_response = requests.get(logs_url, headers=headers, timeout=30)
+
+        if log_response.status_code != 200:
+            print(f"  ⚠️  Failed to fetch logs: HTTP {log_response.status_code}")
+            return []
+
+        log_content = log_response.text
+
+        # Extract errors from logs
+        return extractor.extract_from_github_job_logs(log_content, context)
+
+    except Exception as e:
+        print(f"  ⚠️  Error fetching job logs: {e}")
+        return []
 
 
 def classify_and_upload_critical_errors():
