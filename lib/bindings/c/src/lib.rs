@@ -369,54 +369,6 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
 
 // Default timeout for bookkeeping operations
 const BOOKKEEPING_TIMEOUT_SEC: u64 = 5;
-/// Default timeout for waiting for worker discovery (seconds).
-/// This may take while for large models.
-/// Can be overridden via DYN_DISCOVERY_TIMEOUT_SEC env var.
-const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 30 * 60;
-
-/// Get discovery timeout from environment variable or use default.
-/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
-fn get_discovery_timeout_secs() -> u64 {
-    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SEC)
-}
-
-/// Wait for the discovery daemon to sync and return at least one instance.
-/// This ensures list() calls will have data available.
-/// Returns the number of instances found, or 0 if timed out.
-async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) -> usize {
-    tracing::info!("Waiting for discovery to sync...");
-    let discovery = drt.discovery();
-    let timeout = std::time::Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
-
-    loop {
-        match discovery.list(DiscoveryQuery::AllModels).await {
-            Ok(instances) if !instances.is_empty() => {
-                tracing::info!(
-                    "Discovery sync complete: found {} instances",
-                    instances.len()
-                );
-                return instances.len();
-            }
-            Ok(_) => {
-                if start.elapsed() > timeout {
-                    tracing::warn!("Discovery sync timed out waiting for instances");
-                    return 0;
-                }
-                tracing::debug!("No instances yet, waiting...");
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-            Err(e) => {
-                tracing::warn!("Discovery list error: {}, continuing...", e);
-                return 0;
-            }
-        }
-    }
-}
-
 /// Complete routing result for a chat completion request (C-compatible)
 ///
 /// This is the result of `route_chat_request` which combines
@@ -590,8 +542,7 @@ pub unsafe extern "C" fn create_routers(
 
         // Wait for at least one worker to be discovered before proceeding
         // This ensures the decode router can be created successfully
-        let discovery_timeout = get_discovery_timeout_secs();
-        let instance_count = wait_for_discovery_sync(&drt, discovery_timeout).await;
+        let instance_count = wait_for_discovery_sync(&drt).await;
         if instance_count == 0 {
             tracing::error!(
                 "Discovery sync failed: no worker instances found after {}s. Is the backend running?",
