@@ -343,6 +343,22 @@ pub struct MatchRequest {
     created_at: Instant,
 }
 
+impl MatchRequest {
+    fn new(
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        resp: oneshot::Sender<OverlapScores>,
+    ) -> Self {
+        Self {
+            sequence,
+            early_exit,
+            resp,
+            #[cfg(feature = "bench")]
+            created_at: Instant::now(),
+        }
+    }
+}
+
 /// A request to dump the tree as events
 pub struct DumpRequest {
     /// Channel to send the dumped events
@@ -775,19 +791,7 @@ impl KvIndexerInterface for KvIndexer {
         let start = Instant::now();
         let seq_len = sequence.len();
         let (resp_tx, resp_rx) = oneshot::channel();
-        #[cfg(feature = "bench")]
-        let req = MatchRequest {
-            sequence,
-            early_exit: false,
-            resp: resp_tx,
-            created_at: start,
-        };
-        #[cfg(not(feature = "bench"))]
-        let req = MatchRequest {
-            sequence,
-            early_exit: false,
-            resp: resp_tx,
-        };
+        let req = MatchRequest::new(sequence, false, resp_tx);
 
         if let Err(e) = self.match_tx.send(req).await {
             tracing::error!(
@@ -1189,6 +1193,22 @@ pub struct ShardedMatchRequest {
     created_at: Instant,
 }
 
+impl ShardedMatchRequest {
+    fn new(
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        resp: mpsc::Sender<OverlapScores>,
+    ) -> Self {
+        Self {
+            sequence,
+            early_exit,
+            resp,
+            #[cfg(feature = "bench")]
+            created_at: Instant::now(),
+        }
+    }
+}
+
 /// A sharded KV Indexer that partitions the RadixTree across multiple independent shards.
 ///
 /// ## Sharding Strategy
@@ -1524,19 +1544,7 @@ impl KvIndexerInterface for KvIndexerSharded {
 
         'match_loop: loop {
             let (match_tx, mut match_rx) = mpsc::channel(self.event_tx.len());
-            #[cfg(feature = "bench")]
-            let sharded_req = ShardedMatchRequest {
-                sequence: sequence.clone(),
-                early_exit: false,
-                resp: match_tx,
-                created_at: Instant::now(),
-            };
-            #[cfg(not(feature = "bench"))]
-            let sharded_req = ShardedMatchRequest {
-                sequence: sequence.clone(),
-                early_exit: false,
-                resp: match_tx,
-            };
+            let sharded_req = ShardedMatchRequest::new(sequence.clone(), false, match_tx);
             self.request_broadcast_tx
                 .send(sharded_req)
                 .map_err(|_| KvRouterError::IndexerOffline)?;

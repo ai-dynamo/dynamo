@@ -1599,7 +1599,7 @@ async fn main() -> Result<()> {
 
         let try_simple_fallback = |path: &str| -> Option<PromptRenderer> {
             let config = load_tokenizer_config(path).ok()??;
-            let template = config.chat_template?;
+            let template = config.chat_template.clone()?;
             Some(PromptRenderer::Simple(ChatTemplateRenderer::new(
                 template,
                 config.bos_token_str(),
