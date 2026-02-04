@@ -38,6 +38,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         working-directory: /workspace
         run: |
+          apt-get update && apt-get install -y python3-venv || true
           python3 -m venv /tmp/error-classification-venv
           source /tmp/error-classification-venv/bin/activate
           pip install -r opensearch_upload/requirements.txt
