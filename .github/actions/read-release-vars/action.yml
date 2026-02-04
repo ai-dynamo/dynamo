@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Read Release Variables
+description: Parse release variables from .github/release_variables.yml
+
+outputs:
+  announce_rc:
+    description: 'Whether RC announcements are enabled'
+    value: ${{ steps.parse.outputs.announce_rc }}
+  release_versions_file:
+    description: 'Path to JSON file with release versions'
+    value: /tmp/release_versions.json
+
+runs:
+  using: composite
+  steps:
+    - name: Parse release variables
+      id: parse
+      shell: bash
+      run: |
+        VARS_FILE=".github/release_variables.yml"
+        [ -f "$VARS_FILE" ] || { echo "Error: $VARS_FILE not found"; exit 1; }
+        echo "announce_rc=$(yq -r '.announce_rc // false' $VARS_FILE)" >> "$GITHUB_OUTPUT"
+        yq -o=json '.release_versions // []' "$VARS_FILE" > /tmp/release_versions.json
+        cat /tmp/release_versions.json

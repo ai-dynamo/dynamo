@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Release Configuration
+# This file controls the automated RC announcement workflow
+
+# Set to true to enable RC announcements, false to disable
+announce_rc: true
+
+# List of release versions to announce
+# Add multiple versions if parallel releases are in progress
+release_versions:
+  - "0.9.0"
