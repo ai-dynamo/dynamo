@@ -151,11 +151,12 @@ class BaseConfigModifier:
             Tuple of (model_name, model_path)
         """
         model_name = default_model_name
-
+        served_model_name_found = False
         # Check for --served-model-name first (API model name)
         for i, arg in enumerate(args):
             if arg == cls.WORKER_SERVED_MODEL_NAME_ARG and i + 1 < len(args):
                 model_name = args[i + 1]
+                served_model_name_found = True
                 break
 
         # Check for backend-specific path argument
@@ -166,15 +167,13 @@ class BaseConfigModifier:
                 break
 
         # If model_name not found, use model_path as model_name
-        if model_name == default_model_name and model_path != default_model_name:
-            model_name = model_path
-
-        # Warn if neither argument was found
-        if model_name == default_model_name and model_path == default_model_name:
-            logger.warning(
-                f"Model name not found in configuration args, using default model name: {default_model_name}"
-            )
-
+        if not served_model_name_found:
+            if model_path != default_model_name:
+                model_name = model_path
+            else:
+                logger.warning(
+                    f"Model name not found in configuration args, using default model name: {default_model_name}"
+                )
         return model_name, model_path
 
     @classmethod
