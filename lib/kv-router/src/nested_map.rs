@@ -24,8 +24,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId,
+    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId,
     WorkerWithDpRank, compute_seq_hash_for_block,
 };
 
@@ -361,34 +360,28 @@ impl PositionalIndexer {
                 let start_pos = match store_data.parent_hash {
                     Some(parent_hash) => {
                         // Find parent position from worker_blocks
-                        match self.worker_blocks.get(&worker) {
-                            Some(worker_map) => {
-                                match worker_map.get(&parent_hash) {
-                                    Some(entry) => entry.0 + 1, // parent position + 1
-                                    None => {
-                                        tracing::warn!(
-                                            worker_id = worker.worker_id.to_string(),
-                                            dp_rank = worker.dp_rank,
-                                            id,
-                                            parent_hash = ?parent_hash,
-                                            num_blocks = store_data.blocks.len(),
-                                            "Failed to find parent block; skipping store operation"
-                                        );
-                                        return Err(KvCacheEventError::ParentBlockNotFound);
-                                    }
-                                }
-                            }
-                            None => {
-                                tracing::warn!(
-                                    worker_id = worker.worker_id.to_string(),
-                                    dp_rank = worker.dp_rank,
-                                    id,
-                                    parent_hash = ?parent_hash,
-                                    "Failed to find worker blocks; skipping store operation"
-                                );
-                                return Err(KvCacheEventError::ParentBlockNotFound);
-                            }
-                        }
+
+                        let Some(worker_map) = self.worker_blocks.get(&worker) else {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                parent_hash = ?parent_hash,
+                            );
+                            return Err(KvCacheEventError::ParentBlockNotFound);
+                        };
+
+                        let Some(entry) = worker_map.get(&parent_hash) else {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                parent_hash = ?parent_hash,
+                            );
+                            return Err(KvCacheEventError::ParentBlockNotFound);
+                        };
+
+                        entry.0 + 1 // parent position + 1
                     }
                     None => 0, // Start from position 0
                 };
@@ -413,63 +406,60 @@ impl PositionalIndexer {
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                let mut kv_cache_err: Option<KvCacheEventError> = None;
-
+                let mut first_err: Option<KvCacheEventError> = None;
                 for seq_hash in remove_data.block_hashes {
-                    // Find the block in worker_blocks
-                    let worker_map = match self.worker_blocks.get(&worker) {
-                        Some(map) => map,
-                        None => {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                id,
-                                block_hash = ?seq_hash,
-                                "Failed to find worker blocks to remove"
-                            );
-                            if kv_cache_err.is_none() {
-                                kv_cache_err = Some(KvCacheEventError::BlockNotFound);
-                            }
-                            continue;
-                        }
-                    };
-
-                    // Get position and local_hash for this seq_hash
-                    let (position, local_hash) = match worker_map.remove(&seq_hash) {
-                        Some((_, (pos, lh))) => (pos, lh),
-                        None => {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                id,
-                                block_hash = ?seq_hash,
-                                "Failed to find block to remove; skipping remove operation"
-                            );
-                            if kv_cache_err.is_none() {
-                                kv_cache_err = Some(KvCacheEventError::BlockNotFound);
-                            }
-                            continue;
-                        }
-                    };
-
-                    // Remove from index
-                    if let Some(pos_map) = self.index.get(&position)
-                        && let Some(mut entry) = pos_map.get_mut(&local_hash)
-                        && entry.remove(seq_hash, worker)
-                    {
-                        // Entry is empty, remove it
-                        drop(entry);
-                        pos_map.remove(&local_hash);
+                    if let Err(e) = self.remove_single_block(worker, seq_hash, id) {
+                        first_err.get_or_insert(e);
                     }
                 }
-
-                kv_cache_err.map_or(Ok(()), Err)
+                first_err.map_or(Ok(()), Err)
             }
             KvCacheEventData::Cleared => {
                 self.clear_worker_blocks(worker_id);
                 Ok(())
             }
         }
+    }
+
+    /// Remove a single block from the index for a given worker.
+    fn remove_single_block(
+        &self,
+        worker: WorkerWithDpRank,
+        seq_hash: ExternalSequenceBlockHash,
+        event_id: u64,
+    ) -> Result<(), KvCacheEventError> {
+        let worker_map = self.worker_blocks.get(&worker).ok_or_else(|| {
+            tracing::warn!(
+                worker_id = worker.worker_id.to_string(),
+                dp_rank = worker.dp_rank,
+                event_id,
+                block_hash = ?seq_hash,
+                "Failed to find worker blocks to remove"
+            );
+            KvCacheEventError::BlockNotFound
+        })?;
+
+        let (_, (position, local_hash)) = worker_map.remove(&seq_hash).ok_or_else(|| {
+            tracing::warn!(
+                worker_id = worker.worker_id.to_string(),
+                dp_rank = worker.dp_rank,
+                event_id,
+                block_hash = ?seq_hash,
+                "Failed to find block to remove; skipping remove operation"
+            );
+            KvCacheEventError::BlockNotFound
+        })?;
+
+        // Remove from index
+        if let Some(pos_map) = self.index.get(&position)
+            && let Some(mut entry) = pos_map.get_mut(&local_hash)
+            && entry.remove(seq_hash, worker)
+        {
+            drop(entry);
+            pos_map.remove(&local_hash);
+        }
+
+        Ok(())
     }
 
     /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
@@ -522,57 +512,7 @@ impl PositionalIndexer {
     /// Dump the index as a series of RouterEvents that can reconstruct the index.
     /// Each worker gets one event per block they have stored.
     fn dump_as_events(&self) -> Vec<RouterEvent> {
-        let mut events = Vec::new();
-        let mut event_id = 0u64;
-
-        // Iterate over all workers and their blocks
-        for worker_entry in self.worker_blocks.iter() {
-            let worker = *worker_entry.key();
-            let blocks_map = worker_entry.value();
-
-            // Collect blocks sorted by position for consistent ordering
-            let mut blocks: Vec<(ExternalSequenceBlockHash, usize, LocalBlockHash)> = blocks_map
-                .iter()
-                .map(|entry| (*entry.key(), entry.value().0, entry.value().1))
-                .collect();
-            blocks.sort_by_key(|(_, pos, _)| *pos);
-
-            // Group consecutive blocks into single events where possible
-            // For simplicity, emit one event per block (like radix tree does)
-            for (seq_hash, position, local_hash) in blocks {
-                // Determine parent_hash (previous block's seq_hash if position > 0)
-                let parent_hash = if position > 0 {
-                    // Find the block at position - 1 for this worker
-                    blocks_map
-                        .iter()
-                        .find(|e| e.value().0 == position - 1)
-                        .map(|e| *e.key())
-                } else {
-                    None
-                };
-
-                let event = RouterEvent {
-                    worker_id: worker.worker_id,
-                    event: KvCacheEvent {
-                        event_id,
-                        dp_rank: worker.dp_rank,
-                        data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash,
-                            blocks: vec![KvCacheStoredBlockData {
-                                block_hash: seq_hash,
-                                tokens_hash: local_hash,
-                                mm_extra_info: None,
-                            }],
-                        }),
-                    },
-                };
-
-                events.push(event);
-                event_id += 1;
-            }
-        }
-
-        events
+        unimplemented!();
     }
 }
 
