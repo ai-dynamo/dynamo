@@ -4,11 +4,11 @@
 """
 Async Encoder Cache
 
-Async wrapper over EncoderCacheManager with request coalescing.
+Async wrapper over MultimodalEmbeddingCacheManager with request coalescing.
 Prevents duplicate encoding when multiple requests arrive for the same content.
 
 Usage:
-    cache = EncoderCacheManager(capacity_bytes=4 * 1024**3)
+    cache = MultimodalEmbeddingCacheManager(capacity_bytes=4 * 1024**3)
     async_cache = AsyncEncoderCache(cache)
 
     # Get from cache or compute with coalescing
@@ -21,7 +21,9 @@ from typing import Awaitable, Callable, Dict, Optional
 
 import torch
 
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ def _suppress_unhandled_future_exception(future: asyncio.Future) -> None:
 
 class AsyncEncoderCache:
     """
-    Async wrapper with request coalescing over EncoderCacheManager.
+    Async wrapper with request coalescing over MultimodalEmbeddingCacheManager.
 
     Provides async get_or_compute that deduplicates concurrent requests
     for the same key, ensuring only one encoding runs at a time per key.
@@ -53,12 +55,12 @@ class AsyncEncoderCache:
         asyncio event loop. All access must be from the same thread.
     """
 
-    def __init__(self, cache: EncoderCacheManager):
+    def __init__(self, cache: MultimodalEmbeddingCacheManager):
         """
         Initialize the async encoder cache.
 
         Args:
-            cache: Underlying EncoderCacheManager for storage.
+            cache: Underlying MultimodalEmbeddingCacheManager for storage.
         """
         self._cache = cache
         self._in_flight: Dict[str, asyncio.Future[torch.Tensor]] = {}
