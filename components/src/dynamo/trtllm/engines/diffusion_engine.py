@@ -120,9 +120,11 @@ class DiffusionEngine:
         self._initialized = False
 
         # Get registry entry
-        self._module_path, self._class_name, self._supported_modalities = (
-            self.PIPELINE_REGISTRY[model_type]
-        )
+        (
+            self._module_path,
+            self._class_name,
+            self._supported_modalities,
+        ) = self.PIPELINE_REGISTRY[model_type]
 
     async def initialize(self) -> None:
         """Load and configure the diffusion pipeline.

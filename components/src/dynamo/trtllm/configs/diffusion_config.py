@@ -35,7 +35,9 @@ class DiffusionConfig:
 
     # Model config
     model_path: str = DEFAULT_VIDEO_MODEL_PATH
-    model_type: str = "wan_t2v"  # Must be validated against DiffusionEngine.PIPELINE_REGISTRY
+    model_type: str = (
+        "wan_t2v"  # Must be validated against DiffusionEngine.PIPELINE_REGISTRY
+    )
     served_model_name: Optional[str] = None
 
     # Output config

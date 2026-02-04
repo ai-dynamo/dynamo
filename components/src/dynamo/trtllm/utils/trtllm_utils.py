@@ -452,7 +452,12 @@ def cmd_line_args():
         "--linear-type",
         type=str,
         default="default",
-        choices=["default", "trtllm-fp8-blockwise", "trtllm-fp8-per-tensor", "trtllm-nvfp4"],
+        choices=[
+            "default",
+            "trtllm-fp8-blockwise",
+            "trtllm-fp8-per-tensor",
+            "trtllm-nvfp4",
+        ],
         help="Linear type for quantization. Default: default",
     )
     diffusion_group.add_argument(

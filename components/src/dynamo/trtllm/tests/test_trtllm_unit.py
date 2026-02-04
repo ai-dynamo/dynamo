@@ -36,7 +36,7 @@ def test_custom_jinja_template_invalid_path(mock_trtllm_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"
     mock_trtllm_cli(
-        "--model", "Qwen/Qwen3-0.6B", "--custom-jinja-template", invalid_path
+        "--model-path", "Qwen/Qwen3-0.6B", "--custom-jinja-template", invalid_path
     )
 
     with pytest.raises(
@@ -48,7 +48,9 @@ def test_custom_jinja_template_invalid_path(mock_trtllm_cli):
 
 def test_custom_jinja_template_valid_path(mock_trtllm_cli):
     """Test that valid absolute path is stored correctly."""
-    mock_trtllm_cli(model="Qwen/Qwen3-0.6B", custom_jinja_template=JINJA_TEMPLATE_PATH)
+    mock_trtllm_cli(
+        model_path="Qwen/Qwen3-0.6B", custom_jinja_template=JINJA_TEMPLATE_PATH
+    )
     config = cmd_line_args()
 
     assert config.custom_jinja_template == JINJA_TEMPLATE_PATH, (
@@ -63,7 +65,7 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_trtllm_cli):
     monkeypatch.setenv("JINJA_DIR", jinja_dir)
 
     cli_path = "$JINJA_DIR/custom_template.jinja"
-    mock_trtllm_cli(model="Qwen/Qwen3-0.6B", custom_jinja_template=cli_path)
+    mock_trtllm_cli(model_path="Qwen/Qwen3-0.6B", custom_jinja_template=cli_path)
 
     config = cmd_line_args()
 
