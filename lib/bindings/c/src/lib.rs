@@ -57,47 +57,30 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
-/// Default timeout for discovery sync (seconds).
-const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 10;
-
-/// Get discovery timeout from environment variable or use default.
-/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
-fn get_discovery_timeout_secs() -> u64 {
-    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SEC)
-}
-
-/// Wait for the discovery daemon to sync and return at least one instance.
-/// This ensures list() calls will have data available.
-/// Returns the number of instances found, or 0 if timed out.
-async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) -> usize {
-    tracing::info!("Waiting for discovery to sync...");
+// Wait for the discovery daemon to sync indefinitely and return at least one instance.
+// This is because the Model info is registered by workers and it may take up to 30 min for the model weights to load and for the worker to register itself.
+// The waiting timeout is implemented in the Kubernetes StartupProbe. The EPP waiting loops runs indefinitely, the Probe is a single source of truth with when to kill the EPP if discovery fails.
+// If workers are not found within the probe's failureThreshold × periodSeconds, the pod will be killed and restarted.
+// Users can adjust the StartupProbe waiting timed in the DGD for large models.
+async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
+    tracing::info!(
+        "Waiting for discovery to sync (no timeout - controlled by K8s StartupProbe)..."
+    );
     let discovery = drt.discovery();
-    let timeout = std::time::Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
 
     loop {
         match discovery.list(DiscoveryQuery::AllModels).await {
             Ok(instances) if !instances.is_empty() => {
-                tracing::info!(
-                    "Discovery sync complete: found {} instances",
-                    instances.len()
-                );
                 return instances.len();
             }
             Ok(_) => {
-                if start.elapsed() > timeout {
-                    tracing::warn!("Discovery sync timed out waiting for instances");
-                    return 0;
-                }
                 tracing::debug!("No instances yet, waiting...");
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             Err(e) => {
-                tracing::warn!("Discovery list error: {}, continuing...", e);
-                return 0;
+                // Log and continue - transient errors shouldn't stop the wait
+                tracing::warn!("Discovery list error: {}, retrying...", e);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         }
     }
@@ -128,18 +111,12 @@ pub unsafe extern "C" fn dynamo_llm_init(
             .await
         {
             Ok(drt) => {
-                // Wait for discovery to sync before returning
+                // Wait for discovery to sync before returning.
                 // This is needed because dynamo_create_worker_selection_pipeline() is called
-                // immediately after, and it needs discovery.list() to return data
-                // the discovery daemon takes time to query K8s and returns async, so we need to wait.
-                let timeout_secs = get_discovery_timeout_secs();
-                let instance_count = wait_for_discovery_sync(drt, timeout_secs).await;
-                if instance_count == 0 {
-                    tracing::error!(
-                        "Discovery sync failed: no worker instances found. Is the backend running?"
-                    );
-                    return Err(DynamoLlmResult::ERR);
-                }
+                // immediately after, and it needs discovery.list() to return data.
+                // The discovery daemon takes time to query K8s and returns async, so we need to wait.
+                // Note: This waits indefinitely - the K8s StartupProbe is the timeout mechanism.
+                wait_for_discovery_sync(drt).await;
                 Ok(())
             }
             Err(e) => {
@@ -1374,14 +1351,9 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Only wait for discovery sync if we just initialized the DRT
     // (dynamo_llm_init already does this when it initializes)
+    // Note: This waits indefinitely - the K8s StartupProbe is the timeout mechanism.
     if needs_sync {
-        let timeout_secs = get_discovery_timeout_secs();
-        let instance_count = wait_for_discovery_sync(distributed_runtime, timeout_secs).await;
-        if instance_count == 0 {
-            return Err(anyhow::anyhow!(
-                "Discovery sync failed: no worker instances found. Is the backend running?"
-            ));
-        }
+        wait_for_discovery_sync(distributed_runtime).await;
     }
 
     let component = distributed_runtime

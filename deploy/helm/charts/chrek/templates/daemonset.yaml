@@ -1,0 +1,208 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "chrek.fullname" . }}-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chrek.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkpoint-agent
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: checkpoint-agent
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- with .Values.daemonset.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.daemonset.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "chrek.serviceAccountName" . }}
+      hostPID: true
+      hostIPC: true
+      hostNetwork: true
+      {{- with .Values.daemonset.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        # Default: tolerate all taints (allow running on any node)
+        - operator: Exists
+        {{- with .Values.daemonset.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.daemonset.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.daemonset.runtimeClassName }}
+      # Use specified runtime class for GPU access (e.g., nvidia for CUDA checkpointing)
+      runtimeClassName: {{ .Values.daemonset.runtimeClassName }}
+      {{- end }}
+      {{- if .Values.seccomp.deploy }}
+      initContainers:
+        # Deploy seccomp profile to host before starting the agent
+        # This profile blocks io_uring syscalls that CRIU doesn't support
+        - name: deploy-seccomp
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /host-seccomp/profiles
+              cp /seccomp-profiles/block-iouring.json /host-seccomp/profiles/block-iouring.json
+              echo "Deployed seccomp profile to /var/lib/kubelet/seccomp/profiles/block-iouring.json"
+          volumeMounts:
+            - name: seccomp-profiles
+              mountPath: /seccomp-profiles
+              readOnly: true
+            - name: host-seccomp
+              mountPath: /host-seccomp
+      {{- end }}
+      containers:
+        - name: agent
+          image: "{{ .Values.daemonset.image.repository }}:{{ .Values.daemonset.image.tag }}"
+          imagePullPolicy: {{ .Values.daemonset.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Agent mode: use "watcher" to watch for labeled pods
+            - name: CHECKPOINT_SIGNAL_FROM
+              value: "watcher"
+            {{- if .Values.rbac.namespaceRestricted }}
+            # Restrict pod watching to this namespace (namespace-scoped RBAC)
+            - name: RESTRICTED_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
+            # Checkpoint storage directory
+            - name: CHECKPOINT_DIR
+              value: {{ .Values.storage.pvc.basePath | quote }}
+            # Host proc mount point for CRIU operations
+            - name: HOST_PROC
+              value: "/host/proc"
+            # Containerd socket path
+            - name: CONTAINERD_SOCKET
+              value: {{ .Values.daemonset.containerRuntimeSocket }}
+            {{- if .Values.daemonset.criu.cudaPluginDir }}
+            # CUDA plugin directory for GPU checkpoint support
+            - name: CUDA_PLUGIN_DIR
+              value: {{ .Values.daemonset.criu.cudaPluginDir | quote }}
+            {{- end }}
+            {{- if .Values.daemonset.criu.ghostLimit }}
+            # CRIU ghost file size limit in bytes
+            - name: CRIU_GHOST_LIMIT
+              value: {{ .Values.daemonset.criu.ghostLimit | quote }}
+            {{- end }}
+            {{- if .Values.daemonset.criu.timeout }}
+            # CRIU timeout in seconds
+            - name: CRIU_TIMEOUT
+              value: {{ .Values.daemonset.criu.timeout | quote }}
+            {{- end }}
+            # Storage type (for future S3/OCI support)
+            - name: DYN_CHECKPOINT_STORAGE_TYPE
+              value: {{ .Values.storage.type | quote }}
+          volumeMounts:
+            {{- if eq .Values.storage.type "pvc" }}
+            # Mount the checkpoint PVC (only for PVC storage type)
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
+            {{- end }}
+            # Mount containerd runtime directory for checkpoint operations
+            - name: containerd-run
+              mountPath: /run/containerd
+            # Mount kubelet pods directory for volume discovery
+            - name: kubelet-pods
+              mountPath: /var/lib/kubelet/pods
+              readOnly: true
+            # Mount containerd storage for filesystem info
+            - name: containerd-storage
+              mountPath: /var/lib/containerd
+              readOnly: true
+            # Mount host proc for CRIU and signal file writing
+            - name: host-proc
+              mountPath: /host/proc
+            # Mount host cgroup for CRIU
+            - name: host-cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            {{- if and (eq .Values.storage.type "oci") .Values.storage.oci.credentialsSecretRef }}
+            # Mount docker config for OCI registry auth
+            - name: docker-config
+              mountPath: /root/.docker
+              readOnly: true
+            {{- end }}
+          {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.storage.s3.credentialsSecretRef }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.daemonset.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.seccomp.deploy }}
+        # Seccomp profile ConfigMap (used by initContainer)
+        - name: seccomp-profiles
+          configMap:
+            name: {{ include "chrek.fullname" . }}-seccomp
+        # Host seccomp directory (for deploying the profile)
+        - name: host-seccomp
+          hostPath:
+            path: /var/lib/kubelet/seccomp
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq .Values.storage.type "pvc" }}
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.pvc.name }}
+        {{- end }}
+        # Containerd runtime directory (read-write for checkpoint operations)
+        - name: containerd-run
+          hostPath:
+            path: /run/containerd
+            type: Directory
+        # Kubelet pods directory (for volume discovery)
+        - name: kubelet-pods
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        # Containerd storage directory (for filesystem info)
+        - name: containerd-storage
+          hostPath:
+            path: /var/lib/containerd
+            type: Directory
+        # Host proc (for CRIU and signal files - needs write access)
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        # Host cgroup (for CRIU)
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        {{- if and (eq .Values.storage.type "oci") .Values.storage.oci.credentialsSecretRef }}
+        - name: docker-config
+          secret:
+            secretName: {{ .Values.storage.oci.credentialsSecretRef }}
+        {{- end }}
+      {{- with .Values.daemonset.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
