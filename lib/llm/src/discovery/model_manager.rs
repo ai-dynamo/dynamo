@@ -7,11 +7,11 @@ use std::{
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use tokio::sync::oneshot;
 
-use crate::discovery::KvWorkerMonitor;
-use crate::discovery::runtime_configs::RuntimeConfigs;
+use super::worker_monitor::LoadThresholdConfig;
+use super::{KvWorkerMonitor, RuntimeConfigs};
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
@@ -33,7 +33,7 @@ use crate::{
         openai::{
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
         },
     },
 };
@@ -66,23 +66,17 @@ pub struct ModelManager {
     completion_engines: RwLock<ModelEngines<OpenAICompletionsStreamingEngine>>,
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
+    images_engines: RwLock<ModelEngines<OpenAIImagesStreamingEngine>>,
     tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
     // Prefill models don't have engines - they're only tracked for discovery/lifecycle
     prefill_engines: RwLock<ModelEngines<()>>,
 
-    // These are Mutex because we read and write rarely and equally
-    cards: Mutex<HashMap<String, ModelDeploymentCard>>,
-    kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
-    prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
+    cards: DashMap<String, ModelDeploymentCard>,
+    kv_choosers: DashMap<EndpointId, Arc<KvRouter>>,
+    prefill_router_activators: DashMap<String, PrefillActivationState>,
 
-    /// Per-model worker monitors for dynamic KV cache load rejection.
-    /// Key: model name, Value: cloneable monitor (all fields are Arc).
-    /// HTTP endpoint can update thresholds via monitor.set_threshold().
-    worker_monitors: RwLock<HashMap<String, KvWorkerMonitor>>,
-
-    /// Runtime configs per endpoint using DashMap for lock-free access.
-    /// Outer DashMap: keyed by EndpointId
-    /// Inner RuntimeConfigs: shared with KvScheduler
+    // Per-model monitoring: worker_monitors for load-based rejection, runtime_configs for KvScheduler
+    worker_monitors: DashMap<String, KvWorkerMonitor>,
     runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
 }
 
@@ -98,12 +92,13 @@ impl ModelManager {
             completion_engines: RwLock::new(ModelEngines::default()),
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
+            images_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
             prefill_engines: RwLock::new(ModelEngines::default()),
-            cards: Mutex::new(HashMap::new()),
-            kv_choosers: Mutex::new(HashMap::new()),
-            prefill_router_activators: Mutex::new(HashMap::new()),
-            worker_monitors: RwLock::new(HashMap::new()),
+            cards: DashMap::new(),
+            kv_choosers: DashMap::new(),
+            prefill_router_activators: DashMap::new(),
+            worker_monitors: DashMap::new(),
             runtime_configs: DashMap::new(),
         }
     }
@@ -121,6 +116,7 @@ impl ModelManager {
                 ModelType::Completions => self.completion_engines.read().checksum(model_name),
                 ModelType::Embedding => self.embeddings_engines.read().checksum(model_name),
                 ModelType::TensorBased => self.tensor_engines.read().checksum(model_name),
+                ModelType::Images => self.images_engines.read().checksum(model_name),
                 ModelType::Prefill => self.prefill_engines.read().checksum(model_name),
                 _ => {
                     continue;
@@ -147,7 +143,7 @@ impl ModelManager {
     }
 
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
-        self.cards.lock().values().cloned().collect()
+        self.cards.iter().map(|r| r.value().clone()).collect()
     }
 
     /// Check if a decode model (chat or completions) is registered
@@ -237,6 +233,16 @@ impl ModelManager {
         clients.add(model, card_checksum, engine)
     }
 
+    pub fn add_images_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIImagesStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.images_engines.write();
+        clients.add(model, card_checksum, engine)
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -263,6 +269,11 @@ impl ModelManager {
 
     pub fn remove_tensor_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.tensor_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_images_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.images_engines.write();
         clients.remove(model)
     }
 
@@ -315,16 +326,27 @@ impl ModelManager {
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
     }
 
+    pub fn get_images_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
+        self.images_engines
+            .read()
+            .get(model)
+            .cloned()
+            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
-        self.cards.lock().insert(key.to_string(), card);
+        self.cards.insert(key.to_string(), card);
         Ok(())
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
-        self.cards.lock().remove(key)
+        self.cards.remove(key).map(|(_, v)| v)
     }
 
     pub async fn kv_chooser_for(
@@ -384,14 +406,12 @@ impl ModelManager {
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
-        self.kv_choosers
-            .lock()
-            .insert(endpoint_id, new_kv_chooser.clone());
+        self.kv_choosers.insert(endpoint_id, new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 
     fn get_kv_chooser(&self, id: &EndpointId) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(id).cloned()
+        self.kv_choosers.get(id).map(|r| r.value().clone())
     }
 
     /// Register a prefill router for a decode model. Returns a receiver that will be
@@ -401,10 +421,8 @@ impl ModelManager {
         &self,
         model_name: String,
     ) -> Option<oneshot::Receiver<Endpoint>> {
-        let mut activators = self.prefill_router_activators.lock();
-
-        match activators.remove(&model_name) {
-            Some(PrefillActivationState::PrefillReady(rx)) => {
+        match self.prefill_router_activators.remove(&model_name) {
+            Some((_, PrefillActivationState::PrefillReady(rx))) => {
                 // Prefill endpoint already arrived - rx will immediately resolve
                 tracing::debug!(
                     model_name = %model_name,
@@ -412,19 +430,20 @@ impl ModelManager {
                 );
                 Some(rx)
             }
-            Some(PrefillActivationState::DecodeWaiting(tx)) => {
+            Some((key, PrefillActivationState::DecodeWaiting(tx))) => {
                 // Decode already registered - this shouldn't happen, restore state and return None
                 tracing::error!(
                     model_name = %model_name,
                     "Decode model already registered for this prefill router"
                 );
-                activators.insert(model_name, PrefillActivationState::DecodeWaiting(tx));
+                self.prefill_router_activators
+                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
                 None
             }
             None => {
                 // New registration: create tx/rx pair, store sender and return receiver
                 let (tx, rx) = oneshot::channel();
-                activators.insert(
+                self.prefill_router_activators.insert(
                     model_name.clone(),
                     PrefillActivationState::DecodeWaiting(tx),
                 );
@@ -444,10 +463,8 @@ impl ModelManager {
         model_name: &str,
         endpoint: Endpoint,
     ) -> anyhow::Result<()> {
-        let mut activators = self.prefill_router_activators.lock();
-
-        match activators.remove(model_name) {
-            Some(PrefillActivationState::DecodeWaiting(sender)) => {
+        match self.prefill_router_activators.remove(model_name) {
+            Some((_, PrefillActivationState::DecodeWaiting(sender))) => {
                 // Decode model already registered
                 sender.send(endpoint).map_err(|_| {
                     anyhow::anyhow!(
@@ -463,7 +480,7 @@ impl ModelManager {
 
                 Ok(())
             }
-            Some(PrefillActivationState::PrefillReady(_)) => {
+            Some((_, PrefillActivationState::PrefillReady(_))) => {
                 // Prefill already activated - this shouldn't happen
                 anyhow::bail!("Prefill router for model {} already activated", model_name);
             }
@@ -476,7 +493,7 @@ impl ModelManager {
                 })?;
 
                 // Store the receiver for when decode model registers
-                activators.insert(
+                self.prefill_router_activators.insert(
                     model_name.to_string(),
                     PrefillActivationState::PrefillReady(rx),
                 );
@@ -493,11 +510,9 @@ impl ModelManager {
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
         self.cards
-            .lock()
-            .values()
-            .find(|c| c.display_name == model)
-            .and_then(|c| c.runtime_config.tool_call_parser.as_ref())
-            .map(|parser| parser.to_string())
+            .iter()
+            .find(|r| r.value().display_name == model)
+            .and_then(|r| r.value().runtime_config.tool_call_parser.clone())
     }
 
     /// Creates parsing options with tool call parser and reasoning parser for the specified model.
@@ -509,110 +524,35 @@ impl ModelManager {
         crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
     }
 
-    /// Gets or sets the busy threshold for a model via its worker monitor.
-    ///
-    /// Get or set the active decode blocks threshold for a model's worker monitor.
-    ///
-    /// This is the primary API for HTTP endpoints and external callers.
-    /// The threshold (0.0 to 1.0) controls when workers are marked as "busy"
-    /// based on KV cache block utilization.
-    ///
-    /// # Arguments
-    ///
-    /// * `model` - The model name
-    /// * `threshold` - `Some(value)` to set, `None` to get existing
-    ///
-    /// # Returns
-    ///
-    /// The threshold value as f64, or `None` if no monitor exists for this model.
-    pub fn active_decode_blocks_threshold(
+    /// Gets or sets the load threshold config for a model's worker monitor.
+    /// Pass `Some(config)` to update, `None` to get. Returns `None` if no monitor exists.
+    pub fn load_threshold_config(
         &self,
         model: &str,
-        threshold: Option<f64>,
-    ) -> Option<f64> {
-        let monitors = self.worker_monitors.read();
-        let monitor = monitors.get(model)?;
-
-        match threshold {
-            Some(value) => {
-                monitor.set_active_decode_blocks_threshold(value);
-                Some(value)
-            }
-            None => Some(monitor.active_decode_blocks_threshold()),
+        config: Option<&LoadThresholdConfig>,
+    ) -> Option<LoadThresholdConfig> {
+        let monitor = self.worker_monitors.get(model)?;
+        if let Some(cfg) = config {
+            monitor.set_load_threshold_config(cfg);
         }
+        Some(monitor.load_threshold_config())
     }
 
-    /// Get or set the active prefill tokens threshold for a model's worker monitor.
-    ///
-    /// The threshold is a literal token count (not a percentage).
-    ///
-    /// # Arguments
-    ///
-    /// * `model` - The model name
-    /// * `threshold` - `Some(value)` to set, `None` to get existing
-    ///
-    /// # Returns
-    ///
-    /// The threshold value as u64, or `None` if no monitor exists for this model.
-    pub fn active_prefill_tokens_threshold(
-        &self,
-        model: &str,
-        threshold: Option<u64>,
-    ) -> Option<u64> {
-        let monitors = self.worker_monitors.read();
-        let monitor = monitors.get(model)?;
-
-        match threshold {
-            Some(value) => {
-                monitor.set_active_prefill_tokens_threshold(value);
-                Some(value)
-            }
-            None => Some(monitor.active_prefill_tokens_threshold()),
-        }
-    }
-
-    /// Gets or creates a worker monitor for a model.
-    ///
-    /// If a monitor already exists, updates its thresholds and returns a clone.
-    /// If no monitor exists, creates one with the given client and thresholds.
-    ///
-    /// # Arguments
-    ///
-    /// * `model` - The model name
-    /// * `client` - The client for subscribing to KV metrics (only used if creating new)
-    /// * `active_decode_blocks_threshold` - The initial/updated active decode blocks threshold value (0.0-1.0)
-    /// * `active_prefill_tokens_threshold` - The initial/updated active prefill tokens threshold value (literal token count)
-    ///
-    /// # Returns
-    ///
-    /// A cloneable monitor that shares state with the stored instance.
+    /// Gets or creates a worker monitor for a model. Updates thresholds if monitor exists.
     pub fn get_or_create_worker_monitor(
         &self,
         model: &str,
         client: Client,
-        active_decode_blocks_threshold: f64,
-        active_prefill_tokens_threshold: u64,
+        config: LoadThresholdConfig,
     ) -> KvWorkerMonitor {
-        let mut monitors = self.worker_monitors.write();
-
-        if let Some(existing) = monitors.get(model) {
-            existing.set_active_decode_blocks_threshold(active_decode_blocks_threshold);
-            existing.set_active_prefill_tokens_threshold(active_prefill_tokens_threshold);
-            existing.clone()
-        } else {
-            let monitor = KvWorkerMonitor::new(
-                client,
-                active_decode_blocks_threshold,
-                active_prefill_tokens_threshold,
-            );
-            monitors.insert(model.to_string(), monitor.clone());
-            monitor
+        if let Some(existing) = self.worker_monitors.get(model) {
+            existing.set_load_threshold_config(&config);
+            return existing.clone();
         }
-    }
-
-    /// Gets an existing worker monitor for a model, if one exists.
-    pub fn get_worker_monitor(&self, model: &str) -> Option<KvWorkerMonitor> {
-        self.worker_monitors.read().get(model).cloned()
+        let monitor = KvWorkerMonitor::new(client, config);
+        self.worker_monitors
+            .insert(model.to_string(), monitor.clone());
+        monitor
     }
 
     /// Get or create a runtime config watcher for an endpoint.
@@ -659,20 +599,11 @@ impl ModelManager {
         config_ref.as_ref()?.disaggregated_endpoint.clone()
     }
 
-    /// Lists all models that have worker monitors (and thus busy thresholds) configured.
-    ///
-    /// Returns a vector of (model_name, active_decode_blocks_threshold, active_prefill_tokens_threshold) tuples.
-    pub fn list_busy_thresholds(&self) -> Vec<(String, f64, u64)> {
+    /// Lists all models with worker monitors configured.
+    pub fn list_busy_thresholds(&self) -> Vec<(String, LoadThresholdConfig)> {
         self.worker_monitors
-            .read()
             .iter()
-            .map(|(k, monitor)| {
-                (
-                    k.clone(),
-                    monitor.active_decode_blocks_threshold(),
-                    monitor.active_prefill_tokens_threshold(),
-                )
-            })
+            .map(|entry| (entry.key().clone(), entry.value().load_threshold_config()))
             .collect()
     }
 }

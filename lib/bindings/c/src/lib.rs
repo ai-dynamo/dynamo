@@ -66,6 +66,35 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
+// Wait for the discovery daemon to sync indefinitely and return at least one instance.
+// This is because the Model info is registered by workers and it may take up to 30 min for the model weights to load and for the worker to register itself.
+// The waiting timeout is implemented in the Kubernetes StartupProbe. The EPP waiting loops runs indefinitely, the Probe is a single source of truth with when to kill the EPP if discovery fails.
+// If workers are not found within the probe's failureThreshold × periodSeconds, the pod will be killed and restarted.
+// Users can adjust the StartupProbe waiting timed in the DGD for large models.
+async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
+    tracing::info!(
+        "Waiting for discovery to sync (no timeout - controlled by K8s StartupProbe)..."
+    );
+    let discovery = drt.discovery();
+
+    loop {
+        match discovery.list(DiscoveryQuery::AllModels).await {
+            Ok(instances) if !instances.is_empty() => {
+                return instances.len();
+            }
+            Ok(_) => {
+                tracing::debug!("No instances yet, waiting...");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                // Log and continue - transient errors shouldn't stop the wait
+                tracing::warn!("Discovery list error: {}, retrying...", e);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
@@ -91,15 +120,12 @@ pub unsafe extern "C" fn dynamo_llm_init(
             .await
         {
             Ok(drt) => {
-                // Wait for discovery to sync before returning
-                let timeout_secs = get_discovery_timeout_secs();
-                let instance_count = wait_for_discovery_sync(drt, timeout_secs).await;
-                if instance_count == 0 {
-                    tracing::error!(
-                        "Discovery sync failed: no worker instances found. Is the backend running?"
-                    );
-                    return Err(DynamoLlmResult::ERR);
-                }
+                // Wait for discovery to sync before returning.
+                // This is needed because dynamo_create_worker_selection_pipeline() is called
+                // immediately after, and it needs discovery.list() to return data.
+                // The discovery daemon takes time to query K8s and returns async, so we need to wait.
+                // Note: This waits indefinitely - the K8s StartupProbe is the timeout mechanism.
+                wait_for_discovery_sync(drt).await;
                 Ok(())
             }
             Err(e) => {

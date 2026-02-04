@@ -27,6 +27,9 @@
    kubernetes/api_reference.md
    kubernetes/deployment/create_deployment.md
    kubernetes/deployment/dynamomodel-guide.md
+   kubernetes/chrek/README.md
+   kubernetes/chrek/dynamo.md
+   kubernetes/chrek/standalone.md
 
    kubernetes/fluxcd.md
    kubernetes/grove.md
@@ -81,6 +84,8 @@
    backends/vllm/speculative_decoding.md
 
    benchmarks/kv-router-ab-testing.md
+
+   mocker/mocker.md
 
    frontends/kserve.md
    _sections/frontends.rst

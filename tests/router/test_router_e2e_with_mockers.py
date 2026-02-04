@@ -187,6 +187,8 @@ class MockerProcess:
         mocker_args = mocker_args or {}
         # Store dp_size for DP-aware test functions
         self.dp_size = mocker_args.get("dp_size")
+        # Alias for consistency with vLLM/SGLang workers
+        self.data_parallel_size = self.dp_size
 
         command = _build_mocker_command(
             endpoint=self.endpoint,
@@ -586,15 +588,17 @@ def test_indexers_sync(
     nats_process, _etcd_process = runtime_services_dynamic_ports
 
     # Create mocker args dictionary
+    # Use 2 DP ranks to test per-dp_rank event ID tracking and recovery
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
         "enable_local_indexer": use_nats_core,
+        "dp_size": 2,
     }
 
     try:
-        # Start mocker instances
-        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        # Start mocker instances (2 workers x 2 DP ranks = 4 independent event streams)
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances with dp_size=2")
         mockers = MockerProcess(
             request,
             mocker_args=mocker_args,

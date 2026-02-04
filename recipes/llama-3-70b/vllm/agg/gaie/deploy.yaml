@@ -49,12 +49,6 @@ spec:
       envs:
         - name: HF_HOME
           value: /opt/models
-      args:
-        - "-m"
-        - "dynamo.frontend"
-        - "--direct-route"
-        - "--router-mode"
-        - "kv"
       replicas: 1
     VllmPrefillWorker:
       componentType: worker
