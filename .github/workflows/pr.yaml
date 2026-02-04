@@ -151,12 +151,10 @@ jobs:
           if [[ "$NO_CACHE_FLAG" == "true" ]]; then
             NO_CACHE_FLAG="--no-cache"
           fi
-          docker buildx build --push \
+          docker buildx build --push ${NO_CACHE_FLAG} \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              ${TAGGING_FLAGS} \
-              ${NO_CACHE_FLAG} -f Dockerfile .
-
+              ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
