@@ -31,12 +31,12 @@ The following table shows the backend framework versions included with each Dyna
 | **v0.6.1** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
 | **v0.6.0** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
 
-#### Version Labels
+### Version Labels
 
 - **main (ToT)** reflects the current development branch.
 - Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
-#### Version Compatibility
+### Version Compatibility
 
 - Backend versions listed are the only versions tested and supported for each release.
 - TensorRT-LLM does not support Python 3.11; installation of the `ai-dynamo[trtllm]` wheel will fail on Python 3.11.
