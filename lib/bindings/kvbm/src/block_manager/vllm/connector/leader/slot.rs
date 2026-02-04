@@ -542,6 +542,20 @@ impl Slot for VllmConnectorSlot {
         num_scheduled_tokens: usize,
         priorities: Option<&[u32]>,
     ) -> Result<(), SlotError> {
+        // Debug logging for chunked prefill analysis
+        tracing::info!(
+            request_id = %self.request_id,
+            "apply_scheduler_output: computed={}, scheduled={}, new_blocks={}, priorities={:?}, \
+             current_pos={}, evaluated_blocks={}, offload_terminated={:?}",
+            num_computed_tokens,
+            num_scheduled_tokens,
+            block_ids.len(),
+            priorities.map(|p| p.len()),
+            self.current_position,
+            self.evaluated_blocks,
+            self.offload_terminated_at_block
+        );
+
         // Validate contract: priorities must match block_ids length when provided
         if let Some(prios) = priorities {
             assert_eq!(
