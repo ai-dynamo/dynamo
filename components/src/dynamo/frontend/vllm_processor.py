@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.protocol import (
     DeltaToolCall,
 )
 from vllm.inputs.data import TokensPrompt
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -53,6 +54,7 @@ class VllmProcessor:
         router,  # Client or KvPushRouter
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
+        reasoning_parser_class: type[ReasoningParser] | None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -60,6 +62,7 @@ class VllmProcessor:
         self.is_kv_router = isinstance(router, KvPushRouter)
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
+        self.reasoning_parser_class = reasoning_parser_class
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -203,8 +206,18 @@ class VllmProcessor:
         tool_parser = (
             self.tool_parser_class(self.tokenizer) if self.tool_parser_class else None
         )
+        reasoning_parser = (
+            self.reasoning_parser_class(
+                self.tokenizer,
+                # chat_temmplate_kwargs=..
+            )
+            if self.reasoning_parser_class
+            else None
+        )
+
         previous_text = ""
         previous_token_ids = []
+        reasoning_is_done = False
         in_progress_tool_call: DeltaToolCall | None = None
 
         # dynamo_response: Annotated
@@ -253,23 +266,58 @@ class VllmProcessor:
             choices = []
             for output in vllm_out.request_outputs[0].outputs:
                 delta_text = output.text
-                current_text = previous_text + delta_text
-                current_token_ids = previous_token_ids + output.token_ids
+                delta_token_ids = output.token_ids
 
-                if tool_parser:
+                current_text = previous_text + delta_text
+                current_token_ids = previous_token_ids + delta_token_ids
+
+                # Default if no reasoning or tool parsers
+                delta_message = DeltaMessage(content=delta_text)
+
+                if not reasoning_is_done and reasoning_parser:
+                    # Reasoning comes first in the response
                     delta_message: DeltaMessage | None = (
-                        tool_parser.extract_tool_calls_streaming(
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            delta_token_ids=output.token_ids,
-                            request=ChatCompletionRequest(**request),
+                        reasoning_parser.extract_reasoning_streaming(
+                            previous_text,
+                            current_text,
+                            delta_text,
+                            previous_token_ids,
+                            current_token_ids,
+                            delta_token_ids,
                         )
                     )
-                else:
-                    delta_message = DeltaMessage(content=delta_text)
+
+                if tool_parser:
+                    # Maybe we don't have a reasoning parser, or there was no reasoning to parse
+                    no_prev_reasoning = (
+                        delta_message
+                        and delta_message.content
+                        and not delta_message.reasoning
+                    )
+
+                    if reasoning_is_done or no_prev_reasoning:
+                        delta_message: DeltaMessage | None = (
+                            tool_parser.extract_tool_calls_streaming(
+                                previous_text=previous_text,
+                                current_text=current_text,
+                                delta_text=delta_text,
+                                previous_token_ids=previous_token_ids,
+                                current_token_ids=current_token_ids,
+                                delta_token_ids=output.token_ids,
+                                request=ChatCompletionRequest(**request),
+                            )
+                        )
+
+                if (
+                    not reasoning_is_done
+                    and reasoning_parser
+                    and reasoning_parser.is_reasoning_end(delta_token_ids)
+                ):
+                    reasoning_is_done = True
+                    previous_text = ""
+                    previous_token_ids = []
+                    current_text = ""
+                    current_token_ids = []
 
                 if delta_message is None:
                     # tokens being held back, might be tool call marker
@@ -293,10 +341,15 @@ class VllmProcessor:
                             f"Unknown tool call type in: {delta_message.tool_calls[0]}. Only type 'function' supported."
                         )
 
-                elif delta_message.content:
+                elif delta_message.content or delta_message.reasoning_content:
                     # Stream content to user
                     # ChatCompletionStreamResponseDelta
-                    delta = {"content": delta_message.content, "role": "assistant"}
+                    delta = {"role": "assistant"}
+                    if delta_message.content:
+                        delta["content"] = delta_message.content
+                    if delta_message.reasoning_content:
+                        delta["reasoning_content"] = delta_message.reasoning_content
+
                     if in_progress_tool_call:
                         delta["tool_calls"] = [
                             in_progress_tool_call.model_dump(exclude_none=True)
@@ -402,6 +455,16 @@ class EngineFactory:
         else:
             tool_parser_class = None
 
+        reasoning_parser_name = (
+            self.flags.reasoning_parser or mdc.runtime_config()["reasoning_parser"]
+        )
+        if reasoning_parser_name:
+            reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
+                reasoning_parser_name
+            )
+        else:
+            reasoning_parser_class = None
+
         (namespace_name, component_name, endpoint_name) = instance_id.triple()
         generate_endpoint = (
             self.runtime.namespace(namespace_name)
@@ -419,7 +482,12 @@ class EngineFactory:
             router = await generate_endpoint.client2(self.router_config.router_mode)
 
         gen = VllmProcessor(
-            tokenizer, input_processor, router, output_processor, tool_parser_class
+            tokenizer,
+            input_processor,
+            router,
+            output_processor,
+            tool_parser_class,
+            reasoning_parser_class,
         )
 
         return PythonAsyncEngine(gen.generator, loop)
