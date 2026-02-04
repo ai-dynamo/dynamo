@@ -697,9 +697,6 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 		sort.Strings(servicesToCheck)
 
 		// For a new restart request with services, immediately return Restarting phase without checking readiness.
-		// This prevents a race condition where we check pod readiness before the restart annotation
-		// has been applied and propagated, which would incorrectly mark the restart as completed
-		// when checking the status of pods that haven't been restarted yet.
 		if len(servicesToCheck) > 0 {
 			return &nvidiacomv1alpha1.RestartStatus{
 				ObservedID: specID,
