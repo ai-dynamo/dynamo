@@ -140,8 +140,8 @@ pub struct KvRouterConfig {
     pub use_kv_events: bool,
 
     /// Force JetStream mode for KV events even when all workers have local indexer enabled.
-    /// When false (default), the router uses NATS Core (fire-and-forget) when all workers
-    /// have local_indexer enabled, falling back to JetStream otherwise.
+    /// When false (default), the router uses the event-plane subscriber and requires
+    /// workers to have local_indexer enabled for gap recovery.
     /// When true, always uses JetStream for durability and multi-replica consistency.
     pub use_jetstream: bool,
 

@@ -639,7 +639,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
     - If store_kv != "etcd", etcd is not started (returns None)
     - NATS is always started when etcd is used, because KV events require NATS
       regardless of the request_plane (tcp/nats only affects request transport)
-    - JetStream is enabled by default; disabled when use_nats_core=True for faster startup
+    - NATS Core mode (no JetStream) is the default; JetStream is enabled when use_nats_core=False
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """

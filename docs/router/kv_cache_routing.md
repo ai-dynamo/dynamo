@@ -50,10 +50,10 @@ The main KV-aware routing arguments:
 > - **No KV events** (`--no-kv-events`): State persistence is not supported.
 >
 > **Request plane is independent of KV event transport.**
-> The router can now run without etcd or NATS when using ZMQ event plane (`--event-plane zmq`) and file/mem store (`--store-kv file` or `--store-kv mem`).
-> `DYN_REQUEST_PLANE` controls how **requests** are sent (TCP/HTTP/NATS), but KV-aware routing still uses **NATS** for KV events in both JetStream and NATS Core + Local Indexer modes.
-> When KV events are enabled (default), NATS is automatically initialized. You can optionally set `NATS_SERVER=nats://...` to specify a custom NATS server; otherwise, it defaults to `localhost:4222`.
-> Use `--no-kv-events` to disable KV events and remove the NATS requirement entirely (with request plane being `tcp` or `http`).
+> The router can run without etcd or NATS when using ZMQ event plane (`--event-plane zmq`) and file/mem store (`--store-kv file` or `--store-kv mem`); in this case, KV events use ZMQ transport instead of NATS.
+> `DYN_REQUEST_PLANE` controls how **requests** are sent (TCP/HTTP/NATS), but KV-aware routing uses **NATS** for KV events only in JetStream or NATS Core modes (not ZMQ mode).
+> When KV events are enabled (default) with NATS-based event plane, NATS is automatically initialized. You can optionally set `NATS_SERVER=nats://...` to specify a custom NATS server; otherwise, it defaults to `localhost:4222`.
+> `--no-kv-events` disables KV event transport entirely.
 >
 > When `--kv-overlap-score-weight` is set to 0, no KvIndexer is created and prefix matching is disabled (pure load balancing). When `--no-kv-events` is set, a KvIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
 >
@@ -167,12 +167,13 @@ The KV-aware router operates on two key principles to optimize request routing:
 
 KV events from engines are collected by the router to maintain a global view of cached blocks across all workers. The router supports two event transport modes:
 
-#### Mode 1: JetStream (Default)
+#### Mode 1: JetStream (Opt-in)
 
 KV events are sent to a persistent NATS JetStream. Each KV router/indexer replica acts as a durable consumer, pulling messages from this shared stream. This architecture ensures consistency across router replicas and persistence across restarts.
 
 - **Best for**: Production deployments requiring durability and multi-replica router consistency
 - **Tradeoffs**: Requires JetStream setup; slightly higher latency due to persistence guarantees
+- **Enable with**: `--use-jetstream` flag on frontend, or `--disable-local-indexer` on workers
 
 ```mermaid
 graph TD
