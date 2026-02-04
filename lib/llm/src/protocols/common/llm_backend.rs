@@ -8,6 +8,7 @@ pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
 use dynamo_async_openai::types::CompletionUsage;
 use dynamo_async_openai::types::StopReason;
+use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 pub type TokenType = Option<String>;
@@ -245,13 +246,13 @@ impl LLMEngineOutput {
 }
 
 impl MaybeError for LLMEngineOutput {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        LLMEngineOutput::error(format!("{:?}", err))
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        LLMEngineOutput::error(err.to_string())
     }
 
-    fn err(&self) -> Option<anyhow::Error> {
+    fn err(&self) -> Option<DynamoError> {
         if let Some(FinishReason::Error(err_msg)) = &self.finish_reason {
-            Some(anyhow::Error::msg(err_msg.clone()))
+            Some(DynamoError::msg(err_msg.clone()))
         } else {
             None
         }
@@ -281,7 +282,7 @@ mod tests {
         assert!(!output.is_err());
 
         let output = LLMEngineOutput::error("Test error".to_string());
-        assert_eq!(format!("{}", output.err().unwrap()), "Test error");
+        assert!(format!("{}", output.err().unwrap()).contains("Test error"));
         assert!(!output.is_ok());
         assert!(output.is_err());
     }

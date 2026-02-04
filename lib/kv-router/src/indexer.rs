@@ -36,6 +36,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use dynamo_runtime::error::DynamoError;
 #[cfg(feature = "metrics")]
 pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 #[cfg(feature = "metrics")]
@@ -50,9 +51,9 @@ use prometheus::{IntCounterVec, Opts};
 #[cfg(not(feature = "metrics"))]
 pub trait MaybeError {
     /// Construct an instance from an error.
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self;
+    fn from_err(err: impl std::error::Error + 'static) -> Self;
     /// Convert to an error instance if this represents an error.
-    fn err(&self) -> Option<anyhow::Error>;
+    fn err(&self) -> Option<DynamoError>;
 }
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "metrics")]
@@ -124,14 +125,15 @@ pub enum WorkerKvQueryResponse {
     Error(String),
 }
 
+#[cfg(feature = "metrics")]
 impl MaybeError for WorkerKvQueryResponse {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
         WorkerKvQueryResponse::Error(err.to_string())
     }
 
-    fn err(&self) -> Option<anyhow::Error> {
+    fn err(&self) -> Option<DynamoError> {
         match self {
-            WorkerKvQueryResponse::Error(msg) => Some(anyhow::Error::msg(msg.clone())),
+            WorkerKvQueryResponse::Error(msg) => Some(DynamoError::msg(msg.clone())),
             _ => None,
         }
     }

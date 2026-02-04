@@ -1,7 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
+use super::{AsyncEngineContextProvider, ResponseStream};
+use crate::error::{BackendError, ErrorType, chain_contains};
+
+/// Error types that indicate a worker should be reported as down.
+const INHIBITED_ERRORS: &[ErrorType] = &[
+    ErrorType::CannotConnect,
+    ErrorType::Disconnected,
+    ErrorType::ConnectionTimeout,
+    ErrorType::Backend(BackendError::EngineShutdown),
+];
+
+fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
+    chain_contains(err, INHIBITED_ERRORS, &[])
+}
 use crate::{
     component::{Client, Endpoint},
     engine::{AsyncEngine, Data},
@@ -11,9 +24,6 @@ use crate::{
     },
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
-};
-use async_nats::client::{
-    RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
 };
 use async_trait::async_trait;
 use rand::Rng;
@@ -399,12 +409,12 @@ where
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
-                    // TODO: Standardize error type to avoid using string matching DIS-364
+                    // Check if the error is migratable (indicates worker/connection failure)
                     if let Some(err) = res.err()
-                        && format!("{:?}", err) == STREAM_ERR_MSG
+                        && is_inhibited(&err)
                     {
                         tracing::debug!(
-                            "Reporting instance {instance_id} down due to stream error: {err}"
+                            "Reporting instance {instance_id} down due to migratable error: {err}"
                         );
                         client.report_instance_down(instance_id);
                     }
@@ -413,13 +423,8 @@ where
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }
             Err(err) => {
-                if self.fault_detection_enabled
-                    && let Some(req_err) = err.downcast_ref::<NatsRequestError>()
-                    && matches!(req_err.kind(), NatsNoResponders)
-                {
-                    tracing::debug!(
-                        "Reporting instance {instance_id} down due to request error: {req_err}"
-                    );
+                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
+                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
                     self.client.report_instance_down(instance_id);
                 }
                 Err(err)

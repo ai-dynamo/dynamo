@@ -545,13 +545,24 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
                 // Don't return unhealthy connection to pool, let it drop
-                Err(e)
+                let cause = crate::error::DynamoError::from(
+                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+                );
+                Err(anyhow::anyhow!(crate::error::DynamoError::new(
+                    crate::error::ErrorType::CannotConnect,
+                    format!("TCP request to {addr} failed"),
+                    Some(cause),
+                )))
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("TCP request timeout to {}", addr);
                 // Don't return timed-out connection to pool
-                Err(anyhow::anyhow!("TCP request timeout to {}", addr))
+                Err(anyhow::anyhow!(crate::error::DynamoError::new(
+                    crate::error::ErrorType::CannotConnect,
+                    format!("TCP request to {addr} timed out"),
+                    None::<crate::error::DynamoError>,
+                )))
             }
         }
     }

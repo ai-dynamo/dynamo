@@ -55,6 +55,7 @@ fn create_mock_response_chunk(
         data: Some(response),
         event: None,
         comment: None,
+        error: None,
     }
 }
 

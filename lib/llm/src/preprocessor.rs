@@ -808,6 +808,7 @@ impl OpenAIPreprocessor {
                             data,
                             event: Some(ANNOTATION_LLM_METRICS.to_string()),
                             comment: annotation.comment,
+                            error: None,
                         };
 
                         tracing::trace!(

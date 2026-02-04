@@ -34,10 +34,13 @@ pub enum PrefillError {
     #[error("Prefill router not yet activated")]
     NotActivated,
 
-    /// Error during prefill execution
     /// TODO: Separate prefill worker error from prefill router error
+    /// Error during prefill execution
     #[error("Prefill execution failed: {0}")]
-    PrefillError(String),
+    PrefillError(
+        String,
+        #[source] Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ),
 
     /// Disaggregated params not found in prefill response
     #[error("No disaggregated params in prefill response: {0}")]
@@ -343,7 +346,7 @@ impl PrefillRouter {
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
-            .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
+            .map_err(|e| PrefillError::PrefillError(String::new(), Some(e.into())))?;
 
         // Drop phase permit now - routing is complete, record_worker_full was called in select_worker.
         // This unblocks set_phase(Decode) in the main task without waiting for prefill output.
@@ -352,6 +355,7 @@ impl PrefillRouter {
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
+                None,
             ));
         };
 
@@ -373,9 +377,10 @@ impl PrefillRouter {
         }
 
         if let Some(err) = first_output.err() {
-            return Err(PrefillError::PrefillError(format!(
-                "Prefill router returned error in output: {err:?}"
-            )));
+            return Err(PrefillError::PrefillError(
+                "Prefill router returned error in output".to_string(),
+                Some(Box::new(err)),
+            ));
         }
 
         let Some(output) = &first_output.data else {

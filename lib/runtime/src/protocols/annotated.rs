@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::maybe_error::MaybeError;
+use crate::error::DynamoError;
 use anyhow::{Result, anyhow as error};
 use serde::{Deserialize, Serialize};
 
@@ -27,16 +28,19 @@ pub struct Annotated<R> {
     pub event: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<DynamoError>,
 }
 
 impl<R> Annotated<R> {
-    /// Create a new annotated stream from the given error
+    /// Create a new annotated stream from the given error string
     pub fn from_error(error: String) -> Self {
         Self {
             data: None,
             id: None,
             event: Some("error".to_string()),
-            comment: Some(vec![error]),
+            comment: None,
+            error: Some(DynamoError::msg(error)),
         }
     }
 
@@ -47,6 +51,7 @@ impl<R> Annotated<R> {
             id: None,
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -62,15 +67,20 @@ impl<R> Annotated<R> {
             id: None,
             event: Some(name.into()),
             comment: Some(vec![serde_json::to_string(value)?]),
+            error: None,
         })
     }
 
     /// Convert to a [`Result<Self, String>`]
-    /// If [`Self::event`] is "error", return an error message(s) held by [`Self::comment`]
+    /// If [`Self::event`] is "error", return an error message
     pub fn ok(self) -> Result<Self, String> {
         if let Some(event) = &self.event
             && event == "error"
         {
+            // First check DynamoError, then fallback to comment
+            if let Some(ref err) = self.error {
+                return Err(err.to_string());
+            }
             return Err(self
                 .comment
                 .unwrap_or(vec!["unknown error".to_string()])
@@ -97,6 +107,7 @@ impl<R> Annotated<R> {
             id: self.id,
             event: self.event,
             comment: self.comment,
+            error: self.error,
         }
     }
 
@@ -112,6 +123,7 @@ impl<R> Annotated<R> {
                 id: self.id,
                 event: self.event,
                 comment: self.comment,
+                error: self.error,
             },
             Err(e) => Annotated::from_error(e),
         }
@@ -125,11 +137,18 @@ impl<R> Annotated<R> {
         match self.data {
             Some(data) => Ok(Some(data)),
             None => match self.event {
-                Some(event) if event == "error" => Err(error!(
-                    self.comment
-                        .unwrap_or(vec!["unknown error".to_string()])
-                        .join(", ")
-                ))?,
+                Some(event) if event == "error" => {
+                    // First check DynamoError, then fallback to comment
+                    if let Some(ref err) = self.error {
+                        Err(error!("{}", err))?
+                    } else {
+                        Err(error!(
+                            self.comment
+                                .unwrap_or(vec!["unknown error".to_string()])
+                                .join(", ")
+                        ))?
+                    }
+                }
                 _ => Ok(None),
             },
         }
@@ -138,46 +157,39 @@ impl<R> Annotated<R> {
 
 impl<R> MaybeError for Annotated<R>
 where
-    R: for<'de> Deserialize<'de> + Serialize,
+    R: for<'de> Deserialize<'de>,
 {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        Annotated::from_error(format!("{:?}", err))
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        Self {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(DynamoError::from(
+                Box::new(err) as Box<dyn std::error::Error + 'static>
+            )),
+        }
     }
 
-    fn err(&self) -> Option<anyhow::Error> {
+    fn err(&self) -> Option<DynamoError> {
         if self.is_error() {
+            // First check DynamoError field
+            if let Some(ref error) = self.error {
+                return Some(error.clone());
+            }
+
+            // Fallback to comment-based error
             if let Some(comment) = &self.comment
                 && !comment.is_empty()
             {
-                return Some(anyhow::Error::msg(comment.join("; ")));
+                return Some(DynamoError::msg(comment.join("; ")));
             }
-            Some(anyhow::Error::msg("unknown error"))
+            Some(DynamoError::msg("unknown error"))
         } else {
             None
         }
     }
 }
-
-// impl<R> Annotated<R>
-// where
-//     R: for<'de> Deserialize<'de> + Serialize,
-// {
-//     pub fn convert_sse_stream(
-//         stream: DataStream<Result<Message, SseCodecError>>,
-//     ) -> DataStream<Annotated<R>> {
-//         let stream = stream.map(|message| match message {
-//             Ok(message) => {
-//                 let delta = Annotated::<R>::try_from(message);
-//                 match delta {
-//                     Ok(delta) => delta,
-//                     Err(e) => Annotated::from_error(e.to_string()),
-//                 }
-//             }
-//             Err(e) => Annotated::from_error(e.to_string()),
-//         });
-//         Box::pin(stream)
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
@@ -190,11 +202,69 @@ mod tests {
         assert!(annotated.is_ok());
 
         let annotated = Annotated::<String>::from_error("Test error 2".to_string());
-        assert_eq!(format!("{}", annotated.err().unwrap()), "Test error 2");
+        assert!(annotated.err().is_some());
         assert!(annotated.is_err());
 
-        let annotated =
-            Annotated::<String>::from_err(anyhow::Error::msg("Test error 3".to_string()).into());
+        let dynamo_err = DynamoError::msg("Test error 3");
+        let annotated = Annotated::<String>::from_err(dynamo_err);
         assert!(annotated.is_err());
+    }
+
+    #[test]
+    fn test_from_err() {
+        let err = DynamoError::msg("connection lost");
+        let annotated = Annotated::<String>::from_err(err);
+
+        assert!(annotated.is_err());
+        let err = annotated.err().unwrap();
+        assert!(err.to_string().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_error_serialization() {
+        let err = DynamoError::msg("test error");
+        let annotated = Annotated::<String>::from_err(err);
+
+        // Serialize and deserialize
+        let json = serde_json::to_string(&annotated).unwrap();
+        let deserialized: Annotated<String> = serde_json::from_str(&json).unwrap();
+
+        assert!(deserialized.is_err());
+        assert!(
+            deserialized
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("test error")
+        );
+    }
+
+    #[test]
+    fn test_transfer_preserves_error() {
+        let err = DynamoError::msg("request timed out");
+        let annotated = Annotated::<String>::from_err(err);
+
+        let transferred: Annotated<i32> = annotated.transfer(None);
+        assert!(transferred.err().is_some());
+    }
+
+    #[test]
+    fn test_ok_method() {
+        let err = DynamoError::msg("connection lost");
+        let annotated = Annotated::<String>::from_err(err);
+
+        let result = annotated.ok();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_into_result() {
+        let err = DynamoError::msg("connection lost");
+        let annotated = Annotated::<String>::from_err(err);
+
+        let result = annotated.into_result();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("connection lost"));
     }
 }
