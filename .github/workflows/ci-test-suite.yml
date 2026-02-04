@@ -299,7 +299,8 @@ jobs:
   unit-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always() && inputs.skip_tests != true
+    # TEMPORARY: Skip arm64 on PR
+    if: ${{ !(github.event_name == 'pull_request' && matrix.arch.arch == 'arm64') && always() && inputs.skip_tests != true }}
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
@@ -312,8 +313,6 @@ jobs:
             runner: prod-builder-amd-gpu-v1
           - arch: arm64
             runner: prod-builder-arm-v1
-        exclude:
-          - ${{ github.event_name == 'pull_request' && fromJSON('{"arch": {"arch": "arm64"}}') || fromJSON('{}') }}
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -435,7 +434,8 @@ jobs:
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    # TEMPORARY: Skip arm64 on PR
+    if: ${{ !(github.event_name == 'pull_request' && matrix.arch.arch == 'arm64') && always() }}
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -450,8 +450,6 @@ jobs:
           - arch: arm64
             runner: prod-builder-arm-v1
             timeout: 90
-        exclude:
-          - ${{ github.event_name == 'pull_request' && fromJSON('{"arch": {"arch": "arm64"}}') || fromJSON('{}') }}
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded

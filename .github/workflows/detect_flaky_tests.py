@@ -20,7 +20,6 @@ Environment Variables Required:
     LOOKBACK_DAYS: Days to look back in history (default: 7)
 """
 
-import json
 import logging
 import os
 import subprocess
@@ -34,23 +33,22 @@ import requests
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 # Constants
-OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT', '')
-SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL', '')
-SLACK_OPS_GROUP_ID = os.environ.get('SLACK_OPS_GROUP_ID', '')
-GITHUB_RUN_ID = os.environ.get('GITHUB_RUN_ID', '')
-GITHUB_REPOSITORY = os.environ.get('GITHUB_REPOSITORY', '')
-WORKFLOW_NAME = os.environ.get('WORKFLOW_NAME', '')
-FLAKY_THRESHOLD = float(os.environ.get('FLAKY_THRESHOLD', '0.80'))
-LOOKBACK_DAYS = int(os.environ.get('LOOKBACK_DAYS', '7'))
+OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "")
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+SLACK_OPS_GROUP_ID = os.environ.get("SLACK_OPS_GROUP_ID", "")
+GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "")
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
+WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "")
+FLAKY_THRESHOLD = float(os.environ.get("FLAKY_THRESHOLD", "0.80"))
+LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))
 
 # Test results directory
-TEST_RESULTS_DIR = 'test-results'
+TEST_RESULTS_DIR = "test-results"
 
 
 def download_and_parse_test_artifacts() -> List[Dict]:
@@ -68,7 +66,7 @@ def download_and_parse_test_artifacts() -> List[Dict]:
     failed_tests = []
 
     # Find all JUnit XML files
-    xml_pattern = os.path.join(TEST_RESULTS_DIR, '**', '*.xml')
+    xml_pattern = os.path.join(TEST_RESULTS_DIR, "**", "*.xml")
     xml_files = glob(xml_pattern, recursive=True)
 
     if not xml_files:
@@ -84,36 +82,44 @@ def download_and_parse_test_artifacts() -> List[Dict]:
             # Extract metadata from filename
             # Expected format: pytest_test_report_{framework}_{test_type}_{arch}_{run_id}_{job_id}.xml
             filename = os.path.basename(xml_file)
-            parts = filename.replace('pytest_test_report_', '').replace('.xml', '').split('_')
+            parts = (
+                filename.replace("pytest_test_report_", "")
+                .replace(".xml", "")
+                .split("_")
+            )
 
-            framework = parts[0] if len(parts) > 0 else 'unknown'
-            test_type = parts[1] if len(parts) > 1 else 'unknown'
+            framework = parts[0] if len(parts) > 0 else "unknown"
+            test_type = parts[1] if len(parts) > 1 else "unknown"
 
             # Parse XML
             tree = ET.parse(xml_file)
             root = tree.getroot()
 
             # Find all test cases
-            for testcase in root.findall('.//testcase'):
-                test_name = testcase.get('name')
-                test_classname = testcase.get('classname')
+            for testcase in root.findall(".//testcase"):
+                test_name = testcase.get("name")
+                test_classname = testcase.get("classname")
 
                 # Check if test failed or had an error
-                failure = testcase.find('failure')
-                error = testcase.find('error')
+                failure = testcase.find("failure")
+                error = testcase.find("error")
 
                 if failure is not None or error is not None:
-                    status = 'error' if error is not None else 'failed'
+                    status = "error" if error is not None else "failed"
 
-                    failed_tests.append({
-                        'test_name': test_name,
-                        'test_classname': test_classname,
-                        'framework': framework,
-                        'test_type': test_type,
-                        'status': status
-                    })
+                    failed_tests.append(
+                        {
+                            "test_name": test_name,
+                            "test_classname": test_classname,
+                            "framework": framework,
+                            "test_type": test_type,
+                            "status": status,
+                        }
+                    )
 
-                    logger.info(f"Found failed test: {test_name} ({framework}, {test_type})")
+                    logger.info(
+                        f"Found failed test: {test_name} ({framework}, {test_type})"
+                    )
 
         except ET.ParseError as e:
             logger.warning(f"Failed to parse XML file {xml_file}: {e}")
@@ -140,35 +146,27 @@ def find_test_file_and_blame(test_name: str) -> Tuple[Optional[str], Optional[st
         # Search for test function definition
         # Use grep to find "def test_name" in test files
         grep_pattern = f"def {test_name}"
-        grep_cmd = ['grep', '-r', grep_pattern, 'tests/', '--include=*.py', '-l']
+        grep_cmd = ["grep", "-r", grep_pattern, "tests/", "--include=*.py", "-l"]
 
-        result = subprocess.run(
-            grep_cmd,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        result = subprocess.run(grep_cmd, capture_output=True, text=True, timeout=10)
 
         if result.returncode != 0 or not result.stdout.strip():
             logger.warning(f"Test file not found for {test_name}")
             return None, None
 
         # Get first matching file
-        file_paths = result.stdout.strip().split('\n')
+        file_paths = result.stdout.strip().split("\n")
         file_path = file_paths[0]
 
         if len(file_paths) > 1:
-            logger.info(f"Multiple files found for {test_name}, using first: {file_path}")
+            logger.info(
+                f"Multiple files found for {test_name}, using first: {file_path}"
+            )
 
         # Get last author who modified this file
-        git_log_cmd = ['git', 'log', '-1', '--format=%an', file_path]
+        git_log_cmd = ["git", "log", "-1", "--format=%an", file_path]
 
-        result = subprocess.run(
-            git_log_cmd,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        result = subprocess.run(git_log_cmd, capture_output=True, text=True, timeout=10)
 
         if result.returncode != 0:
             logger.warning(f"Git log failed for {file_path}")
@@ -188,9 +186,7 @@ def find_test_file_and_blame(test_name: str) -> Tuple[Optional[str], Optional[st
 
 
 def query_opensearch_test_history(
-    test_name: str,
-    test_classname: str,
-    framework: str
+    test_name: str, test_classname: str, framework: str
 ) -> Dict:
     """
     Query OpenSearch for historical test data over the past 7 days.
@@ -209,7 +205,7 @@ def query_opensearch_test_history(
     """
     if not OPENSEARCH_ENDPOINT:
         logger.error("OPENSEARCH_ENDPOINT not configured")
-        return {'total_runs': 0, 'passed_count': 0, 'failed_count': 0, 'error_count': 0}
+        return {"total_runs": 0, "passed_count": 0, "failed_count": 0, "error_count": 0}
 
     try:
         # Calculate time range
@@ -230,21 +226,18 @@ def query_opensearch_test_history(
                             "range": {
                                 "@timestamp": {
                                     "gte": start_time.isoformat(),
-                                    "lte": end_time.isoformat()
+                                    "lte": end_time.isoformat(),
                                 }
                             }
-                        }
+                        },
                     ]
                 }
             },
             "aggs": {
                 "status_counts": {
-                    "terms": {
-                        "field": "s_test_status.keyword",
-                        "size": 10
-                    }
+                    "terms": {"field": "s_test_status.keyword", "size": 10}
                 }
-            }
+            },
         }
 
         logger.info(f"Querying OpenSearch for {test_name} ({framework})")
@@ -253,21 +246,23 @@ def query_opensearch_test_history(
         response = requests.post(
             OPENSEARCH_ENDPOINT,
             json=query,
-            headers={'Content-Type': 'application/json'},
-            timeout=30
+            headers={"Content-Type": "application/json"},
+            timeout=30,
         )
 
         response.raise_for_status()
         data = response.json()
 
         # Parse aggregation results
-        buckets = data.get('aggregations', {}).get('status_counts', {}).get('buckets', [])
+        buckets = (
+            data.get("aggregations", {}).get("status_counts", {}).get("buckets", [])
+        )
 
-        status_counts = {bucket['key']: bucket['doc_count'] for bucket in buckets}
+        status_counts = {bucket["key"]: bucket["doc_count"] for bucket in buckets}
 
-        passed_count = status_counts.get('passed', 0)
-        failed_count = status_counts.get('failed', 0)
-        error_count = status_counts.get('error', 0)
+        passed_count = status_counts.get("passed", 0)
+        failed_count = status_counts.get("failed", 0)
+        error_count = status_counts.get("error", 0)
         total_runs = passed_count + failed_count + error_count
 
         logger.info(
@@ -276,18 +271,18 @@ def query_opensearch_test_history(
         )
 
         return {
-            'total_runs': total_runs,
-            'passed_count': passed_count,
-            'failed_count': failed_count,
-            'error_count': error_count
+            "total_runs": total_runs,
+            "passed_count": passed_count,
+            "failed_count": failed_count,
+            "error_count": error_count,
         }
 
     except requests.RequestException as e:
         logger.error(f"OpenSearch query failed for {test_name}: {e}")
-        return {'total_runs': 0, 'passed_count': 0, 'failed_count': 0, 'error_count': 0}
+        return {"total_runs": 0, "passed_count": 0, "failed_count": 0, "error_count": 0}
     except Exception as e:
         logger.error(f"Error querying OpenSearch for {test_name}: {e}")
-        return {'total_runs': 0, 'passed_count': 0, 'failed_count': 0, 'error_count': 0}
+        return {"total_runs": 0, "passed_count": 0, "failed_count": 0, "error_count": 0}
 
 
 def categorize_failed_tests(failed_tests: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
@@ -309,9 +304,9 @@ def categorize_failed_tests(failed_tests: List[Dict]) -> Tuple[List[Dict], List[
     legitimate_failures = []
 
     for test in failed_tests:
-        test_name = test['test_name']
-        test_classname = test['test_classname']
-        framework = test['framework']
+        test_name = test["test_name"]
+        test_classname = test["test_classname"]
+        framework = test["framework"]
 
         # Query OpenSearch for historical data
         history = query_opensearch_test_history(test_name, test_classname, framework)
@@ -320,8 +315,8 @@ def categorize_failed_tests(failed_tests: List[Dict]) -> Tuple[List[Dict], List[
         file_path, author = find_test_file_and_blame(test_name)
 
         # Calculate pass rate
-        total_runs = history['total_runs']
-        passed_count = history['passed_count']
+        total_runs = history["total_runs"]
+        passed_count = history["passed_count"]
 
         is_new_test = total_runs == 0
         pass_rate = passed_count / total_runs if total_runs > 0 else 0.0
@@ -329,14 +324,14 @@ def categorize_failed_tests(failed_tests: List[Dict]) -> Tuple[List[Dict], List[
         # Create enriched test entry
         enriched_test = {
             **test,
-            'total_runs': total_runs,
-            'passed_count': passed_count,
-            'failed_count': history['failed_count'],
-            'error_count': history['error_count'],
-            'pass_rate': pass_rate,
-            'file_path': file_path,
-            'author': author,
-            'is_new_test': is_new_test
+            "total_runs": total_runs,
+            "passed_count": passed_count,
+            "failed_count": history["failed_count"],
+            "error_count": history["error_count"],
+            "pass_rate": pass_rate,
+            "file_path": file_path,
+            "author": author,
+            "is_new_test": is_new_test,
         }
 
         # Categorize
@@ -389,20 +384,20 @@ def format_test_entry(test: Dict) -> str:
     Returns:
         Formatted string for Slack
     """
-    test_name = test['test_name']
-    framework = test['framework']
-    test_type = test['test_type']
-    author_mention = format_slack_mention(test['author'])
+    test_name = test["test_name"]
+    framework = test["framework"]
+    test_type = test["test_type"]
+    author_mention = format_slack_mention(test["author"])
 
-    if test['is_new_test']:
+    if test["is_new_test"]:
         return (
             f"• `{test_name}` ({framework}, {test_type}) - "
             f"*new test, no history* - last modified by {author_mention}"
         )
     else:
-        total_runs = test['total_runs']
-        passed_count = test['passed_count']
-        pass_rate = test['pass_rate']
+        total_runs = test["total_runs"]
+        passed_count = test["passed_count"]
+        pass_rate = test["pass_rate"]
 
         return (
             f"• `{test_name}` ({framework}, {test_type}) - "
@@ -411,7 +406,9 @@ def format_test_entry(test: Dict) -> str:
         )
 
 
-def send_slack_notification(flaky_tests: List[Dict], legitimate_failures: List[Dict]) -> bool:
+def send_slack_notification(
+    flaky_tests: List[Dict], legitimate_failures: List[Dict]
+) -> bool:
     """
     Send Slack notification with categorized test failures.
 
@@ -443,8 +440,8 @@ def send_slack_notification(flaky_tests: List[Dict], legitimate_failures: List[D
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": "🔍 Flaky Test Detection - Post-Merge CI"
-                }
+                    "text": "🔍 Flaky Test Detection - Post-Merge CI",
+                },
             },
             {
                 "type": "section",
@@ -454,9 +451,9 @@ def send_slack_notification(flaky_tests: List[Dict], legitimate_failures: List[D
                         f"*Workflow:* {WORKFLOW_NAME}\n"
                         f"*Run:* <{run_url}|#{GITHUB_RUN_ID}>\n"
                         f"*Total Failed Tests:* {total_failed}"
-                    )
-                }
-            }
+                    ),
+                },
+            },
         ]
 
         # Add flaky tests section
@@ -466,50 +463,40 @@ def send_slack_notification(flaky_tests: List[Dict], legitimate_failures: List[D
             flaky_text = "*🎲 Flaky Tests (>80% pass rate):*\n"
             flaky_text += "\n".join(format_test_entry(test) for test in flaky_tests)
 
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": flaky_text
-                }
-            })
+            blocks.append(
+                {"type": "section", "text": {"type": "mrkdwn", "text": flaky_text}}
+            )
 
         # Add legitimate failures section
         if legitimate_failures:
             blocks.append({"type": "divider"})
 
             legit_text = "*❌ Legitimate Failures (≤80% pass rate or new test):*\n"
-            legit_text += "\n".join(format_test_entry(test) for test in legitimate_failures)
+            legit_text += "\n".join(
+                format_test_entry(test) for test in legitimate_failures
+            )
 
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": legit_text
-                }
-            })
+            blocks.append(
+                {"type": "section", "text": {"type": "mrkdwn", "text": legit_text}}
+            )
 
         # Add footer
         blocks.append({"type": "divider"})
 
-        footer_text = "Flaky tests may need retry logic; legitimate failures need investigation"
+        footer_text = (
+            "Flaky tests may need retry logic; legitimate failures need investigation"
+        )
         if SLACK_OPS_GROUP_ID:
             footer_text = f"<!subteam^{SLACK_OPS_GROUP_ID}> - {footer_text}"
 
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": footer_text
-                }
-            ]
-        })
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": footer_text}]}
+        )
 
         # Build full payload
         payload = {
             "text": f"Flaky Test Detection Results - {total_failed} failed tests",
-            "blocks": blocks
+            "blocks": blocks,
         }
 
         # Send to Slack
@@ -518,8 +505,8 @@ def send_slack_notification(flaky_tests: List[Dict], legitimate_failures: List[D
         response = requests.post(
             SLACK_WEBHOOK_URL,
             json=payload,
-            headers={'Content-Type': 'application/json'},
-            timeout=30
+            headers={"Content-Type": "application/json"},
+            timeout=30,
         )
 
         response.raise_for_status()
@@ -562,7 +549,7 @@ def main():
         logger.info("Step 2: Categorizing failed tests")
         flaky_tests, legitimate_failures = categorize_failed_tests(failed_tests)
 
-        logger.info(f"Categorization complete:")
+        logger.info("Categorization complete:")
         logger.info(f"  - Flaky tests: {len(flaky_tests)}")
         logger.info(f"  - Legitimate failures: {len(legitimate_failures)}")
 
@@ -589,19 +576,27 @@ def main():
         if flaky_tests:
             print("🎲 FLAKY TESTS:")
             for test in flaky_tests:
-                print(f"  - {test['test_name']} ({test['framework']}, {test['test_type']})")
-                print(f"    Pass rate: {test['pass_rate']:.1%} ({test['passed_count']}/{test['total_runs']} runs)")
+                print(
+                    f"  - {test['test_name']} ({test['framework']}, {test['test_type']})"
+                )
+                print(
+                    f"    Pass rate: {test['pass_rate']:.1%} ({test['passed_count']}/{test['total_runs']} runs)"
+                )
                 print(f"    Last modified by: {test['author'] or 'unknown'}")
             print()
 
         if legitimate_failures:
             print("❌ LEGITIMATE FAILURES:")
             for test in legitimate_failures:
-                print(f"  - {test['test_name']} ({test['framework']}, {test['test_type']})")
-                if test['is_new_test']:
-                    print(f"    New test (no history)")
+                print(
+                    f"  - {test['test_name']} ({test['framework']}, {test['test_type']})"
+                )
+                if test["is_new_test"]:
+                    print("    New test (no history)")
                 else:
-                    print(f"    Pass rate: {test['pass_rate']:.1%} ({test['passed_count']}/{test['total_runs']} runs)")
+                    print(
+                        f"    Pass rate: {test['pass_rate']:.1%} ({test['passed_count']}/{test['total_runs']} runs)"
+                    )
                 print(f"    Last modified by: {test['author'] or 'unknown'}")
             print()
 
@@ -620,8 +615,8 @@ def main():
                             "type": "header",
                             "text": {
                                 "type": "plain_text",
-                                "text": "⚠️ Flaky Test Detection Error"
-                            }
+                                "text": "⚠️ Flaky Test Detection Error",
+                            },
                         },
                         {
                             "type": "section",
@@ -631,10 +626,10 @@ def main():
                                     f"*Workflow:* {WORKFLOW_NAME}\n"
                                     f"*Run:* <https://github.com/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}|#{GITHUB_RUN_ID}>\n"
                                     f"*Error:* {str(e)}"
-                                )
-                            }
-                        }
-                    ]
+                                ),
+                            },
+                        },
+                    ],
                 }
                 requests.post(SLACK_WEBHOOK_URL, json=error_payload, timeout=10)
         except Exception as slack_error:
@@ -644,5 +639,5 @@ def main():
         return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
