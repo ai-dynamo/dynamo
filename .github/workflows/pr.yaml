@@ -98,7 +98,7 @@ jobs:
     with:
       framework: sglang
       platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9"'
+      cuda_versions: '["12.9"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       no_cache: true
       run_tests: false
