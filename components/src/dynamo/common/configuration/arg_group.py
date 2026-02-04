@@ -12,7 +12,7 @@ class ArgGroup(ABC):
     Base interface for all configuration groups.
 
     Each ArgGroup represents a domain of configuration parameters with clear ownership.
-    Groups are composed into a CompositeRegistry based on component requirements.
+    Groups are composed into a ConfigurationBuilder based on component requirements.
     """
 
     #: Canonical domain name (e.g., "dynamo-runtime", "dynamo-vllm")

@@ -11,13 +11,13 @@ This module provides a modular, domain-driven configuration architecture where:
 """
 
 from .arg_group import ArgGroup
-from .registry import CompositeRegistry
+from .configuration_builder import ConfigurationBuilder
 from .utils import add_negatable_bool, env_or_default
 
 __all__ = [
     # Base classes
     "ArgGroup",
-    "CompositeRegistry",
+    "ConfigurationBuilder",
     # Utilities
     "env_or_default",
     "add_negatable_bool",

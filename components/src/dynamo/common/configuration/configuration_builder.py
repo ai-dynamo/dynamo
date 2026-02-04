@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CompositeRegistry for assembling configuration from ArgGroups."""
+"""ConfigurationBuilder for assembling configuration from ArgGroups."""
 
 import argparse
 import logging
@@ -12,7 +12,7 @@ from .arg_group import ArgGroup
 logger = logging.getLogger(__name__)
 
 
-class CompositeRegistry:
+class ConfigurationBuilder:
     """
     Assembles argument parser from requested ArgGroups.
 

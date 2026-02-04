@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for CompositeRegistry class."""
+"""Tests for ConfigurationBuilder class."""
 
 import argparse
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from typing import Any, Mapping
 import pytest
 
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.registry import CompositeRegistry
+from dynamo.common.configuration.configuration_builder import ConfigurationBuilder
 
 
 # Test ArgGroups
@@ -60,13 +60,13 @@ class TestGroup2(ArgGroup):
         return Group2Config(flag=raw["flag"])
 
 
-class TestCompositeRegistry:
-    """Test CompositeRegistry class."""
+class TestConfigurationBuilder:
+    """Test ConfigurationBuilder class."""
 
     def test_init_single_group(self):
         """Test initialization with single group."""
         group = TestGroup1()
-        registry = CompositeRegistry([group])
+        registry = ConfigurationBuilder([group])
 
         assert len(registry.groups) == 1
         assert registry.groups[0].name == "group1"
@@ -74,13 +74,13 @@ class TestCompositeRegistry:
     def test_init_multiple_groups(self):
         """Test initialization with multiple groups."""
         groups = [TestGroup1(), TestGroup2()]
-        registry = CompositeRegistry(groups)
+        registry = ConfigurationBuilder(groups)
 
         assert len(registry.groups) == 2
 
     def test_init_empty_list(self):
         """Test initialization with empty list."""
-        registry = CompositeRegistry([])
+        registry = ConfigurationBuilder([])
 
         assert len(registry.groups) == 0
 
@@ -90,11 +90,11 @@ class TestCompositeRegistry:
         group1b = TestGroup1()  # Same name
 
         with pytest.raises(ValueError, match="Duplicate group name"):
-            CompositeRegistry([group1a, group1b])
+            ConfigurationBuilder([group1a, group1b])
 
     def test_build_parser_returns_parser(self):
         """Test that build_parser returns ArgumentParser."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         parser = registry.build_parser()
 
@@ -102,7 +102,7 @@ class TestCompositeRegistry:
 
     def test_build_parser_adds_arguments(self):
         """Test that build_parser adds arguments from groups."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         parser = registry.build_parser()
 
@@ -113,7 +113,7 @@ class TestCompositeRegistry:
 
     def test_build_parser_combines_multiple_groups(self):
         """Test that build_parser combines arguments from multiple groups."""
-        registry = CompositeRegistry([TestGroup1(), TestGroup2()])
+        registry = ConfigurationBuilder([TestGroup1(), TestGroup2()])
 
         parser = registry.build_parser()
 
@@ -124,7 +124,7 @@ class TestCompositeRegistry:
 
     def test_parse_and_resolve_single_group(self):
         """Test parse_and_resolve with single group."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         configs = registry.parse_and_resolve(["--param1", "myvalue", "--param2", "99"])
 
@@ -136,7 +136,7 @@ class TestCompositeRegistry:
 
     def test_parse_and_resolve_multiple_groups(self):
         """Test parse_and_resolve with multiple groups."""
-        registry = CompositeRegistry([TestGroup1(), TestGroup2()])
+        registry = ConfigurationBuilder([TestGroup1(), TestGroup2()])
 
         configs = registry.parse_and_resolve(["--param1", "test", "--flag"])
 
@@ -147,7 +147,7 @@ class TestCompositeRegistry:
 
     def test_parse_and_resolve_uses_defaults(self):
         """Test that defaults are used when args not provided."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         configs = registry.parse_and_resolve([])
 
@@ -156,7 +156,7 @@ class TestCompositeRegistry:
 
     def test_parse_and_resolve_handles_unknown_args(self):
         """Test that unknown arguments are captured in passthrough."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         configs = registry.parse_and_resolve(
             ["--param1", "test", "--unknown-flag", "value", "--another-unknown"]
@@ -169,7 +169,7 @@ class TestCompositeRegistry:
 
     def test_parse_and_resolve_no_unknown_args(self):
         """Test passthrough not included when no unknown args."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         configs = registry.parse_and_resolve(["--param1", "test"])
 
@@ -188,14 +188,14 @@ class TestCompositeRegistry:
             def resolve(self, raw):
                 return {"test": raw.get("test")}
 
-        registry = CompositeRegistry([HyphenatedGroup()])
+        registry = ConfigurationBuilder([HyphenatedGroup()])
         configs = registry.parse_and_resolve([])
 
         assert "my_hyphenated_group" in configs
 
     def test_validation_called_and_passes(self):
         """Test that validation is called and passes for valid config."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         # Should not raise
         configs = registry.parse_and_resolve(["--param2", "10"])
@@ -203,14 +203,14 @@ class TestCompositeRegistry:
 
     def test_validation_called_and_fails(self):
         """Test that validation is called and fails for invalid config."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         with pytest.raises(ValueError, match="Validation failed for group1"):
             registry.parse_and_resolve(["--param2", "-5"])
 
     def test_parse_and_resolve_with_description(self):
         """Test that description can be set."""
-        registry = CompositeRegistry([TestGroup1()])
+        registry = ConfigurationBuilder([TestGroup1()])
 
         parser = registry.build_parser("My test application")
 
@@ -219,7 +219,7 @@ class TestCompositeRegistry:
 
     def test_empty_registry_parses_successfully(self):
         """Test that empty registry still works."""
-        registry = CompositeRegistry([])
+        registry = ConfigurationBuilder([])
 
         configs = registry.parse_and_resolve([])
 
