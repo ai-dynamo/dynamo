@@ -79,7 +79,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, sglang]
+        # TEMPORARY: Only build vllm for quick testing on PR
+        framework: ${{ github.event_name == 'pull_request' && fromJSON('["vllm"]') || fromJSON('["vllm", "sglang"]') }}
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -127,6 +128,8 @@ jobs:
     name: Build ${{ matrix.framework }} (arm64)
     runs-on: prod-builder-arm-v1
     timeout-minutes: 120
+    # TEMPORARY: Skip for quick testing
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -187,6 +190,8 @@ jobs:
     name: Build ${{ matrix.framework }} CUDA13 (amd64)
     runs-on: prod-builder-amd-v1
     timeout-minutes: 120
+    # TEMPORARY: Skip for quick testing
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -239,6 +244,8 @@ jobs:
     name: Build ${{ matrix.framework }} CUDA13 (arm64)
     runs-on: prod-builder-arm-v1
     timeout-minutes: 120
+    # TEMPORARY: Skip for quick testing
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -298,12 +305,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, trtllm, sglang]
+        # TEMPORARY: Only test vllm amd64 for quick testing on PR
+        framework: ${{ github.event_name == 'pull_request' && fromJSON('["vllm"]') || fromJSON('["vllm", "trtllm", "sglang"]') }}
         arch:
           - arch: amd64
             runner: prod-builder-amd-gpu-v1
           - arch: arm64
             runner: prod-builder-arm-v1
+        exclude:
+          - ${{ github.event_name == 'pull_request' && fromJSON('{"arch": {"arch": "arm64"}}') || fromJSON('{}') }}
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -431,7 +441,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, trtllm, sglang]
+        # TEMPORARY: Only test vllm amd64 for quick testing on PR
+        framework: ${{ github.event_name == 'pull_request' && fromJSON('["vllm"]') || fromJSON('["vllm", "trtllm", "sglang"]') }}
         arch:
           - arch: amd64
             runner: prod-builder-amd-gpu-v1
@@ -439,6 +450,8 @@ jobs:
           - arch: arm64
             runner: prod-builder-arm-v1
             timeout: 90
+        exclude:
+          - ${{ github.event_name == 'pull_request' && fromJSON('{"arch": {"arch": "arm64"}}') || fromJSON('{}') }}
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -559,7 +572,8 @@ jobs:
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    # TEMPORARY: Skip for quick testing
+    if: always() && github.event_name != 'pull_request'
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -695,7 +709,8 @@ jobs:
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    # TEMPORARY: Skip for quick testing
+    if: always() && github.event_name != 'pull_request'
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -832,7 +847,8 @@ jobs:
   fault-tolerance-tests:
     name: ${{ matrix.framework.name }}-ft-k8s
     needs: [build-amd64]
-    if: always()
+    # TEMPORARY: Skip for quick testing
+    if: always() && github.event_name != 'pull_request'
     runs-on: prod-builder-amd-v1
     timeout-minutes: 60
     strategy:

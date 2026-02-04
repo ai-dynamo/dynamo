@@ -156,3 +156,19 @@ def test_cuda_major_consistency() -> None:
     assert len(unique) == 1, (
         "\n".join(report) + f"\n\nInconsistent CUDA majors detected: {unique}"
     )
+
+
+# TEMPORARY: Fast-failing tests for flaky detection testing
+def test_flaky_detection_fail_1() -> None:
+    """Intentional failure to test flaky detection system."""
+    assert False, "INTENTIONAL FAILURE: Testing flaky detection system #1"
+
+
+def test_flaky_detection_fail_2() -> None:
+    """Intentional failure to test flaky detection system."""
+    assert False, "INTENTIONAL FAILURE: Testing flaky detection system #2"
+
+
+def test_flaky_detection_fail_3() -> None:
+    """Intentional failure to test flaky detection system."""
+    assert False, "INTENTIONAL FAILURE: Testing flaky detection system #3"

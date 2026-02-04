@@ -8,6 +8,10 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+  # TEMPORARY: Testing flaky detection on PR
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
