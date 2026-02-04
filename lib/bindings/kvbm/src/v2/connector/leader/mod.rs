@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Python bindings for ConnectorLeader.
@@ -39,6 +39,15 @@ pub use scheduler::PySchedulerOutput;
 #[pyclass(name = "ConnectorLeader")]
 pub struct PyConnectorLeader {
     inner: Arc<ConnectorLeader>,
+}
+
+impl PyConnectorLeader {
+    /// Get the inner Arc<ConnectorLeader> for passing to other Rust components.
+    ///
+    /// This is used by [`PyScheduler`] to attach the connector to the Rust scheduler.
+    pub fn inner(&self) -> Arc<ConnectorLeader> {
+        self.inner.clone()
+    }
 }
 
 #[pymethods]
