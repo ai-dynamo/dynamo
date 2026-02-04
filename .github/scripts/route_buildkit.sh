@@ -6,6 +6,33 @@
 # route_buildkit.sh - Discover and route BuildKit pods for CI builds
 # =============================================================================
 #
+# ROUTING LOGIC:
+# --------------
+# Routing is optimized for Docker layer caching based on shared base images:
+#   - vLLM and SGLang share the same base image (cuda-dl-base) when CUDA versions match
+#   - TensorRT-LLM uses a different base (pytorch), so it's isolated
+#   - General builds have no framework, grouped with trtllm for isolation
+#
+# Flavors are routed to BuildKit pods using modulo 3 on the pod index:
+#   - Pool 0 (idx % 3 == 0): vllm-cuda12, sglang-cuda12  (share cuda-dl-base + wheel_builder cache)
+#   - Pool 1 (idx % 3 == 1): vllm-cuda13, sglang-cuda13  (share cuda-dl-base + wheel_builder cache)
+#   - Pool 2 (idx % 3 == 2): trtllm-cuda13, general      (isolated - different/no framework base)
+#
+# FALLBACK: If no pods match the target pool, the highest available index is used.
+#
+# EXPECTED ROUTING TABLE (pod indices returned for each flavor):
+# +------+-------------+---------------+-------------+---------------+---------------+---------+
+# | Pods | vllm-cuda12 | sglang-cuda12 | vllm-cuda13 | sglang-cuda13 | trtllm-cuda13 | general |
+# |      | (mod 0)     | (mod 0)       | (mod 1)     | (mod 1)       | (mod 2)       | (mod 2) |
+# +------+-------------+---------------+-------------+---------------+---------------+---------+
+# |  1   | 0           | 0             | 0 (fb)      | 0 (fb)        | 0 (fb)        | 0 (fb)  |
+# |  2   | 0           | 0             | 1           | 1             | 1 (fb)        | 1 (fb)  |
+# |  3   | 0           | 0             | 1           | 1             | 2             | 2       |
+# |  4   | 0, 3        | 0, 3          | 1           | 1             | 2             | 2       |
+# |  5   | 0, 3        | 0, 3          | 1, 4        | 1, 4          | 2             | 2       |
+# |  6   | 0, 3        | 0, 3          | 1, 4        | 1, 4          | 2, 5          | 2, 5    |
+# +------+-------------+---------------+-------------+---------------+---------------+---------+
+# (fb) = fallback - no pods matched target pool, returns max available index
 #
 # =============================================================================
 
@@ -75,9 +102,9 @@ esac
 # Validate CUDA version input (allow empty for general flavor)
 if [ -n "$CUDA_VERSION" ]; then
   case $CUDA_VERSION in
-    12.9|13.0) ;;
+    12.9|13.0|13.1) ;;
     *)
-      echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 12.9 or 13.0."
+      echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 12.9, 13.0, or 13.1."
       exit 1
       ;;
   esac
@@ -150,16 +177,16 @@ get_target_indices() {
   local target_mod
 
   case "$route_key" in
-    # --- POOL 0: Standard Heavy Lifters (CUDA 12) ---
-    vllm-cuda12|trtllm-cuda12)
+    # --- POOL 0: CUDA 12 builds (vLLM + SGLang share cuda-dl-base:cuda12.9) ---
+    vllm-cuda12|sglang-cuda12)
       target_mod=0
       ;;
-    # --- POOL 1: Next Gen Heavy Lifters (CUDA 13) ---
-    vllm-cuda13|trtllm-cuda13|sglang-cuda13)
+    # --- POOL 1: CUDA 13 builds (vLLM + SGLang share cuda-dl-base:cuda13.0) ---
+    vllm-cuda13|sglang-cuda13)
       target_mod=1
       ;;
-    # --- POOL 2: SGLang Isolation & General Tasks ---
-    sglang-cuda12|general-*)
+    # --- POOL 2: Isolated builds (TensorRT-LLM uses pytorch base, general has no framework) ---
+    trtllm-cuda13|general-*)
       target_mod=2
       ;;
     # --- FALLBACK ---

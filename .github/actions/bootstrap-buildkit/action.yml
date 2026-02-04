@@ -110,6 +110,16 @@ runs:
           '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=dynamo-builder-fallback"' \
           '--driver-opt="tolerations=${{ inputs.tolerations }}"'
         fi
+        sleep 3 # Give the builders some time to be ready
+
+        if [[ "${{ inputs.skip_bootstrap }}" != "true" ]]; then
+          echo "::warning::Build is using fallback pod. Please alert the ops team."
+          echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY
+          echo "This build is running on a **fallback pod**. Please alert the ops team." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+
+
     - name: Bootstrap buildkit
       if: inputs.skip_bootstrap != 'true'
       shell: bash
