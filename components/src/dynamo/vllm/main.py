@@ -27,6 +27,17 @@ from dynamo.llm import (
     fetch_llm,
     register_llm,
 )
+
+# Optional imports for frontend decoding support
+try:
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    MEDIA_DECODER_AVAILABLE = True
+except ImportError:
+    MediaDecoder = None
+    MediaFetcher = None
+    MEDIA_DECODER_AVAILABLE = False
+
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
@@ -61,7 +72,7 @@ async def _handle_non_leader_node(dp_rank: int) -> None:
     await asyncio.Event().wait()
 
 
-async def graceful_shutdown(runtime):
+async def graceful_shutdown(runtime, shutdown_event):
     """
     Shutdown dynamo distributed runtime.
     The endpoints will be immediately invalidated so no new requests will be accepted.
@@ -69,6 +80,7 @@ async def graceful_shutdown(runtime):
     For endpoints served with graceful_shutdown=False, the serving function will return immediately.
     """
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    shutdown_event.set()
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
 
@@ -78,6 +90,9 @@ async def worker():
 
     loop = asyncio.get_running_loop()
     overwrite_args(config)
+
+    # Create shutdown event
+    shutdown_event = asyncio.Event()
 
     # Set DYN_EVENT_PLANE environment variable based on config
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
@@ -95,7 +110,7 @@ async def worker():
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
+        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
@@ -123,29 +138,29 @@ async def worker():
 
     # Route to appropriate initialization based on config flags
     if config.vllm_native_encoder_worker:
-        await init_vllm_native_encoder(runtime, config)
+        await init_vllm_native_encoder(runtime, config, shutdown_event)
         logger.debug("init_vllm_native_encoder completed")
     elif config.ec_processor:
-        await init_ec_processor(runtime, config)
+        await init_ec_processor(runtime, config, shutdown_event)
         logger.debug("init_ec_processor completed")
     elif config.multimodal_processor:
-        await init_multimodal_processor(runtime, config)
+        await init_multimodal_processor(runtime, config, shutdown_event)
         logger.debug("init_multimodal_processor completed")
     elif config.multimodal_encode_worker:
-        await init_multimodal_encode_worker(runtime, config)
+        await init_multimodal_encode_worker(runtime, config, shutdown_event)
         logger.debug("init_multimodal_encode_worker completed")
     elif (
         config.multimodal_worker
         or config.multimodal_decode_worker
         or config.multimodal_encode_prefill_worker
     ):
-        await init_multimodal_worker(runtime, config)
+        await init_multimodal_worker(runtime, config, shutdown_event)
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
-        await init_prefill(runtime, config)
+        await init_prefill(runtime, config, shutdown_event)
         logger.debug("init_prefill completed")
     else:
-        await init(runtime, config)
+        await init(runtime, config, shutdown_event)
         logger.debug("init completed")
 
     logger.debug("Worker function completed, exiting...")
@@ -275,6 +290,7 @@ def setup_kv_event_publisher(
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
             enable_local_indexer=config.enable_local_indexer,
+            dp_rank=dp_rank,
         )
         kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
         kv_publishers.append(kv_publisher)
@@ -402,6 +418,23 @@ async def register_vllm_model(
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
     runtime_config.data_parallel_size = data_parallel_size
 
+    # Configure media decoder for frontend image decoding when enabled
+    # This enables frontend to decode images and transfer via NIXL RDMA
+    media_decoder = None
+    media_fetcher = None
+    if config.frontend_decoding:
+        if not MEDIA_DECODER_AVAILABLE:
+            raise RuntimeError(
+                "--frontend-decoding requires MediaDecoder support. "
+                "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+            )
+        media_decoder = MediaDecoder()
+        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+        # media_decoder.enable_video({})
+
+        media_fetcher = MediaFetcher()
+        media_fetcher.timeout_ms(30000)
+
     await register_llm(
         model_input,
         model_type,
@@ -412,10 +445,14 @@ async def register_vllm_model(
         migration_limit=migration_limit,
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
+        media_decoder=media_decoder,
+        media_fetcher=media_fetcher,
     )
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config):
+async def init_prefill(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Instantiate and serve
     """
@@ -441,6 +478,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         generate_endpoint=generate_endpoint,
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
+        shutdown_event=shutdown_event,
+        enable_frontend_decoding=config.frontend_decoding,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -527,7 +566,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Instantiate and serve
     """
@@ -566,6 +607,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         generate_endpoint=generate_endpoint,
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
+        shutdown_event=shutdown_event,
+        enable_frontend_decoding=config.frontend_decoding,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -699,7 +742,9 @@ def get_engine_cache_info(engine: AsyncLLM):
         raise
 
 
-async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_processor(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal processor component"""
     component = runtime.namespace(config.namespace).component(config.component)
 
@@ -754,7 +799,9 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         handler.cleanup()
 
 
-async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_encode_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal encode worker component"""
     component = runtime.namespace(config.namespace).component(config.component)
 
@@ -792,7 +839,9 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         handler.cleanup()
 
 
-async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
+async def init_vllm_native_encoder(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Initialize vLLM-native encoder worker component (ECConnector mode).
     In this mode, vLLM handles encoder execution, caching, and storage automatically.
@@ -853,7 +902,9 @@ async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_ec_processor(runtime: DistributedRuntime, config: Config):
+async def init_ec_processor(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Initialize ECConnector processor component.
 
@@ -923,7 +974,9 @@ async def init_ec_processor(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Initialize multimodal worker component.
 
@@ -983,11 +1036,16 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     # Choose handler based on worker type
     if config.multimodal_decode_worker:
         handler = MultimodalDecodeWorkerHandler(
-            runtime, component, engine_client, config
+            runtime, component, engine_client, config, shutdown_event
         )
     else:
         handler = MultimodalPDWorkerHandler(
-            runtime, component, engine_client, config, decode_worker_client
+            runtime,
+            component,
+            engine_client,
+            config,
+            decode_worker_client,
+            shutdown_event,
         )
     handler.add_temp_dir(prometheus_temp_dir)
 

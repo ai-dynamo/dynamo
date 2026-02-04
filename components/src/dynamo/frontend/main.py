@@ -242,6 +242,12 @@ def parse_args():
         help="Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.",
     )
     parser.add_argument(
+        "--active-prefill-tokens-threshold-frac",
+        type=float,
+        default=None,
+        help="Fraction of max_num_batched_tokens for busy detection. Worker is busy when active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). Uses OR logic with --active-prefill-tokens-threshold.",
+    )
+    parser.add_argument(
         "--model-name",
         type=validate_model_name,
         help="Model name as a string (e.g., 'Llama-3.2-1B-Instruct')",
@@ -408,6 +414,7 @@ async def async_main():
             kv_router_config,
             active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
             active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
             enforce_disagg=flags.enforce_disagg,
         ),
     }
