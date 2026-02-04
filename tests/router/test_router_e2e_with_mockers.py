@@ -612,6 +612,7 @@ def test_indexers_sync(
 
         # Use the common test implementation (creates its own runtimes for each router)
         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+        # When not using NATS Core (local indexer), we need JetStream mode for the router
         _test_router_indexers_sync(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
@@ -621,6 +622,7 @@ def test_indexers_sync(
             request_plane=request_plane,
             test_nats_interruption=use_nats_core,
             nats_server=nats_process if use_nats_core else None,
+            use_jetstream=not use_nats_core,
         )
 
         logger.info("Indexers sync test completed successfully")
@@ -678,11 +680,11 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.parametrize(
     "use_nats_core,use_kv_events",
     [
-        (False, True),  # JetStream mode (default) - uses JetStream
-        (True, True),  # NATS Core + local indexer mode - no JetStream
-        (False, False),  # Approximate mode (--no-kv-events) - uses JetStream
+        (False, True),  # NATS Core with local indexer (default mode)
+        (True, True),  # NATS Core with local indexer (explicit)
+        (False, False),  # Approximate mode (--no-kv-events) - no KV events
     ],
-    ids=["jetstream", "nats_core", "no_kv_events"],
+    ids=["nats_core_default", "nats_core_explicit", "no_kv_events"],
     indirect=["use_nats_core"],
 )
 def test_router_decisions(
@@ -696,8 +698,7 @@ def test_router_decisions(
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
     Parameterized to test:
-    - JetStream mode (default): KV events via JetStream
-    - NATS Core mode: KV events via NATS Core with local indexer on workers
+    - NATS Core mode (default): KV events via NATS Core with local indexer on workers
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
       based on routing decisions with TTL-based expiration and pruning
     """
@@ -713,12 +714,12 @@ def test_router_decisions(
     )
 
     # Create mocker args dictionary with dp_size=4
-    # Note: enable_local_indexer only applies when use_kv_events=True and use_nats_core=True
+    # Local indexer is now the default; enable it when using KV events
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
         "dp_size": 4,
-        "enable_local_indexer": use_nats_core and use_kv_events,
+        "enable_local_indexer": use_kv_events,
     }
 
     try:
@@ -788,11 +789,11 @@ def test_router_decisions_disagg(
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
 
-    # Create mocker args - use JetStream for KV events (more reliable than NATS Core)
+    # Create mocker args - use NATS Core with local indexer (default mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "enable_local_indexer": False,
+        # enable_local_indexer defaults to True
     }
 
     prefill_workers = None

@@ -50,6 +50,7 @@ class KVRouterProcess(ManagedProcess):
         tokens_threshold: float | None = None,
         tokens_threshold_frac: float | None = None,
         request_plane: str = "nats",
+        use_jetstream: bool = False,
     ):
         command = [
             "python3",
@@ -80,6 +81,9 @@ class KVRouterProcess(ManagedProcess):
             command.extend(
                 ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
             )
+
+        if use_jetstream:
+            command.append("--use-jetstream")
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
@@ -1335,6 +1339,7 @@ def _test_router_indexers_sync(
     request_plane: str = "nats",
     test_nats_interruption: bool = False,
     nats_server: Optional["NatsServer"] = None,
+    use_jetstream: bool = False,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1365,6 +1370,7 @@ def _test_router_indexers_sync(
         request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
         test_nats_interruption: If True, test NATS interruption recovery. Defaults to False.
         nats_server: NatsServer instance for stop/start (required if test_nats_interruption=True).
+        use_jetstream: If True, use JetStream mode for KV events. Defaults to False.
 
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
@@ -1375,7 +1381,10 @@ def _test_router_indexers_sync(
     # Use async to manage the test flow
     async def test_sync():
         # Create KvRouterConfig with lower snapshot threshold for testing
-        kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
+        kv_router_config = KvRouterConfig(
+            router_snapshot_threshold=20,
+            use_jetstream=use_jetstream,
+        )
 
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
@@ -1690,6 +1699,7 @@ def _test_router_decisions_disagg(
     test_payload: dict,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    use_jetstream: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -1711,6 +1721,7 @@ def _test_router_decisions_disagg(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        use_jetstream: If True, use JetStream mode for KV events. Defaults to False.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -1730,6 +1741,7 @@ def _test_router_decisions_disagg(
             store_backend,
             enforce_disagg=True,
             request_plane=request_plane,
+            use_jetstream=use_jetstream,
         )
         kv_router.__enter__()
 
@@ -1909,6 +1921,7 @@ def _test_router_decisions(
     test_dp_rank: bool = False,
     block_size: int = BLOCK_SIZE,
     use_kv_events: bool = True,
+    use_jetstream: bool = False,
 ):
     """Validate KV cache prefix reuse and worker routing by sending requests diverging prefixes.
 
@@ -1929,6 +1942,7 @@ def _test_router_decisions(
         test_dp_rank: If True, also forces and validates dp_rank routing (for data parallel setups)
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with TTL-based expiration (--no-kv-events mode).
+        use_jetstream: If True, use JetStream mode for KV events. Defaults to False.
 
     Raises:
         AssertionError: If routing decisions don't follow KV cache prefix reuse as expected
@@ -1937,6 +1951,7 @@ def _test_router_decisions(
     kv_router_config = KvRouterConfig(
         router_snapshot_threshold=20,
         use_kv_events=use_kv_events,
+        use_jetstream=use_jetstream,
     )
     kv_push_router = KvPushRouter(
         endpoint=endpoint,

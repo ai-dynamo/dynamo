@@ -540,6 +540,7 @@ def test_vllm_indexers_sync(
 
         # Use the common test implementation (creates its own runtimes for each router)
         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+        # When not using NATS Core (local indexer), we need JetStream mode for the router
         _test_router_indexers_sync(
             engine_workers=vllm_workers,
             block_size=BLOCK_SIZE,
@@ -549,6 +550,7 @@ def test_vllm_indexers_sync(
             request_plane=request_plane,
             test_nats_interruption=use_nats_core,
             nats_server=nats_process if use_nats_core else None,
+            use_jetstream=not use_nats_core,
         )
 
         logger.info("vLLM indexers sync test completed successfully")
