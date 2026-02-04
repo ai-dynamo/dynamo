@@ -145,7 +145,6 @@ spec:
         {{- if .Values.webhook.enabled }}
           - --enable-webhooks=true
         {{- end }}
-        {{- end }}
         command:
         - /manager
         env:
