@@ -22,6 +22,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
 	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 const (
@@ -52,11 +53,8 @@ type Config struct {
 	ListenAddr          string // HTTP server address for health checks (e.g., ":8080")
 	RestrictedNamespace string // Optional: restrict watching to this namespace (empty = cluster-wide)
 
-	// GPU/CUDA checkpoint options (passed to checkpoint.Options)
-	CUDAPluginDir  string   // Path to CRIU CUDA plugin directory
-	GhostLimit     uint32   // Ghost file size limit in bytes (default: 512MB for GPU)
-	Timeout        uint32   // CRIU timeout in seconds
-	ExternalMounts []string // Additional external mount mappings
+	// Checkpoint configuration (from ConfigMap)
+	CheckpointConfig *config.CheckpointConfig
 }
 
 // Watcher watches for pods with checkpoint labels and triggers checkpoints
@@ -336,20 +334,16 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 	}
 
 	// Perform checkpoint
-	opts := checkpoint.Options{
-		ContainerID:    containerID,
-		CheckpointID:   checkpointID,
-		CheckpointDir:  w.config.CheckpointDir,
-		NodeName:       w.config.NodeName,
-		PodName:        pod.Name,
-		PodNamespace:   pod.Namespace,
-		CUDAPluginDir:  w.config.CUDAPluginDir,
-		GhostLimit:     w.config.GhostLimit,
-		Timeout:        w.config.Timeout,
-		ExternalMounts: w.config.ExternalMounts,
+	params := checkpoint.CheckpointParams{
+		ContainerID:   containerID,
+		CheckpointID:  checkpointID,
+		CheckpointDir: w.config.CheckpointDir,
+		NodeName:      w.config.NodeName,
+		PodName:       pod.Name,
+		PodNamespace:  pod.Namespace,
 	}
 
-	result, err := w.checkpointer.Checkpoint(ctx, opts)
+	result, err := w.checkpointer.Checkpoint(ctx, params, w.config.CheckpointConfig)
 	if err != nil {
 		log.WithError(err).Error("Checkpoint failed")
 		// Write failure marker to PVC so restore pods know checkpoint failed

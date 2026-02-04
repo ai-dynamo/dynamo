@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chrek.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chrek.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # Chrek Configuration
+    # This ConfigMap provides static configuration for the checkpoint agent.
+    # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables.
+
+    agent:
+      # How checkpoints are triggered: "http" for REST API, "watcher" for auto-checkpoint
+      signalSource: {{ .Values.config.agent.signalSource | quote }}
+      # HTTP server address for health checks and API (when signalSource=http)
+      listenAddr: {{ .Values.config.agent.listenAddr | quote }}
+      # Container runtime socket path
+      containerdSocket: {{ .Values.config.agent.containerdSocket | quote }}
+      # Base directory for checkpoint storage
+      checkpointDir: {{ .Values.config.agent.checkpointDir | quote }}
+      # Host proc mount point for CRIU operations
+      hostProc: {{ .Values.config.agent.hostProc | quote }}
+
+    checkpoint:
+      criu:
+        # RPC options
+        ghostLimit: {{ .Values.config.checkpoint.criu.ghostLimit }}
+        timeout: {{ .Values.config.checkpoint.criu.timeout }}
+        logLevel: {{ .Values.config.checkpoint.criu.logLevel }}
+        workDir: {{ .Values.config.checkpoint.criu.workDir | quote }}
+        logDir: {{ .Values.config.checkpoint.criu.logDir | quote }}
+        # K8s-specific options
+        leaveRunning: {{ .Values.config.checkpoint.criu.leaveRunning }}
+        shellJob: {{ .Values.config.checkpoint.criu.shellJob }}
+        tcpClose: {{ .Values.config.checkpoint.criu.tcpClose }}
+        fileLocks: {{ .Values.config.checkpoint.criu.fileLocks }}
+        orphanPtsMaster: {{ .Values.config.checkpoint.criu.orphanPtsMaster }}
+        extUnixSk: {{ .Values.config.checkpoint.criu.extUnixSk }}
+        linkRemap: {{ .Values.config.checkpoint.criu.linkRemap }}
+        extMasters: {{ .Values.config.checkpoint.criu.extMasters }}
+        manageCgroupsMode: {{ .Values.config.checkpoint.criu.manageCgroupsMode | quote }}
+        # Advanced options
+        autoDedup: {{ .Values.config.checkpoint.criu.autoDedup }}
+        lazyPages: {{ .Values.config.checkpoint.criu.lazyPages }}
+        # Config file options (NOT available via RPC)
+        libDir: {{ .Values.config.checkpoint.criu.libDir | quote }}
+        allowUprobes: {{ .Values.config.checkpoint.criu.allowUprobes }}
+        skipInFlight: {{ .Values.config.checkpoint.criu.skipInFlight }}
+
+      rootfsExclusions:
+        # System directories excluded from rootfs diff (NVIDIA GPU Operator injected)
+        systemDirs:
+          {{- toYaml .Values.config.checkpoint.rootfsExclusions.systemDirs | nindent 10 }}
+        # Cache directories to exclude (reduces checkpoint size)
+        cacheDirs:
+          {{- toYaml .Values.config.checkpoint.rootfsExclusions.cacheDirs | nindent 10 }}
+        # Additional custom exclusions
+        additionalExclusions:
+          {{- toYaml .Values.config.checkpoint.rootfsExclusions.additionalExclusions | nindent 10 }}
+
+    restore:
+      # Restore trigger file path (for trigger-based restore)
+      restoreTrigger: {{ .Values.config.restore.restoreTrigger | quote }}
+      # Maximum wait time for checkpoint to appear
+      waitTimeout: {{ .Values.config.restore.waitTimeout | quote }}
+      # Default command if no checkpoint available
+      defaultCmd: {{ .Values.config.restore.defaultCmd | quote }}
+      # NOTE: CRIU options for restore come from the saved CheckpointData (metadata.yaml)
+      # They are NOT configured here - the restore uses the exact config that was saved at checkpoint time

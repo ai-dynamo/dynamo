@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	criu "github.com/checkpoint-restore/go-criu/v7"
@@ -14,11 +13,12 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
-// Options configures the checkpoint operation
-type Options struct {
+// CheckpointParams holds per-checkpoint identifiers for a checkpoint operation.
+// This is separate from config.CheckpointConfig which holds static CRIU settings.
+type CheckpointParams struct {
 	ContainerID   string
 	ContainerName string // K8s container name (for K8s API volume type lookup)
 	CheckpointID  string
@@ -26,21 +26,13 @@ type Options struct {
 	NodeName      string
 	PodName       string
 	PodNamespace  string
-
-	// CRIU options (from environment variables)
-	GhostLimit uint32 // From CRIU_GHOST_LIMIT: ghost file size limit in bytes (0 = CRIU default)
-	Timeout    uint32 // From CRIU_TIMEOUT: timeout in seconds (0 = no timeout)
-
-	// GPU/CUDA checkpoint options
-	CUDAPluginDir  string   // Path to CRIU CUDA plugin (e.g., /home/mmshin/work/criu/plugins/cuda)
-	ExternalMounts []string // Additional external mount mappings (e.g., "mnt[path]:path")
 }
 
 // Result contains the result of a checkpoint operation
 type Result struct {
 	CheckpointID  string
 	CheckpointDir string
-	Metadata      *common.CheckpointMetadata
+	Data          *config.CheckpointData
 }
 
 // Checkpointer performs CRIU checkpoint operations
@@ -74,13 +66,13 @@ func (c *Checkpointer) WithK8sClient(client *checkpointk8s.K8sClient) *Checkpoin
 }
 
 // Checkpoint performs a CRIU dump of a container
-func (c *Checkpointer) Checkpoint(ctx context.Context, opts Options) (*Result, error) {
+func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, cfg *config.CheckpointConfig) (*Result, error) {
 	checkpointStart := time.Now()
 	c.log.Info("=== Starting checkpoint operation ===")
 
 	// 1. Resolve container to get PID
 	resolveStart := time.Now()
-	containerInfo, err := c.discoveryClient.ResolveContainer(ctx, opts.ContainerID)
+	containerInfo, err := c.discoveryClient.ResolveContainer(ctx, params.ContainerID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve container: %w", err)
 	}
@@ -88,7 +80,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, opts Options) (*Result, e
 	c.log.WithField("duration", time.Since(resolveStart)).Info("Container resolution completed")
 
 	// 2. Create checkpoint directory
-	checkpointDir := common.GetCheckpointDir(opts.CheckpointDir, opts.CheckpointID)
+	checkpointDir := config.GetCheckpointDir(params.CheckpointDir, params.CheckpointID)
 	if err := os.MkdirAll(checkpointDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create checkpoint directory: %w", err)
 	}
@@ -116,42 +108,40 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, opts Options) (*Result, e
 	}
 	defer imageDir.Close()
 
-	// 5. Build CRIU options
-	criuOpts := BuildCRIUOptsFromCheckpointOpts(opts, pid, imageDirFD, rootFS)
+	// 5. Build CRIU options from config
+	criuParams := CRIUDumpParams{
+		PID:        pid,
+		ImageDirFD: imageDirFD,
+		RootFS:     rootFS,
+	}
+	criuOpts := BuildCRIUOpts(&cfg.CRIU, criuParams)
 
-	// 6. Create CRIU config file for CUDA plugin (libdir is not available via RPC)
-	if opts.CUDAPluginDir != "" {
-		if opts.Timeout == 0 {
-			return nil, fmt.Errorf("CRIU_TIMEOUT environment variable must be set for CUDA checkpoints")
+	// 6. Create CRIU config file if needed (for options not available via RPC)
+	if cfg.CRIU.NeedsCRIUConfFile() {
+		if err := cfg.CRIU.Validate(); err != nil {
+			return nil, err
 		}
 		configPath := filepath.Join(checkpointDir, "criu.conf")
-		configContent := fmt.Sprintf(`enable-external-masters
-libdir %s
-tcp-close
-link-remap
-timeout %d
-allow-uprobes
-skip-in-flight
-`, opts.CUDAPluginDir, opts.Timeout)
+		configContent := cfg.CRIU.GenerateCRIUConfContent()
 		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write CRIU config file: %w", err)
 		}
 		criuOpts.ConfigFile = proto.String(configPath)
 		c.log.WithFields(logrus.Fields{
 			"config_path": configPath,
-			"plugin_dir":  opts.CUDAPluginDir,
-		}).Info("Created CRIU config file for CUDA plugin")
+			"lib_dir":     cfg.CRIU.LibDir,
+		}).Info("Created CRIU config file")
 	}
 
 	// 7. Configure external mounts and namespaces
 	if err := ConfigureExternalMounts(criuOpts, pid, c.hostProc, containerInfo); err != nil {
 		return nil, err
 	}
-	netNsInode := ConfigureExternalNamespaces(criuOpts, namespaces, opts.ExternalMounts)
+	netNsInode := ConfigureExternalNamespaces(criuOpts, namespaces, cfg.CRIU.ExternalMounts)
 	if netNsInode > 0 {
 		c.log.WithField("inode", netNsInode).Debug("Marked network namespace as external")
 	}
-	for _, extMount := range opts.ExternalMounts {
+	for _, extMount := range cfg.CRIU.ExternalMounts {
 		c.log.WithField("external", extMount).Debug("Added external mount mapping")
 	}
 
@@ -163,30 +153,32 @@ skip-in-flight
 		c.log.WithField("upperdir", upperDir).Debug("Found overlay upperdir")
 	}
 
-	// 9. Build and save initial metadata before dump
+	// 9. Build checkpoint data with config and container state
 	metaCfg := MetadataBuilderConfig{
-		CheckpointID:  opts.CheckpointID,
-		NodeName:      opts.NodeName,
-		ContainerID:   opts.ContainerID,
-		ContainerName: opts.ContainerName,
-		PodName:       opts.PodName,
-		PodNamespace:  opts.PodNamespace,
+		CheckpointID:  params.CheckpointID,
+		NodeName:      params.NodeName,
+		ContainerID:   params.ContainerID,
+		ContainerName: params.ContainerName,
+		PodName:       params.PodName,
+		PodNamespace:  params.PodNamespace,
 		PID:           pid,
-		CUDAPluginDir: opts.CUDAPluginDir,
 	}
-	meta := BuildCheckpointMetadata(ctx, metaCfg, containerInfo, mounts, namespaces, c.k8sClient, c.log)
+	data := BuildCheckpointData(ctx, metaCfg, cfg, containerInfo, mounts, namespaces, c.k8sClient, c.log)
 	if upperDir != "" {
-		meta.UpperDir = upperDir
+		data.UpperDir = upperDir
 	}
-	if err := common.SaveMetadata(checkpointDir, meta); err != nil {
-		return nil, fmt.Errorf("failed to save metadata: %w", err)
+
+	// Populate external mounts from CRIU options (computed by ConfigureExternalNamespaces)
+	// These are needed for restore to use the exact same external mount mappings
+	data.CRIU.ExternalMounts = cfg.CRIU.ExternalMounts
+
+	if err := config.SaveCheckpointData(checkpointDir, data); err != nil {
+		return nil, fmt.Errorf("failed to save checkpoint data: %w", err)
 	}
 
 	// 10. Remove semaphores from /dev/shm before checkpoint
 	// Semaphores cause CRIU restore to fail with "Can't link dev/shm/link_remap.X -> dev/shm/sem.Y"
-	if err := c.removeSemaphores(pid); err != nil {
-		return nil, fmt.Errorf("failed to remove semaphores: %w", err)
-	}
+	RemoveSemaphores(pid, c.hostProc, c.log)
 
 	// 11. Execute CRIU dump via go-criu
 	criuDumpStart := time.Now()
@@ -198,9 +190,17 @@ skip-in-flight
 	criuDumpDuration := time.Since(criuDumpStart)
 	c.log.WithField("duration", criuDumpDuration).Info("CRIU dump completed successfully")
 
-	// 12. Capture rootfs diff and deleted files
+	// 12. Capture /dev/shm contents (excluding semaphores)
+	// This must happen after CRIU dump since we want the final process state
+	shmCaptureStart := time.Now()
+	if err := CaptureDevShm(pid, c.hostProc, checkpointDir, c.log); err != nil {
+		c.log.WithError(err).Warn("Failed to capture /dev/shm contents")
+	}
+	c.log.WithField("duration", time.Since(shmCaptureStart)).Info("/dev/shm capture completed")
+
+	// 13. Capture rootfs diff and deleted files
 	rootfsCaptureStart := time.Now()
-	CaptureRootfsState(upperDir, checkpointDir, meta, c.log)
+	CaptureRootfsState(upperDir, checkpointDir, data, c.log)
 	c.log.WithField("duration", time.Since(rootfsCaptureStart)).Info("Rootfs capture completed")
 
 	totalDuration := time.Since(checkpointStart)
@@ -210,53 +210,9 @@ skip-in-flight
 	}).Info("=== Checkpoint operation completed ===")
 
 	return &Result{
-		CheckpointID:  opts.CheckpointID,
+		CheckpointID:  params.CheckpointID,
 		CheckpointDir: checkpointDir,
-		Metadata:      meta,
+		Data:          data,
 	}, nil
 }
 
-// removeSemaphores removes POSIX semaphores from the container's /dev/shm.
-// Semaphores can cause issues during CRIU checkpoint/restore because they
-// maintain kernel state that may not transfer correctly between processes.
-// This accesses the container's filesystem via /proc/<pid>/root/dev/shm/.
-func (c *Checkpointer) removeSemaphores(pid int) error {
-	shmPath := filepath.Join(c.hostProc, fmt.Sprintf("%d/root/dev/shm", pid))
-
-	entries, err := os.ReadDir(shmPath)
-	if err != nil {
-		// It's okay if /dev/shm doesn't exist (container may not have it)
-		c.log.WithError(err).Debug("Could not read container /dev/shm (may not exist)")
-		return nil
-	}
-
-	var removed []string
-	var errors []error
-	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasPrefix(name, "sem.") {
-			semPath := filepath.Join(shmPath, name)
-			if err := os.Remove(semPath); err != nil {
-				c.log.WithError(err).WithField("semaphore", name).Error("Failed to remove semaphore")
-				errors = append(errors, fmt.Errorf("failed to remove semaphore %s: %w", name, err))
-			} else {
-				removed = append(removed, name)
-			}
-		}
-	}
-
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to remove %d semaphore(s): %v", len(errors), errors)
-	}
-
-	if len(removed) > 0 {
-		c.log.WithFields(logrus.Fields{
-			"count":      len(removed),
-			"semaphores": removed,
-		}).Info("Removed semaphores from container /dev/shm before checkpoint")
-	} else {
-		c.log.Debug("No semaphores found in container /dev/shm")
-	}
-
-	return nil
-}

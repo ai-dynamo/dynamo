@@ -11,6 +11,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/restore"
 )
 
@@ -23,8 +24,12 @@ func main() {
 		TimestampFormat: "2006-01-02 15:04:05",
 	})
 
-	// Load configuration from environment
-	cfg := restore.ConfigFromEnv()
+	// Load configuration from ConfigMap and environment
+	cfg, err := config.LoadRestoreConfig(config.ConfigMapPath)
+	if err != nil {
+		log.WithError(err).Warn("Could not load config from ConfigMap, using defaults and env vars")
+		cfg, _ = config.LoadRestoreConfig("")
+	}
 
 	// Set log level based on DEBUG flag
 	if cfg.Debug {
