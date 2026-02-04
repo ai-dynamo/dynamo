@@ -142,6 +142,28 @@ spec:
       storage: 50Gi
   storageClassName: "local-ephemeral"
 ```
+
+## Running on AKS Spot VMs based GPU node pools
+
+When deploying Dynamo on AKS with GPU-enabled Spot VM node pools, AKS will automatically apply additional taints to those Spot nodes to prevent standard workloads from being scheduled on them by default.
+
+Because of these taints, workloads (including the Dynamo CRD controller, Platform components, and any GPU workloads) must include corresponding tolerations in their Helm charts. Without these tolerations, Kubernetes will not schedule pods onto the Spot VM node pools, and GPU resources will remain unused.
+
+Inorder to ensure the Dynamo platform pods -controller manager, etcd, nats and Dynamo platform jobs - dynamo-operator-webhook-ca-inject, dynamo-operator-webhook-cert-gen are scheduled correctly, add the below toleration to:
+- dynamo/deploy/helm/charts/platform/values.yaml
+- dynamo/deploy/helm/charts/platform/components/operator/templates/webhook-ca-inject-job.yaml
+- dynamo/deploy/helm/charts/platform/components/operator/templates/webhook-cert-gen-job.yaml 
+
+```bash 
+ 
+tolerations:
+          - key: "kubernetes.azure.com/scalesetpriority"
+            operator: "Equal"
+            value: "spot"
+            effect: "NoSchedule"
+```
+
+
 ## Clean Up Resources
 
 If you want to clean up the Dynamo resources created during this guide, you can run the following commands:
