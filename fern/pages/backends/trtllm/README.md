@@ -44,7 +44,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**KV-Aware Routing**](../../router/kv-cache-routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/sla-planner.md) | ✅ |  |
 | [**Load Based Planner**](../../planner/load-planner.md) | 🚧 | Planned |
-| [**KVBM**](../../kvbm/README.md) | ✅ | |
+| [**KVBM**](../../kvbm/kvbm-architecture.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
@@ -284,4 +284,4 @@ For detailed instructions on running comprehensive performance sweeps across bot
 
 Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
 
-Here is the instruction: [Running KVBM in TensorRT-LLM](../../kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm) .
+Here is the instruction: [Running KVBM in TensorRT-LLM](../../kvbm/trtllm-setup.md) .

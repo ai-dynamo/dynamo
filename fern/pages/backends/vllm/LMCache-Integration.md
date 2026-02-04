@@ -11,11 +11,17 @@ LMCache is a high-performance KV cache layer that supercharges LLM serving by en
 
 This document describes how LMCache is integrated into Dynamo's vLLM backend to provide enhanced performance and memory efficiency.
 
+### Key Benefits
+- **Reduced Time to First Token (TTFT)**: Eliminates redundant prefill computations
+- **Memory Offloading**: Intelligent KV cache placement across CPU/GPU/storage tiers
+- **Improved Throughput**: Reduced GPU memory pressure enables higher batch sizes
+
 ## Platform Support
 
 **Important Note**: LMCache integration currently only supports x86 architecture. ARM64 is not supported at this time.
 
 ## Aggregated Serving
+
 
 ### Configuration
 
@@ -30,7 +36,6 @@ python -m dynamo.vllm --model <model_name> --connector lmcache
 LMCache configuration can be customized via environment variables listed [here](https://docs.lmcache.ai/api_reference/configurations.html).
 
 For advanced configurations, LMCache supports multiple [storage backends](https://docs.lmcache.ai/index.html):
-
 - **CPU RAM**: Fast local memory offloading
 - **Local Storage**: Disk-based persistence
 - **Redis**: Distributed cache sharing
@@ -46,13 +51,12 @@ Use the provided launch script for quick setup:
 ```
 
 This will:
-1. Start the Dynamo frontend
+1. Start the dynamo frontend
 2. Launch a single vLLM worker with LMCache enabled
 
 ### Architecture for Aggregated Mode
 
 In aggregated mode, the system uses:
-
 - **KV Connector**: `LMCacheConnectorV1`
 - **KV Role**: `kv_both` (handles both reading and writing)
 
@@ -62,14 +66,14 @@ Disaggregated serving separates prefill and decode operations into dedicated wor
 
 ### Deployment
 
-Use the provided disaggregated launch script (requires at least 2 GPUs):
+Use the provided disaggregated launch script(the script requires at least 2 GPUs):
 
 ```bash
 ./examples/backends/vllm/launch/disagg_lmcache.sh
 ```
 
 This will:
-1. Start the Dynamo frontend
+1. Start the dynamo frontend
 2. Launch a decode worker on GPU 0
 3. Wait for initialization
 4. Launch a prefill worker on GPU 1 with LMCache enabled
@@ -77,16 +81,14 @@ This will:
 ### Worker Roles
 
 #### Decode Worker
-
 - **Purpose**: Handles token generation (decode phase)
 - **GPU Assignment**: CUDA_VISIBLE_DEVICES=0
-- **LMCache Config**: Uses `NixlConnector` only for KV transfer between prefill and decode workers
+- **LMCache Config**: Uses `NixlConnector` only for kv transfer between prefill and decode workers
 
 #### Prefill Worker
-
 - **Purpose**: Handles prompt processing (prefill phase)
 - **GPU Assignment**: CUDA_VISIBLE_DEVICES=1
-- **LMCache Config**: Uses `MultiConnector` with both LMCache and NIXL connectors. This enables prefill worker to use LMCache for KV offloading and use NIXL for KV transfer between prefill and decode workers.
+- **LMCache Config**: Uses `MultiConnector` with both LMCache and NIXL connectors. This enables prefill worker to use LMCache for kv offloading and use NIXL for kv transfer between prefill and decode workers.
 - **Flag**: `--is-prefill-worker`
 
 ## Architecture
@@ -96,7 +98,6 @@ This will:
 The system automatically configures KV transfer based on the deployment mode and worker type:
 
 #### Prefill Worker (Disaggregated Mode)
-
 ```python
 kv_transfer_config = KVTransferConfig(
     kv_connector="PdConnector",
@@ -111,7 +112,6 @@ kv_transfer_config = KVTransferConfig(
 ```
 
 #### Decode Worker or Aggregated Mode
-
 ```python
 kv_transfer_config = KVTransferConfig(
     kv_connector="LMCacheConnectorV1",
@@ -120,7 +120,6 @@ kv_transfer_config = KVTransferConfig(
 ```
 
 #### Fallback (No LMCache)
-
 ```python
 kv_transfer_config = KVTransferConfig(
     kv_connector="NixlConnector",
@@ -138,6 +137,7 @@ kv_transfer_config = KVTransferConfig(
    - Initializes LMCache environment variables
    - Creates vLLM engine with proper KV transfer config
    - Handles both aggregated and disaggregated modes
+
 
 ### Best Practices
 
@@ -159,16 +159,15 @@ kv_transfer_config = KVTransferConfig(
 When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
 
 **Requirements to access LMCache metrics:**
-
 - `--connector lmcache` - Enables LMCache
 - `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
-- `PROMETHEUS_MULTIPROC_DIR` (optional) - If not set, Dynamo manages it internally
+- `PROMETHEUS_MULTIPROC_DIR` (optional) - If not set, Dynamo manages it internally. Only set explicitly if you need control over the metrics directory.
 
-For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](../backends/vllm/prometheus.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
+For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](prometheus.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
 
-## Troubleshooting
+### Troubleshooting
 
-### LMCache log: `PrometheusLogger instance already created with different metadata`
+#### LMCache log: `PrometheusLogger instance already created with different metadata`
 
 You may see an error like:
 
@@ -198,7 +197,7 @@ vllm serve Qwen/Qwen3-0.6B \
 - **Mitigation (silence)**: set `LMCACHE_LOG_LEVEL=CRITICAL`.
 - **Upstream issue**: [vLLM issue #30996](https://github.com/vllm-project/vllm/issues/30996).
 
-### vLLM log: `Found PROMETHEUS_MULTIPROC_DIR was set by user`
+#### vLLM log: `Found PROMETHEUS_MULTIPROC_DIR was set by user`
 
 vLLM v1 uses `prometheus_client.multiprocess` and stores intermediate metric values in `PROMETHEUS_MULTIPROC_DIR`.
 

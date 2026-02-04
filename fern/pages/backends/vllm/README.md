@@ -40,8 +40,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**KV-Aware Routing**](../../router/kv-cache-routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/sla-planner.md) | ✅ |  |
 | [**Load Based Planner**](../../planner/load-planner.md) | 🚧 | WIP |
-| [**KVBM**](../../kvbm/README.md) | ✅ |  |
-| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
+| [**KVBM**](../../kvbm/kvbm-architecture.md) | ✅ |  |
+| [**LMCache**](LMCache-Integration.md) | ✅ |  |
 | [**Prompt Embeddings**](prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features

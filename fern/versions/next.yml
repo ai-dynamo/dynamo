@@ -72,8 +72,6 @@ navigation:
   # ==================== User Guides ====================
   - section: User Guides
     contents:
-      - page: KV Cache Offloading
-        path: ../pages/kvbm/kvbm-guide.md
       - page: Tool Calling
         path: ../pages/agents/tool-calling.md
       - page: Multimodality Support
@@ -150,20 +148,24 @@ navigation:
         contents:
           - page: Overview
             path: ../pages/kvbm/kvbm-intro.md
-          - page: Quick Start
-            path: ../pages/kvbm/README.md
-          - page: Guide
-            path: ../pages/kvbm/kvbm-guide.md
-          - page: Design
-            path: ../pages/kvbm/kvbm-design.md
-      - section: Integrations
-        contents:
+          - page: Motivation
+            path: ../pages/kvbm/kvbm-motivation.md
+          - page: Architecture
+            path: ../pages/kvbm/kvbm-architecture.md
+          - page: Components
+            path: ../pages/kvbm/kvbm-components.md
+          - page: Design Deep Dive
+            path: ../pages/kvbm/kvbm-design-deepdive.md
+          - page: Integrations
+            path: ../pages/kvbm/kvbm-integrations.md
+          - page: KVBM in vLLM
+            path: ../pages/kvbm/vllm-setup.md
+          - page: KVBM in TRTLLM
+            path: ../pages/kvbm/trtllm-setup.md
           - page: LMCache Integration
-            path: ../pages/integrations/lmcache-integration.md
-          - page: FlexKV Integration
-            path: ../pages/integrations/flexkv-integration.md
-          - page: SGLang HiCache
-            path: ../pages/integrations/sglang-hicache.md
+            path: ../pages/backends/vllm/LMCache-Integration.md
+          - page: Further Reading
+            path: ../pages/kvbm/kvbm-reading.md
 
   # ==================== Design Docs ====================
   - section: Design Docs
@@ -286,6 +288,8 @@ navigation:
                 path: ../pages/backends/sglang/sglang-disaggregation.md
               - page: Expert Distribution (EPLB)
                 path: ../pages/backends/sglang/expert-distribution-eplb.md
+              - page: HiCache Example
+                path: ../pages/backends/sglang/sgl-hicache-example.md
               - page: Profiling
                 path: ../pages/backends/sglang/profiling.md
               - page: Prometheus
