@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use dynamo_runtime::component::Component;
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 use tokio::sync::RwLock;
 
@@ -76,19 +77,28 @@ impl LoadEstimator {
     pub fn start_polling(
         self: Arc<Self>,
         scheduler: Arc<KvScheduler>,
+        component: Component,
     ) -> tokio::task::JoinHandle<()> {
+        let cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.config.poll_interval);
+            tracing::info!("Started LORA load polling");
 
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::debug!("LORA load polling task cancelled");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        // Poll scheduler for current LORA counts
+                        let lora_counts = scheduler.get_active_lora_counts();
 
-                // Poll scheduler for current LORA counts
-                let lora_counts = scheduler.get_active_lora_counts();
-
-                // Update load estimates
-                if let Err(e) = self.update_from_counts(lora_counts).await {
-                    tracing::warn!("Failed to update load estimates: {}", e);
+                        // Update load estimates
+                        if let Err(e) = self.update_from_counts(lora_counts).await {
+                            tracing::warn!("Failed to update load estimates: {}", e);
+                        }
+                    }
                 }
             }
         })
@@ -108,6 +118,7 @@ impl LoadEstimator {
 
     /// Subscribe to ActiveSequenceEvent and update load tracking
     async fn subscribe_to_events(&self, component: Component) -> anyhow::Result<()> {
+        let cancel_token = component.drt().child_token();
         let mut subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
             .await?
             .typed::<ActiveSequenceEvent>();
@@ -115,16 +126,24 @@ impl LoadEstimator {
         tracing::info!("Started LORA load event subscription");
 
         loop {
-            match subscriber.next().await {
-                Some(Ok((_envelope, event))) => {
-                    self.handle_event(event).await;
-                }
-                Some(Err(e)) => {
-                    tracing::warn!("Error receiving LORA load event: {}", e);
-                }
-                None => {
-                    tracing::warn!("LORA load event stream ended");
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::debug!("LORA load event subscription cancelled");
                     break;
+                }
+                result = subscriber.next() => {
+                    match result {
+                        Some(Ok((_envelope, event))) => {
+                            self.handle_event(event).await;
+                        }
+                        Some(Err(e)) => {
+                            tracing::warn!("Error receiving LORA load event: {}", e);
+                        }
+                        None => {
+                            tracing::warn!("LORA load event stream ended");
+                            break;
+                        }
+                    }
                 }
             }
         }
