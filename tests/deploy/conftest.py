@@ -1,38 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """
 Pytest configuration for deployment tests.
 
 This module provides dynamic test discovery and fixtures for running deployment tests
-against Kubernetes deployments. It uses a pluggable discovery system to find deployment
-configurations from the examples directory.
-
-Architecture Overview
----------------------
-
-The test infrastructure is built around three key concepts:
-
-1. **DeploymentTarget**: A data class representing a single deployment to test.
-   Contains all information needed to locate and identify the deployment.
-
-2. **Discovery Functions**: Functions that scan the filesystem and return a list
-   of DeploymentTarget objects.
-
-3. **Test Parametrization**: Tests are parametrized with DeploymentTarget objects.
-   The test only cares about having a valid YAML path.
+against Kubernetes deployments. This currently only covers deployments in the examples directory.
 """
 
 from dataclasses import dataclass
@@ -68,11 +41,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-# -----------------------------------------------------------------------------
-# DeploymentTarget: The core abstraction for test parametrization
-# -----------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class DeploymentTarget:
     """Represents a deployment configuration to be tested.
@@ -97,11 +65,6 @@ class DeploymentTarget:
     def exists(self) -> bool:
         """Check if the deployment YAML file exists."""
         return self.yaml_path.exists()
-
-
-# -----------------------------------------------------------------------------
-# Discovery Functions: Finding deployment targets from various sources
-# -----------------------------------------------------------------------------
 
 
 def discover_example_targets(
@@ -201,11 +164,6 @@ ALL_DEPLOYMENT_TARGETS = _collect_all_targets()
 DEPLOY_TEST_MATRIX = _build_test_matrix(ALL_DEPLOYMENT_TARGETS)
 
 
-# -----------------------------------------------------------------------------
-# Pytest Configuration: Test parametrization
-# -----------------------------------------------------------------------------
-
-
 def _filter_targets(
     targets: List[DeploymentTarget],
     framework: Optional[str] = None,
@@ -291,11 +249,6 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
             filtered_targets,
             ids=[t.test_id for t in filtered_targets],
         )
-
-
-# -----------------------------------------------------------------------------
-# Fixtures: Providing test dependencies
-# -----------------------------------------------------------------------------
 
 
 @pytest.fixture
