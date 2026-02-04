@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import json
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional, Tuple
 
@@ -40,11 +41,13 @@ class EchoTensorEngine:
 
     def generate(self, request, context=None):
         async def _generator():
-            yield {
-                "model": self._model_name,
-                "tensors": request.get("tensors", []),
-                "parameters": request.get("parameters", {}),
-            }
+            yield json.dumps(
+                {
+                    "model": self._model_name,
+                    "tensors": request.get("tensors", []),
+                    "parameters": request.get("parameters", {}),
+                }
+            )
 
         return _generator()
 

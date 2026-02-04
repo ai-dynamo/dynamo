@@ -17,6 +17,7 @@
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 
@@ -73,11 +74,11 @@ class RequestHandler:
             # This is the expected way for a request to end.
             # The new token ID will be eos, don't forward it.
             if res.finished:
-                yield {"finish_reason": "stop", "token_ids": []}
+                yield json.dumps({"finish_reason": "stop", "token_ids": []})
                 break
 
             if not res.outputs:
-                yield {"finish_reason": "error", "token_ids": []}
+                yield json.dumps({"finish_reason": "error", "token_ids": []})
                 break
 
             output = res.outputs[0]
@@ -87,7 +88,7 @@ class RequestHandler:
                 out["finish_reason"] = output.finish_reason
             if output.stop_reason:
                 out["stop_reason"] = output.stop_reason
-            yield out
+            yield json.dumps(out)
             num_output_tokens_so_far = next_total_toks
 
 

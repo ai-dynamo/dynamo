@@ -6,6 +6,8 @@
 
 # Knowing the test will be run in environment that has tritonclient installed,
 # which contain the generated file equivalent to model_config.proto.
+import json
+
 import tritonclient.grpc.model_config_pb2 as mc
 import uvloop
 
@@ -77,31 +79,37 @@ async def generate(request, context):
         params.update(request["parameters"])
         if "malformed_response" in request["parameters"]:
             request["tensors"][0]["data"] = {"values": [0, 1, 2]}
-            yield {
-                "model": request["model"],
-                "tensors": request["tensors"],
-                "parameters": params,
-            }
+            yield json.dumps(
+                {
+                    "model": request["model"],
+                    "tensors": request["tensors"],
+                    "parameters": params,
+                }
+            )
             return
         elif "data_mismatch" in request["parameters"]:
             # Modify the data type to trigger data mismatch error
             request["tensors"][0]["data"]["values"] = []
-            yield {
-                "model": request["model"],
-                "tensors": request["tensors"],
-                "parameters": params,
-            }
+            yield json.dumps(
+                {
+                    "model": request["model"],
+                    "tensors": request["tensors"],
+                    "parameters": params,
+                }
+            )
             return
         elif "raise_exception" in request["parameters"]:
             raise ValueError("Intentional exception raised by echo_tensor_worker.")
 
     params["processed"] = {"bool": True}
 
-    yield {
-        "model": request["model"],
-        "tensors": request["tensors"],
-        "parameters": params,
-    }
+    yield json.dumps(
+        {
+            "model": request["model"],
+            "tensors": request["tensors"],
+            "parameters": params,
+        }
+    )
 
 
 if __name__ == "__main__":

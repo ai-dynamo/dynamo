@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 
 import pytest
 
@@ -59,7 +60,7 @@ class MockServer:
             await asyncio.sleep(0.1)
 
             print(f"Sending iteration {i}")
-            yield i
+            yield json.dumps({"iteration": i})
 
         assert (
             False
@@ -75,7 +76,7 @@ class MockServer:
                 print(f"Processing iteration {i}")
                 await asyncio.sleep(0.1)
                 print(f"Sending iteration {i}")
-                yield i
+                yield json.dumps({"iteration": i})
         except asyncio.CancelledError:
             print(f"Cancelled at iteration {i}")
             self.context_is_stopped = context.is_stopped()
@@ -94,7 +95,7 @@ class MockServer:
             print(f"Processing iteration {i}")
             await asyncio.sleep(0.1)
             print(f"Sending iteration {i}")
-            yield i
+            yield json.dumps({"iteration": i})
 
         context.stop_generating()
 
@@ -109,7 +110,7 @@ class MockServer:
             print(f"Processing iteration {i}")
             await asyncio.sleep(0.1)
             print(f"Sending iteration {i}")
-            yield i
+            yield json.dumps({"iteration": i})
 
         raise asyncio.CancelledError
 
