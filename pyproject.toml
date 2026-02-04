@@ -50,7 +50,8 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.2.0rc6.post2",
+    "msgpack==1.1.2",
+    "tensorrt-llm==1.3.0rc1",
 ]
 
 vllm = [
@@ -61,7 +62,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang==0.5.8",
+    "sglang[diffusion]==0.5.8",
     "nixl[cu12]<=0.9.0",
     "cupy-cuda12x>=13.0.0",
 ]
@@ -246,7 +247,9 @@ markers = [
     "usefixtures: use fixtures",
     "parametrize: parameterized test",
     "filterwarnings: filter warnings",
-    "asyncio: asyncio test marker"
+    "asyncio: asyncio test marker",
+    # Third-party plugin markers
+    "timeout: test timeout in seconds (pytest-timeout plugin)",
 ]
 
 # Linting/formatting

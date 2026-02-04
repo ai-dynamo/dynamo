@@ -94,10 +94,12 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  - 'docs/kubernetes/api_reference.md'
 
 deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
+  - 'deploy/chrek/**'
 
 planner:
   - 'components/src/dynamo/planner/**'
@@ -137,3 +139,10 @@ frontend:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
+
+rust:
+  - '.github/workflows/pre-merge.yml'
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - 'deny.toml'

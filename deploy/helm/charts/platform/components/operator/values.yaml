@@ -146,6 +146,64 @@ nats:
 
 modelExpressURL: ""
 
+# Checkpoint configuration for fast pod restore
+# NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
+# using the chrek Helm chart in each namespace where checkpointing is needed.
+checkpoint:
+  # Enable checkpoint/restore functionality
+  enabled: false
+
+  # Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
+  # Defaults to busybox:latest if not specified
+  initContainerImage: "busybox:latest"
+
+  # Storage configuration
+  # These settings tell the operator where to find checkpoint storage
+  # Must match the configuration in the chrek chart
+  storage:
+    # Storage backend type: pvc, s3, or oci
+    type: pvc
+
+    # Host path for signal files (communication between checkpoint pod and DaemonSet)
+    signalHostPath: "/var/lib/chrek/signals"
+
+    # PVC configuration (used when type=pvc)
+    pvc:
+      # Name of the PVC created by the chrek chart
+      # Must match the PVC name in the chrek chart
+      pvcName: "chrek-pvc"
+      # Base path within the PVC for storing checkpoints
+      basePath: "/checkpoints"
+
+    # S3 configuration (used when type=s3)
+    s3:
+      # S3 URI in format: s3://[endpoint/]bucket/prefix
+      # Examples:
+      #   - s3://my-bucket/checkpoints (AWS S3)
+      #   - s3://minio.example.com/my-bucket/checkpoints (MinIO/custom endpoint)
+      uri: ""
+      # Reference to a secret containing AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION
+      # If not provided, uses IRSA/Workload Identity for authentication
+      credentialsSecretRef: ""
+
+    # OCI registry configuration (used when type=oci)
+    oci:
+      # OCI URI in format: oci://registry/repository
+      # Examples:
+      #   - oci://myregistry.io/checkpoints
+      #   - oci://ghcr.io/myorg/checkpoints
+      uri: ""
+      # Reference to a docker config secret for registry authentication
+      credentialsSecretRef: ""
+
+  # CRIU timeout configuration (shared across checkpoint and restore)
+  criu:
+    # CRIU operation timeout in seconds
+    # Maximum time to wait for checkpoint/restore to complete
+    # Increase for models with very large memory footprints
+    # 21600s (6 hours) is recommended for large LLMs (70B+)
+    timeout: "21600"
+
 # Webhook configuration
 webhook:
   # Enable admission webhooks for validation

@@ -269,6 +269,7 @@ fn register_llm<'p>(
     };
 
     let is_tensor_based = model_type.inner.supports_tensor();
+    let is_images = model_type.inner.supports_images();
 
     let model_type_obj = model_type.inner;
 
@@ -317,8 +318,9 @@ fn register_llm<'p>(
         .or_else(|| Some(source_path.clone()));
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        // For TensorBased models, skip HuggingFace downloads and register directly
-        if is_tensor_based {
+        // For TensorBased and Images models, skip HuggingFace downloads and register directly
+        // These model types don't require tokenizers
+        if is_tensor_based || is_images {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
@@ -429,11 +431,17 @@ fn unregister_llm<'p>(
 /// Download a model from Hugging Face, returning it's local path
 /// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
 #[pyfunction]
-#[pyo3(signature = (remote_name))]
-fn fetch_llm<'p>(py: Python<'p>, remote_name: &str) -> PyResult<Bound<'p, PyAny>> {
+#[pyo3(signature = (remote_name, ignore_weights=false))]
+fn fetch_llm<'p>(
+    py: Python<'p>,
+    remote_name: &str,
+    ignore_weights: bool,
+) -> PyResult<Bound<'p, PyAny>> {
     let repo = remote_name.to_string();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        LocalModel::fetch(&repo, false).await.map_err(to_pyerr)
+        LocalModel::fetch(&repo, ignore_weights)
+            .await
+            .map_err(to_pyerr)
     })
 }
 
@@ -512,6 +520,10 @@ impl ModelType {
     #[classattr]
     const Prefill: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Prefill,
+    };
+    #[classattr]
+    const Images: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Images,
     };
 
     fn __or__(&self, other: &Self) -> Self {
