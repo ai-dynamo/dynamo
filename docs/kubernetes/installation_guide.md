@@ -214,7 +214,7 @@ Note: This gives you access to the latest unreleased features and fixes on the m
 ```bash
 # 1. Set environment
 export NAMESPACE=dynamo-system
-export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # or your registry
+export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo  # or your registry
 export DOCKER_USERNAME='$oauthtoken'
 export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
 export IMAGE_TAG=${RELEASE_VERSION}
