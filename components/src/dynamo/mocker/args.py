@@ -115,7 +115,7 @@ def create_temp_engine_args_file(args) -> Path:
         ),
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
-        "enable_local_indexer": getattr(args, "enable_local_indexer", None),
+        "enable_local_indexer": not getattr(args, "disable_local_indexer", False),
         # Note: bootstrap_port is NOT included here - it's set per-worker in launch_workers()
     }
 
@@ -301,10 +301,10 @@ def parse_args():
         help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
     )
     parser.add_argument(
-        "--enable-local-indexer",
+        "--disable-local-indexer",
         action="store_true",
-        default=False,
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (default: False)",
+        default=os.environ.get("DYN_LOCAL_INDEXER", "true").lower() != "true",
+        help="Disable worker-local KV indexer for tracking this worker's own KV cache state. By default, local indexer is enabled. Can also be set via DYN_LOCAL_INDEXER=false env var.",
     )
     parser.add_argument(
         "--bootstrap-ports",

@@ -124,12 +124,11 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_EVENT_PLANE", "nats"),
         "help": "Determines how events are published [nats|zmq]",
     },
-    "enable-local-indexer": {
-        "flags": ["--enable-local-indexer"],
-        "type": str,
-        "choices": ["true", "false"],
-        "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
-        "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+    "disable-local-indexer": {
+        "flags": ["--disable-local-indexer"],
+        "action": "store_true",
+        "default": os.environ.get("DYN_LOCAL_INDEXER", "true").lower() != "true",
+        "help": "Disable worker-local KV indexer for tracking this worker's own KV cache state. By default, local indexer is enabled. Can also be set via DYN_LOCAL_INDEXER=false env var.",
     },
     "image-diffusion-worker": {
         "flags": ["--image-diffusion-worker"],
@@ -189,7 +188,7 @@ class DynamoArgs:
     # config dump options
     dump_config_to: Optional[str] = None
     # local indexer option
-    enable_local_indexer: bool = False
+    enable_local_indexer: bool = True
     # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
     use_kv_events: bool = False
 
@@ -376,7 +375,12 @@ async def parse_args(args: list[str]) -> Config:
         if "choices" in info:
             kwargs["choices"] = info["choices"]
         if "action" in info:
-            kwargs["action"] = info["action"]
+            action = info["action"]
+            # Handle string "BooleanOptionalAction" for dict-based config
+            if action == "BooleanOptionalAction":
+                kwargs["action"] = argparse.BooleanOptionalAction
+            else:
+                kwargs["action"] = action
 
         parser.add_argument(*info["flags"], **kwargs)
 
@@ -636,7 +640,7 @@ async def parse_args(args: list[str]) -> Config:
         image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
         image_diffusion_base_url=getattr(parsed_args, "image_diffusion_base_url", None),
         dump_config_to=parsed_args.dump_config_to,
-        enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
+        enable_local_indexer=not parsed_args.disable_local_indexer,
         use_kv_events=use_kv_events,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")

@@ -84,7 +84,7 @@ class TRTLLMProcess:
         single_gpu: bool = False,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        enable_local_indexer: bool = False,
+        enable_local_indexer: bool = True,
     ):
         """Initialize TRT-LLM workers with dynamo integration.
 
@@ -99,7 +99,7 @@ class TRTLLMProcess:
             single_gpu: If True, all workers share GPU 0
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            enable_local_indexer: If True, enable worker-local KV indexer for NATS Core mode. Defaults to False.
+            enable_local_indexer: If False, disable worker-local KV indexer to use JetStream mode. Defaults to True (NATS Core mode).
 
         Note: TRT-LLM doesn't support data parallelism like vLLM (dp_rank is always 0).
               Tensor parallelism (TP) is supported but creates 1 worker spanning multiple GPUs,
@@ -174,9 +174,9 @@ class TRTLLMProcess:
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
                 env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
 
-            # Enable local indexer for NATS Core mode
-            if enable_local_indexer:
-                env_vars["DYN_LOCAL_INDEXER"] = "true"
+            # Local indexer is enabled by default; disable for JetStream mode
+            if not enable_local_indexer:
+                env_vars["DYN_LOCAL_INDEXER"] = "false"
 
             env.update(env_vars)
 

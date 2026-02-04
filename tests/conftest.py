@@ -580,22 +580,22 @@ def request_plane(request):
 @pytest.fixture
 def use_nats_core(request):
     """
-    Whether to use NATS Core mode (local indexer) instead of JetStream. Defaults to False.
+    Whether to use NATS Core mode (local indexer) instead of JetStream. Defaults to True.
 
-    When True:
+    When True (default):
     - NATS server starts without JetStream (-js flag omitted) for faster startup
-    - Tests should use enable_local_indexer=True in mocker_args
+    - Tests use NATS Core with local indexer mode (workers default to local_indexer=True)
 
-    When False (default):
+    When False:
     - NATS server starts with JetStream for KV event distribution
-    - Tests use JetStream-based indexer synchronization
+    - Tests should use enable_local_indexer=False in mocker_args to disable local indexer
 
-    To use NATS Core mode:
-        @pytest.mark.parametrize("use_nats_core", [True], indirect=True)
+    To use JetStream mode:
+        @pytest.mark.parametrize("use_nats_core", [False], indirect=True)
         def test_example(runtime_services_dynamic_ports):
             ...
     """
-    return getattr(request, "param", False)
+    return getattr(request, "param", True)
 
 
 @pytest.fixture()

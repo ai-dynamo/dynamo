@@ -45,11 +45,12 @@ The main KV-aware routing arguments:
 
 >[!Note]
 > **State persistence** depends on the event transport mode:
-> - **JetStream mode** (default): State persists across router restarts via JetStream and NATS object store snapshots.
-> - **NATS Core with Local Indexer mode** (`--enable-local-indexer` on workers): State persists on workers—router rebuilds state by querying workers on startup.
+> - **NATS Core / Event Plane mode** (default): State persists on workers—router rebuilds state by querying workers on startup. This is the default when workers have `local_indexer` enabled (which is the default). Works with both NATS Core and ZMQ event planes.
+> - **JetStream mode** (`--use-jetstream` on frontend): State persists across router restarts via JetStream and NATS object store snapshots. Use `--disable-local-indexer` on workers if you need JetStream without the `--use-jetstream` flag.
 > - **No KV events** (`--no-kv-events`): State persistence is not supported.
 >
 > **Request plane is independent of KV event transport.**
+> The router can now run without etcd or NATS when using ZMQ event plane (`--event-plane zmq`) and file/mem store (`--store-kv file` or `--store-kv mem`).
 > `DYN_REQUEST_PLANE` controls how **requests** are sent (TCP/HTTP/NATS), but KV-aware routing still uses **NATS** for KV events in both JetStream and NATS Core + Local Indexer modes.
 > When KV events are enabled (default), NATS is automatically initialized. You can optionally set `NATS_SERVER=nats://...` to specify a custom NATS server; otherwise, it defaults to `localhost:4222`.
 > Use `--no-kv-events` to disable KV events and remove the NATS requirement entirely (with request plane being `tcp` or `http`).
@@ -213,13 +214,13 @@ graph TD
     linkStyle 0,1,2,3,4,5 stroke:#2196f3,stroke-width:2px
 ```
 
-#### Mode 2: NATS Core with Local Indexer
+#### Mode 2: NATS Core / Event Plane with Local Indexer (Default)
 
-When workers are started with `--enable-local-indexer`, each worker maintains its own local radix tree (local indexer) and publishes events over NATS Core (fire-and-forget pub/sub) instead of JetStream. Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
+By default, workers have local indexer enabled. Each worker maintains its own local radix tree (local indexer) and publishes events over the generic event plane (NATS Core or ZMQ, depending on `--event-plane`). Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
 
-- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios
+- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios; deployments without NATS (using ZMQ event plane)
 - **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
-- **Enable with**: `--enable-local-indexer` flag on workers (vLLM, mocker)
+- **Disable with**: `--disable-local-indexer` flag on workers (vLLM, SGLang, mocker) to use JetStream mode instead
 
 ```mermaid
 graph TD

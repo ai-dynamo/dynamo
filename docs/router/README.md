@@ -220,9 +220,9 @@ The router uses KV events from workers by default to maintain an accurate global
 
 The router supports two event transport modes for KV cache state synchronization:
 
-- **JetStream (default)**: Persistent event stream with durable consumers. State persists across router restarts via snapshots in NATS object store. Best for production with multi-replica consistency.
+- **NATS Core / Event Plane with Local Indexer (default)**: Fire-and-forget pub/sub where workers maintain local radix trees (enabled by default). Router rebuilds state by querying workers on startup. Lower latency, simpler setup. Works with both NATS Core and ZMQ event planes.
 
-- **NATS Core with Local Indexer** (`--enable-local-indexer` on workers): Fire-and-forget pub/sub where workers maintain local radix trees. Router rebuilds state by querying workers on startup. Lower latency, simpler setup.
+- **JetStream** (`--use-jetstream` on frontend, or `--disable-local-indexer` on workers): Persistent event stream with durable consumers. State persists across router restarts via snapshots in NATS object store. Best for production with multi-replica consistency.
 
 See [KV Cache Routing](kv_cache_routing.md#global-kv-cache-state-synchronization) for architecture diagrams and details.
 

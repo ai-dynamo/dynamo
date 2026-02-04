@@ -139,6 +139,12 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
+    /// Force JetStream mode for KV events even when all workers have local indexer enabled.
+    /// When false (default), the router uses NATS Core (fire-and-forget) when all workers
+    /// have local_indexer enabled, falling back to JetStream otherwise.
+    /// When true, always uses JetStream for durability and multi-replica consistency.
+    pub use_jetstream: bool,
+
     pub router_replica_sync: bool,
 
     /// Whether to track active blocks in the router (default: true)
@@ -176,6 +182,7 @@ impl Default for KvRouterConfig {
             overlap_score_weight: 1.0,
             router_temperature: 0.0,
             use_kv_events: true,
+            use_jetstream: false, // default to NATS Core (local indexer mode)
             router_replica_sync: false,
             router_track_active_blocks: true,
             router_track_output_blocks: false,
@@ -197,6 +204,7 @@ impl KvRouterConfig {
         overlap_score_weight: Option<f64>,
         temperature: Option<f64>,
         use_kv_events: Option<bool>,
+        use_jetstream: Option<bool>,
         replica_sync: Option<bool>,
         track_active_blocks: Option<bool>,
         track_output_blocks: Option<bool>,
@@ -212,6 +220,7 @@ impl KvRouterConfig {
             overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
             router_temperature: temperature.unwrap_or(default.router_temperature),
             use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
+            use_jetstream: use_jetstream.unwrap_or(default.use_jetstream),
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             router_track_active_blocks: track_active_blocks
                 .unwrap_or(default.router_track_active_blocks),
@@ -399,12 +408,6 @@ impl KvRouter {
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            let all_local_indexer = workers_with_configs
-                .configs
-                .iter()
-                .filter_map(|r| r.value().as_ref().map(|c| c.enable_local_indexer))
-                .all(|b| b);
-
             tracing::info!(
                 "Found {} worker(s), starting KV event subscriber",
                 workers_with_configs.num_workers()
@@ -412,44 +415,16 @@ impl KvRouter {
 
             let transport_kind = EventTransportKind::from_env_or_default();
 
-            // Start subscriber - setup runs synchronously, then spawns background loop internally
-            if all_local_indexer {
-                if transport_kind == EventTransportKind::Zmq {
-                    if kv_router_config.router_snapshot_threshold.is_some()
-                        || kv_router_config.router_reset_states
-                    {
-                        tracing::warn!(
-                            "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
-                        );
-                    }
-                } else {
-                    tracing::info!(
-                        "All {} workers have local_indexer enabled, using NATS Core subscription",
-                        workers_with_configs.num_workers()
-                    );
-                }
-
-                start_kv_router_background_event_plane(
-                    component.clone(),
-                    kv_indexer.event_sender(),
-                    cancellation_token.clone(),
-                    worker_query::WorkerQueryClient::new(
-                        component.clone(),
-                        workers_with_configs.subscribe(),
-                        Some(kv_indexer.remove_worker_sender()),
-                    ),
-                    transport_kind,
-                )
-                .await?;
-            } else {
+            // Start subscriber - use_jetstream flag determines the mode:
+            // - use_jetstream=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
+            // - use_jetstream=true: Use JetStream for durability and multi-replica consistency
+            if kv_router_config.use_jetstream {
                 if transport_kind == EventTransportKind::Zmq {
                     tracing::warn!(
-                        "Not all workers have local_indexer enabled; falling back to JetStream for durability"
+                        "--use-jetstream requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
                     );
                 }
-                tracing::info!(
-                    "Not all workers have local_indexer enabled, using JetStream subscription"
-                );
+                tracing::info!("Using JetStream subscription (--use-jetstream enabled)");
 
                 // Convert router_id to string for NATS consumer naming
                 let consumer_id = router_id.to_string();
@@ -467,6 +442,34 @@ impl KvRouter {
                     cancellation_token.clone(),
                     kv_router_config.router_snapshot_threshold,
                     kv_router_config.router_reset_states,
+                )
+                .await?;
+            } else {
+                // Default: Use NATS Core / generic event plane (ZMQ or NATS Core)
+                // This mode requires workers to have local_indexer enabled (which is now the default)
+                if transport_kind == EventTransportKind::Zmq {
+                    if kv_router_config.router_snapshot_threshold.is_some()
+                        || kv_router_config.router_reset_states
+                    {
+                        tracing::warn!(
+                            "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
+                        );
+                    }
+                    tracing::info!("Using ZMQ event plane subscription (local_indexer mode)");
+                } else {
+                    tracing::info!("Using NATS Core subscription (local_indexer mode)");
+                }
+
+                start_kv_router_background_event_plane(
+                    component.clone(),
+                    kv_indexer.event_sender(),
+                    cancellation_token.clone(),
+                    worker_query::WorkerQueryClient::new(
+                        component.clone(),
+                        workers_with_configs.subscribe(),
+                        Some(kv_indexer.remove_worker_sender()),
+                    ),
+                    transport_kind,
                 )
                 .await?;
             }

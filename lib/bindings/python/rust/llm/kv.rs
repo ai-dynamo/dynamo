@@ -127,7 +127,7 @@ impl ZmqKvEventPublisherConfig {
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
         zmq_topic = "".to_string(),
-        enable_local_indexer = false,
+        enable_local_indexer = true,
         dp_rank = 0
     ))]
     pub fn new(
@@ -261,7 +261,7 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0, enable_local_indexer=false))]
+    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0, enable_local_indexer=true))]
     fn new(
         component: Component,
         worker_id: WorkerId,

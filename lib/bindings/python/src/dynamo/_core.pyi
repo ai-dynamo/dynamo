@@ -738,7 +738,7 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
+        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = True
     ) -> None:
         """
         Create a `KvEventPublisher` object
@@ -748,7 +748,7 @@ class KvEventPublisher:
             worker_id: The worker ID
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
-            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
+            enable_local_indexer: Enable worker-local KV indexer (defaults to True)
         """
 
     def publish_stored(
@@ -791,7 +791,7 @@ class ZmqKvEventPublisherConfig:
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
         zmq_topic: str = "",
-        enable_local_indexer: bool = False,
+        enable_local_indexer: bool = True,
         dp_rank: int = 0
     ) -> None:
         """
@@ -801,7 +801,7 @@ class ZmqKvEventPublisherConfig:
         :param kv_block_size: The block size for the key-value store.
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
-        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
+        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to True.
         :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
         """
         ...
@@ -1008,6 +1008,7 @@ class KvRouterConfig:
         overlap_score_weight: float = 1.0,
         router_temperature: float = 0.0,
         use_kv_events: bool = True,
+        use_jetstream: bool = False,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
@@ -1025,6 +1026,9 @@ class KvRouterConfig:
             overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
             router_temperature: Temperature for worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
+            use_jetstream: Force JetStream mode for KV events (default: False).
+                When False, uses NATS Core / generic event plane with local_indexer mode.
+                When True, uses JetStream for durability and multi-replica consistency.
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).

@@ -87,7 +87,7 @@ class SGLangProcess:
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        enable_local_indexer: bool = False,
+        enable_local_indexer: bool = True,
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -104,7 +104,7 @@ class SGLangProcess:
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            enable_local_indexer: If True, enable worker-local KV indexer for NATS Core mode. Defaults to False.
+            enable_local_indexer: If False, disable worker-local KV indexer to use JetStream mode. Defaults to True (NATS Core mode).
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -194,9 +194,9 @@ class SGLangProcess:
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
                 env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
 
-            # Enable local indexer for NATS Core mode
-            if enable_local_indexer:
-                env_vars["DYN_LOCAL_INDEXER"] = "true"
+            # Local indexer is enabled by default; disable for JetStream mode
+            if not enable_local_indexer:
+                env_vars["DYN_LOCAL_INDEXER"] = "false"
 
             env.update(env_vars)
 
