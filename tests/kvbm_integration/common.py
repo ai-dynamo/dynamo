@@ -635,7 +635,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
             except Exception:
                 pass  # Continue cleanup even if one process fails
 
-    # SAFETY: Do NOT use terminate_existing=True or stragglers=["vllm"] here.
+    # SAFETY: Do NOT use terminate_all_matching_process_names=True or stragglers=["vllm"] here.
     # Those kill ALL vLLM processes system-wide, breaking parallel test execution.
     # Port-based cleanup above is targeted and xdist-safe.
     with ManagedProcess(
@@ -644,7 +644,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         health_check_ports=[port, metrics_port],  # vLLM server + KVBM metrics
         timeout=timeout,
         display_output=True,
-        terminate_existing=False,  # Port-based cleanup done above instead
+        terminate_all_matching_process_names=False,  # Port-based cleanup done above instead
         stragglers=[],  # Empty - we handle cleanup manually per port
         straggler_commands=[],  # Empty - we handle cleanup manually per port
         log_dir=log_dir,

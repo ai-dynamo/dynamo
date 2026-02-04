@@ -80,6 +80,11 @@ class Config:
     ec_extra_config: Optional[str] = None
     ec_consumer_mode: bool = False
 
+    # vLLM-Omni worker for multi-stage pipelines
+    omni: bool = False
+    # Path to vLLM-Omni stage configuration YAML
+    stage_configs_path: Optional[str] = None
+
     # dump config to file
     dump_config_to: Optional[str] = None
 
@@ -259,6 +264,17 @@ def parse_args() -> Config:
         help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
     )
     parser.add_argument(
+        "--omni",
+        action="store_true",
+        help="Run as vLLM-Omni worker for multi-stage pipelines (supports text-to-text, text-to-image, etc.)",
+    )
+    parser.add_argument(
+        "--stage-configs-path",
+        type=str,
+        default=None,
+        help="Path to vLLM-Omni stage configuration YAML file. Required for --omni.",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -379,6 +395,13 @@ def parse_args() -> Config:
                 "Specify a shared storage path for encoder cache."
             )
 
+    # Validate omni worker requirements
+    if args.omni and not args.stage_configs_path:
+        raise ValueError(
+            "--stage-configs-path is required when using --omni. "
+            "Specify a YAML file containing stage configurations for the multi-stage pipeline."
+        )
+
     # Set component and endpoint based on worker type
     if args.multimodal_processor or args.ec_processor:
         config.component = "processor"
@@ -397,6 +420,10 @@ def parse_args() -> Config:
         config.endpoint = "generate"
     elif args.multimodal_worker and args.is_prefill_worker:
         # Multimodal prefill worker stays as "backend" to maintain encoder connection
+        config.component = "backend"
+        config.endpoint = "generate"
+    elif args.omni:
+        # Omni worker uses "backend" component for multi-stage pipeline orchestration
         config.component = "backend"
         config.endpoint = "generate"
     elif args.is_prefill_worker:
@@ -428,6 +455,8 @@ def parse_args() -> Config:
     config.ec_storage_path = args.ec_storage_path
     config.ec_extra_config = args.ec_extra_config
     config.ec_consumer_mode = args.ec_consumer_mode
+    config.omni = args.omni
+    config.stage_configs_path = args.stage_configs_path
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane

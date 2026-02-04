@@ -278,7 +278,7 @@ class EtcdServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
+            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
             health_check_ports=[port],
             data_dir=data_dir,
             log_dir=request.node.name,
@@ -325,7 +325,7 @@ class NatsServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
+            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
             data_dir=data_dir,
             health_check_ports=[port],
             health_check_funcs=[self._nats_ready],
