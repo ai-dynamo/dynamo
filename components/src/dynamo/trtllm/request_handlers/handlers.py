@@ -5,7 +5,9 @@ import logging
 from typing import Optional
 
 from dynamo._core import Context
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
@@ -35,7 +37,7 @@ class RequestHandlerFactory:
         encoder_cache = None
         if config.encoder_cache_capacity_gb > 0:
             capacity_bytes = int(config.encoder_cache_capacity_gb * 1024**3)
-            encoder_cache = EncoderCacheManager(capacity_bytes)
+            encoder_cache = MultimodalEmbeddingCacheManager(capacity_bytes)
         if config.disaggregation_mode.value == "prefill":
             return PrefillHandler(config, encoder_cache=encoder_cache)
         if config.disaggregation_mode.value == "prefill_and_decode":
@@ -90,7 +92,7 @@ class PrefillHandler(HandlerBase):
     def __init__(
         self,
         config: RequestHandlerConfig,
-        encoder_cache: Optional[EncoderCacheManager] = None,
+        encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
     ):
         super().__init__(config)
         self._encoder_cache = encoder_cache

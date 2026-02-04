@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def create_mock_encoder_cache() -> MagicMock:
-    """Create mock EncoderCacheManager."""
+    """Create mock MultimodalEmbeddingCacheManager."""
     cache = MagicMock()
     cache.get = MagicMock(return_value=None)
     cache.set = MagicMock(return_value=True)
