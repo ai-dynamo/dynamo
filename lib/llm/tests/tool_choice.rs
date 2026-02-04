@@ -2,12 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_async_openai::types::{
-    ChatCompletionNamedToolChoice, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+    ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
     ChatCompletionToolType, CreateChatCompletionRequest, FunctionName,
 };
 use dynamo_llm::protocols::common;
 use dynamo_llm::protocols::common::llm_backend::BackendOutput;
+
+/// Helper to extract text from ChatCompletionMessageContent
+fn get_text(content: &ChatCompletionMessageContent) -> &str {
+    match content {
+        ChatCompletionMessageContent::Text(text) => text.as_str(),
+        ChatCompletionMessageContent::Parts(_) => "",
+    }
+}
 use dynamo_llm::protocols::openai::DeltaGeneratorExt;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
@@ -153,7 +161,7 @@ async fn test_named_tool_choice_parses_json() {
         Some(dynamo_async_openai::types::FinishReason::Stop)
     );
     let delta = &choice.delta;
-    assert!(delta.content.is_none() || delta.content.as_deref() == Some(""));
+    assert!(delta.content.is_none() || delta.content.as_ref().map(get_text) == Some(""));
     let tool_calls = delta.tool_calls.as_ref().unwrap();
 
     assert_eq!(tool_calls.len(), 1);
@@ -195,7 +203,7 @@ async fn test_required_tool_choice_parses_json_array() {
         Some(dynamo_async_openai::types::FinishReason::ToolCalls)
     );
     let delta = &choice.delta;
-    assert!(delta.content.is_none() || delta.content.as_deref() == Some(""));
+    assert!(delta.content.is_none() || delta.content.as_ref().map(get_text) == Some(""));
     let tool_calls = delta.tool_calls.as_ref().unwrap();
 
     assert_eq!(tool_calls.len(), 2);
@@ -252,7 +260,7 @@ async fn test_tool_choice_parse_failure_returns_as_content() {
 
     // Jail stream behavior: if parsing fails, return accumulated content as-is
     // This matches marker-based FC behavior
-    assert_eq!(delta.content.as_deref(), Some("not-json"));
+    assert_eq!(delta.content.as_ref().map(get_text), Some("not-json"));
     assert!(delta.tool_calls.is_none());
 }
 
@@ -434,7 +442,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         .expect("normal text");
 
     assert_eq!(
-        response.choices[0].delta.content.as_deref(),
+        response.choices[0].delta.content.as_ref().map(get_text),
         Some("Hello world")
     );
     assert!(response.choices[0].delta.tool_calls.is_none());
