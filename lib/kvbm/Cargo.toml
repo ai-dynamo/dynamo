@@ -46,6 +46,8 @@ lru = "0.16"
 oneshot = "0.1.11"
 
 dynamo-nova-backend = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+rand_chacha = { version = "0.9", optional = true }
 
 # kvbm-bench optional dependencies
 clap = { version = "4.5", features = ["derive"], optional = true }
@@ -72,7 +74,7 @@ rmp-serde = { workspace = true }
 [features]
 default = ["testing", "s3"]
 console = []
-testing = ["dynamo-nova-backend"]
+testing = ["dynamo-nova-backend", "dep:rand", "dep:rand_chacha"]
 kvbm-bench = ["testing", "dep:clap", "dep:indicatif"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:chrono"]
 nvtx = ["dep:nvtx", "dynamo-kvbm-config/nvtx"]
@@ -88,6 +90,8 @@ proptest = "1.5.0"
 tempfile = "3"
 rstest = "0.26"
 tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+rand_chacha = "0.9"
 
 [[bin]]
 name = "bench_local_transfer"

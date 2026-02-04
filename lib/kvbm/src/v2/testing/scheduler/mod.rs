@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Scheduler testing utilities.
@@ -8,17 +8,27 @@
 //! - Generating test requests with specified tokens
 //! - Populating prefix cache with known sequences
 //! - Integration tests for prefix caching behavior
+//! - Mock engine for CPU-only scheduler testing
+
+pub mod mock;
+
+#[cfg(test)]
+mod connector_tests;
 
 use crate::G1;
 use crate::v2::SequenceHash;
 use crate::v2::integrations::common::Request;
+use crate::v2::integrations::connector::leader::ConnectorLeader;
 use crate::v2::integrations::scheduler::{
     KVCacheManager, RequestStatus, Scheduler, SchedulerConfig,
 };
 use crate::v2::logical::blocks::BlockRegistry;
 
+use super::connector::{ConnectorTestConfig, TestConnectorInstance};
 use super::managers;
 use super::token_blocks;
+
+use std::sync::Arc;
 
 /// Create a scheduler with real BlockManager<G1> for testing.
 ///
@@ -100,6 +110,86 @@ pub fn create_test_request_with_salt(
     max_tokens: Option<usize>,
 ) -> Request {
     Request::new(request_id, tokens, None, Some(salt.to_string()), max_tokens)
+}
+
+/// Create a scheduler with a real ConnectorLeader for testing connector integration.
+///
+/// This function creates:
+/// 1. A `TestConnectorInstance` with a single worker (auto-initialized)
+/// 2. A scheduler connected to the instance's `ConnectorLeader`
+///
+/// The returned `TestConnectorInstance` must be kept alive for the duration
+/// of the test, as it owns the tokio runtime and connector infrastructure.
+///
+/// # Arguments
+/// * `block_count` - Number of blocks in the KV cache
+/// * `block_size` - Tokens per block
+///
+/// # Returns
+/// A tuple of (Scheduler, TestConnectorInstance, BlockRegistry)
+///
+/// # Example
+/// ```ignore
+/// let (mut scheduler, instance, _registry) = create_test_scheduler_with_connector(100, 16)?;
+/// assert!(scheduler.connector_shim().is_some());
+///
+/// // Add and schedule a request
+/// scheduler.add_request(create_test_request("req-1", vec![1, 2, 3], Some(10)));
+/// let output = scheduler.schedule();
+///
+/// // The shim should have created a slot for the request
+/// ```
+#[allow(dead_code)]
+pub fn create_test_scheduler_with_connector(
+    block_count: usize,
+    block_size: usize,
+) -> anyhow::Result<(Scheduler, TestConnectorInstance, BlockRegistry)> {
+    // Create connector instance with configured cache blocks
+    // Uses sync factory which properly manages tokio runtime
+    let config = ConnectorTestConfig::new()
+        .leader_cache_blocks(64) // G2: 64 blocks for host memory cache
+        .leader_disk_blocks(32); // G3: 32 blocks for disk storage
+
+    let instance = TestConnectorInstance::create_with_config(config, 1)?;
+
+    // Create block manager and KV cache
+    let registry = managers::TestRegistryBuilder::new().build();
+    let block_manager = managers::TestManagerBuilder::<G1>::new()
+        .block_count(block_count)
+        .block_size(block_size)
+        .registry(registry.clone())
+        .build();
+    let kv_cache = KVCacheManager::with_prefix_caching(block_manager, block_size, true)?;
+
+    // Create scheduler config
+    let config = SchedulerConfig::builder()
+        .max_seq_len(8192)
+        .max_num_batched_tokens(8192)
+        .max_num_seqs(256)
+        .block_size(block_size)
+        .enable_prefix_caching(true)
+        .enable_chunked_prefill(false)
+        .max_prefill_chunk_size(None)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build scheduler config: {}", e))?;
+
+    // Create scheduler with connector via builder
+    let scheduler = Scheduler::builder()
+        .config(config)
+        .kv_cache(kv_cache)
+        .connector(instance.leader.clone())
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build scheduler: {}", e))?;
+
+    Ok((scheduler, instance, registry))
+}
+
+/// Get the ConnectorLeader from a TestConnectorInstance.
+///
+/// Convenience function for tests that need direct access to the leader.
+#[allow(dead_code)]
+pub fn get_connector_leader(instance: &TestConnectorInstance) -> Arc<ConnectorLeader> {
+    instance.leader.clone()
 }
 
 /// Populate the scheduler's prefix cache with a token sequence.
@@ -474,7 +564,7 @@ mod tests {
         let total_scheduled =
             output2.scheduled_new_reqs.len() + output2.scheduled_cached_reqs.len();
         assert!(
-            total_scheduled >= 1,
+            total_scheduled > 0,
             "Scheduler should not crash with limited blocks"
         );
     }
