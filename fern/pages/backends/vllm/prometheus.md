@@ -11,7 +11,7 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 
 **For the complete and authoritative list of all vLLM metrics**, always refer to the [official vLLM Metrics Design documentation](https://docs.vllm.ai/en/latest/design/metrics.html).
 
-**For LMCache metrics and integration**, see the [LMCache Integration Guide](LMCache-Integration.md).
+**For LMCache metrics and integration**, see the [LMCache Integration Guide](../../integrations/lmcache-integration.md).
 
 **For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics.md).
 
@@ -133,10 +133,10 @@ curl -s localhost:8081/metrics | grep "^lmcache:"
 
 Troubleshooting LMCache-related metrics and logs (including `PrometheusLogger instance already created with different metadata` and `PROMETHEUS_MULTIPROC_DIR` warnings) is documented in:
 
-- [LMCache Integration Guide](LMCache-Integration.md#troubleshooting)
+- [LMCache Integration Guide](../../integrations/lmcache-integration.md#troubleshooting)
 
 **For complete LMCache configuration and metric details**, see:
-- [LMCache Integration Guide](LMCache-Integration.md) - Setup and configuration
+- [LMCache Integration Guide](../../integrations/lmcache-integration.md) - Setup and configuration
 - [LMCache Observability Documentation](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Complete metrics reference
 
 ## Implementation Details

@@ -441,7 +441,7 @@ Look for HiCache-related log messages indicating:
 ## Related Documentation
 
 - **[SGLang Backend Guide](../backends/sglang/README.md)**: Complete guide for running SGLang with Dynamo
-- **[KV Cache Routing](../router/kv_cache_routing.md)**: Understanding KV-aware routing for multi-worker deployments
+- **[KV Cache Routing](../router/kv-cache-routing.md)**: Understanding KV-aware routing for multi-worker deployments
 - **[KVBM Design](../kvbm/kvbm-design.md)**: Dynamo's KV Block Manager architecture and NIXL integration
 - **[Disaggregated Serving](../backends/sglang/sglang-disaggregation.md)**: Prefill/decode separation with SGLang
 - **[NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)**: NIXL communication library details
@@ -450,5 +450,5 @@ Look for HiCache-related log messages indicating:
 ## See Also
 
 - [KVBM Overview](../kvbm/README.md)
-- [LMCache Integration](lmcache_integration.md)
-- [FlexKV Integration](flexkv_integration.md)
+- [LMCache Integration](lmcache-integration.md)
+- [FlexKV Integration](flexkv-integration.md)
