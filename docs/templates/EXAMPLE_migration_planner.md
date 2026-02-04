@@ -13,8 +13,7 @@ This is an example prompt for migrating the Planner component documentation to t
 1. Copy this file and rename it for your component (e.g., `EXAMPLE_migration_router.md`)
 2. Update the current files section with your component's existing docs
 3. Update the target structure with your component's file names
-4. Update the migration mapping tables with your component's content
-5. Use the prompt with Claude 4.5 Opus Max mode
+4. Use the prompt with Claude 4.5 Opus Max mode
 
 ---
 
@@ -47,46 +46,6 @@ docs/components/planner/
 
 docs/design_docs/
 └── planner_design.md      # Tier 3: Design (200-250 lines)
-
-## Migration Mapping
-
-### README.md (Quick Start)
-
-| Section | Source | Est. Lines |
-|---------|--------|------------|
-| # Planner | planner_intro.rst overview | 10 |
-| ## Feature Matrix | planner_intro.rst feature table (convert to MD) | 30 |
-| ## Quick Start | sla_planner_quickstart.md Steps 1-4 (condensed) | 50 |
-| ## Next Steps | New: links to guide, examples, design | 10 |
-
-### planner_guide.md (Guide)
-
-| Section | Source | Est. Lines |
-|---------|--------|------------|
-| ## Deployment | sla_planner_quickstart.md Prerequisites, Container Images, DGDR | 140 |
-| ## Configuration | sla_planner_quickstart.md + sla_planner.md config sections | 140 |
-| ## Integration | sla_planner.md Architecture, Virtual Deployment | 70 |
-| ## Troubleshooting | sla_planner_quickstart.md Troubleshooting | 80 |
-
-### planner_examples.md (Examples)
-
-| Section | Source | Est. Lines |
-|---------|--------|------------|
-| ## Basic Examples | sla_planner_quickstart.md sample DGDRs | 140 |
-| ## Kubernetes Examples | sla_planner_quickstart.md MoE, production examples | 130 |
-| ## Advanced Examples | sla_planner.md warmup trace, Virtual Connector | 80 |
-
-### planner_design.md (Design)
-
-| Section | Source | Est. Lines |
-|---------|--------|------------|
-| ## Overview | sla_planner.md first paragraph | 20 |
-| ## Architecture | sla_planner.md Architecture Overview + diagram | 30 |
-| ## Load Prediction Models | sla_planner.md Load Prediction (algorithms) | 65 |
-| ## Scaling Algorithm | sla_planner.md Scaling Algorithm (all 5 steps) | 85 |
-| ## Performance/Future | New sections | 30 |
-
----
 
 ## Phase 1: Read and Analyze
 
@@ -187,5 +146,4 @@ When creating a migration prompt for another component:
 1. **Update Context** - Describe what the component does
 2. **Update Current Files** - List the actual files with line counts
 3. **Update Target Structure** - Use correct component name
-4. **Update Migration Mapping** - Map actual sections to new files
-5. **Keep Phases** - The phase structure works for any component
+4. **Keep Phases** - The phase structure works for any component
