@@ -1,26 +1,22 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Post-Merge CI Pipeline
+# TEMPORARY WORKFLOW FOR TESTING FLAKY DETECTION
+# DELETE THIS FILE AFTER TESTING
+
+name: Test Flaky Detection
 
 on:
-  push:
-    branches:
-      - main
-      - 'release/*.*.*'
-  # TEMPORARY: Testing flaky detection on PR
   pull_request:
     branches:
       - main
-  # TEMPORARY: Manual trigger for testing
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   ci-pipeline:
-    name: Post-Merge CI
+    name: Test Flaky Detection CI
     uses: ./.github/workflows/ci-test-suite.yml
     with:
       pipeline_type: post_merge
