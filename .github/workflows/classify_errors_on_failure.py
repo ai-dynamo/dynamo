@@ -100,9 +100,34 @@ def extract_ci_errors() -> List[ErrorContext]:
             errors.extend(build_errors)
             print(f"  Found {len(build_errors)} errors")
 
+    # Extract from step error log (if steps write errors to this file)
+    step_error_file = "step-error.log"
+    if os.path.exists(step_error_file):
+        print(f"📋 Extracting errors from {step_error_file}")
+        with open(step_error_file, 'r') as f:
+            error_content = f.read()
+        if error_content.strip():
+            step_error = ErrorContext(
+                error_text=error_content,
+                source_type="step_failure",
+                workflow_id=context.get('workflow_id'),
+                job_id=context.get('job_id'),
+                job_name=context.get('job_name'),
+                repo=context.get('repo'),
+                workflow_name=context.get('workflow_name'),
+                branch=context.get('branch'),
+                pr_id=context.get('pr_id'),
+                commit_sha=context.get('commit_sha'),
+                user_alias=context.get('user_alias'),
+            )
+            errors.append(step_error)
+            print(f"  Found 1 error")
+
     # Extract from GitHub job logs (for step failures without artifacts)
-    # Only do this if we haven't found any errors yet
-    if not errors:
+    # NOTE: Currently disabled because GitHub API returns 404 for logs of in-progress jobs
+    # The logs endpoint only works for completed jobs, but we're running during the job
+    # TODO: Implement alternative approach (capture step errors to files)
+    if False and not errors:  # Temporarily disabled
         print("📋 No artifacts found, checking GitHub job logs...")
         github_errors = extract_from_github_job_logs(extractor, context)
         if github_errors:
