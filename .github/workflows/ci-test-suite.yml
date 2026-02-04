@@ -1175,6 +1175,9 @@ jobs:
     runs-on: ubuntu-latest
     if: always() && !cancelled()
     needs: [build-amd64, build-arm64, build-cuda13-amd64, build-cuda13-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    permissions:
+      contents: read
+      checks: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

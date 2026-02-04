@@ -55,6 +55,10 @@ jobs:
       - ${{ github.workspace }}:/workspace
     if: always() && !cancelled()
     needs: [copyright-checks]
+    permissions:
+      contents: read
+      checks: write
+      packages: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
