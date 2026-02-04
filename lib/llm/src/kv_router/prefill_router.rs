@@ -349,12 +349,14 @@ impl PrefillRouter {
     /// If `phase_permit` is provided, it is dropped after the first output is received,
     /// allowing subsequent `set_phase` calls to proceed. This is used in the bootstrap
     /// optimization path to ensure `record_worker` completes before the phase changes.
+    ///
+    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     async fn execute_prefill(
         router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
@@ -406,20 +408,26 @@ impl PrefillRouter {
             ));
         };
 
-        // Extract prefill worker ID from disaggregated_params
-        let prefill_worker_id = disaggregated_params
+        // Extract prefill worker ID and dp_rank from disaggregated_params
+        let prefill_worker_info = disaggregated_params
             .get("worker_id")
             .and_then(|worker_id_json| {
-                worker_id_json
+                let worker_id = worker_id_json
                     .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64())?;
+                let dp_rank = worker_id_json
+                    .get("prefill_dp_rank")
                     .and_then(|v| v.as_u64())
+                    .map(|r| r as u32)
+                    .unwrap_or(0);
+                Some((worker_id, dp_rank))
             });
         Ok((
             PrefillResult {
                 disaggregated_params,
                 prompt_tokens_details,
             },
-            prefill_worker_id,
+            prefill_worker_info,
         ))
     }
 
@@ -461,14 +469,16 @@ impl PrefillRouter {
         );
     }
 
-    /// Call the prefill router and extract structured prefill result and worker ID.
+    /// Call the prefill router and extract structured prefill result, worker ID, and dp_rank.
     ///
     /// This is the synchronous prefill path - we wait for prefill to complete before proceeding.
     /// No phase permit is needed since `record_worker` completes before we return.
+    ///
+    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
         // For call_prefill path, routing is handled by the router itself (no direct routing needed)
         // No phase permit needed - we wait for completion before changing phase
         Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
@@ -581,17 +591,18 @@ impl
                 let result = self.call_prefill(prefill_context).await;
 
                 // Record prefill worker on the main request's tracker for metrics.
-                // (call_prefill returns the worker_id from the prefill routing)
+                // (call_prefill returns the worker_id and dp_rank from the prefill routing)
                 // Worker type is stored at routing time to avoid expensive MDC lookups when
                 // updating Prometheus TTFT metrics later in the response stream.
-                if let Ok((_, Some(worker_id))) = &result
+                if let Ok((_, Some((worker_id, dp_rank)))) = &result
                     && let Some(ref tracker) = req.tracker
                 {
-                    // Use dp_rank=0 as we don't have it in this path
-                    tracker.record_prefill_worker_full(*worker_id, 0, WORKER_TYPE_PREFILL);
+                    tracker.record_prefill_worker_full(*worker_id, *dp_rank, WORKER_TYPE_PREFILL);
                 }
 
-                result.map(|(result, worker_id)| (Some(result), worker_id, None))
+                result.map(|(result, worker_info)| {
+                    (Some(result), worker_info.map(|(id, _)| id), None)
+                })
             }
         }
         .instrument(tracing::info_span!("prefill_routing"))

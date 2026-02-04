@@ -399,7 +399,9 @@ impl RequestTracker {
 
         Some(WorkerIdInfo {
             prefill_worker_id: prefill,
+            prefill_dp_rank: self.prefill_dp_rank(),
             decode_worker_id: decode,
+            decode_dp_rank: self.decode_dp_rank(),
         })
     }
 
