@@ -125,7 +125,7 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
 # Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
 ARG ARCH_ALT
 
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
+FROM quay.io/pypa/manylinux_2_34_${ARCH_ALT} AS wheel_builder
 
 # Redeclare ARGs for this stage
 ARG ARCH
@@ -466,7 +466,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
-            --plat manylinux_2_28_${ARCH_ALT} \
+            --plat manylinux_2_34_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
