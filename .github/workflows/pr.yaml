@@ -145,6 +145,7 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv || true
           python3 -m venv /tmp/error-classification-venv
           source /tmp/error-classification-venv/bin/activate
           pip install -r opensearch_upload/requirements.txt
@@ -241,6 +242,7 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv || true
           python3 -m venv /tmp/error-classification-venv
           source /tmp/error-classification-venv/bin/activate
           pip install -r opensearch_upload/requirements.txt
@@ -531,6 +533,7 @@ jobs:
         ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
         OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
       run: |
+        sudo apt-get update && sudo apt-get install -y python3-venv || true
         python3 -m venv /tmp/error-classification-venv
         source /tmp/error-classification-venv/bin/activate
         pip install -r opensearch_upload/requirements.txt
