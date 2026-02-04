@@ -180,7 +180,7 @@ jobs:
   vllm-pipeline:
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/build-test-disribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
       platforms: '["amd64", "arm64"]'
@@ -197,7 +197,7 @@ jobs:
   sglang-pipeline:
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
-    uses: ./.github/workflows/build-test-disribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
       platforms: '["amd64", "arm64"]'
@@ -214,7 +214,7 @@ jobs:
   trtllm-pipeline:
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/build-test-disribute-flavor-matrix.yml
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
       platforms: '["amd64", "arm64"]'
