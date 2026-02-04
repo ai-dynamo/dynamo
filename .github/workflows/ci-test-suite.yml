@@ -137,7 +137,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
@@ -217,7 +217,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
@@ -286,7 +286,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
@@ -354,7 +354,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
@@ -506,7 +506,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
@@ -657,7 +657,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
@@ -810,7 +810,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
@@ -963,7 +963,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
@@ -1137,7 +1137,7 @@ jobs:
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
           cd opensearch_upload
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           cd ..
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
       - name: Upload Fault Tolerance Test Results
