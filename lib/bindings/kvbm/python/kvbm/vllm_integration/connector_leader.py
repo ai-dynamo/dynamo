@@ -172,17 +172,32 @@ class KvConnectorLeader:
         # In vLLM 0.14.0+, resumed_from_preemption was changed to resumed_req_ids (a set)
         resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
 
-        for (
-            req_id,
-            new_token_ids,
-            new_block_ids,
-            num_computed_tokens,
-        ) in zip(
-            scheduler_output.scheduled_cached_reqs.req_ids,
-            scheduler_output.scheduled_cached_reqs.new_token_ids,
-            scheduler_output.scheduled_cached_reqs.new_block_ids,
-            scheduler_output.scheduled_cached_reqs.num_computed_tokens,
-        ):
+        # If A == B, and A == C, then B == C
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        assert len(cached_reqs.req_ids) == len(
+            cached_reqs.new_block_ids
+        ), "Number of cached req_ids doesn't match the number of cached new_block_ids"
+        assert len(cached_reqs.req_ids) == len(
+            cached_reqs.num_computed_tokens
+        ), "Number of cached req_ids doesn't match the number of cached num_computed_tokens"
+
+        # In https://github.com/vllm-project/vllm/pull/26388/changes#diff-9eeca590fd99f15621897e559dba39b3ec4e7c2c65ec3c3229711689e008b5f4L732-L736,
+        # new_token_ids was changed to return an empty list unless pipeline
+        # parallelism is turned on. If needed, which for KVBM it is not needed,
+        # KVBM can consult the cached_reqs.all_token_ids to get the token ids
+        # for each of the requests. KVBM doesn't consult this field since
+        # it holds the token sequence in the _connector.
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            # new_token_ids may be empty when pipeline parallelism is disabled
+
+            new_token_ids = (
+                cached_reqs.new_token_ids[i]
+                if i < len(cached_reqs.new_token_ids)
+                else []
+            )
+            new_block_ids = cached_reqs.new_block_ids[i]
+            num_computed_tokens = cached_reqs.num_computed_tokens[i]
+
             resumed_from_preemption = req_id in resumed_req_ids
             if new_block_ids is not None:
                 output.add_cached_request(
