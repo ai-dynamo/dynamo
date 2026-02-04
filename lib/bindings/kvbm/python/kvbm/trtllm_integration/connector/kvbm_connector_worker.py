@@ -244,9 +244,6 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         Args:
             metadata (bytes): the connector metadata.
         """
-        # Note: With enable_block_reuse=true, TRT-LLM should properly distribute
-        # metadata to all ranks. If metadata is empty on non-rank-0 workers,
-        # check that enable_block_reuse is enabled in the kv_cache_config.
         super().bind_connector_meta(metadata)
         self._connector.bind_connector_meta(metadata)
 
