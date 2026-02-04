@@ -232,6 +232,11 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
 
     /// Get the current usage statistics with properly calculated total_tokens.
     fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage;
+
+    /// Returns the request tracker if available, for accessing worker timing metrics.
+    fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

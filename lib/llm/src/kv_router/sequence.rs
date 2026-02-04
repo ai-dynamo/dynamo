@@ -40,6 +40,7 @@ use uuid::Uuid;
 use super::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank,
 };
+use crate::discovery::{WORKER_ACTIVE_DECODE_BLOCKS_GAUGE, WORKER_ACTIVE_PREFILL_TOKENS_GAUGE};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::CancellationToken;
@@ -415,6 +416,8 @@ pub struct ActiveSequencesMultiWorker {
     /// Publisher for metrics (namespace-scoped)
     metrics_publisher: EventPublisher,
     replica_sync: bool,
+    /// Worker type for Prometheus metrics labeling ("prefill" or "decode")
+    worker_type: &'static str,
 }
 
 impl ActiveSequencesMultiWorker {
@@ -424,6 +427,7 @@ impl ActiveSequencesMultiWorker {
         workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
         replica_sync: bool,
         router_id: u64,
+        worker_type: &'static str,
     ) -> Result<Self> {
         assert!(block_size > 1, "block_size must be greater than 1");
 
@@ -462,6 +466,7 @@ impl ActiveSequencesMultiWorker {
             metrics_publisher,
             router_id,
             replica_sync,
+            worker_type,
         };
 
         // Start the subscription loop only if replica_sync is enabled
@@ -1045,7 +1050,25 @@ impl ActiveSequencesMultiWorker {
             }
         };
 
-        // Publish ActiveLoad
+        // Update Prometheus gauges directly (router's own bookkeeping)
+        let worker_id_str = worker.worker_id.to_string();
+        let dp_rank_str = worker.dp_rank.to_string();
+        WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
+            .with_label_values(&[
+                worker_id_str.as_str(),
+                dp_rank_str.as_str(),
+                self.worker_type,
+            ])
+            .set(active_blocks as i64);
+        WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
+            .with_label_values(&[
+                worker_id_str.as_str(),
+                dp_rank_str.as_str(),
+                self.worker_type,
+            ])
+            .set(active_tokens as i64);
+
+        // Also publish ActiveLoad to NATS for other subscribers (if NATS is available)
         let active_load = ActiveLoad {
             worker_id: worker.worker_id,
             dp_rank: worker.dp_rank,
@@ -1054,13 +1077,20 @@ impl ActiveSequencesMultiWorker {
         };
 
         if let Err(e) = self.metrics_publisher.publish(&active_load).await {
-            tracing::warn!("Failed to publish ActiveLoad for worker {worker:?}: {e:?}");
+            // This is expected if NATS is not available - the local gauge update above already succeeded
+            tracing::trace!("Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}");
         }
     }
 
     /// Get the number of workers
     pub fn num_workers(&self) -> usize {
         self.senders.len()
+    }
+
+    /// Get the worker type for this router ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.worker_type
     }
 
     /// Generic method to query all workers with a given command
@@ -1301,12 +1331,20 @@ mod tests {
                 workers_with_configs.clone(),
                 true,
                 1,
+                crate::discovery::WORKER_TYPE_DECODE,
             )
             .await?,
         );
         let seq_manager_2 = Arc::new(
-            ActiveSequencesMultiWorker::new(component, block_size, workers_with_configs, true, 2)
-                .await?,
+            ActiveSequencesMultiWorker::new(
+                component,
+                block_size,
+                workers_with_configs,
+                true,
+                2,
+                crate::discovery::WORKER_TYPE_DECODE,
+            )
+            .await?,
         );
 
         // Give some time for the subscription loops to start
@@ -1463,12 +1501,20 @@ mod tests {
                 workers_with_configs.clone(),
                 true,
                 1,
+                crate::discovery::WORKER_TYPE_DECODE,
             )
             .await?,
         );
         let seq_manager_2 = Arc::new(
-            ActiveSequencesMultiWorker::new(component, block_size, workers_with_configs, true, 2)
-                .await?,
+            ActiveSequencesMultiWorker::new(
+                component,
+                block_size,
+                workers_with_configs,
+                true,
+                2,
+                crate::discovery::WORKER_TYPE_DECODE,
+            )
+            .await?,
         );
 
         // Give some time for the subscription loops to start

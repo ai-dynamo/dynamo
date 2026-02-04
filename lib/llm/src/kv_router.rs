@@ -333,6 +333,7 @@ pub struct KvRouter {
 }
 
 impl KvRouter {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
@@ -341,6 +342,7 @@ impl KvRouter {
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
         router_id: u64,
+        worker_type: &'static str,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
@@ -382,6 +384,7 @@ impl KvRouter {
             selector,
             kv_router_config.router_replica_sync,
             router_id,
+            worker_type,
         )
         .await?;
 
@@ -579,6 +582,12 @@ impl KvRouter {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
+    }
+
+    /// Get the worker type for this router ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.scheduler.worker_type()
     }
 
     pub async fn add_output_block(
@@ -926,11 +935,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         }
 
-        // Record metrics in tracker: KV hit rate and worker ID based on phase
+        // Record metrics in tracker: KV hit rate, worker ID, and worker type based on phase.
+        // Worker type is stored at routing time to avoid expensive MDC lookups when
+        // updating Prometheus metrics (TTFT/ITL) later in the response stream.
         if let Some(ref tracker) = request.tracker {
             let isl_blocks = request.token_ids.len().div_ceil(block_size);
             tracker.record_kv_hit(overlap_amount, isl_blocks);
-            tracker.record_worker(instance_id);
+            tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
         }
 
         // Handle query-only requests: early return with worker info

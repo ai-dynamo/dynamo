@@ -101,6 +101,7 @@ impl KvScheduler {
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_id: u64,
+        worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -119,6 +120,7 @@ impl KvScheduler {
                 initial_workers,
                 replica_sync,
                 router_id,
+                worker_type,
             )
             .await
             .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
@@ -343,6 +345,12 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
+    }
+
+    /// Get the worker type for this scheduler ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.slots.worker_type()
     }
 
     pub async fn add_output_block(
