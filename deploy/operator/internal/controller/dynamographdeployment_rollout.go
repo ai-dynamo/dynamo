@@ -20,9 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,9 +29,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/proxy"
 )
 
 // shouldTriggerRollingUpdate determines if WORKER spec changes require a rolling update.
@@ -264,8 +260,6 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	now := metav1.Now()
 	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhasePending
 	rolloutStatus.StartTime = &now
-	rolloutStatus.TrafficWeightOld = 100
-	rolloutStatus.TrafficWeightNew = 0
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
 		"Starting rolling update from namespace %s to %s", oldNamespace, newNamespace)
@@ -278,7 +272,8 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 }
 
 // continueRollingUpdate handles the in-progress phase of a rolling update.
-// This function updates proxy weights based on worker readiness.
+// Traffic weighting is handled automatically by the frontend's multi-pool manager,
+// which discovers workers via prefix-based namespace matching and load balances across them.
 func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
@@ -315,54 +310,9 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		"oldNamespace", oldNamespace,
 		"newNamespace", newNamespace)
 
-	// Check if rollout is complete
+	// Check if rollout is complete: all new workers ready and all old workers scaled down
 	if newInfo.TotalReadyWorkers() >= desiredReplicas && oldInfo.TotalReadyWorkers() == 0 {
 		return r.completeRollout(ctx, dgd, rolloutStatus, oldNamespace, newNamespace)
-	}
-
-	allGroupsReady, notReadyServices := newInfo.AllServicesHaveMinimumReady(1)
-
-	// Ensure all worker services have at least 1 ready replica before proceeding with traffic shifting
-	if !allGroupsReady {
-		// Not all groups have minimum ready workers - keep 100% traffic on old
-		logger.Info("Waiting for all worker services to have minimum ready replicas",
-			"notReadyServices", notReadyServices)
-
-		// Ensure traffic stays on old deployment
-		if rolloutStatus.TrafficWeightNew != 0 {
-			rolloutStatus.TrafficWeightOld = 100
-			rolloutStatus.TrafficWeightNew = 0
-			if err := r.updateProxyWeights(ctx, dgd, 100, 0); err != nil {
-				logger.Error(err, "Failed to reset proxy weights to old deployment")
-			}
-		}
-
-		// Update status
-		if err := r.Status().Update(ctx, dgd); err != nil {
-			return fmt.Errorf("failed to update rollout status: %w", err)
-		}
-
-		return nil
-	}
-
-	totalReady := oldInfo.TotalReadyWorkers() + newInfo.TotalReadyWorkers()
-	if totalReady > 0 {
-		newWeight := (newInfo.TotalReadyWorkers() * 100) / totalReady
-		oldWeight := 100 - newWeight
-
-		// Only update weights if they changed
-		if rolloutStatus.TrafficWeightOld != oldWeight || rolloutStatus.TrafficWeightNew != newWeight {
-			rolloutStatus.TrafficWeightOld = oldWeight
-			rolloutStatus.TrafficWeightNew = newWeight
-
-			// Update HAProxy weights
-			if err := r.updateProxyWeights(ctx, dgd, oldWeight, newWeight); err != nil {
-				logger.Error(err, "Failed to update proxy weights", "oldWeight", oldWeight, "newWeight", newWeight)
-				// Continue anyway - the weights will be updated on next reconciliation
-			} else {
-				logger.Info("Updated proxy weights", "oldWeight", oldWeight, "newWeight", newWeight)
-			}
-		}
 	}
 
 	// Update status
@@ -383,11 +333,6 @@ func (r *DynamoGraphDeploymentReconciler) completeRollout(
 ) error {
 	logger := log.FromContext(ctx)
 
-	// Ensure HAProxy has 100% traffic to new
-	if err := r.updateProxyWeights(ctx, dgd, 0, 100); err != nil {
-		logger.Error(err, "Failed to set final proxy weights")
-	}
-
 	// Get the old and new worker hashes
 	oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)
 	newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)
@@ -406,8 +351,6 @@ func (r *DynamoGraphDeploymentReconciler) completeRollout(
 
 	// Update rollout status to Completed
 	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseCompleted
-	rolloutStatus.TrafficWeightOld = 0
-	rolloutStatus.TrafficWeightNew = 100
 	now := metav1.Now()
 	rolloutStatus.EndTime = &now
 
@@ -527,67 +470,6 @@ func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
 }
 
 // updateProxyWeights updates the HAProxy backend weights and server addresses via the runtime API.
-func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
-	ctx context.Context,
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	oldWeight, newWeight int32,
-) error {
-	logger := log.FromContext(ctx)
-
-	// Get the HAProxy service address
-	// The proxy service is named <dgd-name>-traffic-proxy in the same namespace
-	proxyServiceName := fmt.Sprintf("%s-traffic-proxy-runtime", dgd.Name)
-	proxyHost := fmt.Sprintf("%s.%s.svc.cluster.local", proxyServiceName, dgd.Namespace)
-
-	// Create HAProxy client connecting to the runtime API port
-	haproxyClient := proxy.NewHAProxyClientTCP(proxyHost, consts.HAProxyRuntimePort)
-
-	// Calculate old and new service names based on worker hashes
-	frontendServiceName := r.getFrontendServiceName(dgd)
-	oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)[:8]
-	newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)[:8]
-
-	oldServiceName := frontendServiceName + "-" + oldWorkerHash
-	newServiceName := frontendServiceName + "-" + newWorkerHash
-
-	// Update backend server addresses FIRST (before adjusting weights)
-	// This ensures that both old_frontend and new_frontend point to the correct services
-	logger.Info("Updating HAProxy backend server addresses",
-		"oldService", oldServiceName,
-		"newService", newServiceName)
-
-	// Resolve service names to ClusterIPs (HAProxy requires IP addresses, not DNS names)
-	oldServiceIP, err := r.getServiceClusterIP(ctx, dgd.Namespace, oldServiceName)
-	if err != nil {
-		return fmt.Errorf("failed to get ClusterIP for %s: %w", oldServiceName, err)
-	}
-
-	newServiceIP, err := r.getServiceClusterIP(ctx, dgd.Namespace, newServiceName)
-	if err != nil {
-		return fmt.Errorf("failed to get ClusterIP for %s: %w", newServiceName, err)
-	}
-
-	logger.V(1).Info("Resolved service IPs",
-		"oldServiceName", oldServiceName, "oldServiceIP", oldServiceIP,
-		"newServiceName", newServiceName, "newServiceIP", newServiceIP)
-
-	if err := haproxyClient.SetServerAddr(ctx, proxy.BackendName, proxy.OldServerName, oldServiceIP, consts.DynamoServicePort); err != nil {
-		return fmt.Errorf("failed to set %s addr to %s: %w", proxy.OldServerName, oldServiceIP, err)
-	}
-
-	if err := haproxyClient.SetServerAddr(ctx, proxy.BackendName, proxy.NewServerName, newServiceIP, consts.DynamoServicePort); err != nil {
-		return fmt.Errorf("failed to set %s addr to %s: %w", proxy.NewServerName, newServiceIP, err)
-	}
-
-	// Then update weights
-	logger.Info("Updating HAProxy traffic weights", "oldWeight", oldWeight, "newWeight", newWeight)
-	if err := haproxyClient.UpdateWeights(ctx, oldWeight, newWeight); err != nil {
-		return fmt.Errorf("failed to update HAProxy weights: %w", err)
-	}
-
-	return nil
-}
-
 // scaleOldWorkerDCDs patches the replicas field on old worker DCDs during a rolling update.
 // This is done via direct patching rather than generating the full DCD spec to avoid
 // overwriting the old spec with the new spec (which would trigger an unwanted rolling update).
@@ -698,186 +580,4 @@ func (r *DynamoGraphDeploymentReconciler) deleteOldDCDs(
 	}
 
 	return nil
-}
-
-// reconcileTrafficProxy ensures the HAProxy traffic proxy resources exist and are configured.
-// The proxy is used for traffic shifting during rolling updates.
-func (r *DynamoGraphDeploymentReconciler) reconcileTrafficProxy(
-	ctx context.Context,
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) error {
-	logger := log.FromContext(ctx)
-
-	// Build the proxy configuration
-	proxyConfig := r.buildProxyConfig(dgd)
-
-	// Generate proxy resources
-	proxyDeployment := dynamo.GenerateProxyDeployment(proxyConfig)
-	proxyService := dynamo.GenerateProxyService(proxyConfig)
-	proxyRuntimeService := dynamo.GenerateProxyRuntimeService(proxyConfig)
-	proxyConfigMap := dynamo.GenerateProxyConfigMap(proxyConfig)
-
-	// Sync ConfigMap first (Deployment mounts it)
-	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
-		return proxyConfigMap, false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to sync proxy ConfigMap: %w", err)
-	}
-
-	// Sync main Service (for frontend traffic)
-	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return proxyService, false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to sync proxy Service: %w", err)
-	}
-
-	// Sync runtime Service (for controller weight updates)
-	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return proxyRuntimeService, false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to sync proxy runtime Service: %w", err)
-	}
-
-	// Sync Deployment
-	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*appsv1.Deployment, bool, error) {
-		return proxyDeployment, false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to sync proxy Deployment: %w", err)
-	}
-
-	logger.V(1).Info("Traffic proxy reconciled successfully", "name", dynamo.GetProxyName(dgd.Name))
-	return nil
-}
-
-// buildProxyConfig constructs the ProxyConfig from DGD spec and platform defaults.
-func (r *DynamoGraphDeploymentReconciler) buildProxyConfig(
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) *dynamo.ProxyConfig {
-	// Default values from platform config
-	replicas := r.Config.TrafficProxy.Replicas
-	image := r.Config.TrafficProxy.Image
-	resources := r.Config.TrafficProxy.Resources
-
-	// Override with DGD-specific settings if provided
-	if dgd.Spec.TrafficProxy != nil {
-		if dgd.Spec.TrafficProxy.Replicas != nil {
-			replicas = *dgd.Spec.TrafficProxy.Replicas
-		}
-		if dgd.Spec.TrafficProxy.Resources != nil {
-			resources = *dgd.Spec.TrafficProxy.Resources
-		}
-	}
-
-	// Get frontend service name for backend configuration
-	frontendServiceName := r.getFrontendServiceName(dgd)
-
-	// Configure backends based on rollout state
-	var oldBackend, newBackend *dynamo.BackendConfig
-
-	if r.isRollingUpdateInProgress(dgd) && dgd.Status.Rollout != nil {
-		// During rollout, configure both backends with current weights
-		// Use hash-based naming for stable service names
-		oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)[:8]
-		newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)[:8]
-
-		oldBackend = &dynamo.BackendConfig{
-			ServiceName: frontendServiceName + "-" + oldWorkerHash, // e.g., dgd-Frontend-abc12345
-			ServicePort: consts.DynamoServicePort,
-			Weight:      dgd.Status.Rollout.TrafficWeightOld,
-		}
-		newBackend = &dynamo.BackendConfig{
-			ServiceName: frontendServiceName + "-" + newWorkerHash, // e.g., dgd-Frontend-def67890
-			ServicePort: consts.DynamoServicePort,
-			Weight:      dgd.Status.Rollout.TrafficWeightNew,
-		}
-	} else {
-		// Normal operation - both backends point to the same service
-		// old_frontend carries 100% of traffic, new_frontend is at 0 (standby)
-		// This ensures both servers exist in HAProxy config for dynamic updates during rollout
-		currentHash := dynamo.ComputeWorkerSpecHash(dgd)[:8]
-		serviceName := frontendServiceName + "-" + currentHash
-
-		oldBackend = &dynamo.BackendConfig{
-			ServiceName: serviceName,
-			ServicePort: consts.DynamoServicePort,
-			Weight:      100,
-		}
-		newBackend = &dynamo.BackendConfig{
-			ServiceName: serviceName,
-			ServicePort: consts.DynamoServicePort,
-			Weight:      0,
-		}
-	}
-
-	// Build tolerations - merge platform defaults with DGD-specific
-	var tolerations []corev1.Toleration
-	tolerations = append(tolerations, r.Config.TrafficProxy.Tolerations...)
-	if dgd.Spec.TrafficProxy != nil {
-		tolerations = append(tolerations, dgd.Spec.TrafficProxy.Tolerations...)
-	}
-
-	// Affinity - DGD overrides platform default
-	var affinity *corev1.Affinity
-	if dgd.Spec.TrafficProxy != nil && dgd.Spec.TrafficProxy.Affinity != nil {
-		affinity = dgd.Spec.TrafficProxy.Affinity
-	} else {
-		affinity = r.Config.TrafficProxy.Affinity
-	}
-
-	return &dynamo.ProxyConfig{
-		DGDName:     dgd.Name,
-		Namespace:   dgd.Namespace,
-		Replicas:    replicas,
-		Image:       image,
-		Resources:   resources,
-		Tolerations: tolerations,
-		Affinity:    affinity,
-		OldBackend:  oldBackend,
-		NewBackend:  newBackend,
-		Labels: map[string]string{
-			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-		},
-	}
-}
-
-// getServiceClusterIP retrieves the ClusterIP for a Kubernetes service.
-// HAProxy's runtime API requires IP addresses, not DNS names.
-func (r *DynamoGraphDeploymentReconciler) getServiceClusterIP(
-	ctx context.Context,
-	namespace, serviceName string,
-) (string, error) {
-	svc := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKey{
-		Namespace: namespace,
-		Name:      serviceName,
-	}, svc)
-	if err != nil {
-		return "", err
-	}
-
-	if svc.Spec.ClusterIP == "" {
-		return "", fmt.Errorf("service %s has no ClusterIP", serviceName)
-	}
-
-	return svc.Spec.ClusterIP, nil
-}
-
-// getFrontendServiceName returns the frontend service name for normal operation.
-// Service names are created with lowercase component names to match Kubernetes naming conventions.
-func (r *DynamoGraphDeploymentReconciler) getFrontendServiceName(
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) string {
-	// Find the frontend service
-	for name, spec := range dgd.Spec.Services {
-		if spec != nil && spec.ComponentType == consts.ComponentTypeFrontend {
-			// Use strings.ToLower to match how GetDynamoComponentName creates service names
-			return fmt.Sprintf("%s-%s", dgd.Name, strings.ToLower(name))
-		}
-	}
-	// Fallback to default frontend naming
-	return fmt.Sprintf("%s-frontend", dgd.Name)
 }

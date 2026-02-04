@@ -196,13 +196,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, err
 		}
 
-		// Reconcile traffic proxy (always, to ensure it exists for rolling updates)
-		if err = r.reconcileTrafficProxy(ctx, dynamoDeployment); err != nil {
-			logger.Error(err, "Failed to reconcile traffic proxy")
-			reason = "failed_to_reconcile_traffic_proxy"
-			return ctrl.Result{}, err
-		}
-
 		if r.isRollingUpdateInProgress(dynamoDeployment) || r.shouldTriggerRollingUpdate(dynamoDeployment) {
 			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
 				logger.Error(err, "Failed to reconcile rolling update")

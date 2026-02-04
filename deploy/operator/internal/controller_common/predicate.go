@@ -23,7 +23,6 @@ import (
 	"time"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -57,20 +56,6 @@ type KaiSchedulerConfig struct {
 type MpiRunConfig struct {
 	// SecretName is the name of the secret containing the SSH key for MPI Run
 	SecretName string
-}
-
-// TrafficProxyConfig holds configuration for the HAProxy traffic proxy used in rolling updates
-type TrafficProxyConfig struct {
-	// Replicas is the default number of proxy pod replicas (recommend 2+ for HA)
-	Replicas int32
-	// Image is the HAProxy container image (e.g., "haproxy:2.9-alpine")
-	Image string
-	// Resources are the resource requirements for the proxy container
-	Resources corev1.ResourceRequirements
-	// Tolerations for the proxy pods
-	Tolerations []corev1.Toleration
-	// Affinity rules for the proxy pods
-	Affinity *corev1.Affinity
 }
 
 type Config struct {

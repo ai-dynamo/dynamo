@@ -66,11 +66,6 @@ type DynamoGraphDeploymentSpec struct {
 	// Restart specifies the restart policy for the graph deployment.
 	// +kubebuilder:validation:Optional
 	Restart *Restart `json:"restart,omitempty"`
-
-	// TrafficProxy configures the HAProxy load balancer for rolling updates.
-	// Fields specified here override the platform-wide Helm defaults.
-	// +kubebuilder:validation:Optional
-	TrafficProxy *TrafficProxySpec `json:"trafficProxy,omitempty"`
 }
 
 type Restart struct {
@@ -102,32 +97,6 @@ const (
 	RestartStrategyTypeSequential RestartStrategyType = "Sequential"
 	RestartStrategyTypeParallel   RestartStrategyType = "Parallel"
 )
-
-// TrafficProxySpec configures the HAProxy load balancer for rolling updates.
-// Fields specified here override the platform-wide defaults from Helm values.
-type TrafficProxySpec struct {
-	// Replicas is the number of proxy pod replicas.
-	// Overrides the platform default. Recommend 2+ for high availability.
-	// +kubebuilder:validation:Optional
-	Replicas *int32 `json:"replicas,omitempty"`
-
-	// Resources configures the proxy pod resource requirements.
-	// Overrides the platform default.
-	// +kubebuilder:validation:Optional
-	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// Tolerations for the proxy pods.
-	// Useful when workers run on tainted nodes (e.g., GPU nodes).
-	// Merged with platform defaults (DGD tolerations take precedence).
-	// +kubebuilder:validation:Optional
-	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
-
-	// Affinity rules for the proxy pods.
-	// Useful for co-locating proxy with workers or spreading across zones.
-	// Overrides platform default if specified.
-	// +kubebuilder:validation:Optional
-	Affinity *corev1.Affinity `json:"affinity,omitempty"`
-}
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 type DynamoGraphDeploymentStatus struct {
@@ -204,16 +173,6 @@ type RolloutStatus struct {
 	// Phase indicates the current phase of the rollout.
 	// +optional
 	Phase RolloutPhase `json:"phase,omitempty"`
-
-	// TrafficWeightOld is the percentage of traffic routed to the old deployment (0-100).
-	// This reflects the current HAProxy backend weight configuration.
-	// +optional
-	TrafficWeightOld int32 `json:"trafficWeightOld,omitempty"`
-
-	// TrafficWeightNew is the percentage of traffic routed to the new deployment (0-100).
-	// This reflects the current HAProxy backend weight configuration.
-	// +optional
-	TrafficWeightNew int32 `json:"trafficWeightNew,omitempty"`
 
 	// StartTime is when the rollout began.
 	// +optional

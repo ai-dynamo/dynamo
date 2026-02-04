@@ -1416,7 +1416,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			existingDCDs: []client.Object{
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-frontend-44136fa3",
+						Name:      "test-dgd-frontend",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1435,7 +1435,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-44136fa3-deployment",
+							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   2,
 							ReadyReplicas:     ptr.To(int32(2)),
@@ -1451,7 +1451,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-44136fa3-deployment",
+						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						ReadyReplicas:     ptr.To(int32(2)),
@@ -1476,7 +1476,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			existingDCDs: []client.Object{
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-frontend-44136fa3",
+						Name:      "test-dgd-frontend",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1495,7 +1495,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-44136fa3-deployment",
+							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -1507,11 +1507,11 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			wantReconcileResult: ReconcileResult{
 				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-frontend-44136fa3: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-44136fa3-deployment",
+						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -1548,7 +1548,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			existingDCDs: []client.Object{
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-frontend-e1f2a6fe",
+						Name:      "test-dgd-frontend",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1567,7 +1567,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-e1f2a6fe-deployment",
+							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -1641,7 +1641,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-e1f2a6fe-deployment",
+						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -1694,7 +1694,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			existingDCDs: []client.Object{
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-frontend-e1f2a6fe",
+						Name:      "test-dgd-frontend",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1713,7 +1713,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-e1f2a6fe-deployment",
+							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -1787,7 +1787,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-e1f2a6fe-deployment",
+						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -1834,7 +1834,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			existingDCDs: []client.Object{
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-frontend-5f3d46ba",
+						Name:      "test-dgd-frontend",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1853,7 +1853,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-5f3d46ba-deployment",
+							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
 							UpdatedReplicas:   0,
 							ReadyReplicas:     ptr.To(int32(0)),
@@ -1894,11 +1894,11 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			wantReconcileResult: ReconcileResult{
 				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode-5f3d46ba: Component deployment not ready - Available condition not true; test-dgd-frontend-5f3d46ba: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-5f3d46ba: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-5f3d46ba-deployment",
+						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          1,
 						UpdatedReplicas:   0,
 						ReadyReplicas:     ptr.To(int32(0)),

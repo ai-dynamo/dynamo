@@ -389,9 +389,7 @@ func TestClearRolloutStatus(t *testing.T) {
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	dgd.Status.Rollout = &nvidiacomv1alpha1.RolloutStatus{
-		Phase:            nvidiacomv1alpha1.RolloutPhaseCompleted,
-		TrafficWeightOld: 0,
-		TrafficWeightNew: 100,
+		Phase: nvidiacomv1alpha1.RolloutPhaseCompleted,
 	}
 
 	r := createTestReconciler(dgd)
@@ -399,8 +397,6 @@ func TestClearRolloutStatus(t *testing.T) {
 
 	assert.NotNil(t, dgd.Status.Rollout)
 	assert.Equal(t, nvidiacomv1alpha1.RolloutPhaseNone, dgd.Status.Rollout.Phase)
-	assert.Zero(t, dgd.Status.Rollout.TrafficWeightOld)
-	assert.Zero(t, dgd.Status.Rollout.TrafficWeightNew)
 }
 
 func TestGetDesiredWorkerReplicas(t *testing.T) {
@@ -607,90 +603,6 @@ func TestDeleteOldDCDs_NoDCDsToDelete(t *testing.T) {
 	// Delete old DCDs when there are none - should not error
 	err := r.deleteOldDCDs(ctx, dgd, oldNamespace)
 	require.NoError(t, err)
-}
-
-func TestBuildProxyConfig(t *testing.T) {
-	tests := []struct {
-		name             string
-		services         map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-		trafficProxy     *nvidiacomv1alpha1.TrafficProxySpec
-		rolloutStatus    *nvidiacomv1alpha1.RolloutStatus
-		expectedReplicas int32
-	}{
-		{
-			name: "uses default replicas when no override",
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"frontend": {ComponentType: consts.ComponentTypeFrontend},
-				"worker":   {ComponentType: consts.ComponentTypeWorker},
-			},
-			trafficProxy:     nil,
-			expectedReplicas: 2, // Default
-		},
-		{
-			name: "uses DGD override for replicas",
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"frontend": {ComponentType: consts.ComponentTypeFrontend},
-				"worker":   {ComponentType: consts.ComponentTypeWorker},
-			},
-			trafficProxy: &nvidiacomv1alpha1.TrafficProxySpec{
-				Replicas: ptr.To(int32(4)),
-			},
-			expectedReplicas: 4,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", "default", tt.services)
-			dgd.Spec.TrafficProxy = tt.trafficProxy
-			dgd.Status.Rollout = tt.rolloutStatus
-
-			r := createTestReconciler(dgd)
-			// Set default config
-			r.Config.TrafficProxy.Replicas = 2
-			r.Config.TrafficProxy.Image = "haproxy:2.9-alpine"
-
-			config := r.buildProxyConfig(dgd)
-
-			assert.Equal(t, tt.expectedReplicas, config.Replicas)
-			assert.Equal(t, "test-dgd", config.DGDName)
-			assert.Equal(t, "default", config.Namespace)
-		})
-	}
-}
-
-func TestGetFrontendServiceName(t *testing.T) {
-	tests := []struct {
-		name     string
-		services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-		expected string
-	}{
-		{
-			name: "finds frontend service",
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"my-frontend": {ComponentType: consts.ComponentTypeFrontend},
-				"worker":      {ComponentType: consts.ComponentTypeWorker},
-			},
-			expected: "test-dgd-my-frontend",
-		},
-		{
-			name: "returns default when no frontend",
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {ComponentType: consts.ComponentTypeWorker},
-			},
-			expected: "test-dgd-frontend",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", "default", tt.services)
-			r := createTestReconciler(dgd)
-
-			result := r.getFrontendServiceName(dgd)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
 }
 
 func TestGetWorkerStatusForNamespace(t *testing.T) {
