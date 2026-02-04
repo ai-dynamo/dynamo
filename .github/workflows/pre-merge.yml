@@ -202,6 +202,9 @@ jobs:
     runs-on: ubuntu-latest
     if: always() && !cancelled()
     needs: [changed-files, pre-commit, rust-tests, rust-clippy]
+    permissions:
+      contents: read
+      checks: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
