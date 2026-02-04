@@ -123,12 +123,32 @@ def extract_from_github_job_logs(
     """
     import requests
 
+    # Debug: Print all relevant environment variables
+    print("\n🔍 DEBUG: GitHub Environment Variables")
+    print("=" * 60)
+    debug_vars = {
+        "GITHUB_TOKEN": "***" if os.getenv("GITHUB_TOKEN") else None,
+        "GITHUB_REPOSITORY": os.getenv("GITHUB_REPOSITORY"),
+        "GITHUB_RUN_ID": os.getenv("GITHUB_RUN_ID"),
+        "GITHUB_JOB": os.getenv("GITHUB_JOB"),
+        "GITHUB_WORKFLOW": os.getenv("GITHUB_WORKFLOW"),
+        "GITHUB_RUN_NUMBER": os.getenv("GITHUB_RUN_NUMBER"),
+        "GITHUB_ACTOR": os.getenv("GITHUB_ACTOR"),
+        "GITHUB_EVENT_NAME": os.getenv("GITHUB_EVENT_NAME"),
+    }
+    for key, value in debug_vars.items():
+        print(f"  {key}: {value}")
+    print("=" * 60)
+
     github_token = os.getenv("GITHUB_TOKEN")
     repo = os.getenv("GITHUB_REPOSITORY")
     run_id = os.getenv("GITHUB_RUN_ID")
 
     if not all([github_token, repo, run_id]):
         print("  ⚠️  Missing GitHub context, skipping job log extraction")
+        print(f"     - Token present: {bool(github_token)}")
+        print(f"     - Repo: {repo}")
+        print(f"     - Run ID: {run_id}")
         return []
 
     try:
@@ -139,44 +159,86 @@ def extract_from_github_job_logs(
         }
 
         jobs_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs"
+        print(f"\n📡 Fetching jobs from: {jobs_url}")
         response = requests.get(jobs_url, headers=headers, timeout=10)
+
+        print(f"  Response status: {response.status_code}")
 
         if response.status_code != 200:
             print(f"  ⚠️  Failed to fetch jobs: HTTP {response.status_code}")
+            print(f"  Response: {response.text[:500]}")
             return []
 
         jobs_data = response.json()
+        print(f"  Total jobs in workflow: {len(jobs_data.get('jobs', []))}")
 
         # Find the current job (the one that's failing)
-        current_job_name = os.getenv("GITHUB_JOB")
+        # GITHUB_JOB can be either the job ID or job name
+        current_job_id = os.getenv("GITHUB_JOB")
         current_job = None
 
+        print(f"\n🔎 Searching for current job: {current_job_id}")
+
+        # Try multiple strategies to find the current job
         for job in jobs_data.get("jobs", []):
-            if job.get("name") == current_job_name or job.get("conclusion") == "failure":
+            job_name = job.get("name", "")
+            job_status = job.get("status", "")
+            job_conclusion = job.get("conclusion", "")
+
+            # Strategy 1: Match by job name (matrix jobs have expanded names)
+            if current_job_id and current_job_id in job_name:
                 current_job = job
+                print(f"  ✅ Found job by name match: {job_name}")
+                break
+
+            # Strategy 2: Match by status (in_progress or completed with failure)
+            if job_status == "in_progress" or job_conclusion == "failure":
+                current_job = job
+                print(f"  ✅ Found job by status/conclusion: {job_name} [status: {job_status}, conclusion: {job_conclusion}]")
                 break
 
         if not current_job:
-            print("  ⚠️  Could not find current job")
+            # Debug: print available jobs
+            print(f"\n  ⚠️  Could not find current job!")
+            print(f"  Looking for GITHUB_JOB: '{current_job_id}'")
+            print(f"\n  Available jobs ({len(jobs_data.get('jobs', []))}):")
+            for job in jobs_data.get("jobs", []):
+                print(f"    - name: '{job.get('name')}'")
+                print(f"      id: {job.get('id')}")
+                print(f"      status: {job.get('status')}")
+                print(f"      conclusion: {job.get('conclusion')}")
+                print()
             return []
 
         # Get job logs
         logs_url = current_job.get("logs_url")
+        job_id = current_job.get("id")
+
         if not logs_url:
             # Try constructing the URL
-            job_id = current_job.get("id")
             logs_url = f"https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs"
 
+        print(f"\n📥 Fetching job logs...")
+        print(f"  Job ID: {job_id}")
+        print(f"  Logs URL: {logs_url}")
+
         log_response = requests.get(logs_url, headers=headers, timeout=30)
+        print(f"  Response status: {log_response.status_code}")
 
         if log_response.status_code != 200:
             print(f"  ⚠️  Failed to fetch logs: HTTP {log_response.status_code}")
+            print(f"  Response: {log_response.text[:500]}")
             return []
 
         log_content = log_response.text
+        print(f"  Log content size: {len(log_content)} bytes")
 
         # Extract errors from logs
-        return extractor.extract_from_github_job_logs(log_content, context)
+        print(f"\n🔍 Extracting errors from logs...")
+        errors = extractor.extract_from_github_job_logs(log_content, context)
+        print(f"  Extracted {len(errors)} errors")
+
+        return errors
 
     except Exception as e:
         print(f"  ⚠️  Error fetching job logs: {e}")
