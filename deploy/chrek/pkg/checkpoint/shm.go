@@ -15,7 +15,8 @@ import (
 // Semaphores cause CRIU restore to fail with "Can't link dev/shm/link_remap.X -> dev/shm/sem.Y"
 // because they maintain kernel state that cannot be correctly restored.
 // This accesses the container's filesystem via /proc/<pid>/root/dev/shm/.
-func RemoveSemaphores(pid int, hostProc string, log *logrus.Entry) {
+// Returns an error if any semaphore removal fails.
+func RemoveSemaphores(pid int, hostProc string, log *logrus.Entry) error {
 	if hostProc == "" {
 		hostProc = "/proc"
 	}
@@ -24,22 +25,29 @@ func RemoveSemaphores(pid int, hostProc string, log *logrus.Entry) {
 
 	entries, err := os.ReadDir(shmPath)
 	if err != nil {
+		// It's okay if /dev/shm doesn't exist (container may not have it)
 		log.WithError(err).Debug("Could not read container /dev/shm (may not exist)")
-		return
+		return nil
 	}
 
 	var removed []string
+	var errors []error
 	for _, entry := range entries {
 		name := entry.Name()
 		// Check for both "sem." and "sem_" prefixes for consistency with CaptureDevShm
 		if strings.HasPrefix(name, "sem.") || strings.HasPrefix(name, "sem_") {
 			semPath := filepath.Join(shmPath, name)
 			if err := os.Remove(semPath); err != nil {
-				log.WithError(err).WithField("semaphore", name).Warn("Failed to remove semaphore")
+				log.WithError(err).WithField("semaphore", name).Error("Failed to remove semaphore")
+				errors = append(errors, fmt.Errorf("failed to remove semaphore %s: %w", name, err))
 			} else {
 				removed = append(removed, name)
 			}
 		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to remove %d semaphore(s): %v", len(errors), errors)
 	}
 
 	if len(removed) > 0 {
@@ -50,6 +58,8 @@ func RemoveSemaphores(pid int, hostProc string, log *logrus.Entry) {
 	} else {
 		log.Debug("No semaphores found in container /dev/shm")
 	}
+
+	return nil
 }
 
 const (

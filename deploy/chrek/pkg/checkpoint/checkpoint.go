@@ -190,7 +190,9 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 
 	// 10. Remove semaphores from /dev/shm before checkpoint
 	// Semaphores cause CRIU restore to fail with "Can't link dev/shm/link_remap.X -> dev/shm/sem.Y"
-	RemoveSemaphores(pid, c.hostProc, c.log)
+	if err := RemoveSemaphores(pid, c.hostProc, c.log); err != nil {
+		return nil, fmt.Errorf("failed to remove semaphores: %w", err)
+	}
 
 	// 11. Execute CRIU dump via go-criu
 	criuDumpStart := time.Now()
