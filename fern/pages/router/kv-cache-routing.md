@@ -32,7 +32,9 @@ The main KV-aware routing arguments:
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
-- `--active-decode-blocks-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, blocks-based busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
+- `--no-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. By default (`router_assume_kv_reuse=true`), the router computes actual block hashes for sequence tracking to deduplicate blocks and optimize load balancing. When disabled via this flag, the router generates random hashes for sequence blocks, treating each request's blocks as unique. This is useful in disaggregated setups where prefill transfers blocks to decode workers that may already have those blocks cached, but the engine cannot coordinate transfers to avoid duplication. Without this flag, the router's load balancing heuristics would undercount decode blocks when duplicates exist.
+
+- `--active-decode-blocks-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, blocks-based busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines publish load metrics. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
 
 - `--active-prefill-tokens-threshold`: Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.
 
@@ -44,16 +46,22 @@ The main KV-aware routing arguments:
 
 >[!Note]
 > **State persistence** depends on the event transport mode:
-> - **JetStream mode** (default): State persists across router restarts via JetStream and NATS object store snapshots.
-> - **NATS Core with Local Indexer mode** (`--enable-local-indexer` on workers): State persists on workers—router rebuilds state by querying workers on startup.
+> - **NATS Core / Event Plane mode** (default): State persists on workers—router rebuilds state by querying workers on startup. This is the default when workers have `local_indexer` enabled (which is the default). Works with both NATS Core and ZMQ event planes.
+> - **JetStream mode** (`--durable-kv-events` on frontend): State persists across router restarts via JetStream and NATS object store snapshots. Use `--disable-local-indexer` on workers if you need JetStream without the `--durable-kv-events` flag.
 > - **No KV events** (`--no-kv-events`): State persistence is not supported.
 >
 > **Request plane is independent of KV event transport.**
-> `DYN_REQUEST_PLANE` controls how **requests** are sent (TCP/HTTP/NATS), but KV-aware routing still uses **NATS** for KV events in both JetStream and NATS Core + Local Indexer modes.
-> If you run with `DYN_REQUEST_PLANE=tcp` (or `http`) and KV events enabled (default), you must also configure NATS, e.g. `NATS_SERVER=nats://...`.
-> Only `--no-kv-events` removes the NATS requirement.
+> The router can run without etcd or NATS when using ZMQ event plane (`--event-plane zmq`) and file/mem store (`--store-kv file` or `--store-kv mem`); in this case, KV events use ZMQ transport instead of NATS.
+> `DYN_REQUEST_PLANE` controls how **requests** are sent (TCP/HTTP/NATS), but KV-aware routing uses **NATS** for KV events only in JetStream or NATS Core modes (not ZMQ mode).
+> When KV events are enabled (default) with NATS-based event plane, NATS is automatically initialized. You can optionally set `NATS_SERVER=nats://...` to specify a custom NATS server; otherwise, it defaults to `localhost:4222`.
+> `--no-kv-events` disables KV event transport entirely.
 >
-> When `--kv-overlap-score-weight` is set to 0, no KvIndexer is created and prefix matching is disabled (pure load balancing). When `--no-kv-events` is set, a KvIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning. In both cases, it's recommended to disable your backend workers from publishing events through `KvEventPublisher` to avoid event accumulation in JetStream. WIP to enable disabling publishing of KV events completely in these cases.
+> When `--kv-overlap-score-weight` is set to 0, no KvIndexer is created and prefix matching is disabled (pure load balancing). When `--no-kv-events` is set, a KvIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
+>
+> **Backend Configuration:** When using `--no-kv-events`, configure your backend workers to disable KV event publishing:
+> - **vLLM**: Use `--kv-events-config '{"enable_kv_cache_events": false}'`
+> - **SGLang**: Do not use `--kv-events-config`
+> - **TRT-LLM**: Do not use `--publish-events-and-metrics`
 >
 > The cli args `--router-ttl`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When KV events are enabled (default), the router relies on worker-side eviction events and these parameters are ignored.
 
@@ -120,7 +128,7 @@ await register_llm(
 await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
-> [!NOTE]
+> [!Note]
 > The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/disagg_router.sh).
 
 ### Request Flow
@@ -160,12 +168,13 @@ The KV-aware router operates on two key principles to optimize request routing:
 
 KV events from engines are collected by the router to maintain a global view of cached blocks across all workers. The router supports two event transport modes:
 
-#### Mode 1: JetStream (Default)
+#### Mode 1: JetStream (Opt-in)
 
 KV events are sent to a persistent NATS JetStream. Each KV router/indexer replica acts as a durable consumer, pulling messages from this shared stream. This architecture ensures consistency across router replicas and persistence across restarts.
 
 - **Best for**: Production deployments requiring durability and multi-replica router consistency
 - **Tradeoffs**: Requires JetStream setup; slightly higher latency due to persistence guarantees
+- **Enable with**: `--durable-kv-events` flag on frontend, or `--disable-local-indexer` on workers
 
 ```mermaid
 graph TD
@@ -207,13 +216,13 @@ graph TD
     linkStyle 0,1,2,3,4,5 stroke:#2196f3,stroke-width:2px
 ```
 
-#### Mode 2: NATS Core with Local Indexer
+#### Mode 2: NATS Core / Event Plane with Local Indexer (Default)
 
-When workers are started with `--enable-local-indexer`, each worker maintains its own local radix tree (local indexer) and publishes events over NATS Core (fire-and-forget pub/sub) instead of JetStream. Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
+By default, workers have local indexer enabled. Each worker maintains its own local radix tree (local indexer) and publishes events over the generic event plane (NATS Core or ZMQ, depending on `--event-plane`). Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
 
-- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios
+- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios; deployments without NATS (using ZMQ event plane)
 - **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
-- **Enable with**: `--enable-local-indexer` flag on workers (vLLM, mocker)
+- **Disable with**: `--disable-local-indexer` flag on workers (vLLM, SGLang, mocker) to use JetStream mode instead
 
 ```mermaid
 graph TD
@@ -511,15 +520,11 @@ The `KvPushRouter` provides the following methods:
   - Without `request_id`: Query-only, doesn't update router state
   - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
 
-- **`best_worker_id(token_ids, router_config_override=None, request_id=None)`**: **[DEPRECATED - use `best_worker()` instead]** Query which worker would be selected for given tokens. Returns `(worker_id, overlap_blocks)`.
-  - Without `request_id`: Query-only, doesn't update router state
-  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
-
 - **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
 
-- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker()` for manual routing instead of `generate()`.
 
-- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker()` for manual routing instead of `generate()`.
 
 - **`dump_events()`**: Dump all KV cache events from the router's indexer as a JSON string. Useful for debugging and analysis.
 
@@ -534,7 +539,7 @@ python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf
 
 ```python
 import asyncio
-from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamollm import DistributedRuntime, KvPushRouter, KvRouterConfig
 
 async def main():
     # Get runtime and create endpoint
@@ -597,9 +602,9 @@ stream = await router.generate(token_ids=tokens, model="model-name")
 - **Router automatically**: Selects best worker, updates state, routes request, tracks lifecycle
 
 #### 2. Manual State Management (Advanced)
-Use `best_worker_id(request_id=...)` to select and track, then manage the request yourself:
+Use `best_worker(request_id=...)` to select and track, then manage the request yourself:
 ```python
-worker_id, overlap = await router.best_worker_id(tokens, request_id="req-123")
+worker_id, _dp_rank, overlap = await router.best_worker(tokens, request_id="req-123")
 response = await client.generate(tokens, request_id="req-123")
 # await anext(response)  # Get first token
 await router.mark_prefill_complete("req-123")  # After first token
@@ -615,8 +620,8 @@ await router.free("req-123")  # After completion
 Query without state updates, then route through a chosen router:
 ```python
 # Probe multiple routers without updating state
-worker_id_1, overlap_1 = await router_1.best_worker_id(tokens)  # No request_id
-worker_id_2, overlap_2 = await router_2.best_worker_id(tokens)
+worker_id_1, dp_rank, overlap_1 = await router_1.best_worker(tokens)  # No request_id
+worker_id_2, dp_rank, overlap_2 = await router_2.best_worker(tokens)
 
 # Pick the best router based on results
 chosen_router = router_1 if overlap_1 > overlap_2 else router_2
@@ -645,7 +650,7 @@ Here's an example of using `get_potential_loads()` to implement custom routing t
 
 ```python
 import asyncio
-from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamo.llm import DistributedRuntime, KvPushRouter, KvRouterConfig
 
 async def minimize_ttft_routing():
     # Setup router
@@ -692,7 +697,7 @@ if __name__ == "__main__":
 This approach gives you complete control over routing decisions, allowing you to optimize for different metrics based on your specific requirements. As some examples:
 
 - **Minimize TTFT**: Select worker with lowest `potential_prefill_tokens`
-- **Maximize cache reuse**: Use `best_worker_id()` which considers both prefill and decode loads
+- **Maximize cache reuse**: Use `best_worker()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
 See [KV Router Architecture](README.md) for performance tuning details.
