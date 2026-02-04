@@ -1691,7 +1691,7 @@ mod tests {
         match variant {
             "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics)),
             "sharded" => Box::new(KvIndexerSharded::new(token, 4, kv_block_size, metrics)),
-            "flat" => Box::new(PositionalIndexer::new(4, kv_block_size, 0.5)),
+            "flat" => Box::new(PositionalIndexer::new(4, kv_block_size, 32)),
             _ => panic!("Unknown variant: {}", variant),
         }
     }
@@ -1703,6 +1703,8 @@ mod tests {
 
         // Store a sequence for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Find matches using local hashes
         let scores = index
@@ -1724,6 +1726,8 @@ mod tests {
 
         // Store [1, 2, 3] for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Find matches for [1, 2, 999] - should match first 2 then stop
         let scores = index
@@ -1748,6 +1752,8 @@ mod tests {
         // Remove all blocks
         index.apply_event(make_remove_event(0, &[1, 2, 3])).await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Find should return nothing
         let scores = index
             .find_matches(vec![
@@ -1770,6 +1776,8 @@ mod tests {
         // but [1, 2] and [1, 3] have different hashes.
         index.apply_event(make_store_event(0, &[1, 2])).await;
         index.apply_event(make_store_event(1, &[1, 3])).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query [1] - both workers should match
         let scores = index.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
@@ -1830,6 +1838,8 @@ mod tests {
                 .await;
         }
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Verify we can find matches for the last stored sequence
         let last_seq: Vec<LocalBlockHash> = (1..=512u64)
             .map(|x| LocalBlockHash(x + (9 * 10000)))
@@ -1884,6 +1894,8 @@ mod tests {
         // Clear worker 0's blocks using the Cleared event
         index.apply_event(make_clear_event(0)).await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Worker 0's blocks should be gone, worker 1's remain
         let scores = index
             .find_matches(vec![
@@ -1904,6 +1916,8 @@ mod tests {
 
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Empty query should return empty scores
         let scores = index.find_matches(vec![]).await.unwrap();
         assert!(scores.scores.is_empty());
@@ -1915,6 +1929,8 @@ mod tests {
         let index = make_indexer(variant);
 
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query for non-existent blocks
         let scores = index
@@ -1945,7 +1961,7 @@ mod tests {
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
         // Allow time for async processing
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Note: find_matches_for_request computes block hashes from tokens,
         // so we need tokens that hash to the same LocalBlockHash values.
@@ -1987,6 +2003,8 @@ mod tests {
             .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
             .await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Query for full sequence [1, 2, 3, 4, 5] should match all 5 blocks
         let full_seq: Vec<LocalBlockHash> = (1..=5).map(|i| LocalBlockHash(i)).collect();
         let scores = index.find_matches(full_seq).await.unwrap();
@@ -2015,6 +2033,8 @@ mod tests {
             .apply_event(make_store_event_with_dp_rank(0, &[1, 2, 3], 2))
             .await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Query should return all 3 dp_ranks as separate entries
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
         let scores = index.find_matches(seq).await.unwrap();
@@ -2032,6 +2052,8 @@ mod tests {
 
         // Store [1, 2, 3]
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify all 3 blocks match
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2057,6 +2079,8 @@ mod tests {
         };
         index.apply_event(remove_event).await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Query [1, 2, 3] - should only match 2 blocks now (block 3 is removed)
         let scores = index.find_matches(seq).await.unwrap();
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
@@ -2075,11 +2099,13 @@ mod tests {
         // Store data for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Remove non-existent worker 999 - should not error or affect worker 0
         index.remove_worker(999).await;
 
         // Allow time for async processing
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Worker 0's data should still be there
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2099,6 +2125,8 @@ mod tests {
         // Try to remove blocks [999, 998] that don't exist - should not error
         index.apply_event(make_remove_event(0, &[999, 998])).await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Original data should still be there
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
         let scores = index.find_matches(seq).await.unwrap();
@@ -2116,6 +2144,8 @@ mod tests {
         // Clear the worker
         index.apply_event(make_clear_event(0)).await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Verify data is gone
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
         let scores = index.find_matches(seq.clone()).await.unwrap();
@@ -2123,6 +2153,8 @@ mod tests {
 
         // Store new data for the same worker
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify new data is accessible
         let scores = index.find_matches(seq).await.unwrap();
@@ -2142,6 +2174,8 @@ mod tests {
         index
             .apply_event(make_store_event(0, &[100, 101, 102]))
             .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query first sequence
         let seq1: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2173,6 +2207,8 @@ mod tests {
             .apply_event(make_store_event_with_dp_rank(0, &[1, 2, 3], 1))
             .await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Verify both dp_ranks are present
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
         let scores = index.find_matches(seq.clone()).await.unwrap();
@@ -2181,11 +2217,610 @@ mod tests {
         // Clear event clears ALL blocks for the worker_id, regardless of dp_rank
         index.apply_event(make_clear_event_with_dp_rank(0, 0)).await;
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // Both dp_ranks should be cleared
         let scores = index.find_matches(seq).await.unwrap();
         assert!(
             scores.scores.is_empty(),
             "Cleared event should clear all dp_ranks for a worker"
+        );
+    }
+
+    // ============================================================================
+    // Long sequence tests - especially important for NestedMap/PositionalIndexer
+    // ============================================================================
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_single_store(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Store a long sequence (128 blocks) in a single event
+        let seq_len = 128;
+        let sequence: Vec<u64> = (1..=seq_len).collect();
+        index.apply_event(make_store_event(0, &sequence)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query full sequence - should match all blocks
+        let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(full_query).await.unwrap();
+        assert_eq!(scores.scores.len(), 1);
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            seq_len as u32
+        );
+
+        // Query prefix (first 64 blocks)
+        let prefix_query: Vec<LocalBlockHash> = (1..=64).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(prefix_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            64
+        );
+
+        // Query with divergence at position 50
+        let mut divergent_query: Vec<LocalBlockHash> =
+            (1..=100).map(|i| LocalBlockHash(i)).collect();
+        divergent_query[49] = LocalBlockHash(99999); // Position 49 (0-indexed) diverges
+        let scores = index.find_matches(divergent_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            49
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_multiple_continuations(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Build a long sequence through multiple continuations
+        // First store: blocks 1-50
+        let first_chunk: Vec<u64> = (1..=50).collect();
+        index.apply_event(make_store_event(0, &first_chunk)).await;
+
+        // Second store: blocks 51-100 (continuation of first)
+        let second_chunk: Vec<u64> = (51..=100).collect();
+        index
+            .apply_event(make_store_event_with_parent(0, &first_chunk, &second_chunk))
+            .await;
+
+        // Third store: blocks 101-150 (continuation of second)
+        let prefix_1_2: Vec<u64> = (1..=100).collect();
+        let third_chunk: Vec<u64> = (101..=150).collect();
+        index
+            .apply_event(make_store_event_with_parent(0, &prefix_1_2, &third_chunk))
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query full sequence - should match all 150 blocks
+        let full_query: Vec<LocalBlockHash> = (1..=150).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(full_query).await.unwrap();
+        assert_eq!(scores.scores.len(), 1);
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            150
+        );
+
+        // Query crossing continuation boundaries
+        let cross_boundary_query: Vec<LocalBlockHash> =
+            (45..=105).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(cross_boundary_query).await.unwrap();
+        // Query starts at block 45, but stored sequence starts at 1, so this won't match
+        // because the sequence hash at position 0 of our query (block 45) won't match
+        // the stored sequence hash at position 0 (block 1)
+        assert!(
+            scores.scores.is_empty() || scores.scores.get(&WorkerWithDpRank::new(0, 0)).is_none()
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_branching_continuations(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Common prefix: blocks 1-30
+        let common_prefix: Vec<u64> = (1..=30).collect();
+        index.apply_event(make_store_event(0, &common_prefix)).await;
+
+        // Branch A: blocks 31-60 on worker 0
+        let branch_a: Vec<u64> = (31..=60).collect();
+        index
+            .apply_event(make_store_event_with_parent(0, &common_prefix, &branch_a))
+            .await;
+
+        // Branch B: blocks 131-160 (different content) on worker 1
+        // First store the common prefix for worker 1
+        index.apply_event(make_store_event(1, &common_prefix)).await;
+        let branch_b: Vec<u64> = (131..=160).collect();
+        index
+            .apply_event(make_store_event_with_parent(1, &common_prefix, &branch_b))
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query common prefix - both workers should match
+        let prefix_query: Vec<LocalBlockHash> = (1..=30).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(prefix_query).await.unwrap();
+        assert_eq!(scores.scores.len(), 2);
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            30
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+            30
+        );
+
+        // Query branch A path - only worker 0 should match fully
+        let branch_a_query: Vec<LocalBlockHash> = (1..=60).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(branch_a_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            60
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+            30
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_partial_removal(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Store a long sequence
+        let sequence: Vec<u64> = (1..=100).collect();
+        index.apply_event(make_store_event(0, &sequence)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify full match
+        let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(full_query.clone()).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            100
+        );
+
+        // Remove blocks 80-100 (the tail)
+        let tail_hashes: Vec<LocalBlockHash> = (1..=100).map(|i| LocalBlockHash(i)).collect();
+        let seq_hashes = compute_seq_hash_for_block(&tail_hashes);
+        let remove_hashes: Vec<ExternalSequenceBlockHash> = seq_hashes[79..100]
+            .iter()
+            .map(|&h| ExternalSequenceBlockHash(h))
+            .collect();
+
+        let remove_event = RouterEvent {
+            worker_id: 0,
+            event: KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: remove_hashes,
+                }),
+                dp_rank: 0,
+            },
+        };
+        index.apply_event(remove_event).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query should now only match first 79 blocks
+        let scores = index.find_matches(full_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            79
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_interleaved_workers(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Multiple workers storing overlapping long sequences concurrently
+        // Worker 0: blocks 1-100
+        // Worker 1: blocks 1-75
+        // Worker 2: blocks 1-50
+        // Worker 3: blocks 1-25
+
+        let seq_100: Vec<u64> = (1..=100).collect();
+        let seq_75: Vec<u64> = (1..=75).collect();
+        let seq_50: Vec<u64> = (1..=50).collect();
+        let seq_25: Vec<u64> = (1..=25).collect();
+
+        index.apply_event(make_store_event(0, &seq_100)).await;
+        index.apply_event(make_store_event(1, &seq_75)).await;
+        index.apply_event(make_store_event(2, &seq_50)).await;
+        index.apply_event(make_store_event(3, &seq_25)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query for 60 blocks - workers 0,1 match 60, worker 2 matches 50, worker 3 matches 25
+        let query_60: Vec<LocalBlockHash> = (1..=60).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query_60).await.unwrap();
+        assert_eq!(scores.scores.len(), 4);
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            60
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+            60
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+            50
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
+            25
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_exact_jump_size_boundaries(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Test sequences that align exactly with jump_size boundaries (32 for PositionalIndexer)
+        // This tests edge cases in the jump search algorithm
+
+        // Store sequence of exactly 32 blocks
+        let seq_32: Vec<u64> = (1..=32).collect();
+        index.apply_event(make_store_event(0, &seq_32)).await;
+
+        // Store sequence of exactly 64 blocks (2x jump_size)
+        let seq_64: Vec<u64> = (1001..=1064).collect();
+        index.apply_event(make_store_event(1, &seq_64)).await;
+
+        // Store sequence of exactly 96 blocks (3x jump_size)
+        let seq_96: Vec<u64> = (2001..=2096).collect();
+        index.apply_event(make_store_event(2, &seq_96)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify all sequences match correctly
+        let query_32: Vec<LocalBlockHash> = seq_32.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query_32).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            32
+        );
+
+        let query_64: Vec<LocalBlockHash> = seq_64.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query_64).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+            64
+        );
+
+        let query_96: Vec<LocalBlockHash> = seq_96.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query_96).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+            96
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_off_by_one_jump_boundaries(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Test sequences at jump_size +/- 1 boundaries to catch off-by-one errors
+        let seq_31: Vec<u64> = (1..=31).collect();
+        let seq_33: Vec<u64> = (101..=133).collect();
+        let seq_63: Vec<u64> = (201..=263).collect();
+        let seq_65: Vec<u64> = (301..=365).collect();
+
+        index.apply_event(make_store_event(0, &seq_31)).await;
+        index.apply_event(make_store_event(1, &seq_33)).await;
+        index.apply_event(make_store_event(2, &seq_63)).await;
+        index.apply_event(make_store_event(3, &seq_65)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify all sequences match correctly
+        let query_31: Vec<LocalBlockHash> = seq_31.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query_31).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            31
+        );
+
+        let query_33: Vec<LocalBlockHash> = seq_33.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query_33).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+            33
+        );
+
+        let query_63: Vec<LocalBlockHash> = seq_63.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query_63).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+            63
+        );
+
+        let query_65: Vec<LocalBlockHash> = seq_65.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query_65).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
+            65
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_divergence_at_jump_boundaries(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Store a long sequence
+        let sequence: Vec<u64> = (1..=128).collect();
+        index.apply_event(make_store_event(0, &sequence)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Test divergence exactly at jump boundaries (position 31, 32, 33, 63, 64, 65)
+        for diverge_pos in [31usize, 32, 33, 63, 64, 65, 95, 96, 97] {
+            let mut query: Vec<LocalBlockHash> = (1..=128).map(|i| LocalBlockHash(i)).collect();
+            query[diverge_pos] = LocalBlockHash(99999);
+
+            let scores = index.find_matches(query).await.unwrap();
+            assert_eq!(
+                *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+                diverge_pos as u32,
+                "Divergence at position {} should match {} blocks",
+                diverge_pos,
+                diverge_pos
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_deep_continuation_chain(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Build a very long sequence through many small continuations
+        // This tests the parent_hash chain handling
+        let chunk_size = 10;
+        let num_chunks = 20; // Total 200 blocks
+
+        let mut full_prefix: Vec<u64> = Vec::new();
+
+        for chunk_idx in 0..num_chunks {
+            let chunk_start = chunk_idx * chunk_size + 1;
+            let chunk: Vec<u64> = (chunk_start..chunk_start + chunk_size)
+                .map(|x| x as u64)
+                .collect();
+
+            if chunk_idx == 0 {
+                index.apply_event(make_store_event(0, &chunk)).await;
+            } else {
+                index
+                    .apply_event(make_store_event_with_parent(0, &full_prefix, &chunk))
+                    .await;
+            }
+
+            full_prefix.extend(&chunk);
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query full sequence
+        let full_query: Vec<LocalBlockHash> = (1..=200).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(full_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            200
+        );
+
+        // Query partial prefix crossing multiple chunk boundaries
+        let partial_query: Vec<LocalBlockHash> = (1..=75).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(partial_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            75
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_clear_and_rebuild(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Store a long sequence
+        let sequence: Vec<u64> = (1..=100).collect();
+        index.apply_event(make_store_event(0, &sequence)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify it's stored
+        let query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query.clone()).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            100
+        );
+
+        // Clear the worker
+        index.apply_event(make_clear_event(0)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify it's cleared
+        let scores = index.find_matches(query.clone()).await.unwrap();
+        assert!(scores.scores.is_empty());
+
+        // Rebuild with a different sequence
+        let new_sequence: Vec<u64> = (1001..=1100).collect();
+        index.apply_event(make_store_event(0, &new_sequence)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify new sequence works
+        let new_query: Vec<LocalBlockHash> =
+            new_sequence.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(new_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            100
+        );
+
+        // Verify old sequence no longer matches
+        let scores = index.find_matches(query).await.unwrap();
+        assert!(scores.scores.is_empty());
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_multiple_workers_diverging(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Multiple workers with long sequences that share a prefix then diverge
+        // This tests precise drain point tracking across workers
+
+        // All workers share prefix 1-40
+        let shared_prefix: Vec<u64> = (1..=40).collect();
+
+        // Worker 0: prefix + 41-100 (stores full sequence 1-100)
+        let worker_0_full: Vec<u64> = (1..=100).collect();
+
+        // Worker 1: prefix + 141-180 (diverges at block 41)
+        let worker_1_suffix: Vec<u64> = (141..=180).collect();
+
+        // Worker 2: prefix + 241-300 (diverges at block 41)
+        let worker_2_suffix: Vec<u64> = (241..=300).collect();
+
+        // Store for all workers
+        index.apply_event(make_store_event(0, &worker_0_full)).await;
+
+        index.apply_event(make_store_event(1, &shared_prefix)).await;
+        index
+            .apply_event(make_store_event_with_parent(
+                1,
+                &shared_prefix,
+                &worker_1_suffix,
+            ))
+            .await;
+
+        index.apply_event(make_store_event(2, &shared_prefix)).await;
+        index
+            .apply_event(make_store_event_with_parent(
+                2,
+                &shared_prefix,
+                &worker_2_suffix,
+            ))
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query 1-100 - worker 0 matches 100, workers 1&2 match 40
+        let query: Vec<LocalBlockHash> = worker_0_full.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query).await.unwrap();
+
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            100
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+            40
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+            40
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_long_sequence_staggered_lengths(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Workers with sequences of staggered lengths to test drain tracking
+        // Worker 0: 10 blocks
+        // Worker 1: 20 blocks
+        // Worker 2: 35 blocks (just past first jump)
+        // Worker 3: 64 blocks (exactly 2 jumps)
+        // Worker 4: 100 blocks
+
+        for (worker_id, len) in [(0, 10), (1, 20), (2, 35), (3, 64), (4, 100)] {
+            let sequence: Vec<u64> = (1..=len).collect();
+            index
+                .apply_event(make_store_event(worker_id, &sequence))
+                .await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query for 100 blocks - each worker should match their stored length
+        let query: Vec<LocalBlockHash> = (1..=100).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(query).await.unwrap();
+
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            10
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
+            20
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
+            35
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
+            64
+        );
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(4, 0)).unwrap(),
+            100
+        );
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_very_long_sequence(variant: &str) {
+        let index = make_indexer(variant);
+
+        // Test with a very long sequence (1000 blocks)
+        let seq_len = 1000u64;
+        let sequence: Vec<u64> = (1..=seq_len).collect();
+        index.apply_event(make_store_event(0, &sequence)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Full match
+        let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(full_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            seq_len as u32
+        );
+
+        // Partial match (first 500)
+        let partial_query: Vec<LocalBlockHash> = (1..=500).map(|i| LocalBlockHash(i)).collect();
+        let scores = index.find_matches(partial_query).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            500
+        );
+
+        // Divergence in the middle
+        let mut mid_diverge: Vec<LocalBlockHash> = (1..=1000).map(|i| LocalBlockHash(i)).collect();
+        mid_diverge[499] = LocalBlockHash(99999);
+        let scores = index.find_matches(mid_diverge).await.unwrap();
+        assert_eq!(
+            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
+            499
         );
     }
 
