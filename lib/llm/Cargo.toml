@@ -13,19 +13,19 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = []
+default = ["media-nixl", "block-manager"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
 testing-full = ["testing-cuda", "testing-nixl"]
-testing-cuda = ["dep:cudarc"]
-testing-nixl = ["dep:nixl-sys"]
+testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
+testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
 testing-etcd = []
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec", "dep:dynamo-memory"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-nixl = ["dep:nixl-sys", "dep:dynamo-memory", "dep:flate2"]
+media-nixl = ["dep:nixl-sys", "dep:flate2"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
 kv-router-stress = ["dep:clap", "dep:indicatif"]
 
@@ -43,7 +43,7 @@ required-features = ["block-manager", "testing-cuda"]
 dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics"] }
-dynamo-memory = { path = "../memory", optional = true }
+dynamo-memory = { workspace = true }
 
 # workspace
 aho-corasick = "1.1"

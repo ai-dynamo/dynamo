@@ -441,6 +441,7 @@ async def init(
             metrics_collector=metrics_collector,
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
+            encoder_cache_capacity_gb=config.encoder_cache_capacity_gb,
         )
 
         # Register the model with runtime config

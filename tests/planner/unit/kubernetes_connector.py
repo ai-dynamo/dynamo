@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import pytest
 
 from dynamo.planner.defaults import (
+    Service,
     SubComponentType,
     get_service_from_sub_component_type_or_name,
 )
@@ -681,3 +682,209 @@ def test_get_model_name_agree_returns_model_name(kubernetes_connector, mock_kube
 
     # Assert
     assert result == "agreed-model"
+
+
+# Tests for Service.get_gpu_count()
+def test_service_get_gpu_count_valid():
+    """Test that get_gpu_count returns correct GPU count from resources.limits.gpu"""
+    service = Service(
+        name="test-service",
+        service={
+            "replicas": 1,
+            "resources": {"limits": {"gpu": "4"}},
+        },
+    )
+    assert service.get_gpu_count() == 4
+
+
+def test_service_get_gpu_count_from_requests_fallback():
+    """Test that get_gpu_count falls back to requests.gpu when limits.gpu is missing"""
+    service = Service(
+        name="test-service",
+        service={
+            "replicas": 1,
+            "resources": {"requests": {"gpu": "2"}},
+        },
+    )
+    assert service.get_gpu_count() == 2
+
+
+def test_service_get_gpu_count_limits_preferred_over_requests():
+    """Test that limits.gpu is preferred over requests.gpu when both are present"""
+    service = Service(
+        name="test-service",
+        service={
+            "replicas": 1,
+            "resources": {
+                "limits": {"gpu": "4"},
+                "requests": {"gpu": "2"},
+            },
+        },
+    )
+    assert service.get_gpu_count() == 4
+
+
+def test_service_get_gpu_count_integer_value():
+    """Test that get_gpu_count works with integer GPU values"""
+    service = Service(
+        name="test-service",
+        service={
+            "replicas": 1,
+            "resources": {"limits": {"gpu": 2}},
+        },
+    )
+    assert service.get_gpu_count() == 2
+
+
+def test_service_get_gpu_count_missing_raises_error():
+    """Test that get_gpu_count raises ValueError when GPU count is missing"""
+    service = Service(
+        name="test-service",
+        service={"replicas": 1},
+    )
+    with pytest.raises(ValueError) as exc_info:
+        service.get_gpu_count()
+    assert "No GPU count specified" in str(exc_info.value)
+    assert "test-service" in str(exc_info.value)
+
+
+def test_service_get_gpu_count_invalid_raises_error():
+    """Test that get_gpu_count raises ValueError for invalid GPU count"""
+    service = Service(
+        name="test-service",
+        service={
+            "replicas": 1,
+            "resources": {"limits": {"gpu": "invalid"}},
+        },
+    )
+    with pytest.raises(ValueError) as exc_info:
+        service.get_gpu_count()
+    assert "Invalid GPU count" in str(exc_info.value)
+
+
+# Tests for KubernetesConnector.get_gpu_counts()
+def test_get_gpu_counts_both_services(kubernetes_connector, mock_kube_api):
+    """Test get_gpu_counts returns correct counts for both prefill and decode"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "prefill-worker": {
+                    "replicas": 1,
+                    "subComponentType": "prefill",
+                    "resources": {"limits": {"gpu": "2"}},
+                },
+                "decode-worker": {
+                    "replicas": 1,
+                    "subComponentType": "decode",
+                    "resources": {"limits": {"gpu": "4"}},
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts()
+
+    assert prefill_gpu == 2
+    assert decode_gpu == 4
+
+
+def test_get_gpu_counts_prefill_only(kubernetes_connector, mock_kube_api):
+    """Test get_gpu_counts with require_decode=False"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "prefill-worker": {
+                    "replicas": 1,
+                    "subComponentType": "prefill",
+                    "resources": {"limits": {"gpu": "2"}},
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts(
+        require_prefill=True, require_decode=False
+    )
+
+    assert prefill_gpu == 2
+    assert decode_gpu == 0
+
+
+def test_get_gpu_counts_decode_only(kubernetes_connector, mock_kube_api):
+    """Test get_gpu_counts with require_prefill=False"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "decode-worker": {
+                    "replicas": 1,
+                    "subComponentType": "decode",
+                    "resources": {"limits": {"gpu": "4"}},
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts(
+        require_prefill=False, require_decode=True
+    )
+
+    assert prefill_gpu == 0
+    assert decode_gpu == 4
+
+
+def test_get_gpu_counts_missing_gpu_raises_error(kubernetes_connector, mock_kube_api):
+    """Test get_gpu_counts raises DeploymentValidationError when GPU count missing"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "prefill-worker": {
+                    "replicas": 1,
+                    "subComponentType": "prefill",
+                    # No resources.limits.gpu
+                },
+                "decode-worker": {
+                    "replicas": 1,
+                    "subComponentType": "decode",
+                    "resources": {"limits": {"gpu": "4"}},
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    with pytest.raises(DeploymentValidationError) as exc_info:
+        kubernetes_connector.get_gpu_counts()
+
+    assert "prefill GPU count" in str(exc_info.value)
+
+
+def test_get_gpu_counts_service_not_found_raises_error(
+    kubernetes_connector, mock_kube_api
+):
+    """Test get_gpu_counts raises DeploymentValidationError when service not found"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "prefill-worker": {
+                    "replicas": 1,
+                    "subComponentType": "prefill",
+                    "resources": {"limits": {"gpu": "2"}},
+                },
+                # No decode service
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    with pytest.raises(DeploymentValidationError) as exc_info:
+        kubernetes_connector.get_gpu_counts()
+
+    assert "decode GPU count" in str(exc_info.value)

@@ -63,10 +63,9 @@
 //!
 //! ```rust
 //! use dynamo_llm::block_manager::layout::{
-//!     LayoutConfig, FullyContiguous, BlockLayout, BlockLayoutLookup, BlockLayoutConfig,
+//!     LayoutConfig, FullyContiguous, BlockLayout, GenericBlockLayout, BlockLayoutConfig,
 //! };
 //! use dynamo_llm::block_manager::storage::{SystemAllocator, StorageType};
-//! use dynamo_llm::common::dtype::DType;
 //!
 //! // Define the layout configuration
 //! let config = LayoutConfig::builder()
@@ -75,10 +74,8 @@
 //!     .outer_dim(1)
 //!     .page_size(16)
 //!     .inner_dim(128)
-//!     .dtype(DType::FP16)
 //!     .build()
 //!     .unwrap();
-//!
 //!
 //! // Allocate a FullyContiguous layout using a SystemAllocator
 //! let allocator = SystemAllocator;
@@ -86,11 +83,11 @@
 //!
 //! // Access layout properties
 //! assert_eq!(layout.num_blocks(), 10);
-//! assert_eq!(layout.storage_type(), StorageType::System);
+//! assert_eq!(layout.storage_type(), &StorageType::System);
 //!
-//! // Get the address of a specific page
-//! let addr = layout.memory_region_addr(0, 0).unwrap();
-//! println!("Address of block 0, layer 0: {}", addr);
+//! // Get the memory region of a specific block/layer
+//! let region = layout.memory_region(0, 0, 0).unwrap();
+//! println!("Address of block 0, layer 0: {}", region.addr());
 //! ```
 //!
 //! ## NIXL Integration

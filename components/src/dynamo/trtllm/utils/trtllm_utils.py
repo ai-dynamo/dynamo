@@ -54,6 +54,7 @@ class Config:
         self.modality: str = "text"
         self.allowed_local_media_path: str = ""
         self.max_file_size_mb: int = 50
+        self.encoder_cache_capacity_gb: float = 0
         self.reasoning_parser: Optional[str] = None
         self.tool_call_parser: Optional[str] = None
         self.dump_config_to: Optional[str] = None
@@ -92,6 +93,7 @@ class Config:
             f"modality={self.modality}, "
             f"allowed_local_media_path={self.allowed_local_media_path}, "
             f"max_file_size_mb={self.max_file_size_mb}, "
+            f"encoder_cache_capacity_gb={self.encoder_cache_capacity_gb}, "
             f"reasoning_parser={self.reasoning_parser}, "
             f"tool_call_parser={self.tool_call_parser}, "
             f"dump_config_to={self.dump_config_to}, "
@@ -286,6 +288,12 @@ def cmd_line_args():
         default=50,
         help="Maximum size of downloadable embedding files/Image URLs. Default: 50MB",
     )
+    parser.add_argument(
+        "--dyn-encoder-cache-capacity-gb",
+        type=float,
+        default=0,
+        help="Capacity of the encoder cache in GB for multimodal embeddings. Default: 0",
+    )
     # To avoid name conflicts with different backends, adoped prefix "dyn-" for dynamo specific args
     parser.add_argument(
         "--dyn-tool-call-parser",
@@ -384,6 +392,7 @@ def cmd_line_args():
     config.encode_endpoint = args.encode_endpoint
     config.allowed_local_media_path = args.allowed_local_media_path
     config.max_file_size_mb = args.max_file_size_mb
+    config.encoder_cache_capacity_gb = args.dyn_encoder_cache_capacity_gb
 
     config.tensor_parallel_size = args.tensor_parallel_size
     if args.pipeline_parallel_size is not None:

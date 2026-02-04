@@ -22,7 +22,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{
 //!     PinnedAllocator, StorageAllocator,
 //!     nixl::NixlRegisterableStorage

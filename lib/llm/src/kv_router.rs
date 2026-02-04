@@ -386,11 +386,12 @@ impl KvRouter {
         .await?;
 
         // Initialize worker query client using namespace abstraction
-        // (created before background task so we can use it for startup recovery)
+        // (for query/recovery API methods - no lifecycle tracking needed)
         // Uses a subscriber from workers_with_configs
         let worker_query_client = worker_query::WorkerQueryClient::new(
             component.clone(),
             workers_with_configs.subscribe(),
+            None, // No removal channel - query only
         );
         tracing::info!("Worker query client initialized");
 
@@ -431,11 +432,11 @@ impl KvRouter {
                 start_kv_router_background_event_plane(
                     component.clone(),
                     kv_indexer.event_sender(),
-                    kv_indexer.remove_worker_sender(),
                     cancellation_token.clone(),
                     worker_query::WorkerQueryClient::new(
                         component.clone(),
                         workers_with_configs.subscribe(),
+                        Some(kv_indexer.remove_worker_sender()),
                     ),
                     transport_kind,
                 )

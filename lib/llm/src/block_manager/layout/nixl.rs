@@ -56,7 +56,7 @@
 //!     reconstruct an `Arc<dyn BlockLayout<StorageType = NixlStorage>>`. This reconstructed layout now
 //!     refers to the remote NIXL memory regions.
 //!
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::layout::{LayoutConfig, LayoutType};
 //! use dynamo_llm::block_manager::layout::nixl::{NixlLayout, ToSerializedNixlBlockLayout, SerializedNixlBlockLayout};
 //! use dynamo_llm::block_manager::storage::nixl::NixlAgent;
@@ -67,6 +67,7 @@
 //! let config = LayoutConfig::builder()
 //!     .num_blocks(10)
 //!     .num_layers(2)
+//!     .outer_dim(1)
 //!     .page_size(4)
 //!     .inner_dim(13)
 //!     .build().unwrap();
@@ -340,7 +341,7 @@ impl SerializedNixlBlockLayout {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::super::*;
     use super::*;

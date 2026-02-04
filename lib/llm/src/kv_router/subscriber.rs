@@ -495,41 +495,6 @@ pub async fn start_kv_router_background(
     Ok(())
 }
 
-/// Handle a worker discovery event (added or removed).
-async fn handle_worker_discovery(
-    event: DiscoveryEvent,
-    worker_query_client: &WorkerQueryClient,
-    kv_events_tx: &mpsc::Sender<RouterEvent>,
-    remove_worker_tx: &mpsc::Sender<WorkerId>,
-) {
-    match event {
-        DiscoveryEvent::Added(instance) => {
-            let worker_id = instance.instance_id();
-            tracing::info!(
-                "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
-            );
-
-            let total_recovered = worker_query_client
-                .recover_all_dp_ranks(worker_id, kv_events_tx)
-                .await;
-
-            if total_recovered > 0 {
-                tracing::info!(
-                    "DISCOVERY: Worker {worker_id} total recovered {total_recovered} events"
-                );
-            }
-        }
-        DiscoveryEvent::Removed(id) => {
-            let worker_id = id.instance_id();
-            tracing::warn!("DISCOVERY: Worker {worker_id} removed, removing from router indexer");
-
-            if let Err(e) = remove_worker_tx.send(worker_id).await {
-                tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
-            }
-        }
-    }
-}
-
 /// Start a simplified background task for event consumption using the event plane.
 ///
 /// This is used when local indexer mode is enabled. Unlike `start_kv_router_background`,
@@ -546,7 +511,6 @@ async fn handle_worker_discovery(
 pub async fn start_kv_router_background_event_plane(
     component: Component,
     kv_events_tx: mpsc::Sender<RouterEvent>,
-    remove_worker_tx: mpsc::Sender<WorkerId>,
     cancellation_token: CancellationToken,
     mut worker_query_client: WorkerQueryClient,
     transport_kind: EventTransportKind,
@@ -587,18 +551,10 @@ pub async fn start_kv_router_background_event_plane(
         ready_workers.len()
     );
 
-    // Recover initial state from all ready workers (all dp_ranks)
-    for worker_id in &ready_workers {
-        if worker_query_client.has_local_indexer(*worker_id) {
-            worker_query_client
-                .recover_all_dp_ranks(*worker_id, &kv_events_tx)
-                .await;
-        }
-    }
-
-    // Get instance discovery stream for ongoing monitoring of worker add/remove events
-    let mut instance_event_stream =
-        get_instance_discovery_stream(&component, &cancellation_token).await?;
+    // Recover initial state from all workers with local indexer enabled
+    worker_query_client
+        .process_and_recover_workers(&kv_events_tx, "Initial recovery")
+        .await;
 
     tokio::spawn(async move {
         // Track last received event ID per (worker, dp_rank) for gap detection
@@ -614,19 +570,16 @@ pub async fn start_kv_router_background_event_plane(
                     break;
                 }
 
-                // Handle generate endpoint instance add/remove events
-                Some(discovery_event_result) = instance_event_stream.next() => {
-                    let Ok(event) = discovery_event_result else {
+                // Handle runtime config changes (worker add/remove, recovery for new workers)
+                result = worker_query_client.wait_for_config_change() => {
+                    if result.is_err() {
+                        tracing::warn!("Runtime config watch sender dropped");
                         continue;
-                    };
+                    }
 
-                    handle_worker_discovery(
-                        event,
-                        &worker_query_client,
-                        &kv_events_tx,
-                        &remove_worker_tx,
-                    )
-                    .await;
+                    worker_query_client
+                        .process_and_recover_workers(&kv_events_tx, "DISCOVERY")
+                        .await;
                 }
 
                 // Handle event consumption from event plane subscription
@@ -708,14 +661,12 @@ pub async fn start_kv_router_background_event_plane(
 pub async fn start_kv_router_background_nats_core(
     component: Component,
     kv_events_tx: mpsc::Sender<RouterEvent>,
-    remove_worker_tx: mpsc::Sender<WorkerId>,
     cancellation_token: CancellationToken,
     worker_query_client: WorkerQueryClient,
 ) -> Result<()> {
     start_kv_router_background_event_plane(
         component,
         kv_events_tx,
-        remove_worker_tx,
         cancellation_token,
         worker_query_client,
         EventTransportKind::Nats,

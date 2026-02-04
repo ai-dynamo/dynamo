@@ -78,14 +78,16 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--decode-engine-num-gpu",
         type=int,
-        default=SLAPlannerDefaults.decode_engine_num_gpu,
-        help="Number of GPUs for decode engine",
+        default=None,
+        help="Number of GPUs per decode engine. In Kubernetes mode, this is auto-detected "
+        "from DGD resources but can be overridden (e.g., for mockers without GPU resources).",
     )
     parser.add_argument(
         "--prefill-engine-num-gpu",
         type=int,
-        default=SLAPlannerDefaults.prefill_engine_num_gpu,
-        help="Number of GPUs for prefill engine",
+        default=None,
+        help="Number of GPUs per prefill engine. In Kubernetes mode, this is auto-detected "
+        "from DGD resources but can be overridden (e.g., for mockers without GPU resources).",
     )
     parser.add_argument(
         "--profile-results-dir",

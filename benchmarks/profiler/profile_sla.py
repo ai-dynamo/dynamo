@@ -50,6 +50,10 @@ from benchmarks.profiler.utils.profile_prefill import (
     profile_prefill_aiconfigurator,
 )
 from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
+from benchmarks.profiler.utils.profiler_status import (
+    ProfilerStatus,
+    write_profiler_status,
+)
 from benchmarks.profiler.webui.select_config import (
     add_profiling_error,
     clear_profiling_errors,
@@ -141,6 +145,14 @@ async def run_profile(args):
     # Inherit aic_backend from backend if not explicitly set
     if not args.aic_backend:
         args.aic_backend = args.backend
+
+    # Write initial status for external jobs to monitor
+    os.makedirs(args.output_dir, exist_ok=True)
+    write_profiler_status(
+        args.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Profiler job started",
+    )
 
     try:
         config_modifier = CONFIG_MODIFIERS[args.backend]
@@ -490,6 +502,12 @@ async def run_profile(args):
                 error_msg = "No prefill results produced; skipping recommendations."
                 logger.error(error_msg)
                 add_profiling_error(error_msg)
+                write_profiler_status(
+                    args.output_dir,
+                    status=ProfilerStatus.FAILED,
+                    error=error_msg,
+                    message="Profiler failed: no prefill results produced",
+                )
                 return
 
             if args.pick_with_webui:
@@ -527,6 +545,12 @@ async def run_profile(args):
                     error_msg = "No decode results produced; skipping recommendations."
                     logger.error(error_msg)
                     add_profiling_error(error_msg)
+                    write_profiler_status(
+                        args.output_dir,
+                        status=ProfilerStatus.FAILED,
+                        error=error_msg,
+                        message="Profiler failed: no decode results produced",
+                    )
                     return
                 if min(decode_data.itl) > args.itl:
                     warning_msg = "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
@@ -759,8 +783,26 @@ async def run_profile(args):
             else:
                 yaml.safe_dump(mocker_config, f, sort_keys=False)
 
+        # Write success status with output files
+        write_profiler_status(
+            args.output_dir,
+            status=ProfilerStatus.SUCCESS,
+            message="Profiler completed successfully",
+            outputs={
+                "config_with_planner": "config_with_planner.yaml",
+                "mocker_config_with_planner": "mocker_config_with_planner.yaml",
+                "disagg_config": "disagg_config.yaml",
+            },
+        )
+
     except Exception as e:
-        logger.error(f"Profile job failed with error: {e}")
+        logger.exception("Profile job failed with error")
+        write_profiler_status(
+            args.output_dir,
+            status=ProfilerStatus.FAILED,
+            error=str(e),
+            message=f"Profiler failed with exception: {type(e).__name__}",
+        )
         raise
     finally:
         # Always clean up any remaining deployments, even if the job failed

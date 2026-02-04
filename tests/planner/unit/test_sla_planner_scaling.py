@@ -9,10 +9,12 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from dynamo.planner.utils.exceptions import DeploymentValidationError
 from dynamo.planner.utils.planner_core import (
     DecodePlanner,
     PlannerSharedState,
     PrefillPlanner,
+    _initialize_gpu_counts,
 )
 
 pytestmark = [
@@ -201,3 +203,214 @@ def test_disagg_scale_down():
     assert low_d == _expected_decode(args, decode_planner, samples[1])
     assert low_p < high_p
     assert low_d < high_d
+
+
+# Tests for _initialize_gpu_counts
+class TestInitializeGpuCounts:
+    def test_kubernetes_mode_reads_from_dgd(self):
+        """Test that GPU counts are read from DGD in Kubernetes mode"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = None
+        args.decode_engine_num_gpu = None
+
+        connector = Mock()
+        connector.get_gpu_counts = Mock(return_value=(2, 4))
+
+        _initialize_gpu_counts(
+            args, connector, require_prefill=True, require_decode=True
+        )
+
+        assert args.prefill_engine_num_gpu == 2
+        assert args.decode_engine_num_gpu == 4
+        connector.get_gpu_counts.assert_called_once_with(
+            require_prefill=True, require_decode=True
+        )
+
+    def test_kubernetes_mode_prefill_only(self):
+        """Test GPU count initialization for prefill-only mode"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = None
+        args.decode_engine_num_gpu = None
+
+        connector = Mock()
+        connector.get_gpu_counts = Mock(return_value=(2, 0))
+
+        _initialize_gpu_counts(
+            args, connector, require_prefill=True, require_decode=False
+        )
+
+        assert args.prefill_engine_num_gpu == 2
+        assert args.decode_engine_num_gpu == 0
+        connector.get_gpu_counts.assert_called_once_with(
+            require_prefill=True, require_decode=False
+        )
+
+    def test_virtual_mode_uses_cli_args(self):
+        """Test that GPU counts come from CLI args in virtual mode"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = 2
+        args.decode_engine_num_gpu = 4
+
+        # Virtual connector doesn't have get_gpu_counts method
+        connector = Mock(spec=[])
+
+        _initialize_gpu_counts(
+            args, connector, require_prefill=True, require_decode=True
+        )
+
+        # Values should remain unchanged
+        assert args.prefill_engine_num_gpu == 2
+        assert args.decode_engine_num_gpu == 4
+
+    def test_virtual_mode_missing_prefill_raises_error(self):
+        """Test that missing prefill GPU flag raises error in virtual mode"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = None
+        args.decode_engine_num_gpu = 4
+
+        connector = Mock(spec=[])
+
+        with pytest.raises(DeploymentValidationError) as exc_info:
+            _initialize_gpu_counts(
+                args, connector, require_prefill=True, require_decode=True
+            )
+
+        assert "prefill-engine-num-gpu" in str(exc_info.value)
+
+    def test_virtual_mode_missing_decode_raises_error(self):
+        """Test that missing decode GPU flag raises error in virtual mode"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = 2
+        args.decode_engine_num_gpu = None
+
+        connector = Mock(spec=[])
+
+        with pytest.raises(DeploymentValidationError) as exc_info:
+            _initialize_gpu_counts(
+                args, connector, require_prefill=True, require_decode=True
+            )
+
+        assert "decode-engine-num-gpu" in str(exc_info.value)
+
+    def test_virtual_mode_missing_both_raises_error_with_both_messages(self):
+        """Test that missing both GPU flags shows both error messages"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = None
+        args.decode_engine_num_gpu = None
+
+        connector = Mock(spec=[])
+
+        with pytest.raises(DeploymentValidationError) as exc_info:
+            _initialize_gpu_counts(
+                args, connector, require_prefill=True, require_decode=True
+            )
+
+        assert len(exc_info.value.errors) == 2
+
+    def test_virtual_mode_decode_only_no_prefill_error(self):
+        """Test decode-only mode doesn't require prefill GPU flag"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = None
+        args.decode_engine_num_gpu = 4
+
+        connector = Mock(spec=[])
+
+        # Should not raise - prefill not required
+        _initialize_gpu_counts(
+            args, connector, require_prefill=False, require_decode=True
+        )
+
+        assert args.decode_engine_num_gpu == 4
+
+    def test_kubernetes_mode_fallback_to_cli_on_dgd_error(self):
+        """Test that K8s mode falls back to CLI flags when DGD parsing fails"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = 2
+        args.decode_engine_num_gpu = 4
+
+        connector = Mock()
+        connector.get_gpu_counts = Mock(
+            side_effect=ValueError("No GPU count specified")
+        )
+
+        _initialize_gpu_counts(
+            args, connector, require_prefill=True, require_decode=True
+        )
+
+        # Should use CLI flag values after fallback
+        assert args.prefill_engine_num_gpu == 2
+        assert args.decode_engine_num_gpu == 4
+
+    def test_kubernetes_mode_fallback_missing_cli_flags_raises_error(self):
+        """Test that K8s fallback raises error when CLI flags are also missing"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = None
+        args.decode_engine_num_gpu = None
+
+        connector = Mock()
+        connector.get_gpu_counts = Mock(
+            side_effect=ValueError("No GPU count specified")
+        )
+
+        with pytest.raises(DeploymentValidationError) as exc_info:
+            _initialize_gpu_counts(
+                args, connector, require_prefill=True, require_decode=True
+            )
+
+        assert len(exc_info.value.errors) == 2
+
+    def test_kubernetes_mode_fallback_partial_cli_flags(self):
+        """Test K8s fallback with only one CLI flag provided"""
+        args = argparse.Namespace()
+        args.prefill_engine_num_gpu = 2
+        args.decode_engine_num_gpu = None
+
+        connector = Mock()
+        connector.get_gpu_counts = Mock(
+            side_effect=ValueError("No GPU count specified")
+        )
+
+        with pytest.raises(DeploymentValidationError) as exc_info:
+            _initialize_gpu_counts(
+                args, connector, require_prefill=True, require_decode=True
+            )
+
+        assert "decode-engine-num-gpu" in str(exc_info.value)
+
+
+# Tests for dryrun GPU defaults
+class TestDryrunGpuDefaults:
+    def test_dryrun_defaults_gpu_counts_when_none(self):
+        """Test that dryrun sets default GPU counts of 1 when None"""
+        from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
+
+        args = _build_args()
+        args.prefill_engine_num_gpu = None
+        args.decode_engine_num_gpu = None
+        args.dataset = "nonexistent.jsonl"  # Will fail but we check args first
+
+        # The function will set defaults before trying to load dataset
+        try:
+            run_sla_planner_dryrun(args)
+        except (FileNotFoundError, ValueError):
+            pass  # Expected - dataset doesn't exist
+
+        assert args.prefill_engine_num_gpu == 1
+        assert args.decode_engine_num_gpu == 1
+
+    def test_dryrun_preserves_cli_gpu_counts(self):
+        """Test that dryrun preserves GPU counts provided via CLI"""
+        from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
+
+        args = _build_args()
+        args.prefill_engine_num_gpu = 2
+        args.decode_engine_num_gpu = 4
+        args.dataset = "nonexistent.jsonl"
+
+        try:
+            run_sla_planner_dryrun(args)
+        except (FileNotFoundError, ValueError):
+            pass
+
+        assert args.prefill_engine_num_gpu == 2
+        assert args.decode_engine_num_gpu == 4

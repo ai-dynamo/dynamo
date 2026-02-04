@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,21 +34,41 @@ const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
 ///
 /// Each dp_rank has its own LocalKvIndexer and query endpoint, so we maintain separate
 /// routers per dp_rank to ensure queries go to the correct endpoint.
+///
+/// Also handles worker lifecycle (add/remove) by tracking known workers and sending
+/// removal events to the router indexer.
 pub struct WorkerQueryClient {
     component: Component,
     /// Subscriber for runtime configs (includes shared configs DashMap)
     subscriber: RuntimeConfigsSubscriber,
     /// Routers keyed by dp_rank - each dp_rank has its own endpoint
     routers: DashMap<DpRank, Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
+    /// Workers that have been successfully recovered (full recovery)
+    recovered: HashSet<WorkerId>,
+    /// Workers we know about (to detect removals)
+    known_workers: HashSet<WorkerId>,
+    /// Channel to send worker removal events to the router indexer (optional)
+    remove_worker_tx: Option<mpsc::Sender<WorkerId>>,
 }
 
 impl WorkerQueryClient {
-    /// Create a new WorkerQueryClient with a subscriber to runtime configs
-    pub fn new(component: Component, subscriber: RuntimeConfigsSubscriber) -> Self {
+    /// Create a new WorkerQueryClient with a subscriber to runtime configs.
+    ///
+    /// If `remove_worker_tx` is provided, this client will handle worker lifecycle
+    /// (tracking known workers, sending removal events). If None, lifecycle tracking
+    /// is disabled (suitable for query-only usage).
+    pub fn new(
+        component: Component,
+        subscriber: RuntimeConfigsSubscriber,
+        remove_worker_tx: Option<mpsc::Sender<WorkerId>>,
+    ) -> Self {
         Self {
             component,
             subscriber,
             routers: DashMap::new(),
+            recovered: HashSet::new(),
+            known_workers: HashSet::new(),
+            remove_worker_tx,
         }
     }
 
@@ -57,8 +78,84 @@ impl WorkerQueryClient {
         self.subscriber.wait_for_some().await
     }
 
+    /// Wait for runtime config changes.
+    /// Returns Ok(()) when configs have changed, or Err if the sender was dropped.
+    pub async fn wait_for_config_change(
+        &mut self,
+    ) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.subscriber.change_rx.changed().await
+    }
+
+    /// Process config changes and recover pending workers.
+    ///
+    /// This method:
+    /// 1. Detects removed workers and sends removal events (if remove_worker_tx is set)
+    /// 2. Recovers workers that have config + local_indexer enabled but haven't been recovered yet
+    /// 3. Marks recovered workers so they won't be recovered again
+    ///
+    /// Should be called after `wait_for_config_change()` returns.
+    ///
+    /// # Arguments
+    /// * `event_tx` - Channel to send recovered events to the router indexer
+    /// * `log_prefix` - Prefix for log messages (e.g., "DISCOVERY" or "Initial recovery")
+    pub async fn process_and_recover_workers(
+        &mut self,
+        event_tx: &mpsc::Sender<RouterEvent>,
+        log_prefix: &str,
+    ) {
+        // Get current workers from configs
+        let current_workers: HashSet<WorkerId> =
+            self.subscriber.configs.iter().map(|r| *r.key()).collect();
+
+        // Handle removed workers (only if we have a removal channel)
+        if let Some(ref remove_worker_tx) = self.remove_worker_tx {
+            for worker_id in self.known_workers.difference(&current_workers) {
+                self.recovered.remove(worker_id);
+                tracing::warn!(
+                    "{log_prefix}: Worker {worker_id} removed, removing from router indexer"
+                );
+                if let Err(e) = remove_worker_tx.send(*worker_id).await {
+                    tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
+                }
+            }
+        }
+        self.known_workers = current_workers;
+
+        // Find workers needing recovery:
+        // - Has config (Some)
+        // - Has local_indexer enabled
+        // - Not yet recovered
+        let workers_to_recover: Vec<WorkerId> = self
+            .subscriber
+            .configs
+            .iter()
+            .filter(|r| {
+                r.value()
+                    .as_ref()
+                    .map(|c| c.enable_local_indexer)
+                    .unwrap_or(false)
+            })
+            .map(|r| *r.key())
+            .filter(|id| !self.recovered.contains(id))
+            .collect();
+
+        // Recover each worker
+        for worker_id in workers_to_recover {
+            tracing::info!(
+                "{log_prefix}: Worker {worker_id} added, dumping local indexer into router"
+            );
+            let recovered = self.recover_all_dp_ranks(worker_id, event_tx).await;
+            if recovered > 0 {
+                tracing::info!(
+                    "{log_prefix}: Worker {worker_id} recovered {recovered} events from local indexer"
+                );
+            }
+            self.recovered.insert(worker_id);
+        }
+    }
+
     /// Check if a worker has local indexer enabled
-    pub fn has_local_indexer(&self, worker_id: WorkerId) -> bool {
+    fn has_local_indexer(&self, worker_id: WorkerId) -> bool {
         self.subscriber
             .configs
             .get(&worker_id)
