@@ -409,19 +409,20 @@ impl PrefillRouter {
         };
 
         // Extract prefill worker ID and dp_rank from disaggregated_params
-        let prefill_worker_info = disaggregated_params
-            .get("worker_id")
-            .and_then(|worker_id_json| {
-                let worker_id = worker_id_json
-                    .get("prefill_worker_id")
-                    .and_then(|v| v.as_u64())?;
-                let dp_rank = worker_id_json
-                    .get("prefill_dp_rank")
-                    .and_then(|v| v.as_u64())
-                    .map(|r| r as u32)
-                    .unwrap_or(0);
-                Some((worker_id, dp_rank))
-            });
+        let prefill_worker_info =
+            disaggregated_params
+                .get("worker_id")
+                .and_then(|worker_id_json| {
+                    let worker_id = worker_id_json
+                        .get("prefill_worker_id")
+                        .and_then(|v| v.as_u64())?;
+                    let dp_rank = worker_id_json
+                        .get("prefill_dp_rank")
+                        .and_then(|v| v.as_u64())
+                        .map(|r| r as u32)
+                        .unwrap_or(0);
+                    Some((worker_id, dp_rank))
+                });
         Ok((
             PrefillResult {
                 disaggregated_params,
