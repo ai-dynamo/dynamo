@@ -24,8 +24,8 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId,
-    WorkerWithDpRank, compute_seq_hash_for_block,
+    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
+    RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
 };
 
 use crate::compute_block_hash_for_seq;
@@ -100,16 +100,6 @@ impl SeqEntry {
         }
     }
 
-    /// Get workers when there's only one entry (lazy optimization).
-    /// Returns None if there are multiple seq_hash entries.
-    fn get_single(&self) -> Option<&HashSet<WorkerWithDpRank>> {
-        match self {
-            Self::Single(_, workers) => Some(workers),
-            Self::Multi(map) if map.len() == 1 => map.values().next(),
-            Self::Multi(_) => None,
-        }
-    }
-
     /// Check if this entry has only one seq_hash (lazy optimization applies).
     #[cfg(test)]
     fn is_single(&self) -> bool {
@@ -156,25 +146,23 @@ impl SeqEntry {
 
 type LevelIndex = DashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>;
 
-pub(crate) struct PositionalIndexer {
+pub struct PositionalIndexer {
     index: Arc<DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>>,
     /// Per-worker reverse lookup: worker -> seq_hash -> (position, local_hash)
     /// Enables efficient remove operations without global flat reverse map.
     worker_blocks: Arc<DashMap<WorkerWithDpRank, LevelIndex>>,
 
+    /// Maps WorkerId to worker thread index for sticky routing.
     worker_assignments: Arc<DashMap<WorkerId, usize>>,
+    /// Counter for round-robin assignment of new WorkerIds.
     worker_assignment_count: AtomicUsize,
 
+    /// Channels to send events to worker threads.
     worker_event_channels: Arc<Vec<flume::Sender<RouterEvent>>>,
     worker_request_channel: flume::Sender<MatchRequest>,
 
     num_workers: usize,
     kv_block_size: u32,
-
-    /// Weight for binary search starting position (0.0 to 1.0).
-    /// With weight=0.2 and 100 blocks, search starts at position 20.
-    /// Lower values are better when expecting shorter prefix matches.
-    search_weight: f64,
 
     /// Cancellation token to signal worker threads to shut down.
     cancel_token: CancellationToken,
@@ -188,15 +176,12 @@ impl PositionalIndexer {
     /// # Arguments
     /// * `num_workers` - Number of worker threads for event processing
     /// * `kv_block_size` - Block size for KV cache
-    /// * `search_weight` - Weight for binary search starting position (0.0 to 1.0).
-    ///   With weight=0.2 and 100 blocks, search starts at position 20.
-    ///   Lower values are better when expecting shorter prefix matches.
-    pub fn new(num_workers: usize, kv_block_size: u32, search_weight: f64) -> Self {
+    /// * `jump_size` - Jump size for find_matches optimization (e.g., 32).
+    ///   The algorithm jumps by this many positions at a time, only scanning
+    ///   intermediate positions when workers drain (stop matching).
+    pub fn new(num_workers: usize, kv_block_size: u32, jump_size: usize) -> Self {
         assert!(num_workers > 0, "Number of workers must be greater than 0");
-        assert!(
-            (0.0..=1.0).contains(&search_weight),
-            "search_weight must be between 0.0 and 1.0"
-        );
+        assert!(jump_size > 0, "jump_size must be greater than 0");
 
         let index = Arc::new(DashMap::new());
         let worker_blocks = Arc::new(DashMap::new());
@@ -212,6 +197,7 @@ impl PositionalIndexer {
 
             let worker_request_channel_rx = worker_request_channel_rx.clone();
             let index = Arc::clone(&index);
+            let worker_blocks = Arc::clone(&worker_blocks);
             let cancel_token = cancel_token.clone();
 
             let handle = std::thread::spawn(move || {
@@ -228,15 +214,18 @@ impl PositionalIndexer {
                                     break;
                                 }
 
-                                Ok(_event) = event_receiver.recv_async() => {
-                                    // Event processing handled elsewhere
+                                Ok(event) = event_receiver.recv_async() => {
+                                    if let Err(e) = Self::apply_event_impl(&index, &worker_blocks, event) {
+                                        tracing::warn!("Failed to apply event: {:?}", e);
+                                    }
                                 }
 
                                 Ok(request) = worker_request_channel_rx.recv_async() => {
-                                    let scores = PositionalIndexer::weighted_binary_search_matches(
+                                    let scores = PositionalIndexer::jump_search_matches(
                                         &index,
+                                        &worker_blocks,
                                         &request.sequence,
-                                        search_weight,
+                                        jump_size,
                                         request.early_exit,
                                     );
                                     let _ = request.resp.send(scores);
@@ -257,7 +246,6 @@ impl PositionalIndexer {
             worker_request_channel: worker_request_channel_tx,
             num_workers,
             kv_block_size,
-            search_weight,
             cancel_token,
             thread_handles: Mutex::new(thread_handles),
         }
@@ -299,9 +287,23 @@ impl KvIndexerInterface for PositionalIndexer {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        // Process events synchronously since DashMap is thread-safe
-        if let Err(e) = self.apply_event_sync(event) {
-            tracing::warn!("Failed to apply event: {:?}", e);
+        let worker_id = event.worker_id;
+
+        // Get or assign worker thread index using sticky round-robin
+        let thread_idx = *self.worker_assignments.entry(worker_id).or_insert_with(|| {
+            let idx = self
+                .worker_assignment_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            idx % self.num_workers
+        });
+
+        // Send event to the assigned worker thread
+        if let Err(e) = self.worker_event_channels[thread_idx].send(event) {
+            tracing::error!(
+                "Failed to send event to worker thread {}: {:?}",
+                thread_idx,
+                e
+            );
         }
     }
 
@@ -328,7 +330,7 @@ impl KvIndexerInterface for PositionalIndexer {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        Ok(self.dump_as_events())
+        unimplemented!();
     }
 
     async fn process_routing_decision_for_request(
@@ -342,7 +344,13 @@ impl KvIndexerInterface for PositionalIndexer {
 }
 
 impl PositionalIndexer {
-    fn apply_event_sync(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+    /// Process an event using the provided index and worker_blocks.
+    /// This is called from worker threads.
+    fn apply_event_impl(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        event: RouterEvent,
+    ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
 
@@ -350,7 +358,7 @@ impl PositionalIndexer {
 
         tracing::trace!(
             id,
-            "PositionalIndexer::apply_event_sync: operation: {:?}",
+            "PositionalIndexer::apply_event_impl: operation: {:?}",
             op
         );
 
@@ -361,7 +369,7 @@ impl PositionalIndexer {
                     Some(parent_hash) => {
                         // Find parent position from worker_blocks
 
-                        let Some(worker_map) = self.worker_blocks.get(&worker) else {
+                        let Some(worker_map) = worker_blocks.get(&worker) else {
                             tracing::warn!(
                                 worker_id = worker.worker_id.to_string(),
                                 dp_rank = worker.dp_rank,
@@ -392,14 +400,14 @@ impl PositionalIndexer {
                     let seq_hash = block_data.block_hash;
 
                     // Insert into index: position -> local_hash -> seq_hash -> worker
-                    let pos_map = self.index.entry(position).or_default();
+                    let pos_map = index.entry(position).or_default();
                     pos_map
                         .entry(local_hash)
                         .and_modify(|entry| entry.insert(seq_hash, worker))
                         .or_insert_with(|| SeqEntry::new(seq_hash, worker));
 
                     // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
-                    let worker_map = self.worker_blocks.entry(worker).or_default();
+                    let worker_map = worker_blocks.entry(worker).or_default();
                     worker_map.insert(seq_hash, (position, local_hash));
                 }
 
@@ -408,27 +416,30 @@ impl PositionalIndexer {
             KvCacheEventData::Removed(remove_data) => {
                 let mut first_err: Option<KvCacheEventError> = None;
                 for seq_hash in remove_data.block_hashes {
-                    if let Err(e) = self.remove_single_block(worker, seq_hash, id) {
+                    if let Err(e) =
+                        Self::remove_single_block_impl(index, worker_blocks, worker, seq_hash, id)
+                    {
                         first_err.get_or_insert(e);
                     }
                 }
                 first_err.map_or(Ok(()), Err)
             }
             KvCacheEventData::Cleared => {
-                self.clear_worker_blocks(worker_id);
+                Self::clear_worker_blocks_impl(index, worker_blocks, worker_id);
                 Ok(())
             }
         }
     }
 
     /// Remove a single block from the index for a given worker.
-    fn remove_single_block(
-        &self,
+    fn remove_single_block_impl(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
         worker: WorkerWithDpRank,
         seq_hash: ExternalSequenceBlockHash,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let worker_map = self.worker_blocks.get(&worker).ok_or_else(|| {
+        let worker_map = worker_blocks.get(&worker).ok_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id.to_string(),
                 dp_rank = worker.dp_rank,
@@ -451,7 +462,7 @@ impl PositionalIndexer {
         })?;
 
         // Remove from index
-        if let Some(pos_map) = self.index.get(&position)
+        if let Some(pos_map) = index.get(&position)
             && let Some(mut entry) = pos_map.get_mut(&local_hash)
             && entry.remove(seq_hash, worker)
         {
@@ -463,35 +474,49 @@ impl PositionalIndexer {
     }
 
     /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
-    fn clear_worker_blocks(&self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, true);
+    /// Static version for use in worker threads.
+    fn clear_worker_blocks_impl(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        worker_id: WorkerId,
+    ) {
+        Self::remove_or_clear_worker_blocks_impl(index, worker_blocks, worker_id, true);
     }
 
     /// Remove a worker and all their blocks completely from the index.
     fn remove_worker_blocks(&self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, false);
+        Self::remove_or_clear_worker_blocks_impl(
+            &self.index,
+            &self.worker_blocks,
+            worker_id,
+            false,
+        );
     }
 
     /// Helper function to remove or clear blocks for a worker.
     /// If `keep_worker` is true, the worker remains tracked with empty blocks.
     /// If `keep_worker` is false, the worker is completely removed.
-    fn remove_or_clear_worker_blocks(&self, worker_id: WorkerId, keep_worker: bool) {
+    fn remove_or_clear_worker_blocks_impl(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        worker_id: WorkerId,
+        keep_worker: bool,
+    ) {
         // Collect all WorkerWithDpRank keys that match this worker_id
-        let workers: Vec<WorkerWithDpRank> = self
-            .worker_blocks
+        let workers: Vec<WorkerWithDpRank> = worker_blocks
             .iter()
             .filter(|entry| entry.key().worker_id == worker_id)
             .map(|entry| *entry.key())
             .collect();
 
         for worker in workers {
-            if let Some((_, worker_map)) = self.worker_blocks.remove(&worker) {
+            if let Some((_, worker_map)) = worker_blocks.remove(&worker) {
                 // Remove each block from the index
                 for entry in worker_map.iter() {
                     let seq_hash = *entry.key();
                     let (position, local_hash) = *entry.value();
 
-                    if let Some(pos_map) = self.index.get(&position)
+                    if let Some(pos_map) = index.get(&position)
                         && let Some(mut seq_entry) = pos_map.get_mut(&local_hash)
                         && seq_entry.remove(seq_hash, worker)
                     {
@@ -504,127 +529,149 @@ impl PositionalIndexer {
 
             if keep_worker {
                 // Re-insert worker with empty map to keep it tracked
-                self.worker_blocks.insert(worker, DashMap::new());
+                worker_blocks.insert(worker, DashMap::new());
             }
         }
-    }
-
-    /// Dump the index as a series of RouterEvents that can reconstruct the index.
-    /// Each worker gets one event per block they have stored.
-    fn dump_as_events(&self) -> Vec<RouterEvent> {
-        unimplemented!();
     }
 }
 
 // -----------------------------------------------------------------------------
-// Weighted binary search methods (associated functions for use in worker threads)
+// Jump-based search methods (associated functions for use in worker threads)
 // -----------------------------------------------------------------------------
 
 impl PositionalIndexer {
-    /// Check if there's a match at the given position for the (local_hash, seq_hash) pair.
+    /// Compute sequence hash incrementally from previous hash and current local hash.
     #[inline]
-    fn has_match_at_position(
-        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
-        position: usize,
-        local_hash: LocalBlockHash,
-        seq_hash: ExternalSequenceBlockHash,
-    ) -> bool {
-        let Some(pos_map) = index.get(&position) else {
-            return false;
-        };
-        let Some(entry) = pos_map.get(&local_hash) else {
-            return false;
-        };
-        entry.get(seq_hash).is_some()
+    fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
+        let combined = [prev_seq_hash, current_local_hash];
+        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
+        crate::protocols::compute_hash(&bytes)
     }
 
-    /// Update scores with workers at a specific position for a (local_hash, seq_hash) pair.
-    /// Returns true if workers were found and scores were updated.
+    /// Ensure seq_hashes is computed up to and including target_pos.
+    /// Lazily extends the seq_hashes vector as needed.
     #[inline]
-    fn update_scores_at_position(
-        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
-        position: usize,
-        local_hash: LocalBlockHash,
-        seq_hash: ExternalSequenceBlockHash,
-        scores: &mut OverlapScores,
-        record_frequency: bool,
-    ) -> bool {
-        let Some(pos_map) = index.get(&position) else {
-            return false;
-        };
-        let Some(entry) = pos_map.get(&local_hash) else {
-            return false;
-        };
-        let Some(workers) = entry.get(seq_hash) else {
-            return false;
-        };
-        scores.update_scores(workers.iter());
-        if record_frequency {
-            scores.add_frequency(workers.len());
-        }
-        true
-    }
-
-    /// Find the boundary between matching and non-matching positions using weighted binary search.
-    ///
-    /// Returns the first position with no match (i.e., all positions in `0..boundary` match).
-    /// The weight is applied at each step of the binary search, biasing toward lower positions.
-    ///
-    /// # Arguments
-    /// * `index` - The position -> local_hash -> SeqEntry index
-    /// * `local_hashes` - Sequence of LocalBlockHash to match
-    /// * `seq_hashes` - Corresponding sequence hashes for exact matching
-    /// * `search_weight` - Weight for midpoint calculation (0.0 to 1.0) applied at each step
-    fn find_match_boundary(
-        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
-        local_hashes: &[LocalBlockHash],
-        seq_hashes: &[ExternalSequenceBlockHash],
-        search_weight: f64,
-    ) -> usize {
-        let len = local_hashes.len();
-        if len == 0 {
-            return 0;
-        }
-
-        let mut low = 0;
-        let mut high = len;
-
-        while low < high {
-            let range = high - low;
-            // Apply weight to calculate midpoint, clamped to ensure progress
-            let offset = (((range as f64) * search_weight).floor() as usize).min(range - 1);
-            let mid = low + offset;
-
-            if Self::has_match_at_position(index, mid, local_hashes[mid], seq_hashes[mid]) {
-                // Match found, boundary is above mid
-                low = mid + 1;
+    fn ensure_seq_hash_computed(
+        seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
+        target_pos: usize,
+        sequence: &[LocalBlockHash],
+    ) {
+        while seq_hashes.len() <= target_pos {
+            let pos = seq_hashes.len();
+            if pos == 0 {
+                // First block's seq_hash equals its local_hash
+                seq_hashes.push(ExternalSequenceBlockHash::from(sequence[0].0));
             } else {
-                // No match, boundary is at or below mid
-                high = mid;
+                let prev_seq_hash = seq_hashes[pos - 1].0;
+                let current_local_hash = sequence[pos].0;
+                let next_hash = Self::compute_next_seq_hash(prev_seq_hash, current_local_hash);
+                seq_hashes.push(ExternalSequenceBlockHash::from(next_hash));
+            }
+        }
+    }
+
+    /// Get workers at a position by verifying both local_hash and seq_hash match.
+    ///
+    /// Returns None if no workers match at this position.
+    /// Always computes and verifies the seq_hash to ensure correctness when
+    /// the query may have diverged from stored sequences at earlier positions.
+    fn get_workers_lazy(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        position: usize,
+        local_hash: LocalBlockHash,
+        seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
+        sequence: &[LocalBlockHash],
+    ) -> Option<HashSet<WorkerWithDpRank>> {
+        let pos_map = index.get(&position)?;
+        let entry = pos_map.get(&local_hash)?;
+
+        // Always compute and verify seq_hash to handle divergent queries correctly.
+        // Even if there's only one seq_hash entry, the query's seq_hash might differ
+        // if the query diverged from the stored sequence at an earlier position.
+        Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
+        let seq_hash = seq_hashes[position];
+        entry.get(seq_hash).cloned()
+    }
+
+    /// Scan positions sequentially, updating active set and recording drain scores.
+    ///
+    /// Returns the highest position where workers remain active (or lo-1 if none match at lo).
+    #[allow(clippy::too_many_arguments)]
+    fn linear_scan_drain(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        sequence: &[LocalBlockHash],
+        seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
+        active: &mut HashSet<WorkerWithDpRank>,
+        scores: &mut OverlapScores,
+        lo: usize,
+        hi: usize,
+        early_exit: bool,
+    ) -> usize {
+        let mut highest_active_pos = lo.saturating_sub(1);
+
+        for pos in lo..hi {
+            if active.is_empty() {
+                break;
+            }
+
+            let workers_at_pos =
+                Self::get_workers_lazy(index, pos, sequence[pos], seq_hashes, sequence);
+
+            let still_active: HashSet<WorkerWithDpRank> = match &workers_at_pos {
+                Some(workers) => active.intersection(workers).cloned().collect(),
+                None => HashSet::new(),
+            };
+
+            // Record scores for workers that drained (stopped matching)
+            let drained: Vec<_> = active.difference(&still_active).cloned().collect();
+            for worker in drained {
+                // Score is the position where they stopped matching (i.e., pos)
+                // which represents they matched positions 0..pos
+                scores.scores.insert(worker, pos as u32);
+            }
+
+            // Record frequency for this position if workers matched
+            if !still_active.is_empty() {
+                scores.add_frequency(still_active.len());
+                highest_active_pos = pos;
+            }
+
+            *active = still_active;
+
+            if early_exit && !active.is_empty() {
+                // Found at least one match, can exit early
+                break;
             }
         }
 
-        low
+        highest_active_pos
     }
 
-    /// Perform weighted binary search to find matches for a sequence of block hashes.
+    /// Jump-based search to find matches for a sequence of block hashes.
     ///
     /// # Algorithm
     ///
-    /// 1. Compute sequence hashes from local block hashes for exact prefix matching
-    /// 2. Use weighted binary search to find the boundary (first non-matching position)
-    /// 3. The weight biases each step toward lower positions (useful when short matches are common)
-    /// 4. Scan all matching positions (0..boundary) to collect worker scores
+    /// 1. Check first position - initialize active set with matching workers
+    /// 2. Initialize seq_hashes with first block's hash (seq_hash[0] = local_hash[0])
+    /// 3. Loop: jump by jump_size positions
+    ///    - At each jump, check if active workers still match:
+    ///      - All match: Continue jumping (skip intermediate positions)
+    ///      - None match: Scan range with linear_scan_drain
+    ///      - Partial match: Scan range to find exact drain points
+    /// 4. Record final scores for remaining active workers
+    /// 5. Populate tree_sizes from worker_blocks
     ///
     /// # Arguments
     /// * `index` - The position -> local_hash -> SeqEntry index
+    /// * `worker_blocks` - Per-worker reverse lookup for tree sizes
     /// * `local_hashes` - Sequence of LocalBlockHash to match
-    /// * `search_weight` - Weight for midpoint calculation (0.0 to 1.0) applied at each step
+    /// * `jump_size` - Number of positions to jump at a time
     /// * `early_exit` - If true, stop after finding any match
-    fn weighted_binary_search_matches(
+    fn jump_search_matches(
         index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
         local_hashes: &[LocalBlockHash],
-        search_weight: f64,
+        jump_size: usize,
         early_exit: bool,
     ) -> OverlapScores {
         let mut scores = OverlapScores::new();
@@ -633,40 +680,109 @@ impl PositionalIndexer {
             return scores;
         }
 
-        // Compute sequence hashes for exact prefix matching
-        let seq_hashes: Vec<ExternalSequenceBlockHash> = compute_seq_hash_for_block(local_hashes)
-            .into_iter()
-            .map(ExternalSequenceBlockHash::from)
-            .collect();
+        // Lazily computed sequence hashes
+        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::new();
 
-        let boundary = Self::find_match_boundary(index, local_hashes, &seq_hashes, search_weight);
+        // Check first position to initialize active set
+        let Some(initial_workers) =
+            Self::get_workers_lazy(index, 0, local_hashes[0], &mut seq_hashes, local_hashes)
+        else {
+            return scores;
+        };
 
-        if boundary == 0 {
+        let mut active = initial_workers;
+
+        if active.is_empty() {
             return scores;
         }
 
-        // Collect workers from all matching positions (0..boundary)
+        // Record frequency for position 0
+        scores.add_frequency(active.len());
+
         if early_exit {
-            // For early exit, just check position 0
-            Self::update_scores_at_position(
+            // For early exit, just record that these workers matched at least position 0
+            for worker in &active {
+                scores.scores.insert(*worker, 1);
+            }
+            // Populate tree_sizes
+            for worker in scores.scores.keys() {
+                if let Some(worker_map) = worker_blocks.get(worker) {
+                    scores.tree_sizes.insert(*worker, worker_map.len());
+                }
+            }
+            return scores;
+        }
+
+        let len = local_hashes.len();
+        let mut current_pos = 0;
+
+        // Jump through positions
+        while current_pos < len - 1 && !active.is_empty() {
+            let next_pos = (current_pos + jump_size).min(len - 1);
+
+            // Check workers at jump destination
+            let workers_at_next = Self::get_workers_lazy(
                 index,
-                0,
-                local_hashes[0],
-                seq_hashes[0],
-                &mut scores,
-                false,
+                next_pos,
+                local_hashes[next_pos],
+                &mut seq_hashes,
+                local_hashes,
             );
-        } else {
-            // Scan all matching positions
-            for pos in 0..boundary {
-                Self::update_scores_at_position(
+
+            let still_active_at_next: HashSet<WorkerWithDpRank> = match &workers_at_next {
+                Some(workers) => active.intersection(workers).cloned().collect(),
+                None => HashSet::new(),
+            };
+
+            if still_active_at_next == active {
+                // All active workers still match at jump destination
+                // Record frequency for skipped positions (we know all active workers match)
+                for _pos in (current_pos + 1)..=next_pos {
+                    scores.add_frequency(active.len());
+                }
+                current_pos = next_pos;
+            } else if still_active_at_next.is_empty() {
+                // No active workers match at jump destination
+                // Scan the range to find where each worker drained
+                Self::linear_scan_drain(
                     index,
-                    pos,
-                    local_hashes[pos],
-                    seq_hashes[pos],
+                    local_hashes,
+                    &mut seq_hashes,
+                    &mut active,
                     &mut scores,
-                    true,
+                    current_pos + 1,
+                    next_pos + 1,
+                    false,
                 );
+                current_pos = next_pos;
+            } else {
+                // Partial match - some workers drained in between
+                // Scan the range to find exact drain points
+                Self::linear_scan_drain(
+                    index,
+                    local_hashes,
+                    &mut seq_hashes,
+                    &mut active,
+                    &mut scores,
+                    current_pos + 1,
+                    next_pos + 1,
+                    false,
+                );
+                current_pos = next_pos;
+            }
+        }
+
+        // Record final scores for remaining active workers
+        // They matched all positions through the end
+        let final_score = len as u32;
+        for worker in active {
+            scores.scores.insert(worker, final_score);
+        }
+
+        // Populate tree_sizes from worker_blocks
+        for worker in scores.scores.keys() {
+            if let Some(worker_map) = worker_blocks.get(worker) {
+                scores.tree_sizes.insert(*worker, worker_map.len());
             }
         }
 
