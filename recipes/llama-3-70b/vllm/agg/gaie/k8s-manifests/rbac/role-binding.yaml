@@ -16,15 +16,15 @@
 # NOTE: ClusterRoleBinding is cluster-scoped (no metadata.namespace)
 # The subjects.namespace field specifies where the ServiceAccount is located
 # This CANNOT be removed - it must match your deployment namespace
+kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
 metadata:
   name: pod-read-binding
-  # no metadata.namespace - kubectl -n sets it
 subjects:
   - kind: ServiceAccount
-    name: epp-sa
+    name: default
+    namespace: default  # UPDATE to match your deployment namespace
 roleRef:
-  apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: pod-read
+  apiGroup: rbac.authorization.k8s.io
