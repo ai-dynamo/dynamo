@@ -20,6 +20,7 @@ jobs:
       include_nightly_marks: true
       image_prefix: nightly
       enable_slack_notification: true
+      enable_coverage: true
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
