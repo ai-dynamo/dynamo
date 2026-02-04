@@ -84,7 +84,7 @@ class TRTLLMProcess:
         single_gpu: bool = False,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        enable_local_indexer: bool = True,
+        durable_kv_events: bool = False,
     ):
         """Initialize TRT-LLM workers with dynamo integration.
 
@@ -99,7 +99,7 @@ class TRTLLMProcess:
             single_gpu: If True, all workers share GPU 0
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            enable_local_indexer: If False, disable worker-local KV indexer to use JetStream mode. Defaults to True (NATS Core mode).
+            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
 
         Note: TRT-LLM doesn't support data parallelism like vLLM (dp_rank is always 0).
               Tensor parallelism (TP) is supported but creates 1 worker spanning multiple GPUs,
@@ -156,8 +156,8 @@ class TRTLLMProcess:
             if max_seq_len is not None:
                 command.extend(["--max-seq-len", str(max_seq_len)])
 
-            # Local indexer is enabled by default; use --durable-kv-events to use JetStream mode
-            if not enable_local_indexer:
+            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
+            if durable_kv_events:
                 command.append("--durable-kv-events")
 
             # Each TRT-LLM worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
@@ -401,13 +401,14 @@ def test_router_decisions_trtllm_multiple_workers(
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 @pytest.mark.parametrize(
-    "store_backend,use_nats_core,request_plane",
+    "store_backend,durable_kv_events,request_plane",
     [
-        ("etcd", False, "nats"),  # JetStream mode
-        # ("etcd", True, "tcp"),  # nats_core mode - disabled for now
-        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for TRT-LLM
+        ("etcd", True, "nats"),  # JetStream mode
+        # ("etcd", False, "tcp"),  # nats_core mode - disabled for now
+        # ("file", True, "nats"),  # File backend - TODO: investigate file backend support for TRT-LLM
     ],
     ids=["jetstream"],
+    indirect=["durable_kv_events", "request_plane"],
 )
 def test_trtllm_indexers_sync(
     request,
@@ -416,7 +417,7 @@ def test_trtllm_indexers_sync(
     file_storage_backend,
     set_ucx_tls_no_mm,
     store_backend,
-    use_nats_core,
+    durable_kv_events,
     request_plane,
 ):
     """
@@ -425,14 +426,14 @@ def test_trtllm_indexers_sync(
 
     Tests with configuration:
     - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - tcp_nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     nats_process, _etcd_process = runtime_services_dynamic_ports
 
     logger.info(
         f"Starting TRT-LLM indexers sync test: store_backend={store_backend}, "
-        f"use_nats_core={use_nats_core}, request_plane={request_plane}"
+        f"durable_kv_events={durable_kv_events}, request_plane={request_plane}"
     )
 
     N_TRTLLM_WORKERS = 2
@@ -447,14 +448,14 @@ def test_trtllm_indexers_sync(
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
             store_backend=store_backend,
-            enable_local_indexer=use_nats_core,
+            durable_kv_events=durable_kv_events,
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
         trtllm_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)
         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-        # When not using NATS Core (local indexer), we need JetStream mode for the router
+        # When using durable_kv_events=True, use JetStream mode for the router
         _test_router_indexers_sync(
             engine_workers=trtllm_workers,
             block_size=TRTLLM_BLOCK_SIZE,
@@ -462,9 +463,9 @@ def test_trtllm_indexers_sync(
             num_workers=N_TRTLLM_WORKERS,
             store_backend=store_backend,
             request_plane=request_plane,
-            test_nats_interruption=use_nats_core,
-            nats_server=nats_process if use_nats_core else None,
-            durable_kv_events=not use_nats_core,
+            test_nats_interruption=not durable_kv_events,
+            nats_server=nats_process if not durable_kv_events else None,
+            durable_kv_events=durable_kv_events,
         )
 
         logger.info("TRT-LLM indexers sync test completed successfully")

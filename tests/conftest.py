@@ -578,24 +578,24 @@ def request_plane(request):
 
 
 @pytest.fixture
-def use_nats_core(request):
+def durable_kv_events(request):
     """
-    Whether to use NATS Core mode (local indexer) instead of JetStream. Defaults to True.
+    Whether to use durable KV events via JetStream. Defaults to False (NATS Core mode).
 
-    When True (default):
+    When False (default):
     - NATS server starts without JetStream (-js flag omitted) for faster startup
-    - Tests use NATS Core with local indexer mode (workers default to local_indexer=True)
+    - Workers use local indexer mode (NATS Core / fire-and-forget events)
 
-    When False:
-    - NATS server starts with JetStream for KV event distribution
-    - Tests should use enable_local_indexer=False in mocker_args to disable local indexer
+    When True:
+    - NATS server starts with JetStream for durable KV event distribution
+    - Workers use --durable-kv-events flag to publish to JetStream
 
     To use JetStream mode:
-        @pytest.mark.parametrize("use_nats_core", [False], indirect=True)
+        @pytest.mark.parametrize("durable_kv_events", [True], indirect=True)
         def test_example(runtime_services_dynamic_ports):
             ...
     """
-    return getattr(request, "param", True)
+    return getattr(request, "param", False)
 
 
 @pytest.fixture()
@@ -624,7 +624,7 @@ def runtime_services(request, store_kv, request_plane):
 
 
 @pytest.fixture()
-def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_core):
+def runtime_services_dynamic_ports(request, store_kv, request_plane, durable_kv_events):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
     This fixture actually allocates dynamic ports by passing port=0 to the servers.
@@ -639,7 +639,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
     - If store_kv != "etcd", etcd is not started (returns None)
     - NATS is always started when etcd is used, because KV events require NATS
       regardless of the request_plane (tcp/nats only affects request transport)
-    - NATS Core mode (no JetStream) is the default; JetStream is enabled when use_nats_core=False
+    - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -647,10 +647,10 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
-    # When use_nats_core=True, disable JetStream for faster startup
+    # When durable_kv_events=False (default), disable JetStream for faster startup
     if store_kv == "etcd":
         with NatsServer(
-            request, port=0, disable_jetstream=use_nats_core
+            request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Save original env vars (may be set by session-scoped fixture)
@@ -674,7 +674,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
                     os.environ.pop("ETCD_ENDPOINTS", None)
     elif request_plane == "nats":
         with NatsServer(
-            request, port=0, disable_jetstream=use_nats_core
+            request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             orig_nats = os.environ.get("NATS_SERVER")
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
