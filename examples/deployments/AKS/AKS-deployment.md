@@ -145,7 +145,7 @@ spec:
 
 ## Running on AKS Spot VMs based GPU node pools
 
-When deploying Dynamo on AKS with GPU-enabled Spot VM node pools, AKS will automatically apply additional taints to those Spot nodes to prevent standard workloads from being scheduled on them by default.
+When deploying Dynamo on AKS with GPU-enabled [Spot VM](https://azure.microsoft.com/en-us/products/virtual-machines/spot) node pools, AKS will automatically apply additional taints to those Spot nodes to prevent standard workloads from being scheduled on them by default.
 
 Because of these taints, workloads (including the Dynamo CRD controller, Platform components, and any GPU workloads) must include corresponding tolerations in their Helm charts. Without these tolerations, Kubernetes will not schedule pods onto the Spot VM node pools, and GPU resources will remain unused.
 
