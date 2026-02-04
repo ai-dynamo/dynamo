@@ -163,10 +163,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    # TEMPORARY: Skip arm64 and CUDA 12 on flaky-tests branch
-    if: |
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true') &&
-      !(contains(github.head_ref, 'flaky-tests') && (matrix.platform.arch == 'arm64' || matrix.cuda_version.major_minor == '12.9'))
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     strategy:
       fail-fast: false
       matrix:
