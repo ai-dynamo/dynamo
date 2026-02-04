@@ -510,14 +510,29 @@ class ManagedDeployment:
         self._deployment_name = self.deployment_spec.name
 
     async def _init_kubernetes(self):
-        """Initialize kubernetes client"""
-        try:
-            # Try in-cluster config first (for pods with service accounts)
-            config.load_incluster_config()
-            self._in_cluster = True
-        except Exception:
-            # Fallback to kube config file (for local development)
-            await config.load_kube_config()
+        """Initialize kubernetes client.
+
+        Priority order:
+        1. KUBECONFIG environment variable (CI scenario with proper RBAC)
+        2. In-cluster config (for pods without explicit kubeconfig)
+        3. Default kubeconfig (~/.kube/config)
+        """
+        kubeconfig_path = os.environ.get("KUBECONFIG")
+
+        if kubeconfig_path and os.path.exists(kubeconfig_path):
+            # Explicit kubeconfig provided (CI scenario) - use it first
+            await config.load_kube_config(config_file=kubeconfig_path)
+            self._in_cluster = False
+        else:
+            try:
+                # Try in-cluster config (for pods without explicit kubeconfig)
+                config.load_incluster_config()
+                self._in_cluster = True
+            except Exception:
+                # Fallback to default kube config file (for local development)
+                await config.load_kube_config()
+                self._in_cluster = False
+
         k8s_client = client.ApiClient()
         self._custom_api = client.CustomObjectsApi(k8s_client)
         self._core_api = client.CoreV1Api(k8s_client)
