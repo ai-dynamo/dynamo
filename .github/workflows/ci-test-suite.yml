@@ -569,10 +569,10 @@ jobs:
         arch:
           - arch: amd64
             runner: prod-builder-amd-gpu-v1
-            timeout: 120
+            timeout: 180
           - arch: arm64
             runner: prod-builder-arm-v1
-            timeout: 120
+            timeout: 180
     steps:
       - uses: actions/checkout@v4
         with:

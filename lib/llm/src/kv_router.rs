@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "bench")]
+use std::time::Instant;
 
 use anyhow::Result;
 use derive_builder::Builder;
@@ -504,6 +506,9 @@ impl KvRouter {
         update_states: bool,
         lora_name: Option<String>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
+        #[cfg(feature = "bench")]
+        let start = Instant::now();
+
         // Validate that context_id is provided when update_states is true
         if update_states && context_id.is_none() {
             panic!("context_id must be provided if update_states is true");
@@ -512,7 +517,11 @@ impl KvRouter {
         let isl_tokens = tokens.len();
 
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        #[cfg(feature = "bench")]
+        let hash_elapsed = start.elapsed();
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+        #[cfg(feature = "bench")]
+        let find_matches_elapsed = start.elapsed();
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = self
@@ -531,6 +540,19 @@ impl KvRouter {
                 lora_name,
             )
             .await?;
+
+        #[cfg(feature = "bench")]
+        {
+            let total_elapsed = start.elapsed();
+            tracing::info!(
+                isl_tokens,
+                hash_us = hash_elapsed.as_micros() as u64,
+                find_matches_us = (find_matches_elapsed - hash_elapsed).as_micros() as u64,
+                schedule_us = (total_elapsed - find_matches_elapsed).as_micros() as u64,
+                total_us = total_elapsed.as_micros() as u64,
+                "find_best_match completed"
+            );
+        }
 
         // Note: Routing decision recording (for approximate mode) is now handled
         // by KvPushRouter::generate after select_worker returns.
