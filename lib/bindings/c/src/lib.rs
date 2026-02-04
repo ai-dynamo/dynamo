@@ -501,6 +501,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 (overlap_score_weight >= 0.0).then_some(overlap_score_weight),
                 (router_temperature >= 0.0).then_some(router_temperature),
                 Some(use_kv_events),
+                None, // use_jetstream (default to NATS Core / event plane mode)
                 Some(router_replica_sync),
                 None, // track_active_blocks
                 None, // track_output_blocks
