@@ -127,7 +127,7 @@ fi
 # --- CONFIGURATION ---
 NAMESPACE="buildkit"
 PORT="1234"
-MAX_POD_CHECK=3  # How many pod indices to probe (e.g., 0 to 3)
+MAX_POD_CHECK=10  # How many pod indices to probe (e.g., 0 to 3)
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
