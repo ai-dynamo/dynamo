@@ -78,8 +78,9 @@ class VllmProcessor:
             # This is not the type the source code declares.
             tokens = self.tokenizer.apply_chat_template(
                 conversation=request["messages"],
-                tools=request["tools"] if "tools" in request else None,
+                tools=request.get("tools", None),
                 tokenize=True,
+                add_generation_prompt=request.get("add_generation_prompt", True),
             )
         except TypeError:
             # tokenizer is an impl of TokenizerLike. This is the declared type.
@@ -91,8 +92,9 @@ class VllmProcessor:
             ]
             tokens = self.tokenizer.apply_chat_template(
                 messages=filtered_messages,
-                tools=request["tools"] if "tools" in request else None,
+                tools=request.get("tools", None),
                 tokenize=True,
+                add_generation_prompt=request.get("add_generation_prompt", True),
             )
 
         if "max_completion_tokens" in request:
@@ -107,6 +109,15 @@ class VllmProcessor:
             output_kind=RequestOutputKind.DELTA,
             max_tokens=max_tokens,
         )
+        # Only affects eos_token_id
+        sampling_params.update_from_generation_config(
+            self.input_processor.generation_config_fields, self.tokenizer.eos_token_id
+        )
+        # generation_config.json
+        for k, v in self.input_processor.generation_config_fields.items():
+            if hasattr(sampling_params, k):
+                setattr(sampling_params, k, v)
+        # User request
         for k, v in request.items():
             if hasattr(sampling_params, k):
                 setattr(sampling_params, k, v)
@@ -234,6 +245,7 @@ class VllmProcessor:
             vllm_out: OutputProcessorOutput = self.output_processor.process_outputs(
                 [vllm_response]
             )
+
             # vllm
             # RequestOutput: OutputProcessorOutput(request_outputs=[RequestOutput(request_id=9dbe240d8de78db3, prompt='What is the capital of Tuvalu?', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], encoder_prompt=None, encoder_prompt_token_ids=None, prompt_logprobs=None, outputs=[CompletionOutput(index=0, text=' The', token_ids=[576], cumulative_logprob=None, logprobs=None, finish_reason=None, stop_reason=None)], finished=False, metrics=RequestStateStats(num_generation_tokens=0, arrival_time=1769118902.2172132, queued_ts=0.0, scheduled_ts=0.0, first_token_ts=0.0, last_token_ts=0.0, first_token_latency=0.0, is_corrupted=False), lora_request=None, num_cached_tokens=0, multi_modal_placeholders={})], reqs_to_abort=[])
 
