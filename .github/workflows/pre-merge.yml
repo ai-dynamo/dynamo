@@ -117,6 +117,23 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Classify Critical Errors on Failure
+      if: failure()
+      env:
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        API_FORMAT: "openai"
+        API_BASE_URL: "https://inference-api.nvidia.com/v1"
+        ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
+        ENABLE_ERROR_CLASSIFICATION: "true"
+        ENABLE_GITHUB_ANNOTATIONS: "true"
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
+        OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
+      run: |
+        cd opensearch_upload
+        pip install -r requirements.txt
+        cd ..
+        python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
 
   rust-clippy:
     needs: changed-files
@@ -160,3 +177,20 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Classify Critical Errors on Failure
+      if: failure()
+      env:
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        API_FORMAT: "openai"
+        API_BASE_URL: "https://inference-api.nvidia.com/v1"
+        ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
+        ENABLE_ERROR_CLASSIFICATION: "true"
+        ENABLE_GITHUB_ANNOTATIONS: "true"
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
+        OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
+      run: |
+        cd opensearch_upload
+        pip install -r requirements.txt
+        cd ..
+        python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"

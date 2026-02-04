@@ -130,6 +130,23 @@ jobs:
         if: always()
         run: |
           docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
+      - name: Classify Critical Errors on Failure
+        if: failure()
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          API_FORMAT: "openai"
+          API_BASE_URL: "https://inference-api.nvidia.com/v1"
+          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
+          ENABLE_ERROR_CLASSIFICATION: "true"
+          ENABLE_GITHUB_ANNOTATIONS: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
+          OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
+        run: |
+          cd opensearch_upload
+          pip install -r requirements.txt
+          cd ..
+          python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
       - name: Archive test report
         uses: actions/upload-artifact@v4
         if: always()
