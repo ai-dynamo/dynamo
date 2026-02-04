@@ -1,0 +1,69 @@
+# Example: How to add workflow-level error classification to your workflows
+#
+# Add this job at the END of your workflow file (after all other jobs)
+# It will run after everything completes and classify all failures
+
+jobs:
+  # ... your existing jobs (operator, vllm, sglang, trtllm, etc.) ...
+
+  # Add this at the end:
+  classify-workflow-errors:
+    name: Classify Workflow Errors
+    runs-on: ubuntu-latest
+    # Always run, even if other jobs failed or were cancelled
+    if: always() && !cancelled()
+    # List ALL jobs that this should wait for
+    needs: [operator, vllm, sglang, trtllm, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, cleanup]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Classify All Workflow Errors
+        env:
+          # AI API Configuration
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          API_FORMAT: "openai"
+          API_BASE_URL: "https://inference-api.nvidia.com/v1"
+          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
+
+          # Feature flags
+          ENABLE_ERROR_CLASSIFICATION: "true"
+          ENABLE_GITHUB_ANNOTATIONS: "true"
+
+          # GitHub context (auto-provided)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # Optional: OpenSearch (for trend tracking)
+          ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
+          OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
+        run: |
+          # Install dependencies
+          sudo apt-get update && sudo apt-get install -y python3-venv || true
+          python3 -m venv /tmp/error-classification-venv
+          . /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
+
+          # Run workflow-level classification
+          python3 .github/workflows/classify_workflow_errors.py || echo "⚠️  Classification failed but continuing"
+
+# IMPORTANT NOTES:
+# ================
+# 1. Update the 'needs' list to include ALL jobs in your workflow
+# 2. This job will ALWAYS run (even if other jobs fail) due to if: always()
+# 3. Per-job classification (if: failure() steps) can be REMOVED since this handles everything
+# 4. The script fetches logs for ALL failed jobs and creates comprehensive annotations
+# 5. Results are uploaded to OpenSearch if configured
+
+# BENEFITS:
+# =========
+# ✅ Works reliably - fetches logs from completed jobs (no 404 errors)
+# ✅ Complete view - sees all failures across all jobs in one place
+# ✅ Better context - can correlate related failures
+# ✅ Single annotation set - cleaner PR experience
+# ✅ Cost efficient - classifies once at the end vs. per-job

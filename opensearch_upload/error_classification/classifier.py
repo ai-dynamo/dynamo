@@ -339,7 +339,7 @@ class ErrorClassifier:
         # Classify infrastructure and build errors in real-time
         source_type = error_context.source_type
 
-        if source_type in ["buildkit", "github_annotation", "infrastructure_error", "github_job_log"]:
+        if source_type in ["buildkit", "github_annotation", "infrastructure_error", "github_job_log", "step_failure"]:
             return True
 
         # For pytest errors, check if they're infrastructure issues
