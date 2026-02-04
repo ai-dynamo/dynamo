@@ -28,17 +28,19 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::kv_router::protocols::DpRank;
-use crate::mocker::evictor::LRUEvictor;
-use crate::mocker::kv_manager::KvManager;
-use crate::mocker::perf_model::PerfModel;
-use crate::mocker::protocols::{
-    DirectRequest, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost, WorkerType,
+use crate::evictor::LRUEvictor;
+use crate::kv_manager::KvManager;
+use crate::perf_model::PerfModel;
+use crate::protocols::{
+    DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost,
+    WorkerType,
 };
-use crate::mocker::running_mean::RunningMean;
-use crate::mocker::sequence::ActiveSequence;
+use crate::running_mean::RunningMean;
+use crate::sequence::ActiveSequence;
+use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -254,7 +256,7 @@ impl Scheduler {
         args: MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        component: Option<dynamo_runtime::component::Component>,
+        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
         // Assert speedup_ratio is non-negative (0 means infinite speedup)
@@ -279,12 +281,11 @@ impl Scheduler {
         tokio::spawn(async move {
             // Create state and kv_manager as local variables owned by this task
             let mut state = SchedulerState::new(args.max_num_batched_tokens);
-            let mut kv_manager = KvManager::new_with_publisher(
+            let mut kv_manager = KvManager::new_with_event_sink(
                 args.num_gpu_blocks,
                 args.block_size,
-                component,
+                kv_event_sink,
                 dp_rank,
-                args.enable_local_indexer,
             );
             let mut hit_rates = RunningMean::new(1000);
 
