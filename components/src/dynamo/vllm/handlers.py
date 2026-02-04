@@ -1290,12 +1290,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if self.use_vllm_tokenizer:
             # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
             async for chunk in self._generate_text_mode(request, context, request_id):
-                # Serialize to JSON string for Rust binding (reduces GIL contention)
                 yield json.dumps(chunk)
         else:
             # Token-in-token-out mode: internal protocol format
             async for chunk in self._generate_token_mode(request, context, request_id):
-                # Serialize to JSON string for Rust binding (reduces GIL contention)
                 yield json.dumps(chunk)
 
     async def _generate_token_mode(self, request, context, request_id):
@@ -1506,7 +1504,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Token-in-token-out mode: internal protocol format
         async for chunk in self._generate_token_mode(request, context, request_id):
-            # Serialize to JSON string for Rust binding (reduces GIL contention)
             yield json.dumps(chunk)
 
     async def _generate_token_mode(self, request, context, request_id):

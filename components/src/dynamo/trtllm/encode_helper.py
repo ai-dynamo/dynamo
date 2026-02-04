@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Union
@@ -238,7 +239,9 @@ class EncodeHelper:
             # Dictionary format: contains 'mm_embeddings' key plus auxiliary data
             encodings = loaded_data.get("mm_embeddings")
             if encodings is None:
-                yield {"error": "Dictionary embeddings missing 'mm_embeddings' key"}
+                yield json.dumps(
+                    {"error": "Dictionary embeddings missing 'mm_embeddings' key"}
+                )
                 return
             auxiliary_data = {
                 k: v for k, v in loaded_data.items() if k != "mm_embeddings"
@@ -258,7 +261,7 @@ class EncodeHelper:
                 "embeddings_dtype": str(encodings.dtype),
                 "auxiliary_data": EncodeHelper.serialize_tensor_dict(auxiliary_data),
             }
-            yield response
+            yield json.dumps(response)
 
             # Wait for prefill worker to complete the read
             logging.debug(
@@ -317,7 +320,7 @@ class EncodeHelper:
 
         if not encoder_outputs:
             logging.error("ENCODE WORKER: encoder_outputs is empty")
-            yield {"ep_disaggregated_params": None}
+            yield json.dumps({"ep_disaggregated_params": None})
             return
 
         ep_disaggregated_params = encoder_outputs[0].disaggregated_params
@@ -325,7 +328,7 @@ class EncodeHelper:
             logging.error(
                 "ENCODE WORKER: encoder_outputs[0].disaggregated_params is None"
             )
-            yield {"ep_disaggregated_params": None}
+            yield json.dumps({"ep_disaggregated_params": None})
             return
 
         if ep_disaggregated_params.multimodal_embedding_handles is None:
@@ -362,11 +365,13 @@ class EncodeHelper:
             len(processed_prompt) if processed_prompt is not None else None,
         )
 
-        yield {
-            "ep_disaggregated_params": params_dict,
-            "processed_prompt": processed_prompt,
-            "prompt_token_ids": prompt_token_ids,
-        }
+        yield json.dumps(
+            {
+                "ep_disaggregated_params": params_dict,
+                "processed_prompt": processed_prompt,
+                "prompt_token_ids": prompt_token_ids,
+            }
+        )
 
     @staticmethod
     async def process_encode_request(
@@ -396,7 +401,9 @@ class EncodeHelper:
             - Full EPD flow: ep_disaggregated_params + processed_prompt + prompt_token_ids
         """
         if multimodal_processor is None:
-            yield {"error": "No multimodal_processor configured on encode worker"}
+            yield json.dumps(
+                {"error": "No multimodal_processor configured on encode worker"}
+            )
             return
 
         # Extract messages and determine which flow to use
@@ -412,28 +419,38 @@ class EncodeHelper:
         # Flow 1: Embedding-path flow (pre-computed embeddings via NIXL)
         if embedding_paths:
             if connector is None:
-                yield {"error": "NIXL connector is required for embedding_paths encode"}
+                yield json.dumps(
+                    {"error": "NIXL connector is required for embedding_paths encode"}
+                )
                 return
             async for response in EncodeHelper._process_embedding_path_flow(
                 embedding_paths, multimodal_processor, connector
             ):
+                # response is already JSON string from _process_embedding_path_flow
                 yield response
 
         # Flow 2: Full EPD flow (image URLs via MultimodalEncoder)
         elif image_urls and text_prompt:
             if model_dir is None or model_type is None:
-                yield {
-                    "error": "model_dir and model_type are required for full EPD encode"
-                }
+                yield json.dumps(
+                    {
+                        "error": "model_dir and model_type are required for full EPD encode"
+                    }
+                )
                 return
             if engine is None:
-                yield {"error": "No engine configured on encode worker for full EPD"}
+                yield json.dumps(
+                    {"error": "No engine configured on encode worker for full EPD"}
+                )
                 return
             async for response in EncodeHelper._process_full_epd_flow(
                 text_prompt, image_urls, tokenizer, model_dir, model_type, engine
             ):
+                # response is already JSON string from _process_full_epd_flow
                 yield response
 
         # No valid multimodal content found
         else:
-            yield {"error": "No embedding_paths or image_urls found in request"}
+            yield json.dumps(
+                {"error": "No embedding_paths or image_urls found in request"}
+            )

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 from typing import Any, AsyncGenerator, Dict
 
@@ -106,12 +107,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Yield bootstrap_info for PrefillRouter - required for async generator contract
         # and Rust-side expects disaggregated_params in first output
-        yield {
-            "token_ids": [],
-            "text": None,
-            "finish_reason": None,
-            "disaggregated_params": bootstrap_info,
-        }
+        yield json.dumps(
+            {
+                "token_ids": [],
+                "text": None,
+                "finish_reason": None,
+                "disaggregated_params": bootstrap_info,
+            }
+        )
 
         input_param = self._get_input_param(inner_request)
 

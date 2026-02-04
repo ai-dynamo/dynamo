@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, AsyncGenerator, Dict
@@ -144,10 +145,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(decode, context):
-                    yield out
+                    yield json.dumps(out)
             else:
                 async for out in self._process_text_stream(decode, context):
-                    yield out
+                    yield json.dumps(out)
         else:
             # Extract image URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
@@ -181,10 +182,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
-                    yield out
+                    yield json.dumps(out)
             else:
                 async for out in self._process_text_stream(agg, context):
-                    yield out
+                    yield json.dumps(out)
 
     async def _process_token_stream(
         self,

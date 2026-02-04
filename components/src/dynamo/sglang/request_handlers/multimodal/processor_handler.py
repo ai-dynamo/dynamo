@@ -84,7 +84,7 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
             logger.debug(
                 f"Generated response type {type(response)}, content: {response}"
             )
-            yield response
+            yield json.dumps(response)
 
     async def _generate(
         self,

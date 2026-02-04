@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -700,7 +701,7 @@ class HandlerBase:
 
                     # If we are not done generating, but there are no outputs, return an error
                     if not res.outputs and not res.finished:
-                        yield {"finish_reason": "error", "token_ids": []}
+                        yield json.dumps({"finish_reason": "error", "token_ids": []})
                         break
 
                     output = res.outputs[0]
@@ -777,7 +778,7 @@ class HandlerBase:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
                     # Yield the chunk to the client and update the token count for the next iteration.
-                    yield out
+                    yield json.dumps(out)
                     num_output_tokens_so_far = next_total_toks
 
         # 1. Client cancellation - don't shutdown
@@ -790,10 +791,12 @@ class HandlerBase:
         except RequestError as e:
             error_msg = str(e)
             logging.warning(f"Request {request_id} error: {error_msg}")
-            yield {
-                "finish_reason": {"error": error_msg},
-                "token_ids": [],
-            }
+            yield json.dumps(
+                {
+                    "finish_reason": {"error": error_msg},
+                    "token_ids": [],
+                }
+            )
 
         # 3. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
@@ -806,10 +809,12 @@ class HandlerBase:
 
             # Try to send error to client before shutdown
             try:
-                yield {
-                    "finish_reason": {"error": error_msg},
-                    "token_ids": [],
-                }
+                yield json.dumps(
+                    {
+                        "finish_reason": {"error": error_msg},
+                        "token_ids": [],
+                    }
+                )
             except Exception:
                 pass  # Best effort
 
