@@ -120,7 +120,7 @@ mod tests {
                 index,
                 delta: ChatCompletionStreamResponseDelta {
                     role: Some(Role::Assistant),
-                    content: Some(content),
+                    content: Some(ChatCompletionMessageContent::Text(content)),
                     tool_calls: None,
                     function_call: None,
                     refusal: None,
@@ -163,7 +163,7 @@ mod tests {
                         index,
                         delta: ChatCompletionStreamResponseDelta {
                             role: Some(Role::Assistant),
-                            content: Some(content),
+                            content: Some(ChatCompletionMessageContent::Text(content)),
                             tool_calls: None,
                             function_call: None,
                             refusal: None,
@@ -254,9 +254,9 @@ mod tests {
                 .expect("Expected content in result");
 
             assert_eq!(
-                content, expected,
+                extract_text(content), expected,
                 "Content mismatch: expected '{}', got '{}'",
-                expected, content
+                expected, extract_text(content)
             );
         }
 
@@ -310,7 +310,7 @@ mod tests {
             {
                 assert!(
                     choice.delta.content.is_none()
-                        || choice.delta.content.as_ref().unwrap().is_empty(),
+                        || choice.delta.content.as_ref().is_none_or(|c| match c { dynamo_async_openai::types::ChatCompletionMessageContent::Text(t) => t.is_empty(), _ => false }),
                     "Expected no content but got: {:?}",
                     choice.delta.content
                 );
@@ -335,7 +335,7 @@ mod tests {
                         .and_then(|d| d.choices.first())
                         .and_then(|c| c.delta.content.as_ref())
                 })
-                .cloned()
+                .map(extract_text)
                 .collect::<Vec<_>>()
                 .join("")
         }
@@ -373,7 +373,7 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
-                .map(|content| !content.is_empty())
+                .map(|content| !extract_text(content).is_empty())
                 .unwrap_or(false)
         }
     }
@@ -414,7 +414,8 @@ mod tests {
             results[0].data.as_ref().unwrap().choices[0]
                 .delta
                 .content
-                .as_deref(),
+                .as_ref()
+                .map(extract_text),
             Some("Hello ")
         );
 
@@ -422,9 +423,7 @@ mod tests {
         let unjailed_content = &results[1].data.as_ref().unwrap().choices[0].delta.content;
         assert!(unjailed_content.is_some());
         assert!(
-            unjailed_content
-                .as_ref()
-                .unwrap()
+            extract_text(unjailed_content.as_ref().unwrap())
                 .contains("<jail>This is jailed content</jail>")
         );
 
@@ -433,7 +432,8 @@ mod tests {
             results[2].data.as_ref().unwrap().choices[0]
                 .delta
                 .content
-                .as_deref(),
+                .as_ref()
+                .map(extract_text),
             Some(" World")
         );
     }
@@ -506,7 +506,8 @@ mod tests {
             results[0].data.as_ref().unwrap().choices[0]
                 .delta
                 .content
-                .as_deref(),
+                .as_ref()
+                .map(extract_text),
             Some("Normal text ")
         );
 
@@ -516,7 +517,7 @@ mod tests {
             .content
             .as_ref()
             .expect("Expected accumulated jailed content");
-        assert!(jailed.contains("<jail><TOOLCALL>Jailed content</jail>"));
+        assert!(extract_text(jailed).contains("<jail><TOOLCALL>Jailed content</jail>"));
     }
 
     #[tokio::test]
@@ -1684,7 +1685,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            content, "Hello, world!",
+            extract_text(content), "Hello, world!",
             "Content chunk should have 'Hello, world!'"
         );
 
@@ -1924,7 +1925,7 @@ mod tests {
             for choice in data.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
-                        !test_utils::extract_text(content).contains("<｜tool▁calls▁end｜>"),
+                        !test_utils::extract_text(&content).contains("<｜tool▁calls▁end｜>"),
                         "Should not contain deepseek special tokens in content"
                     );
                 }
@@ -1998,7 +1999,7 @@ mod tests {
             for choice in data.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
-                        !test_utils::extract_text(content).contains("<｜tool▁calls▁end｜>"),
+                        !test_utils::extract_text(&content).contains("<｜tool▁calls▁end｜>"),
                         "Should not contain deepseek special tokens in content"
                     );
                 }
@@ -2335,6 +2336,7 @@ mod parallel_jail_tests {
     use futures::StreamExt;
     use futures::stream;
     use serde_json::json;
+    use dynamo_async_openai::types::ChatCompletionMessageContent;
 
     /// Helper function to create a mock response chunk with multiple choices
     fn create_multi_choice_response_chunk(
@@ -2349,7 +2351,7 @@ mod parallel_jail_tests {
                     index: i as u32,
                     delta: ChatCompletionStreamResponseDelta {
                         role: Some(Role::Assistant),
-                        content: Some(content),
+                        content: Some(ChatCompletionMessageContent::Text(content)),
                         tool_calls: None,
                         function_call: None,
                         refusal: None,

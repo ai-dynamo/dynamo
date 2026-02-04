@@ -11,8 +11,9 @@ use dynamo_llm::perf::{RecordedStream, TimestampedResponse};
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
 use dynamo_async_openai::types::{
-    ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
-    ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
+    ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
+    ChatCompletionStreamResponseDelta, ChatCompletionTokenLogprob, FinishReason, Role,
+    TopLogprobs,
 };
 
 // Type aliases to simplify complex test data structures
@@ -380,7 +381,7 @@ fn create_response_with_linear_probs(
     let choice = ChatChoiceStream {
         index: 0,
         delta: ChatCompletionStreamResponseDelta {
-            content: Some(_content.to_string()),
+            content: Some(ChatCompletionMessageContent::Text(_content.to_string())),
             #[expect(deprecated)]
             function_call: None,
             tool_calls: None,
@@ -460,7 +461,7 @@ fn create_multi_choice_response(
             ChatChoiceStream {
                 index: choice_idx as u32,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some("test".to_string()),
+                    content: Some(ChatCompletionMessageContent::Text("test".to_string())),
                     #[expect(deprecated)]
                     function_call: None,
                     tool_calls: None,
