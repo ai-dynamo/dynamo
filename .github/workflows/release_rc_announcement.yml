@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Requires GitHub variables:
+#   ANNOUNCE_RC: "true" or "false"
+#   RELEASE_VERSIONS: Comma-separated versions, e.g., "0.7.0,0.8.0"
+
 name: Release RC Announcement
 
 on:
@@ -21,25 +25,22 @@ jobs:
   announce-rc:
     name: Announce RC to Slack
     runs-on: prod-builder-amd-v1
+    if: vars.ANNOUNCE_RC == 'true'
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Read release variables
-        id: vars
-        uses: ./.github/actions/read-release-vars
-
       - name: Send Slack announcement
-        if: steps.vars.outputs.announce_rc == 'true'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
-          VERSIONS_FILE: ${{ steps.vars.outputs.release_versions_file }}
+          SLACK_GROUP_ID: ${{ secrets.RELEASE_SLACK_GROUP_ID }}
+          RELEASE_VERSIONS: ${{ vars.RELEASE_VERSIONS }}
         run: |
           set -euo pipefail
           [ -n "${SLACK_WEBHOOK_URL:-}" ] || { echo "Error: RELEASE_WEBHOOK_URL not configured"; exit 1; }
+          [ -n "${RELEASE_VERSIONS:-}" ] || { echo "Error: RELEASE_VERSIONS not configured"; exit 1; }
 
-          for VERSION in $(jq -r '.[]' "$VERSIONS_FILE"); do
-            MSG="Next RC for dynamo ${VERSION} will be started at 3 pm PST today. Ensure the CPs are mergeable and updated in release canvas for QA verification."
+          IFS=',' read -ra VERSIONS <<< "$RELEASE_VERSIONS"
+          for VERSION in "${VERSIONS[@]}"; do
+            VERSION=$(echo "$VERSION" | xargs)  # trim whitespace
+            MSG="Next RC for dynamo ${VERSION} will be started at 3 pm PST today. Ensure the CPs are mergeable and updated in release canvas for QA verification. cc: <!subteam^${SLACK_GROUP_ID}>"
             if curl -sSf -X POST -H "Content-Type: application/json" \
               -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$SLACK_WEBHOOK_URL" 2>/dev/null; then
               echo "Sent announcement for ${VERSION}"
