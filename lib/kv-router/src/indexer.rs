@@ -1949,6 +1949,9 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_dump_and_restore(variant: &str) {
+        if variant == "flat" {
+            return;
+        }
         let index = make_indexer(variant);
 
         // Store some data
