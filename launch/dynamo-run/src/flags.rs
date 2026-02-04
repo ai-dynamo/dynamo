@@ -184,7 +184,7 @@ impl Flags {
                 self.kv_overlap_score_weight,
                 self.router_temperature,
                 self.use_kv_events,
-                None, // use_jetstream (defaults to false, using NATS Core / event plane mode)
+                None, // durable_kv_events (defaults to false, using NATS Core / event plane mode)
                 self.router_replica_sync,
                 self.router_track_active_blocks,
                 None, // track_output_blocks

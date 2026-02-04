@@ -46,7 +46,7 @@ The main KV-aware routing arguments:
 >[!Note]
 > **State persistence** depends on the event transport mode:
 > - **NATS Core / Event Plane mode** (default): State persists on workers—router rebuilds state by querying workers on startup. This is the default when workers have `local_indexer` enabled (which is the default). Works with both NATS Core and ZMQ event planes.
-> - **JetStream mode** (`--use-jetstream` on frontend): State persists across router restarts via JetStream and NATS object store snapshots. Use `--disable-local-indexer` on workers if you need JetStream without the `--use-jetstream` flag.
+> - **JetStream mode** (`--durable-kv-events` on frontend): State persists across router restarts via JetStream and NATS object store snapshots. Use `--disable-local-indexer` on workers if you need JetStream without the `--durable-kv-events` flag.
 > - **No KV events** (`--no-kv-events`): State persistence is not supported.
 >
 > **Request plane is independent of KV event transport.**
@@ -173,7 +173,7 @@ KV events are sent to a persistent NATS JetStream. Each KV router/indexer replic
 
 - **Best for**: Production deployments requiring durability and multi-replica router consistency
 - **Tradeoffs**: Requires JetStream setup; slightly higher latency due to persistence guarantees
-- **Enable with**: `--use-jetstream` flag on frontend, or `--disable-local-indexer` on workers
+- **Enable with**: `--durable-kv-events` flag on frontend, or `--disable-local-indexer` on workers
 
 ```mermaid
 graph TD

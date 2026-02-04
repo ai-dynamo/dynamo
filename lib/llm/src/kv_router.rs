@@ -139,11 +139,11 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
-    /// Force JetStream mode for KV events even when all workers have local indexer enabled.
+    /// Enable durable KV events using NATS JetStream instead of the default event plane.
     /// When false (default), the router uses the event-plane subscriber and requires
     /// workers to have local_indexer enabled for gap recovery.
-    /// When true, always uses JetStream for durability and multi-replica consistency.
-    pub use_jetstream: bool,
+    /// When true, uses JetStream for durability and multi-replica consistency.
+    pub durable_kv_events: bool,
 
     pub router_replica_sync: bool,
 
@@ -182,7 +182,7 @@ impl Default for KvRouterConfig {
             overlap_score_weight: 1.0,
             router_temperature: 0.0,
             use_kv_events: true,
-            use_jetstream: false, // default to NATS Core (local indexer mode)
+            durable_kv_events: false, // default to NATS Core (local indexer mode)
             router_replica_sync: false,
             router_track_active_blocks: true,
             router_track_output_blocks: false,
@@ -204,7 +204,7 @@ impl KvRouterConfig {
         overlap_score_weight: Option<f64>,
         temperature: Option<f64>,
         use_kv_events: Option<bool>,
-        use_jetstream: Option<bool>,
+        durable_kv_events: Option<bool>,
         replica_sync: Option<bool>,
         track_active_blocks: Option<bool>,
         track_output_blocks: Option<bool>,
@@ -220,7 +220,7 @@ impl KvRouterConfig {
             overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
             router_temperature: temperature.unwrap_or(default.router_temperature),
             use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
-            use_jetstream: use_jetstream.unwrap_or(default.use_jetstream),
+            durable_kv_events: durable_kv_events.unwrap_or(default.durable_kv_events),
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             router_track_active_blocks: track_active_blocks
                 .unwrap_or(default.router_track_active_blocks),
@@ -415,16 +415,16 @@ impl KvRouter {
 
             let transport_kind = EventTransportKind::from_env_or_default();
 
-            // Start subscriber - use_jetstream flag determines the mode:
-            // - use_jetstream=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
-            // - use_jetstream=true: Use JetStream for durability and multi-replica consistency
-            if kv_router_config.use_jetstream {
+            // Start subscriber - durable_kv_events flag determines the mode:
+            // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
+            // - durable_kv_events=true: Use JetStream for durability and multi-replica consistency
+            if kv_router_config.durable_kv_events {
                 if transport_kind == EventTransportKind::Zmq {
                     tracing::warn!(
-                        "--use-jetstream requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
+                        "--durable-kv-events requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
                     );
                 }
-                tracing::info!("Using JetStream subscription (--use-jetstream enabled)");
+                tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
 
                 // Convert router_id to string for NATS consumer naming
                 let consumer_id = router_id.to_string();

@@ -622,7 +622,7 @@ def test_indexers_sync(
             request_plane=request_plane,
             test_nats_interruption=use_nats_core,
             nats_server=nats_process if use_nats_core else None,
-            use_jetstream=not use_nats_core,
+            durable_kv_events=not use_nats_core,
         )
 
         logger.info("Indexers sync test completed successfully")
