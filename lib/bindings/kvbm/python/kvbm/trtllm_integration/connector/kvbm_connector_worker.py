@@ -178,6 +178,10 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
                 "For NCCL replicated mode, ensure MPI is initialized."
             )
 
+        # Store NCCL config for use in bind_connector_meta
+        self._use_nccl_replicated = nccl_comm_ptr is not None
+        self._mpi_world_size = nccl_world_size if nccl_world_size else 1
+        
         self._connector = RustKvConnectorWorker(
             self.drt,
             str(self.rank),
@@ -241,9 +245,23 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         before the model execution. The metadata will be used for runtime
         KV cache loading and saving.
 
+        In TP>1 mode, TRT-LLM only provides metadata to Rank 0. We use MPI
+        broadcast to distribute the metadata to all ranks.
+
         Args:
             metadata (bytes): the connector metadata.
         """
+        # In TP mode, TRT-LLM only sends valid metadata to Rank 0.
+        # Non-rank-0 workers receive empty/invalid metadata.
+        # We use MPI broadcast to distribute the correct metadata to all ranks.
+        if self._use_nccl_replicated and self._mpi_world_size > 1:
+            from mpi4py import MPI
+            comm = MPI.COMM_WORLD
+            
+            # Only rank 0 has valid metadata - broadcast to all
+            # Note: This is a blocking collective operation, all ranks must participate
+            metadata = comm.bcast(metadata, root=0)
+        
         super().bind_connector_meta(metadata)
         self._connector.bind_connector_meta(metadata)
 
