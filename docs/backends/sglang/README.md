@@ -39,7 +39,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**KV-Aware Routing**](../../router/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/sla_planner.md) | ✅ |  |
 | [**Multimodal Support**](../../multimodal/sglang.md) | ✅ |  |
-| [**KVBM**](../../kvbm/kvbm_architecture.md) | ❌ | Planned |
+| [**KVBM**](../../kvbm/README.md) | ❌ | Planned |
 
 
 ## Dynamo SGLang Integration
