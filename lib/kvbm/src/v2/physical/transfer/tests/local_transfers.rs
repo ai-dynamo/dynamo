@@ -893,3 +893,181 @@ async fn test_partial_layer_transfer_uses_layer_wise() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// Transfer Coverage Gap Tests
+// ============================================================================
+
+/// Test that transferring layer 0 and layer 1 independently produces the same
+/// result as a full-block transfer.
+///
+/// `test_partial_layer_transfer_uses_layer_wise` only transfers layer 0. This test
+/// verifies that layer 0 + layer 1 transferred independently compose to the same
+/// result as transferring all layers at once.
+#[rstest]
+#[case(LayoutKind::FC, LayoutKind::FC)]
+#[case(LayoutKind::FC, LayoutKind::LW)]
+#[case(LayoutKind::LW, LayoutKind::FC)]
+#[case(LayoutKind::LW, LayoutKind::LW)]
+#[tokio::test]
+async fn test_layer_composition_equals_full_block(
+    #[case] src_kind: LayoutKind,
+    #[case] dst_kind: LayoutKind,
+) -> Result<()> {
+    let agent = create_test_agent("test_layer_composition");
+
+    let src = create_layout(
+        agent.clone(),
+        LayoutSpec::new(src_kind, StorageKind::Pinned),
+        4,
+    );
+    let dst_full = create_layout(
+        agent.clone(),
+        LayoutSpec::new(dst_kind, StorageKind::Pinned),
+        4,
+    );
+    let dst_layered = create_layout(
+        agent.clone(),
+        LayoutSpec::new(dst_kind, StorageKind::Pinned),
+        4,
+    );
+
+    let src_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    // Fill source blocks with sequential pattern (all layers)
+    fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+
+    let ctx = create_transfer_context(agent, None)?;
+
+    // Full-block transfer: src[0,1] → dst_full[2,3]
+    let notification = execute_transfer(
+        &src,
+        &dst_full,
+        &src_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // Layer-wise transfers: src[0,1] → dst_layered[2,3] layer by layer
+    let options_layer0 = TransferOptionsInternal::builder()
+        .layer_range(0..1)
+        .build()?;
+    let notification = execute_transfer(
+        &src,
+        &dst_layered,
+        &src_blocks,
+        &dst_blocks,
+        options_layer0,
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    let options_layer1 = TransferOptionsInternal::builder()
+        .layer_range(1..2)
+        .build()?;
+    let notification = execute_transfer(
+        &src,
+        &dst_layered,
+        &src_blocks,
+        &dst_blocks,
+        options_layer1,
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // Compute full-block checksums on both destinations
+    let checksums_full = compute_block_checksums(&dst_full, &dst_blocks)?;
+    let checksums_layered = compute_block_checksums(&dst_layered, &dst_blocks)?;
+
+    // Layer-wise composition must equal full-block transfer
+    for &block_id in &dst_blocks {
+        assert_eq!(
+            checksums_full[&block_id], checksums_layered[&block_id],
+            "Block {}: full-block checksum ({}) != layer-composed checksum ({})",
+            block_id, checksums_full[&block_id], checksums_layered[&block_id],
+        );
+    }
+
+    Ok(())
+}
+
+/// Test that FC↔LW CUDA transfers through Pinned↔Device correctly use the
+/// vectorized path and preserve data integrity through a roundtrip.
+///
+/// Existing tests cover FC↔LW via memcpy (System/Pinned) and via `test_p2p`.
+/// This test explicitly asserts that CUDA FC↔LW transfers go through the
+/// vectorized path (not whole-block) and verifies roundtrip integrity.
+#[rstest]
+#[case(LayoutKind::FC, LayoutKind::LW)]
+#[case(LayoutKind::LW, LayoutKind::FC)]
+#[tokio::test]
+async fn test_cuda_fc_lw_roundtrip_uses_vectorized(
+    #[case] host_kind: LayoutKind,
+    #[case] device_kind: LayoutKind,
+) -> Result<()> {
+    if dynamo_kvbm_kernels::is_using_stubs() {
+        eprintln!(
+            "Skipping test '{}': stub kernels in use (no real CUDA)",
+            module_path!()
+        );
+        return Ok(());
+    }
+
+    let agent = build_agent_for_kinds(StorageKind::Pinned, StorageKind::Device(0))?;
+
+    let host = create_layout(
+        agent.clone(),
+        LayoutSpec::new(host_kind, StorageKind::Pinned),
+        4,
+    );
+    let device = create_layout(
+        agent.clone(),
+        LayoutSpec::new(device_kind, StorageKind::Device(0)),
+        4,
+    );
+
+    // Confirm vectorized path will be used (not whole-block)
+    assert!(
+        !can_use_whole_block_transfer(&host, &device, None),
+        "FC↔LW across Pinned↔Device should use vectorized path, not whole-block"
+    );
+
+    let src_blocks = vec![0, 1];
+    let device_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    // Fill host source blocks
+    let checksums = fill_and_checksum(&host, &src_blocks, FillPattern::Sequential)?;
+
+    let ctx = create_transfer_context(agent, None)?;
+
+    // H2D: host[0,1] → device[0,1]
+    let notification = execute_transfer(
+        &host,
+        &device,
+        &src_blocks,
+        &device_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // D2H: device[0,1] → host[2,3]
+    let notification = execute_transfer(
+        &device,
+        &host,
+        &device_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    // Verify roundtrip: host[0,1] == host[2,3]
+    verify_checksums_by_position(&checksums, &src_blocks, &host, &dst_blocks)?;
+
+    Ok(())
+}
