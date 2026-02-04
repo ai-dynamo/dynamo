@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Request queues for the scheduler.
@@ -261,10 +261,7 @@ impl PausedRequests {
 
     /// Get the number of blocks lent from a request.
     pub fn num_lent_blocks(&self, request_id: &str) -> usize {
-        self.lent_blocks
-            .get(request_id)
-            .map(|v| v.len())
-            .unwrap_or(0)
+        self.lent_blocks.get(request_id).map(|v| v.len()).unwrap_or(0)
     }
 
     /// Remove a request from the paused collection (for eviction).
