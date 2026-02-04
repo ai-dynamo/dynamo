@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "bench")]
+use std::time::Instant;
 
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
@@ -101,6 +103,7 @@ impl KvScheduler {
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_id: u64,
+        worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -119,6 +122,7 @@ impl KvScheduler {
                 initial_workers,
                 replica_sync,
                 router_id,
+                worker_type,
             )
             .await
             .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
@@ -286,6 +290,9 @@ impl KvScheduler {
         update_states: bool,
         lora_name: Option<String>,
     ) -> Result<WorkerWithDpRank, KvSchedulerError> {
+        #[cfg(feature = "bench")]
+        let start = Instant::now();
+
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             maybe_request_id,
@@ -304,9 +311,23 @@ impl KvScheduler {
             .send(request)
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+
+        #[cfg(feature = "bench")]
+        let send_elapsed = start.elapsed();
+
         let response = resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+
+        #[cfg(feature = "bench")]
+        let total_elapsed = start.elapsed();
+        #[cfg(feature = "bench")]
+        tracing::info!(
+            isl_tokens,
+            send_us = send_elapsed.as_micros() as u64,
+            total_us = total_elapsed.as_micros() as u64,
+            "scheduler.schedule completed"
+        );
 
         Ok(response.best_worker)
     }
@@ -343,6 +364,12 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
+    }
+
+    /// Get the worker type for this scheduler ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.slots.worker_type()
     }
 
     pub async fn add_output_block(

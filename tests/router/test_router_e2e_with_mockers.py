@@ -209,7 +209,7 @@ class MockerProcess:
             health_check_ports=[],
             health_check_urls=[],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         logger.info(
             f"Created mocker process with {num_mockers} worker(s), endpoint: {self.endpoint}"
@@ -295,7 +295,7 @@ class DisaggMockerProcess:
             health_check_ports=[],
             health_check_urls=[],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         logger.info(
             f"Created {worker_type} mocker process with {num_mockers} worker(s), "

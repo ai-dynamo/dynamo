@@ -354,6 +354,7 @@ impl ModelManager {
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        worker_type: &'static str,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let endpoint_id = endpoint.id();
 
@@ -403,6 +404,7 @@ impl ModelManager {
             Some(selector),
             kv_router_config,
             instance_id,
+            worker_type,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
@@ -536,6 +538,11 @@ impl ModelManager {
             monitor.set_load_threshold_config(cfg);
         }
         Some(monitor.load_threshold_config())
+    }
+
+    /// Gets an existing worker monitor for a model, if one exists.
+    pub fn get_worker_monitor(&self, model: &str) -> Option<KvWorkerMonitor> {
+        self.worker_monitors.get(model).map(|m| m.clone())
     }
 
     /// Gets or creates a worker monitor for a model. Updates thresholds if monitor exists.

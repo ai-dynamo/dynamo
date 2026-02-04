@@ -52,7 +52,11 @@ from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .health_check import (
+    VllmHealthCheckPayload,
+    VllmOmniHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
@@ -261,6 +265,9 @@ async def worker():
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
         logger.debug("init_multimodal_worker completed")
+    elif config.omni:
+        await init_omni(runtime, config, shutdown_event)
+        logger.debug("init_omni completed")
     elif config.is_prefill_worker:
         await init_prefill(
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
@@ -1221,6 +1228,80 @@ async def init_multimodal_worker(
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        handler.cleanup()
+
+
+async def init_omni(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
+    """
+    Initialize Omni worker for text-to-text generation using vLLM-Omni orchestrator.
+
+    Uses vLLM-Omni's Omni class for single-stage text generation pipeline.
+    For now, supports text-to-text only (no multimodal).
+    """
+    # Lazy import to avoid loading vllm-omni unless explicitly needed
+    from dynamo.vllm.omni import OmniHandler
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Load default sampling params from model config (same as other workers)
+    default_sampling_params = (
+        config.engine_args.create_model_config().get_diff_sampling_param()
+    )
+    logger.info(f"Loaded default sampling params: {default_sampling_params}")
+
+    # Initialize OmniHandler with Omni orchestrator
+    handler = OmniHandler(
+        runtime=runtime,
+        component=component,
+        config=config,
+        default_sampling_params=default_sampling_params,
+        shutdown_event=shutdown_event,
+    )
+
+    logger.info(f"Omni worker initialized for model: {config.model}")
+
+    # Set up metrics collection for vLLM and LMCache metrics
+    setup_metrics_collection(config, generate_endpoint, logger)
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
+    # TODO: extend for multi-stage pipelines
+    # Register as Chat endpoint for text-to-text generation
+    # Use Tokens input since we're doing token-based processing
+    await register_llm(
+        ModelInput.Tokens,
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info("Starting to serve Omni worker endpoint...")
+
+    # Create health check payload (extracts BOS token from AsyncOmni)
+    health_check_payload = (
+        await VllmOmniHealthCheckPayload.create(handler.engine_client)
+    ).to_dict()
+
+    try:
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", config.served_model_name or config.model)],
+            health_check_payload=health_check_payload,
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve Omni endpoint: {e}")
+        raise
+    finally:
+        logger.debug("Cleaning up Omni worker")
         handler.cleanup()
 
 

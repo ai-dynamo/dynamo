@@ -991,7 +991,11 @@ impl KvRecorder {
 }
 
 /// Helper function to create a KV router from an endpoint using the ModelManager
-/// to ensure proper etcd registration
+/// to ensure proper etcd registration.
+/// Infers worker type using endpoint naming and router config:
+/// - If endpoint name/component contains "prefill", treat as prefill
+/// - If router_track_active_blocks is disabled, treat as prefill
+/// - Otherwise, default to decode
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
@@ -999,8 +1003,28 @@ async fn create_kv_router_from_endpoint(
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
+    let endpoint_id = endpoint.inner.id();
+    let namespace = endpoint_id.namespace.to_lowercase();
+    let component = endpoint_id.component.to_lowercase();
+    let name = endpoint_id.name.to_lowercase();
+    let endpoint_is_prefill =
+        namespace.contains("prefill") || component.contains("prefill") || name.contains("prefill");
+    let track_active_blocks = kv_router_config
+        .as_ref()
+        .map(|cfg| cfg.router_track_active_blocks)
+        .unwrap_or(true);
+    let worker_type = if endpoint_is_prefill || !track_active_blocks {
+        llm_rs::discovery::WORKER_TYPE_PREFILL
+    } else {
+        llm_rs::discovery::WORKER_TYPE_DECODE
+    };
     let kv_router = model_manager
-        .kv_chooser_for(&endpoint.inner, block_size as u32, kv_router_config)
+        .kv_chooser_for(
+            &endpoint.inner,
+            block_size as u32,
+            kv_router_config,
+            worker_type,
+        )
         .await
         .map_err(to_pyerr)?;
 
@@ -1096,7 +1120,17 @@ impl KvPushRouter {
 
 #[pymethods]
 impl KvPushRouter {
+    /// Create a new KvPushRouter for KV-aware routing to workers.
+    ///
+    /// # Arguments
+    /// * `endpoint` - The endpoint to route requests to
+    /// * `block_size` - KV cache block size for routing decisions
+    /// * `kv_router_config` - Configuration for the KV router
+    ///
+    /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
+    /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
