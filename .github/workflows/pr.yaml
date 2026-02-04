@@ -65,6 +65,54 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
+  # TEMPORARY: Flaky test detection for testing
+  flaky-test-detection:
+    name: Flaky Test Detection
+    runs-on: prod-builder-amd-v1
+    timeout-minutes: 15
+    if: always() && contains(github.head_ref, 'flaky-tests')
+    needs: [vllm, sglang, trtllm]
+    permissions:
+      contents: read
+      actions: read
+    env:
+      OPENSEARCH_ENDPOINT: https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*/_search
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+      SLACK_OPS_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
+      FLAKY_THRESHOLD: "0.80"
+      LOOKBACK_DAYS: "7"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: test-results/
+          pattern: test-results-*
+
+      - name: Install Python dependencies
+        run: pip install requests
+
+      - name: Detect flaky tests
+        id: detect_flaky
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+        run: python3 .github/workflows/detect_flaky_tests.py
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ steps.detect_flaky.outcome }}" == "success" ]; then
+            echo "✅ Flaky test detection completed successfully"
+          else
+            echo "⚠️ Flaky test detection encountered errors, check logs"
+          fi
+
   backend-status-check:
     runs-on: ubuntu-latest
     needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
