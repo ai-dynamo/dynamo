@@ -92,6 +92,20 @@ jobs:
       push_image: false
     secrets: inherit
 
+  vllm-sccache-cu12:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-disribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      no_cache: true
+      run_tests: false
+      copy_to_acr: false
+      push_image: false
+    secrets: inherit
+
 
 
   # backend-status-check:
