@@ -26,6 +26,7 @@ from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -679,6 +680,19 @@ class HandlerBase:
         # Build trace headers for distributed tracing
         trace_headers = build_trace_headers(context)
 
+        # Extract dp_rank from request for attention DP scheduling
+        # This allows dynamo's router to control which DP rank processes the request
+        dp_rank = request.get("dp_rank")
+        scheduling_params = None
+        if dp_rank is not None:
+            scheduling_params = SchedulingParams(
+                attention_dp_rank=dp_rank,
+                attention_dp_relax=False,  # Strict routing - use the rank dynamo router selected
+            )
+            logging.debug(
+                f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
+            )
+
         try:
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
@@ -687,6 +701,7 @@ class HandlerBase:
                 disaggregated_params=disaggregated_params,
                 streaming=streaming,
                 trace_headers=trace_headers,
+                scheduling_params=scheduling_params,
             )
 
             # Monitor for cancellation triggers and cancel by calling generation_result.abort()
