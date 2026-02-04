@@ -72,11 +72,44 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
         bootstrap_data = None
 
     # Broadcast bootstrap data to all ranks
+    logger.info(f"KVBM: Rank {rank} entering bcast (data_len={len(bootstrap_data) if bootstrap_data else 0})")
     bootstrap_data = comm.bcast(bootstrap_data, root=0)
+    logger.info(f"KVBM: Rank {rank} received bootstrap data (len={len(bootstrap_data)})")
 
     # Non-rank-0 deserializes the data
     if rank != 0:
         bootstrap = NcclBootstrap.deserialize(bootstrap_data)
+    
+    logger.info(f"KVBM: Rank {rank} bootstrap world_size={bootstrap.world_size()}")
+
+    # In TRT-LLM TP mode with MPI, all ranks see all GPUs (device_count=4)
+    # but default to device 0. We must set each rank to its corresponding GPU.
+    # NCCL requires each rank to be on a DIFFERENT device for multi-GPU comm.
+    device_count = torch.cuda.device_count()
+    if device_count > 1:
+        # Multi-GPU: each rank uses its own GPU
+        target_device = rank % device_count
+        torch.cuda.set_device(target_device)
+        logger.info(
+            f"KVBM: Rank {rank} set to CUDA device {target_device} "
+            f"(device_count={device_count})"
+        )
+    else:
+        # Single GPU per process (CUDA_VISIBLE_DEVICES restricts view)
+        target_device = 0
+        torch.cuda.set_device(target_device)
+        logger.info(
+            f"KVBM: Rank {rank} on CUDA device {target_device} "
+            f"(device_count={device_count})"
+        )
+    
+    torch.cuda.synchronize()  # Ensure device is properly initialized
+
+    # Synchronize all ranks before NCCL initialization
+    # This ensures all processes are ready before the collective call
+    logger.info(f"KVBM: Rank {rank} waiting at MPI barrier before ncclCommInitRank")
+    comm.Barrier()
+    logger.info(f"KVBM: Rank {rank} passed barrier, calling ncclCommInitRank")
 
     # All ranks collectively initialize (must be called together)
     # This is a blocking collective operation
@@ -115,7 +148,43 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         mappings = self._llm_args.parallel_config.to_mapping()
         self.rank = mappings.rank
 
-        self._connector = RustKvConnectorWorker(self.drt, str(self.rank))
+        # Always attempt NCCL replicated mode for MLA support
+        nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
+
+        logger.info("Attempting KVBM NCCL replicated mode for MLA support")
+        nccl_rank, nccl_world_size = _get_mpi_info()
+
+        if nccl_rank is not None and nccl_world_size is not None:
+            try:
+                nccl_comm_ptr = _create_kvbm_nccl_comm(
+                    nccl_rank, nccl_world_size
+                )
+                logger.info(
+                    f"KVBM MLA support: NCCL broadcast optimization enabled. "
+                    f"Rank {nccl_rank}/{nccl_world_size}: only rank 0 loads "
+                    f"from G2/G3 storage, then broadcasts to all GPUs."
+                )
+            except ImportError:
+                logger.warning(
+                    "KVBM MLA support: NCCL not compiled. Using worker-level "
+                    "replication (each GPU loads independently). For optimal "
+                    "broadcast-based replication, rebuild with: "
+                    "cargo build -p kvbm --features nccl"
+                )
+                nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
+        else:
+            logger.info(
+                "KVBM: MPI not available, using standard sharded mode. "
+                "For NCCL replicated mode, ensure MPI is initialized."
+            )
+
+        self._connector = RustKvConnectorWorker(
+            self.drt,
+            str(self.rank),
+            rank=nccl_rank,
+            world_size=nccl_world_size,
+            nccl_comm_ptr=nccl_comm_ptr,
+        )
         self.event = torch.cuda.Event()
 
         # Default to old way of processing offload

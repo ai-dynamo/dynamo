@@ -417,6 +417,7 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
 ARG ENABLE_KVBM
+ARG ENABLE_KVBM_NCCL=true
 ARG USE_SCCACHE
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -444,7 +445,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
-        maturin build --release --out target/wheels && \
+        KVBM_FEATURES=""; \
+        if [ "$ENABLE_KVBM_NCCL" = "true" ]; then \
+            KVBM_FEATURES="nccl"; \
+            echo "Building KVBM with NCCL support for replicated mode"; \
+        fi; \
+        if [ -n "$KVBM_FEATURES" ]; then \
+            maturin build --release --features "$KVBM_FEATURES" --out target/wheels; \
+        else \
+            maturin build --release --out target/wheels; \
+        fi && \
         auditwheel repair \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
@@ -766,6 +776,7 @@ $NIXL_PLUGIN_DIR:\
 $TENSORRT_LIB_DIR:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
+/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib:\
 /usr/local/cuda/lib:\
 /usr/local/cuda/lib64:\
 $LD_LIBRARY_PATH
@@ -816,6 +827,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt \
         cupy-cuda13x
+
+# Upgrade NCCL to 2.29.3+ which includes ncclAlltoAll (required for KVBM NCCL replicated mode)
+# The base nvidia-nccl-cu13 2.27.7 on ARM64 is missing ncclAlltoAll symbol
+# After upgrade, create libnccl.so symlink so the library is found via LD_LIBRARY_PATH
+RUN uv pip install --no-cache --upgrade "nvidia-nccl-cu13>=2.29.3" && \
+    NCCL_LIB_DIR="${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib" && \
+    ln -sf libnccl.so.2 "${NCCL_LIB_DIR}/libnccl.so"
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
