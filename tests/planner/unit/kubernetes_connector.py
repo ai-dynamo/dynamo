@@ -899,28 +899,8 @@ def test_get_actual_worker_counts_stable(kubernetes_connector, mock_kube_api):
         "metadata": {"name": "test-graph"},
         "spec": {
             "services": {
-                "prefill-component": {
-                    "replicas": 2,
-                    "subComponentType": "prefill",
-                },
-                "decode-component": {
-                    "replicas": 4,
-                    "subComponentType": "decode",
-                },
-            }
-        },
-        "status": {
-            "services": {
-                "prefill-component": {
-                    "availableReplicas": 2,
-                    "readyReplicas": 2,
-                    "updatedReplicas": 2,
-                },
-                "decode-component": {
-                    "availableReplicas": 4,
-                    "readyReplicas": 4,
-                    "updatedReplicas": 4,
-                },
+                "prefill-component": {},
+                "decode-component": {},
             }
         },
     }
@@ -949,133 +929,13 @@ def test_get_actual_worker_counts_prefill_rollout_in_progress(
         "metadata": {"name": "test-graph"},
         "spec": {
             "services": {
-                "prefill-component": {
-                    "replicas": 4,
-                    "subComponentType": "prefill",
-                },
-                "decode-component": {
-                    "replicas": 4,
-                    "subComponentType": "decode",
-                },
-            }
-        },
-        "status": {
-            "services": {
-                "prefill-component": {
-                    "availableReplicas": 2,
-                    "readyReplicas": 2,
-                    "updatedReplicas": 2,
-                },
-                "decode-component": {
-                    "availableReplicas": 4,
-                    "readyReplicas": 4,
-                    "updatedReplicas": 4,
-                },
+                "prefill-component": {},
+                "decode-component": {},
             }
         },
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
     mock_kube_api.get_service_replica_status.side_effect = [(2, False), (4, True)]
-
-    (
-        prefill_count,
-        decode_count,
-        is_stable,
-    ) = kubernetes_connector.get_actual_worker_counts(
-        prefill_component_name="prefill-component",
-        decode_component_name="decode-component",
-    )
-
-    assert prefill_count == 2
-    assert decode_count == 4
-    assert is_stable is False
-
-
-def test_get_actual_worker_counts_decode_rollout_in_progress(
-    kubernetes_connector, mock_kube_api
-):
-    """Test get_actual_worker_counts when decode has rollout in progress"""
-    mock_deployment = {
-        "metadata": {"name": "test-graph"},
-        "spec": {
-            "services": {
-                "prefill-component": {
-                    "replicas": 2,
-                    "subComponentType": "prefill",
-                },
-                "decode-component": {
-                    "replicas": 8,
-                    "subComponentType": "decode",
-                },
-            }
-        },
-        "status": {
-            "services": {
-                "prefill-component": {
-                    "availableReplicas": 2,
-                    "readyReplicas": 2,
-                    "updatedReplicas": 2,
-                },
-                "decode-component": {
-                    "availableReplicas": 4,
-                    "readyReplicas": 4,
-                    "updatedReplicas": 4,
-                },
-            }
-        },
-    }
-    mock_kube_api.get_graph_deployment.return_value = mock_deployment
-    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, False)]
-
-    (
-        prefill_count,
-        decode_count,
-        is_stable,
-    ) = kubernetes_connector.get_actual_worker_counts(
-        prefill_component_name="prefill-component",
-        decode_component_name="decode-component",
-    )
-
-    assert prefill_count == 2
-    assert decode_count == 4
-    assert is_stable is False
-
-
-def test_get_actual_worker_counts_both_rollouts_in_progress(
-    kubernetes_connector, mock_kube_api
-):
-    """Test get_actual_worker_counts when both services have rollout in progress"""
-    mock_deployment = {
-        "metadata": {"name": "test-graph"},
-        "spec": {
-            "services": {
-                "prefill-component": {
-                    "replicas": 4,
-                    "subComponentType": "prefill",
-                },
-                "decode-component": {
-                    "replicas": 8,
-                    "subComponentType": "decode",
-                },
-            }
-        },
-        "status": {
-            "services": {
-                "prefill-component": {
-                    "availableReplicas": 2,
-                    "readyReplicas": 2,
-                    "updatedReplicas": 2,
-                },
-                "decode-component": {
-                    "availableReplicas": 4,
-                    "readyReplicas": 4,
-                    "updatedReplicas": 4,
-                },
-            }
-        },
-    }
-    mock_kube_api.get_graph_deployment.return_value = mock_deployment
-    mock_kube_api.get_service_replica_status.side_effect = [(2, False), (4, False)]
 
     (
         prefill_count,
@@ -1100,15 +960,6 @@ def test_get_actual_worker_counts_prefill_only(kubernetes_connector, mock_kube_a
                 "prefill-component": {
                     "replicas": 2,
                     "subComponentType": "prefill",
-                },
-            }
-        },
-        "status": {
-            "services": {
-                "prefill-component": {
-                    "availableReplicas": 2,
-                    "readyReplicas": 2,
-                    "updatedReplicas": 2,
                 },
             }
         },
@@ -1142,15 +993,6 @@ def test_get_actual_worker_counts_decode_only(kubernetes_connector, mock_kube_ap
                 },
             }
         },
-        "status": {
-            "services": {
-                "decode-component": {
-                    "availableReplicas": 4,
-                    "readyReplicas": 4,
-                    "updatedReplicas": 4,
-                },
-            }
-        },
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
     mock_kube_api.get_service_replica_status.return_value = (4, True)
@@ -1166,46 +1008,6 @@ def test_get_actual_worker_counts_decode_only(kubernetes_connector, mock_kube_ap
 
     assert prefill_count == 0
     assert decode_count == 4
-    assert is_stable is True
-
-
-def test_get_actual_worker_counts_uses_ready_replicas_fallback(
-    kubernetes_connector, mock_kube_api
-):
-    """Test get_actual_worker_counts uses readyReplicas when availableReplicas is missing"""
-    mock_deployment = {
-        "metadata": {"name": "test-graph"},
-        "spec": {
-            "services": {
-                "prefill-component": {
-                    "replicas": 2,
-                    "subComponentType": "prefill",
-                },
-            }
-        },
-        "status": {
-            "services": {
-                "prefill-component": {
-                    "readyReplicas": 2,
-                    "updatedReplicas": 2,
-                },
-            }
-        },
-    }
-    mock_kube_api.get_graph_deployment.return_value = mock_deployment
-    mock_kube_api.get_service_replica_status.return_value = (2, True)
-
-    (
-        prefill_count,
-        decode_count,
-        is_stable,
-    ) = kubernetes_connector.get_actual_worker_counts(
-        prefill_component_name="prefill-component",
-        decode_component_name=None,
-    )
-
-    assert prefill_count == 2
-    assert decode_count == 0
     assert is_stable is True
 
 

@@ -312,9 +312,6 @@ class KubernetesConnector(PlannerConnector):
                 deployment, service.name
             )
             if not is_stable:
-                logger.info(
-                    f"Prefill service {service.name} has rollout in progress, skipping scaling"
-                )
                 all_stable = False
             prefill_count = ready_replicas
 
@@ -328,9 +325,6 @@ class KubernetesConnector(PlannerConnector):
                 deployment, service.name
             )
             if not is_stable:
-                logger.info(
-                    f"Decode service {service.name} has rollout in progress, skipping scaling"
-                )
                 all_stable = False
             decode_count = ready_replicas
 
