@@ -14,6 +14,7 @@ pub mod chat_completions;
 pub mod common_ext;
 pub mod completions;
 pub mod embeddings;
+pub mod images;
 pub mod models;
 pub mod nvext;
 pub mod responses;

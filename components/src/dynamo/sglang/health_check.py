@@ -118,3 +118,29 @@ class SglangPrefillHealthCheckPayload(HealthCheckPayload):
             self.default_payload["request"]["token_ids"] = [bos_token_id]  # type: ignore
 
         super().__init__()
+
+
+class ImageDiffusionHealthCheckPayload(HealthCheckPayload):
+    """Image diffusion-specific health check payload for image generation workers.
+
+    Sends a minimal image generation request to verify the diffusion worker
+    is responding and the model is loaded. Uses minimal resources for fast checks.
+    """
+
+    def __init__(self, model_path: str):
+        """Initialize diffusion health check payload with minimal generation request.
+
+        Args:
+            model_path: The diffusion model being served.
+        """
+        self.default_payload = {
+            "prompt": "test",  # Minimal prompt
+            "model": model_path,
+            "n": 1,  # Generate 1 image
+            "size": "512x512",  # Small size for fast health check
+            "num_inference_steps": 1,  # Just 1 step (fast but low quality)
+            "guidance_scale": 7.5,  # Standard guidance scale
+            "response_format": "b64_json",  # Don't require S3 for health check
+        }
+
+        super().__init__()
