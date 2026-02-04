@@ -17,6 +17,7 @@ import pytest
 
 from tests.fault_tolerance.deploy.scenarios import scenarios
 
+
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
 # Only fault_tolerance-specific options are defined here.
 def pytest_addoption(parser):
