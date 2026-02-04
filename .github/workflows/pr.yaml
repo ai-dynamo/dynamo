@@ -218,7 +218,7 @@ jobs:
     with:
       framework: trtllm
       platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9"]'
+      cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trt-llm-{0}', github.sha) || '' }}

@@ -11,7 +11,7 @@ repository.workspace = true
 description = "Memory management library for Dynamo"
 
 [features]
-default = ["testing-all"]
+default = []
 
 # feature to enable unsafe slices of memory descriptors
 # for advanced testing in other crates
