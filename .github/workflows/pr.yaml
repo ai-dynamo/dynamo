@@ -91,8 +91,12 @@ jobs:
           path: test-results/
           pattern: test-results-*
 
-      - name: Install Python dependencies
-        run: pip install requests
+      - name: Setup Python environment
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv || true
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install requests
 
       - name: Detect flaky tests
         id: detect_flaky
@@ -102,7 +106,9 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           WORKFLOW_NAME: ${{ github.workflow }}
-        run: python3 .github/workflows/detect_flaky_tests.py
+        run: |
+          source venv/bin/activate
+          python3 .github/workflows/detect_flaky_tests.py
 
       - name: Report status
         if: always()
