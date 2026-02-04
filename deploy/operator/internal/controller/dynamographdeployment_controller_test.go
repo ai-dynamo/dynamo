@@ -1038,6 +1038,49 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 		},
 		{
+			name: "parallel restart - new request with ready resources should NOT complete immediately (race condition fix)",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				// No existing restart status - brand new restart request
+			},
+			existingResources: []client.Object{
+				// DCD is READY - simulating state BEFORE restart annotation is applied
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting, // NOT Completed!
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
 			name: "Grove pathway - parallel restart complete",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
