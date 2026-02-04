@@ -586,7 +586,6 @@ _Appears in:_
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
-| `trafficProxy` _[TrafficProxySpec](#trafficproxyspec)_ | TrafficProxy configures the HAProxy load balancer for rolling updates.<br />Fields specified here override the platform-wide Helm defaults. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -1041,8 +1040,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `phase` _[RolloutPhase](#rolloutphase)_ | Phase indicates the current phase of the rollout. |  | Enum: [Pending InProgress Completed Failed ] <br />Optional: \{\} <br /> |
-| `trafficWeightOld` _integer_ | TrafficWeightOld is the percentage of traffic routed to the old deployment (0-100).<br />This reflects the current HAProxy backend weight configuration. |  | Optional: \{\} <br /> |
-| `trafficWeightNew` _integer_ | TrafficWeightNew is the percentage of traffic routed to the new deployment (0-100).<br />This reflects the current HAProxy backend weight configuration. |  | Optional: \{\} <br /> |
 | `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rollout began. |  | Optional: \{\} <br /> |
 | `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rollout completed (successfully or failed). |  | Optional: \{\} <br /> |
 
@@ -1142,26 +1139,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `disabled` _boolean_ |  |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
-
-
-#### TrafficProxySpec
-
-
-
-TrafficProxySpec configures the HAProxy load balancer for rolling updates.
-Fields specified here override the platform-wide defaults from Helm values.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `replicas` _integer_ | Replicas is the number of proxy pod replicas.<br />Overrides the platform default. Recommend 2+ for high availability. |  | Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources configures the proxy pod resource requirements.<br />Overrides the platform default. |  | Optional: \{\} <br /> |
-| `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations for the proxy pods.<br />Useful when workers run on tainted nodes (e.g., GPU nodes).<br />Merged with platform defaults (DGD tolerations take precedence). |  | Optional: \{\} <br /> |
-| `affinity` _[Affinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core)_ | Affinity rules for the proxy pods.<br />Useful for co-locating proxy with workers or spreading across zones.<br />Overrides platform default if specified. |  | Optional: \{\} <br /> |
 
 
 #### VolumeMount
