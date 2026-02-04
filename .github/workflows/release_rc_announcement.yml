@@ -10,6 +10,9 @@ on:
     - cron: '0 17 * * 1-5'
   # Allow manual trigger for testing
   workflow_dispatch:
+  push:
+    branches:
+      - pvijayakrish/automate-release-announcement
 
 permissions:
   contents: read
