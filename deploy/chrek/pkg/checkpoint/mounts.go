@@ -261,6 +261,42 @@ func GetAllMountsFromMountinfo(pid int, hostProc string) ([]AllMountInfo, error)
 	return mounts, nil
 }
 
+// GetMountsUnderPrefixes returns all mount points that fall under any of the given
+// directory prefixes. This is used to enumerate mounts to skip during checkpoint,
+// allowing cross-node restore when certain mounts (e.g., nvidia runtime mounts)
+// don't exist on the target node.
+//
+// For example, with prefixes ["/run/nvidia/driver", "/proc/driver/nvidia"]:
+//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_tu10x.bin -> included
+//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_ga10x.bin -> included
+//   - /proc/driver/nvidia/params -> included
+//   - /run/nvidia-ctk-hook -> NOT included (doesn't match prefix)
+func GetMountsUnderPrefixes(pid int, hostProc string, prefixes []string) ([]string, error) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+
+	mounts, err := GetAllMountsFromMountinfo(pid, hostProc)
+	if err != nil {
+		return nil, err
+	}
+
+	var matchedMounts []string
+	for _, m := range mounts {
+		for _, prefix := range prefixes {
+			// Check if mount point starts with prefix
+			// Use HasPrefix with trailing slash check to avoid partial matches
+			// e.g., "/run/nvidia" should match "/run/nvidia/driver/..." but not "/run/nvidia-ctk-hook"
+			if strings.HasPrefix(m.MountPoint, prefix+"/") || m.MountPoint == prefix {
+				matchedMounts = append(matchedMounts, m.MountPoint)
+				break // Don't add same mount twice if it matches multiple prefixes
+			}
+		}
+	}
+
+	return matchedMounts, nil
+}
+
 // parseAllMountInfoLine parses a single line from mountinfo without filtering.
 // mountinfo format:
 // 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue

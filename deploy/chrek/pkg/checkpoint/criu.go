@@ -166,3 +166,24 @@ func ConfigureExternalNamespaces(criuOpts *criurpc.CriuOpts, namespaces map[Name
 	return netNsInode
 }
 
+// ConfigureSkipMounts enumerates mounts under the given prefixes and adds them to CRIU's
+// skip mount list. This allows cross-node restore by skipping mounts that may not exist
+// on the target node (e.g., NVIDIA runtime mounts like /run/nvidia/driver/...).
+// Returns the list of mounts that will be skipped, for logging purposes.
+func ConfigureSkipMounts(criuOpts *criurpc.CriuOpts, pid int, hostProc string, prefixes []string) ([]string, error) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+
+	skipMounts, err := GetMountsUnderPrefixes(pid, hostProc, prefixes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to enumerate skip mounts from prefixes: %w", err)
+	}
+
+	if len(skipMounts) > 0 {
+		criuOpts.SkipMnt = skipMounts
+	}
+
+	return skipMounts, nil
+}
+

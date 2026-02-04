@@ -22,7 +22,10 @@ import (
 
 func main() {
 	// Load configuration from ConfigMap (or use defaults if not found)
-	cfg := config.LoadConfigOrDefault(config.ConfigMapPath)
+	cfg, err := config.LoadConfigOrDefault(config.ConfigMapPath)
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
 
 	// Validate configuration
 	if err := cfg.Agent.Validate(); err != nil {

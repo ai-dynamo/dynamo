@@ -19,6 +19,10 @@ import (
 // All CRIU options are read from the saved CheckpointData - no hardcoding.
 // Returns the PID of the restored process.
 func Restore(ctx context.Context, checkpointPath string, data *config.CheckpointData, log *logrus.Entry) (int, error) {
+	if data == nil {
+		return 0, fmt.Errorf("checkpoint data is required")
+	}
+
 	// Hardcoded restore constants
 	const (
 		rootPath = "/"

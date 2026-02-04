@@ -59,6 +59,12 @@ type CRIUConfig struct {
 	// ManageCgroupsMode controls cgroup handling: "ignore" lets K8s manage cgroups.
 	ManageCgroupsMode string `yaml:"manageCgroupsMode"`
 
+	// SkipMounts is a list of mount paths to skip during checkpoint.
+	// These are passed to CRIU's --skip-mnt option. This allows cross-node restore
+	// when certain mounts (e.g., nvidia runtime mounts) don't exist on the target node.
+	// Typically populated dynamically from SkipMountPrefixes in CheckpointConfig.
+	SkipMounts []string `yaml:"skipMounts,omitempty"`
+
 	// ExternalMounts are additional external mount mappings (e.g., "mnt[path]:path").
 	// Populated dynamically at checkpoint time from container introspection.
 	// Serialized to metadata.yaml so restore can use the exact same mappings.

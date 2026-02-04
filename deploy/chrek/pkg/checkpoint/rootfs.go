@@ -202,7 +202,7 @@ func FindWhiteoutFiles(upperDir string) ([]string, error) {
 // CaptureRootfsState captures the overlay upperdir and deleted files after CRIU dump.
 // Updates the checkpoint data with rootfs diff information and saves it.
 func CaptureRootfsState(upperDir, checkpointDir string, data *config.CheckpointData, log *logrus.Entry) {
-	if upperDir == "" {
+	if upperDir == "" || data == nil {
 		return
 	}
 

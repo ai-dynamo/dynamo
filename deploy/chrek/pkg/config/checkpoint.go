@@ -12,6 +12,15 @@ type CheckpointConfig struct {
 	// RootfsExclusions defines paths to exclude from rootfs diff capture
 	RootfsExclusions RootfsExclusionConfig `yaml:"rootfsExclusions"`
 
+	// SkipMountPrefixes is a list of directory prefixes. All mount points under these
+	// directories will be skipped during checkpoint. This allows cross-node restore
+	// when certain mounts (e.g., nvidia runtime mounts) don't exist on the target node.
+	// Example: ["/run/nvidia/driver"] skips all mounts like:
+	//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_tu10x.bin
+	//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_ga10x.bin
+	// The actual mount paths are enumerated at checkpoint time and passed to CRIU.SkipMounts.
+	SkipMountPrefixes []string `yaml:"skipMountPrefixes"`
+
 	// === Environment-only fields (read by vLLM directly) ===
 	// These fields are populated from environment variables because vLLM
 	// reads these env vars directly to know where to signal checkpoint completion.

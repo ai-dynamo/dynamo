@@ -4,6 +4,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -83,15 +84,21 @@ func (c *RestoreConfig) LoadRestoreEnvOverrides() {
 
 // LoadRestoreConfig creates a RestoreConfig from ConfigMap and environment variables.
 // If configPath is empty, uses environment variables only (for backwards compatibility).
+// Returns an error if the config file exists but cannot be parsed.
 func LoadRestoreConfig(configPath string) (*RestoreConfig, error) {
 	var cfg *RestoreConfig
 
 	if configPath != "" {
 		fullCfg, err := LoadConfig(configPath)
 		if err != nil {
-			// Fall back to zero config if config file not found
-			// All defaults should come from ConfigMap (values.yaml)
-			cfg = &RestoreConfig{}
+			// Check if the error is "file not found" (acceptable) vs parse error (should be surfaced)
+			if os.IsNotExist(err) {
+				// File not found is acceptable - fall back to zero config
+				cfg = &RestoreConfig{}
+			} else {
+				// Parse errors and other errors should be surfaced
+				return nil, fmt.Errorf("failed to load restore config: %w", err)
+			}
 		} else {
 			cfg = &fullCfg.Restore
 		}

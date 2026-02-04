@@ -31,7 +31,8 @@ func RemoveSemaphores(pid int, hostProc string, log *logrus.Entry) {
 	var removed []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasPrefix(name, "sem.") {
+		// Check for both "sem." and "sem_" prefixes for consistency with CaptureDevShm
+		if strings.HasPrefix(name, "sem.") || strings.HasPrefix(name, "sem_") {
 			semPath := filepath.Join(shmPath, name)
 			if err := os.Remove(semPath); err != nil {
 				log.WithError(err).WithField("semaphore", name).Warn("Failed to remove semaphore")

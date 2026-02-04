@@ -63,6 +63,10 @@ data:
         additionalExclusions:
           {{- toYaml .Values.config.checkpoint.rootfsExclusions.additionalExclusions | nindent 10 }}
 
+      # Skip mount prefixes for cross-node restore (enumerated at checkpoint time)
+      skipMountPrefixes:
+        {{- toYaml .Values.config.checkpoint.skipMountPrefixes | nindent 8 }}
+
     restore:
       # Restore trigger file path (for trigger-based restore)
       restoreTrigger: {{ .Values.config.restore.restoreTrigger | quote }}

@@ -280,9 +280,11 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 
 	// Find the main container and get signal file path from env
 	var containerID string
+	var containerName string
 	var signalFilePath string
 	for _, container := range pod.Spec.Containers {
 		if container.Name == "main" || len(pod.Spec.Containers) == 1 {
+			containerName = container.Name
 			// Get signal file path from environment
 			for _, env := range container.Env {
 				if env.Name == EnvCheckpointSignalFile {
@@ -333,9 +335,19 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 		return
 	}
 
+	// Validate CheckpointConfig is set
+	if w.config.CheckpointConfig == nil {
+		log.Error("CheckpointConfig is nil - cannot perform checkpoint")
+		w.checkpointedMu.Lock()
+		delete(w.checkpointed, podKey)
+		w.checkpointedMu.Unlock()
+		return
+	}
+
 	// Perform checkpoint
 	params := checkpoint.CheckpointParams{
 		ContainerID:   containerID,
+		ContainerName: containerName,
 		CheckpointID:  checkpointID,
 		CheckpointDir: w.config.CheckpointDir,
 		NodeName:      w.config.NodeName,

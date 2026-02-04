@@ -145,6 +145,18 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 		c.log.WithField("external", extMount).Debug("Added external mount mapping")
 	}
 
+	// 7b. Configure mounts to skip from configured prefixes (for cross-node restore)
+	skipMounts, err := ConfigureSkipMounts(criuOpts, pid, c.hostProc, cfg.SkipMountPrefixes)
+	if err != nil {
+		c.log.WithError(err).Warn("Failed to configure skip mounts")
+	} else if len(skipMounts) > 0 {
+		c.log.WithFields(logrus.Fields{
+			"prefixes":    cfg.SkipMountPrefixes,
+			"skip_mounts": skipMounts,
+			"count":       len(skipMounts),
+		}).Info("Configured mounts to skip for cross-node restore")
+	}
+
 	// 8. Get overlay upperdir for rootfs diff capture
 	upperDir, upperDirErr := GetOverlayUpperDir(pid, c.hostProc)
 	if upperDirErr != nil {

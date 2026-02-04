@@ -43,18 +43,25 @@ func LoadConfig(path string) (*FullConfig, error) {
 }
 
 // LoadConfigOrDefault loads configuration from a file, falling back to zero values if the file doesn't exist.
+// Returns an error if the config file exists but cannot be parsed (e.g., YAML syntax errors).
 // WARNING: When ConfigMap is missing, configuration will have zero/empty values except for env overrides.
 // All default values should be defined in the ConfigMap (via values.yaml).
-func LoadConfigOrDefault(path string) *FullConfig {
+func LoadConfigOrDefault(path string) (*FullConfig, error) {
 	cfg, err := LoadConfig(path)
 	if err != nil {
-		// Return zero config if ConfigMap is not found - env overrides will still apply
-		cfg = &FullConfig{}
-		cfg.Agent.LoadAgentEnvOverrides()
-		cfg.Checkpoint.LoadCheckpointEnvOverrides()
-		cfg.Restore.LoadRestoreEnvOverrides()
+		// Check if the error is "file not found" (acceptable) vs parse error (should be surfaced)
+		if os.IsNotExist(err) {
+			// File not found is acceptable - return zero config with env overrides
+			cfg = &FullConfig{}
+			cfg.Agent.LoadAgentEnvOverrides()
+			cfg.Checkpoint.LoadCheckpointEnvOverrides()
+			cfg.Restore.LoadRestoreEnvOverrides()
+			return cfg, nil
+		}
+		// Parse errors and other errors should be surfaced
+		return nil, err
 	}
-	return cfg
+	return cfg, nil
 }
 
 // LoadAgentConfig loads only the agent configuration from a YAML file.
