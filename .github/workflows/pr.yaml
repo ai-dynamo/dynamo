@@ -26,7 +26,7 @@ concurrency:
     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  BUILDER_NAME: b-${{ github.run_id }}${{ github.run_attempt }}
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
 
