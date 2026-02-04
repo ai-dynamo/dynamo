@@ -65,23 +65,22 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME &
 
     # Prefill worker handles prompt processing and image encoding
-    DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-    DYN_VLLM_KV_EVENT_PORT=20081 \
     VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
     python -m dynamo.vllm \
         --enable-multimodal \
         --model $MODEL_NAME \
         --is-prefill-worker \
         $MODEL_SPECIFIC_ARGS \
+        --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' \
         "${EXTRA_ARGS[@]}" &
 else
     # run decode worker on non-head node
-    DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
     python -m dynamo.vllm \
         --enable-multimodal \
         --model $MODEL_NAME \
         $MODEL_SPECIFIC_ARGS \
+        --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' \
         "${EXTRA_ARGS[@]}" &
 fi
 
