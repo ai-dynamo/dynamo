@@ -17,10 +17,9 @@ import pytest
 
 from tests.fault_tolerance.deploy.scenarios import scenarios
 
-# Shared CLI options are defined in tests/conftest.py.
+# Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
+# Only fault_tolerance-specific options are defined here.
 def pytest_addoption(parser):
-    parser.addoption("--image", type=str, default=None)
-    parser.addoption("--namespace", type=str, default="fault-tolerance-test")
     parser.addoption(
         "--client-type",
         type=str,
@@ -34,13 +33,6 @@ def pytest_addoption(parser):
         default=False,
         help="Include tests that require custom builds (e.g., MoE models). "
         "By default, these tests are excluded.",
-    )
-    parser.addoption(
-        "--skip-service-restart",
-        action="store_true",
-        default=False,
-        help="Skip restarting NATS and etcd services before deployment. "
-        "By default, these services are restarted.",
     )
 
 

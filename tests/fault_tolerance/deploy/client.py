@@ -24,7 +24,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
 from kr8s.objects import Pod
 
 from tests.utils.client import wait_for_model_availability

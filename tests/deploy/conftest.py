@@ -17,7 +17,8 @@ import pytest
 from tests.utils.managed_deployment import DeploymentSpec, _get_workspace_dir
 
 
-# Shared CLI options are defined in tests/conftest.py.
+# Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
+# Only deploy-specific options are defined here.
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add deploy-specific command-line options.
 
