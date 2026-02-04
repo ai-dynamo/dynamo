@@ -95,16 +95,6 @@ controllerManager:
   serviceAccount:
     annotations: {}
 
-# Rolling update traffic proxy configuration (platform-wide defaults)
-trafficProxy:
-  # Default number of proxy replicas (recommend 2+ for HA)
-  replicas: 2
-
-  # HAProxy image configuration
-  image:
-    repository: haproxy
-    tag: "2.9-alpine"
-
 dynamo:
   components:
     serviceAccount:
