@@ -70,7 +70,7 @@ jobs:
     name: Flaky Test Detection
     runs-on: prod-builder-amd-v1
     timeout-minutes: 15
-    if: always() && contains(github.head_ref, 'flaky-tests')
+    if: always()
     needs: [vllm, sglang, trtllm]
     permissions:
       contents: read
