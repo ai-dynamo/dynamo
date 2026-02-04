@@ -239,7 +239,7 @@ Dynamo supports video generation using diffusion models through the `--modality 
 
 ### Requirements
 
-- **visual_gen package**: Video diffusion requires the `visual_gen` package, which is a separate NVIDIA package for diffusion pipelines. Contact your NVIDIA representative for access.
+- **visual_gen**: Part of TensorRT-LLM, located at `tensorrt_llm/visual_gen/`. Currently available on the [`feat/visual_gen`](https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen) branch (not yet merged to main). Install from that branch or use a TRT-LLM container that includes it (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4` or later).
 - **dynamo-runtime with video API**: The Dynamo runtime must include `ModelType.Videos` support. Ensure you're using a compatible version.
 
 ### Supported Models

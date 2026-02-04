@@ -7,9 +7,9 @@ This module provides a unified interface for various diffusion models
 (Wan, Flux, Cosmos, etc.) through a pipeline registry system.
 
 Requirements:
-    - visual_gen: A separate NVIDIA package for diffusion pipelines.
-      This is NOT part of TensorRT-LLM and must be installed separately.
-      Contact your NVIDIA representative for access.
+    - visual_gen: Part of TensorRT-LLM, located at tensorrt_llm/visual_gen/.
+      Currently on the feat/visual_gen branch (not yet merged to main).
+      See: https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen
     - See docs/backends/trtllm/README.md for setup instructions.
 
 Note on imports:
