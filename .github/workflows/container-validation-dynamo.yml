@@ -129,7 +129,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y python3-venv || true
           python3 -m venv /tmp/error-classification-venv
-          source /tmp/error-classification-venv/bin/activate
+          . /tmp/error-classification-venv/bin/activate
           pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
           deactivate
