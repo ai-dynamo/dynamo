@@ -133,7 +133,7 @@ pub struct RouterConfigOverride {
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvRouterConfig {
     pub overlap_score_weight: f64,
 
@@ -170,6 +170,16 @@ pub struct KvRouterConfig {
 
     /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
     pub router_prune_target_ratio: f64,
+
+    /// Enable prefix caching for routing decisions (default: false).
+    /// When enabled, routes requests with matching prefixes to the same worker
+    /// to maximize KV cache reuse, even when KV events haven't propagated yet.
+    /// Controlled by DYN_ROUTER_ENABLE_PREFIX_CACHE env var.
+    pub router_enable_prefix_cache: bool,
+
+    /// Maximum number of prefix cache entries (default: 1000)
+    /// Controlled by DYN_ROUTER_PREFIX_CACHE_SIZE env var.
+    pub router_prefix_cache_size: usize,
 }
 
 impl Default for KvRouterConfig {
@@ -187,6 +197,14 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
+            router_enable_prefix_cache: std::env::var("DYN_ROUTER_ENABLE_PREFIX_CACHE")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .unwrap_or(false),
+            router_prefix_cache_size: std::env::var("DYN_ROUTER_PREFIX_CACHE_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1000),
         }
     }
 }
@@ -227,6 +245,8 @@ impl KvRouterConfig {
             router_max_tree_size: router_max_tree_size.unwrap_or(default.router_max_tree_size),
             router_prune_target_ratio: router_prune_target_ratio
                 .unwrap_or(default.router_prune_target_ratio),
+            router_enable_prefix_cache: default.router_enable_prefix_cache,
+            router_prefix_cache_size: default.router_prefix_cache_size,
         }
     }
 

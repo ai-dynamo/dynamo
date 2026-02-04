@@ -429,7 +429,7 @@ impl ModelWatcher {
                         .kv_chooser_for(
                             &endpoint,
                             card.kv_cache_block_size,
-                            Some(self.router_config.kv_router_config),
+                            Some(self.router_config.kv_router_config.clone()),
                             WORKER_TYPE_DECODE, // This is the decode router
                         )
                         .await?,
@@ -449,7 +449,7 @@ impl ModelWatcher {
                 .register_prefill_router(model_name.clone())
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = self.router_config.kv_router_config;
+                    let mut prefill_config = self.router_config.kv_router_config.clone();
                     prefill_config.router_track_active_blocks = false;
 
                     PrefillRouter::new(

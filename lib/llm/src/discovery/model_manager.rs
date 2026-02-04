@@ -395,7 +395,7 @@ impl ModelManager {
         // Get or create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
+        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config.clone()));
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
