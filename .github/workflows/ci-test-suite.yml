@@ -133,10 +133,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
 
   build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
@@ -203,10 +204,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
 
   # CUDA 13 builds (vllm and sglang only, both architectures)
   build-cuda13-amd64:
@@ -271,10 +273,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
 
   build-cuda13-arm64:
     name: Build ${{ matrix.framework }} CUDA13 (arm64)
@@ -338,10 +341,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
 
 ############################## TEST JOBS ##############################
 
@@ -490,10 +494,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
 
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
@@ -641,10 +646,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
 
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
@@ -794,10 +800,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
 
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
@@ -947,10 +954,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
 
   ############################## FAULT TOLERANCE TESTS ##############################
   fault-tolerance-tests:
@@ -1121,10 +1129,11 @@ jobs:
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
         run: |
-          cd opensearch_upload
-          python3 -m pip install -r requirements.txt
-          cd ..
+          python3 -m venv /tmp/error-classification-venv
+          source /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
+          deactivate
       - name: Upload Fault Tolerance Test Results
         uses: actions/upload-artifact@v4
         if: always()
