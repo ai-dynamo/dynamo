@@ -188,7 +188,9 @@ async def test_deployment(
             "temperature": DEFAULT_TEMPERATURE,
             "stream": False,
         }
-        response = send_request(url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST")
+        response = send_request(
+            url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
+        )
 
         # Validate response
         validate_chat_response(
