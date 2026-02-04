@@ -72,7 +72,7 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      no_cache: false
+      no_cache: true
       run_tests: false
       copy_to_acr: false
       push_image: false
