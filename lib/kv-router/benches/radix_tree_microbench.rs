@@ -15,7 +15,7 @@
 
 use clap::{Parser, ValueEnum};
 use dynamo_kv_router::{
-    RadixTree, RouterEvent, compute_block_hash_for_seq,
+    ConcurrentRadixTree, OverlapScores, RadixTree, RouterEvent, compute_block_hash_for_seq,
     nested_map::NestedMap,
     protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
@@ -27,14 +27,15 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
-/// Unified interface for RadixTree and NestedMap benchmarking.
+/// Unified interface for RadixTree, ConcurrentRadixTree, and NestedMap benchmarking.
 ///
-/// Both structures have feature parity for store, remove, find_matches, and current_size.
+/// All structures have feature parity for store, remove, find_matches, and current_size.
 /// The key difference is find_matches input:
-/// - RadixTree: uses LocalBlockHash (tokens_hash)
+/// - RadixTree/ConcurrentRadixTree: uses LocalBlockHash (tokens_hash)
 /// - NestedMap: uses ExternalSequenceBlockHash (cumulative sequence hash)
 enum KvIndex {
     Tree(RadixTree),
+    Concurrent(ConcurrentRadixTree),
     Nested(NestedMap),
 }
 
@@ -42,6 +43,7 @@ impl KvIndex {
     fn name(&self) -> &'static str {
         match self {
             KvIndex::Tree(_) => "RadixTree",
+            KvIndex::Concurrent(_) => "ConcurrentRadixTree",
             KvIndex::Nested(_) => "NestedMap",
         }
     }
@@ -49,6 +51,9 @@ impl KvIndex {
     fn apply_event(&mut self, event: RouterEvent) {
         match self {
             KvIndex::Tree(tree) => {
+                let _ = tree.apply_event(event);
+            }
+            KvIndex::Concurrent(tree) => {
                 let _ = tree.apply_event(event);
             }
             KvIndex::Nested(map) => {
@@ -62,6 +67,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches(local_hashes, early_exit),
             KvIndex::Nested(map) => map.find_matches(local_hashes, early_exit),
         };
         start.elapsed()
@@ -74,6 +80,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(miss_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches(miss_hashes, early_exit),
             KvIndex::Nested(map) => map.find_matches(miss_hashes, early_exit),
         };
         start.elapsed()
@@ -93,6 +100,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(partial, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches(partial, early_exit),
             KvIndex::Nested(map) => map.find_matches(partial, early_exit),
         };
         start.elapsed()
@@ -101,7 +109,27 @@ impl KvIndex {
     fn current_size(&self) -> usize {
         match self {
             KvIndex::Tree(tree) => tree.current_size(),
+            KvIndex::Concurrent(tree) => tree.current_size(),
             KvIndex::Nested(map) => map.current_size(),
+        }
+    }
+
+    fn find_matches(&self, local_hashes: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
+        match self {
+            KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches(local_hashes, early_exit),
+            KvIndex::Nested(map) => map.find_matches(local_hashes, early_exit),
+        }
+    }
+
+    fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        match self {
+            KvIndex::Tree(tree) => tree.dump_tree_as_events(),
+            KvIndex::Concurrent(tree) => tree.dump_tree_as_events(),
+            KvIndex::Nested(_) => {
+                // NestedMap does not support dump_tree_as_events
+                vec![]
+            }
         }
     }
 }
@@ -204,6 +232,10 @@ struct Args {
     /// Use nested map instead of radix tree (for comparison)
     #[arg(long)]
     nested_map: bool,
+
+    /// Use concurrent radix tree instead of single-threaded radix tree
+    #[arg(long)]
+    concurrent: bool,
 }
 
 /// Pre-generated sequence data for benchmarking
@@ -314,39 +346,13 @@ fn generate_sequences(
     sequences
 }
 
-/// Build a pre-populated RadixTree (for sweep/dump benchmarks that specifically need RadixTree)
-fn build_tree(sequences: &[SequenceData]) -> RadixTree {
-    let num_blocks: usize = sequences.iter().map(|s| s.local_hashes.len()).sum();
-    print!(
-        "  Building tree with {} sequences ({} blocks)... ",
-        sequences.len(),
-        num_blocks
-    );
-    std::io::Write::flush(&mut std::io::stdout()).unwrap();
-
-    let start = Instant::now();
-    let mut tree = RadixTree::new();
-    for (event_id, seq) in sequences.iter().enumerate() {
-        let event = seq.to_store_event(event_id as u64);
-        let _ = tree.apply_event(event);
-    }
-    let elapsed = start.elapsed();
-
-    println!(
-        "done in {:.2?} ({:.2} sequences/sec, {:.2} blocks/sec)",
-        elapsed,
-        sequences.len() as f64 / elapsed.as_secs_f64(),
-        num_blocks as f64 / elapsed.as_secs_f64()
-    );
-
-    tree
-}
-
 /// Build a pre-populated KvIndex (prints timing info)
-fn build_index(sequences: &[SequenceData], use_nested_map: bool) -> KvIndex {
+fn build_index(sequences: &[SequenceData], use_nested_map: bool, use_concurrent: bool) -> KvIndex {
     let num_blocks: usize = sequences.iter().map(|s| s.local_hashes.len()).sum();
     let name = if use_nested_map {
         "NestedMap"
+    } else if use_concurrent {
+        "ConcurrentRadixTree"
     } else {
         "RadixTree"
     };
@@ -361,6 +367,8 @@ fn build_index(sequences: &[SequenceData], use_nested_map: bool) -> KvIndex {
     let start = Instant::now();
     let mut index = if use_nested_map {
         KvIndex::Nested(NestedMap::new())
+    } else if use_concurrent {
+        KvIndex::Concurrent(ConcurrentRadixTree::new())
     } else {
         KvIndex::Tree(RadixTree::new())
     };
@@ -489,7 +497,7 @@ fn bench_store_remove_cycle(args: &Args, time_store: bool) {
         args.seed,
     );
 
-    let mut index = build_index(&sequences, args.nested_map);
+    let mut index = build_index(&sequences, args.nested_map, args.concurrent);
     println!("\n=== Benchmarking {} ({}) ===", op_name, index.name());
     println!("  Size: {} blocks", index.current_size());
 
@@ -550,7 +558,7 @@ fn bench_find_matches(args: &Args) {
         args.seed,
     );
 
-    let index = build_index(&sequences, args.nested_map);
+    let index = build_index(&sequences, args.nested_map, args.concurrent);
     println!("\n=== Benchmarking FIND_MATCHES ({}) ===", index.name());
     println!(
         "  Built with {} sequences, {} total blocks",
@@ -849,7 +857,7 @@ fn bench_sweep(args: &Args) {
         let tree_sequences = &all_sequences[..num_sequences];
         let extra_sequences = &all_sequences[num_sequences..];
 
-        let mut tree = build_tree(tree_sequences);
+        let mut index = build_index(tree_sequences, args.nested_map, args.concurrent);
 
         // --- STORE benchmark ---
         let mut store_durations = Vec::with_capacity(args.sweep_iterations);
@@ -866,12 +874,12 @@ fn bench_sweep(args: &Args) {
             let store_event = truncated.to_store_event(i as u64);
 
             let start = Instant::now();
-            let _ = tree.apply_event(store_event);
+            index.apply_event(store_event);
             store_durations.push(start.elapsed());
 
-            // Remove to restore tree state (untimed)
+            // Remove to restore index state (untimed)
             let remove_event = truncated.to_remove_event(i as u64);
-            let _ = tree.apply_event(remove_event);
+            index.apply_event(remove_event);
         }
 
         // --- REMOVE benchmark ---
@@ -886,12 +894,12 @@ fn bench_sweep(args: &Args) {
             let remove_event = truncated.to_remove_event(i as u64);
 
             let start = Instant::now();
-            let _ = tree.apply_event(remove_event);
+            index.apply_event(remove_event);
             remove_durations.push(start.elapsed());
 
             // Re-add to restore state (untimed)
             let store_event = truncated.to_store_event(i as u64 + 1000000);
-            let _ = tree.apply_event(store_event);
+            index.apply_event(store_event);
         }
 
         // --- FIND_MATCHES benchmark ---
@@ -916,7 +924,7 @@ fn bench_sweep(args: &Args) {
             };
 
             let start = Instant::now();
-            let _ = tree.find_matches(query, false);
+            let _ = index.find_matches(query, false);
             find_matches_durations.push(start.elapsed());
         }
 
@@ -958,16 +966,17 @@ fn bench_dump(args: &Args) {
         args.seed,
     );
 
-    let tree = build_tree(&sequences);
+    let index = build_index(&sequences, args.nested_map, args.concurrent);
     println!(
-        "  Tree built with {} sequences, {} total blocks",
+        "  {} built with {} sequences, {} total blocks",
+        index.name(),
         sequences.len(),
-        tree.current_size()
+        index.current_size()
     );
 
     // Single iteration timing
     let start = Instant::now();
-    let events = tree.dump_tree_as_events();
+    let events = index.dump_tree_as_events();
     let elapsed = start.elapsed();
 
     println!("\nDUMP_TREE_AS_EVENTS Results:");
