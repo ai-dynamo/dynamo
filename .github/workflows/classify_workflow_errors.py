@@ -101,6 +101,43 @@ def fetch_workflow_jobs() -> List[Dict[str, Any]]:
         return []
 
 
+def fetch_job_steps(job: Dict[str, Any], github_token: str, repo: str) -> List[Dict[str, Any]]:
+    """
+    Fetch step details for a specific job.
+
+    Args:
+        job: Job object from GitHub API
+        github_token: GitHub token for authentication
+        repo: Repository name (owner/repo)
+
+    Returns:
+        List of step objects with name, conclusion, number
+    """
+    job_id = job.get("id")
+
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    # The job object already contains steps
+    steps = job.get("steps", [])
+
+    if not steps:
+        print(f"  ⚠️  No steps found in job data")
+        return []
+
+    # Filter for failed steps, excluding classification steps
+    failed_steps = [
+        step for step in steps
+        if step.get("conclusion") == "failure"
+        and "Classify" not in step.get("name", "")  # Skip classification steps
+        and "Error Classification" not in step.get("name", "")
+    ]
+
+    return failed_steps
+
+
 def fetch_job_logs(job: Dict[str, Any], github_token: str, repo: str) -> Optional[str]:
     """
     Fetch logs for a specific job.
@@ -138,6 +175,46 @@ def fetch_job_logs(job: Dict[str, Any], github_token: str, repo: str) -> Optiona
     except Exception as e:
         print(f"  ⚠️  Error fetching logs: {e}")
         return None
+
+
+def extract_failed_step_logs(full_log: str, step: Dict[str, Any]) -> str:
+    """
+    Extract log section for a specific failed step from full job log.
+
+    GitHub Actions logs use ##[group] markers to separate steps.
+
+    Args:
+        full_log: Full job log content
+        step: Step object with name and number
+
+    Returns:
+        Log content for that step only
+    """
+    step_name = step.get("name", "")
+    step_number = step.get("number", 0)
+
+    # GitHub logs format: ##[group]Step name
+    # Try to find the step section
+    import re
+
+    # Look for the step by name
+    step_pattern = rf"##\[group\]{re.escape(step_name)}.*?##\[endgroup\]"
+    match = re.search(step_pattern, full_log, re.DOTALL | re.MULTILINE)
+
+    if match:
+        return match.group(0)
+
+    # Fallback: if we can't parse by markers, look for step name in log
+    # and extract surrounding context (next 5000 chars)
+    name_pos = full_log.find(step_name)
+    if name_pos != -1:
+        # Get context around the step name
+        start = max(0, name_pos - 500)
+        end = min(len(full_log), name_pos + 5000)
+        return full_log[start:end]
+
+    # Last resort: return full log (filtered later)
+    return full_log
 
 
 def extract_errors_from_workflow() -> List[ErrorContext]:
@@ -198,22 +275,68 @@ def extract_errors_from_workflow() -> List[ErrorContext]:
             "job_name": job_name,
         }
 
-        # Fetch job logs
+        # Get failed steps for this job
+        failed_steps = fetch_job_steps(job, github_token, repo)
+
+        if not failed_steps:
+            print(f"  ℹ️  No failed steps found in {job_name} (or all failures from classification steps)")
+            # Create a generic error for the job since we can't identify specific failed steps
+            generic_error = ErrorContext(
+                error_text=f"Job '{job_name}' failed but no specific failed steps identified.\n\nSee job logs for details.",
+                source_type="github_job_log",
+                workflow_id=job_context.get("workflow_id"),
+                job_id=job_context.get("job_id"),
+                job_name=job_name,
+                repo=job_context.get("repo"),
+                workflow_name=job_context.get("workflow_name"),
+                branch=job_context.get("branch"),
+                commit_sha=job_context.get("commit_sha"),
+                user_alias=job_context.get("user_alias"),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+            errors.append(generic_error)
+            continue
+
+        print(f"  🔍 Found {len(failed_steps)} failed step(s) in {job_name}:")
+        for step in failed_steps:
+            print(f"     - {step.get('name')}")
+
+        # Fetch full job logs
         log_content = fetch_job_logs(job, github_token, repo)
 
         if not log_content:
             continue
 
-        # Extract errors from logs
-        job_errors = extractor.extract_from_github_job_logs(log_content, job_context)
+        # Extract errors from each failed step
+        step_error_count = 0
+        for step in failed_steps:
+            step_name = step.get("name")
+            step_number = step.get("number")
 
-        if job_errors:
-            errors.extend(job_errors)
-            print(f"  ✅ Extracted {len(job_errors)} errors from {job_name}")
+            # Extract logs for this specific step
+            step_log = extract_failed_step_logs(log_content, step)
+
+            # Update context with step info
+            step_context = {
+                **job_context,
+                "step_id": str(step_number),
+                "step_name": step_name,
+            }
+
+            # Extract errors from this step's logs
+            step_errors = extractor.extract_from_github_job_logs(step_log, step_context)
+
+            if step_errors:
+                errors.extend(step_errors)
+                step_error_count += len(step_errors)
+
+        if step_error_count > 0:
+            print(f"  ✅ Extracted {step_error_count} error(s) from {job_name}")
         else:
-            # If no specific errors extracted, create a generic error for the failed job
+            # No errors extracted from failed steps - create generic error
+            step_names = ", ".join([s.get("name", "unknown") for s in failed_steps])
             generic_error = ErrorContext(
-                error_text=f"Job '{job_name}' failed.\n\nSee job logs for details.",
+                error_text=f"Job '{job_name}' failed in step(s): {step_names}\n\nNo specific error pattern identified. See job logs for details.",
                 source_type="github_job_log",
                 workflow_id=job_context.get("workflow_id"),
                 job_id=job_context.get("job_id"),
