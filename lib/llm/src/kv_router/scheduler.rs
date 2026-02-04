@@ -326,8 +326,6 @@ impl KvScheduler {
             total_us = total_elapsed.as_micros() as u64,
             "scheduler.schedule completed"
         );
-        #[cfg(not(feature = "bench"))]
-        let _ = (send_elapsed, total_elapsed);
 
         Ok(response.best_worker)
     }
@@ -561,13 +559,13 @@ impl WorkerSelector for DefaultWorkerSelector {
 
                 worker_logits.insert(worker, logit);
 
-                tracing::info!(
-                    "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
-                     = {overlap_weight:.1} * prefill_blocks + decode_blocks \
-                     = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
-                    worker.worker_id,
-                    worker.dp_rank
-                );
+                // tracing::info!(
+                //     "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
+                //      = {overlap_weight:.1} * prefill_blocks + decode_blocks \
+                //      = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
+                //     worker.worker_id,
+                //     worker.dp_rank
+                // );
             }
         }
 
