@@ -138,6 +138,12 @@ spec:
           - containerPort: 9003
           - name: metrics
             containerPort: 9090
+        startupProbe:
+          grpc:
+            port: 9003
+            service: inference-extension
+          periodSeconds: 10
+          failureThreshold: 180
         livenessProbe:
           grpc:
             port: 9003

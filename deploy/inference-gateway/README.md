@@ -63,26 +63,6 @@ kubectl get gateway inference-gateway
 
 ### 3. Setup secrets ###
 
-Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
-Make sure to enable kv-routing by adding the env var in the FrontEnd.
-```bash
-    mainContainer:
-      image: ...
-      env:
-        - name: DYN_ROUTER_MODE
-          value: "kv"
-```
-
-Sample commands to deploy model:
-
-```bash
-cd <dynamo-source-root>
-cd examples/backends/vllm/deploy
-kubectl apply -f agg.yaml -n my-model
-```
-
-Take a note of or change the DYNAMO_IMAGE in the model deployment file.
-
 Do not forget docker registry secret if needed.
 
 ```bash
@@ -93,7 +73,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --namespace=$NAMESPACE
 ```
 
-Do not forget to include the HuggingFace token if required.
+Do not forget to include the HuggingFace token.
 
 ```bash
 export HF_TOKEN=your_hf_token
@@ -139,11 +119,15 @@ make info # Check image tag
 We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
 you could deploy it as a standalone pod
 
-#### 5.a. Deploy as a DGD component
+#### 5.a. Deploy as a DGD component (recommended)
+
+We provide an example for llama-3-70b vLLM below.
 
 ```bash
-kubectl apply -f operator-managed/examples/agg.yaml -n ${NAMESPACE}
-kubectl apply -f operator-managed/examples/http-route.yaml -n ${NAMESPACE}
+# Deploy your model
+kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
+# Deploy the GAIE http-route CR.
+kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 ```
 
 **Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
@@ -166,6 +150,8 @@ If you installed it into a different namespace, you need to adjust the HttpRoute
 
 ##### 5.b.1 Deploy Your Model ###
 
+We provide an example for Qwen vLLM below.
+
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
 Sample commands to deploy model:
@@ -175,10 +161,6 @@ cd <dynamo-source-root>
 cd examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
-
-Take a note of or change the DYNAMO_IMAGE in the model deployment file.
-
-Do not forget docker registry secret if needed.
 
 ##### 5.b.2 Install Dynamo GIE helm chart ###
 
