@@ -736,7 +736,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 
 func Test_GetDynamoComponentDeploymentsGlobalNamespaceIgnored(t *testing.T) {
 	// GlobalDynamoNamespace is DEPRECATED and IGNORED.
-	// All components use hash-based namespace regardless of this field.
+	// Frontend uses base namespace for prefix-based discovery.
+	// Workers use hash-based namespace for isolation during rolling updates.
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dynamographdeployment",
@@ -767,12 +768,19 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespaceIgnored(t *testing.T) {
 		return
 	}
 
-	// All components use hash-based namespace, GlobalDynamoNamespace is ignored
-	expectedNamespace := ComputeHashedDynamoNamespace(dgd)
-	for _, d := range got {
-		assert.Equal(t, expectedNamespace, *d.Spec.DynamoNamespace,
-			"GlobalDynamoNamespace should be ignored, component %s should use hash-based namespace", d.Spec.ComponentType)
-		assert.Equal(t, expectedNamespace, d.Labels[commonconsts.KubeLabelDynamoNamespace])
+	// Frontend uses base namespace, workers use hashed namespace
+	baseNamespace := ComputeBaseDynamoNamespace(dgd)
+	hashedNamespace := ComputeHashedDynamoNamespace(dgd)
+	for name, d := range got {
+		if d.Spec.ComponentType == commonconsts.ComponentTypeFrontend {
+			assert.Equal(t, baseNamespace, *d.Spec.DynamoNamespace,
+				"Frontend %s should use base namespace for prefix-based discovery", name)
+			assert.Equal(t, baseNamespace, d.Labels[commonconsts.KubeLabelDynamoNamespace])
+		} else {
+			assert.Equal(t, hashedNamespace, *d.Spec.DynamoNamespace,
+				"Worker %s should use hash-based namespace", name)
+			assert.Equal(t, hashedNamespace, d.Labels[commonconsts.KubeLabelDynamoNamespace])
+		}
 	}
 }
 

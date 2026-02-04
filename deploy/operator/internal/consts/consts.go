@@ -55,10 +55,11 @@ const (
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
-	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
-	DynamoNamespaceEnvVar        = "DYN_NAMESPACE"
-	DynamoComponentEnvVar        = "DYN_COMPONENT"
-	DynamoDiscoveryBackendEnvVar = "DYN_DISCOVERY_BACKEND"
+	DynamoDeploymentConfigEnvVar     = "DYN_DEPLOYMENT_CONFIG"
+	DynamoNamespaceEnvVar            = "DYN_NAMESPACE"
+	DynamoNamespacePrefixEnvVar      = "DYN_NAMESPACE_PREFIX"
+	DynamoComponentEnvVar            = "DYN_COMPONENT"
+	DynamoDiscoveryBackendEnvVar     = "DYN_DISCOVERY_BACKEND"
 
 	GlobalDynamoNamespace = "dynamo"
 
@@ -97,29 +98,6 @@ const (
 	MainContainerName = "main"
 
 	RestartAnnotation = "nvidia.com/restartAt"
-
-	// HAProxy traffic proxy constants
-	HAProxyHTTPPort        = 8000
-	HAProxyHTTPPortName    = "http"
-	HAProxyStatsPort       = 8404
-	HAProxyStatsPortName   = "stats"
-	HAProxyRuntimePort     = 9999
-	HAProxyRuntimePortName = "runtime"
-	HAProxyMetricsPort     = 9998
-	HAProxyMetricsPortName = "metrics"
-
-	HAProxyConfigMapKey    = "haproxy.cfg"
-	HAProxyContainerName   = "haproxy"
-	HAProxyConfigMountPath = "/usr/local/etc/haproxy"
-	HAProxySocketPath      = "/var/run/haproxy/haproxy.sock"
-	HAProxySocketMountPath = "/var/run/haproxy"
-
-	// HAProxy labels and annotations
-	KubeLabelTrafficProxy          = "nvidia.com/traffic-proxy"
-	KubeLabelTrafficProxyComponent = "nvidia.com/traffic-proxy-component"
-
-	// Traffic proxy component types
-	TrafficProxyComponentProxy = "proxy"
 
 	// Rolling update annotations
 	AnnotationActiveWorkerHash = "nvidia.com/active-worker-hash"
