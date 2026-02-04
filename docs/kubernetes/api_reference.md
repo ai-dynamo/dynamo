@@ -269,6 +269,7 @@ DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests
 It serves as the primary interface for users to request model deployments with
 specific performance and resource constraints, enabling SLA-driven deployments.
 
+
 Lifecycle:
  1. Initial → Pending: Validates spec and prepares for profiling
  2. Pending → Profiling: Creates and runs profiling job (online or AIC)
@@ -276,6 +277,7 @@ Lifecycle:
  4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
  5. Ready: Terminal state when DGD is operational or spec is available
  6. DeploymentDeleted: Terminal state when auto-created DGD is manually deleted
+
 
 The spec becomes immutable once profiling starts. Users must delete and recreate
 the DGDR to modify configuration after this point.
@@ -347,6 +349,7 @@ _Appears in:_
 DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual services
 within a DynamoGraphDeployment. It implements the Kubernetes scale
 subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+
 
 The adapter acts as an intermediary between autoscalers and the DGD,
 ensuring that only the adapter controller modifies the DGD's service replicas.
