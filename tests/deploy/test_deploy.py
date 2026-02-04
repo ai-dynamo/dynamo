@@ -95,6 +95,8 @@ def validate_chat_response(
 
 @pytest.mark.k8s
 @pytest.mark.deploy
+@pytest.mark.post_merge
+@pytest.mark.e2e
 async def test_deployment(
     deployment_target: DeploymentTarget,
     deployment_spec: DeploymentSpec,
