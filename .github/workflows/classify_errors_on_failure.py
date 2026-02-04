@@ -15,7 +15,7 @@ Usage:
 import glob
 import os
 import sys
-from typing import List
+from typing import List, Dict, Any
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
