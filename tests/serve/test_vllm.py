@@ -452,16 +452,44 @@ vllm_configs = {
             ),
         ],
     ),
-    # TODO: Update this test case when we have video multimodal support in vllm official components
+    # Video multimodal tests for nightly CI pipeline
+    # These tests validate video inference capabilities with LLaVA-NeXT-Video model
+    # Reference: Linear OPS-3015
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
-        delayed_start=0,
+        delayed_start=60,  # Video models require longer loading time
         script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
-        timeout=360,
+        timeout=600,  # 10 minutes for video processing overhead
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {
+                            "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["rabbit"],
+                temperature=0.7,
+            )
+        ],
+    ),
+    "multimodal_video_disagg": VLLMConfig(
+        name="multimodal_video_disagg",
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
+        script_name="video_disagg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
+        model="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        delayed_start=60,  # Video models require longer loading time
+        script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
+        timeout=600,  # 10 minutes for video processing overhead
         request_payloads=[
             chat_payload(
                 [
