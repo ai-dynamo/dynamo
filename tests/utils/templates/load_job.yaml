@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Template for aiperf load testing Job
+# Fields marked with TEMPLATE_ are replaced at runtime by ManagedLoad
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: TEMPLATE_JOB_NAME
+  namespace: TEMPLATE_NAMESPACE
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600  # Auto-cleanup after 1 hour
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: aiperf
+          image: python:3.12-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "=== Installing aiperf ==="
+              pip install --quiet aiperf
+
+              echo "=== Creating output directories ==="
+              mkdir -p /tmp/aiperf/status
+
+              echo "=== Waiting for model endpoint to be ready ==="
+              MAX_RETRIES=60
+              RETRY_COUNT=0
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+                if curl -s --max-time 5 "${ENDPOINT_URL}/v1/models" > /dev/null 2>&1; then
+                  echo "Model endpoint is ready"
+                  break
+                fi
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                echo "Waiting for model endpoint... ($RETRY_COUNT/$MAX_RETRIES)"
+                sleep 5
+              done
+
+              if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+                echo "ERROR: Model endpoint not ready after $MAX_RETRIES attempts"
+                exit 1
+              fi
+
+              echo "=== Starting aiperf load test ==="
+              touch /tmp/aiperf/status/started
+
+              # Run aiperf command (substituted at runtime)
+              AIPERF_CMD
+
+              AIPERF_EXIT_CODE=$?
+              echo $AIPERF_EXIT_CODE > /tmp/aiperf/status/exit_code
+              touch /tmp/aiperf/status/completed
+
+              echo "=== aiperf completed with exit code: $AIPERF_EXIT_CODE ==="
+              exit $AIPERF_EXIT_CODE
+          env:
+            - name: ENDPOINT_URL
+              value: "TEMPLATE_ENDPOINT_URL"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: results-volume
+              mountPath: /tmp/aiperf
+      volumes:
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: TEMPLATE_PVC_NAME
