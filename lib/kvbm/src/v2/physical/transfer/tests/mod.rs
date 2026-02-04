@@ -3,6 +3,8 @@
 
 //! Comprehensive transfer tests for verifying data integrity across storage types and layout configurations.
 
+#[cfg(feature = "permute_kernels")]
+mod cuda_kernel_tests;
 mod local_transfers;
 
 /// Skip test if stub kernels are in use (no real CUDA available).

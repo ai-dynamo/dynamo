@@ -82,6 +82,7 @@ collectives = ["dep:nixl-sys", "nccl"]  # Enable NIXL transfers and NCCL collect
 nccl = []  # Enable NCCL collective operations (via cudarc)
 testing-nccl = ["collectives"]  # Enable NCCL tests (requires 2+ GPUs)
 nats = ["dep:async-nats", "dep:flume"]  # Enable NATS pubsub implementation
+permute_kernels = ["dynamo-kvbm-kernels/permute_kernels"]  # Enable permute kernel tests
 
 [dev-dependencies]
 dynamo-memory = {workspace=true, features = ["unsafe-slices"]}
