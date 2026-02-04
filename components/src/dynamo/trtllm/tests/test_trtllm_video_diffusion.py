@@ -11,7 +11,6 @@ These tests do NOT require visual_gen or GPU - they test logic only.
 
 from dataclasses import dataclass
 from typing import Optional
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -156,17 +155,32 @@ class TestDiffusionEngineRegistry:
         assert "wan_t2v" in DiffusionEngine.PIPELINE_REGISTRY
 
         entry = DiffusionEngine.PIPELINE_REGISTRY["wan_t2v"]
-        assert len(entry) == 3  # (module_path, class_name, modalities)
-        module_path, class_name, modalities = entry
+        assert (
+            len(entry) == 4
+        )  # (module_path, class_name, modalities, config_overrides)
+        module_path, class_name, modalities, config_overrides = entry
 
         assert "visual_gen" in module_path
         assert "Pipeline" in class_name or "pipeline" in class_name.lower()
         assert "video_diffusion" in modalities
+        assert isinstance(config_overrides, dict)
+        assert "torch_compile_models" in config_overrides
+
+    def test_pipeline_registry_has_wan22_t2v(self):
+        """Test that wan2.2_t2v entry exists with dual transformer config."""
+        assert "wan2.2_t2v" in DiffusionEngine.PIPELINE_REGISTRY
+
+        entry = DiffusionEngine.PIPELINE_REGISTRY["wan2.2_t2v"]
+        _, _, _, config_overrides = entry
+
+        # Wan 2.2 requires dual transformer compilation
+        assert config_overrides["torch_compile_models"] == "transformer,transformer_2"
 
     def test_get_allowed_model_types_video(self):
-        """Test video_diffusion modality returns wan_t2v."""
+        """Test video_diffusion modality returns wan model types."""
         allowed = DiffusionEngine.get_allowed_model_types("video_diffusion")
         assert "wan_t2v" in allowed
+        assert "wan2.2_t2v" in allowed
 
     def test_get_allowed_model_types_unknown(self):
         """Test unknown modality returns empty list."""
@@ -231,6 +245,7 @@ class MockDiffusionConfig:
     default_width: int = 832
     default_height: int = 480
     default_num_frames: int = 81
+    default_fps: int = 24
 
 
 @dataclass
@@ -359,7 +374,10 @@ class TestVideoHandlerComputeNumFrames:
             prompt="test",
             model="test-model",
         )
-        assert self.handler._compute_num_frames(req) == MockDiffusionConfig.default_num_frames
+        assert (
+            self.handler._compute_num_frames(req)
+            == MockDiffusionConfig.default_num_frames
+        )
 
 
 # =============================================================================

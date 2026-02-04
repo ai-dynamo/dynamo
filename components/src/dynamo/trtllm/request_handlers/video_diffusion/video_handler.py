@@ -7,6 +7,7 @@ This handler processes video generation requests using diffusion models.
 """
 
 import asyncio
+import base64
 import logging
 import time
 import uuid
@@ -60,6 +61,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
     def _parse_size(self, size: Optional[str]) -> tuple[int, int]:
         """Parse 'WxH' string to (width, height) tuple.
 
+        The API accepts size as a string (e.g., "832x480") to match the format
+        used by OpenAI's image generation API (/v1/images/generations).
+        This method converts that string to a (width, height) tuple for the engine.
+
         Args:
             size: Size string in 'WxH' format (e.g., '832x480').
 
@@ -89,19 +94,23 @@ class VideoGenerationHandler(BaseGenerativeHandler):
         Returns:
             Number of frames to generate.
         """
+        # Priority 1: Explicit num_frames takes precedence
         if req.num_frames is not None:
             return req.num_frames
 
-        # Use request values or defaults
+        # Priority 2: If user provided seconds and/or fps, calculate frame count
+        # Use config defaults for any unspecified value
         seconds = req.seconds if req.seconds is not None else 4
-        fps = req.fps if req.fps is not None else 24
-
+        fps = req.fps if req.fps is not None else self.config.default_fps
         computed = seconds * fps
 
-        # If neither was provided in request, use config default
+        # Priority 3: If user provided NEITHER seconds NOR fps, use config default
+        # This allows config.default_num_frames to take effect only when the user
+        # didn't specify any duration-related parameters
         if req.seconds is None and req.fps is None:
             return self.config.default_num_frames
 
+        # User provided at least one of (seconds, fps), so use computed value
         return computed
 
     async def generate(
@@ -161,7 +170,7 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             # Determine output format
             response_format = req.response_format or "url"
-            fps = req.fps or 16  # Default output fps
+            fps = req.fps or self.config.default_fps
 
             if response_format == "url":
                 # Encode to MP4 and save to file
@@ -174,8 +183,6 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 video_data = VideoData(url=output_path)
             else:
                 # Encode to base64
-                import base64
-
                 video_bytes = encode_to_mp4_bytes(frames, fps=fps)
                 b64_video = base64.b64encode(video_bytes).decode("utf-8")
                 video_data = VideoData(b64_json=b64_video)

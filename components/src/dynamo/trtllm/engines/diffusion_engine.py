@@ -5,6 +5,19 @@
 
 This module provides a unified interface for various diffusion models
 (Wan, Flux, Cosmos, etc.) through a pipeline registry system.
+
+Requirements:
+    - visual_gen: A separate NVIDIA package for diffusion pipelines.
+      This is NOT part of TensorRT-LLM and must be installed separately.
+      Contact your NVIDIA representative for access.
+    - See docs/backends/trtllm/README.md for setup instructions.
+
+Note on imports:
+    visual_gen is imported lazily in initialize() because:
+    1. It's a heavy package that may not be installed in all environments
+    2. Importing at module load would fail if visual_gen is not available
+    3. This allows the module to be imported for type checking and validation
+       without requiring visual_gen to be installed
 """
 
 import importlib
@@ -35,14 +48,32 @@ class DiffusionEngine:
         >>> frames = engine.generate(prompt="A cat playing piano", ...)
     """
 
-    # Registry: model_type -> (module_path, class_name, supported_modalities)
-    # The module_path is relative to visual_gen package
-    PIPELINE_REGISTRY: dict[str, tuple[str, str, list[str]]] = {
-        # Video diffusion models (text-to-video)
+    # Registry: model_type -> (module_path, class_name, supported_modalities, config_overrides)
+    # - module_path: Python module path for the pipeline class
+    # - class_name: Name of the pipeline class to instantiate
+    # - supported_modalities: List of modalities this model supports
+    # - config_overrides: Model-specific config overrides for _build_dit_configs()
+    #
+    # When adding new models, specify the torch_compile_models for that architecture.
+    # visual_gen is a generic framework; each model family may need different settings.
+    #
+    # NOTE: This registry is initially focused on Wan text-to-video models.
+    # Follow-up PRs will extend support for other model families (Flux, Cosmos, etc.)
+    # which may require additional config fields in DiffusionConfig.
+    PIPELINE_REGISTRY: dict[str, tuple[str, str, list[str], dict[str, Any]]] = {
+        # Wan 2.1 text-to-video (single transformer)
         "wan_t2v": (
             "visual_gen.pipelines.wan_pipeline",
             "ditWanPipeline",
             ["video_diffusion"],
+            {"torch_compile_models": "transformer"},
+        ),
+        # Wan 2.2 text-to-video (dual transformer architecture)
+        "wan2.2_t2v": (
+            "visual_gen.pipelines.wan_pipeline",
+            "ditWanPipeline",
+            ["video_diffusion"],
+            {"torch_compile_models": "transformer,transformer_2"},
         ),
         # TODO(nv-yna): Add support for wan_i2v, cosmos, flux, flux2 in follow-up PR
     }
@@ -59,7 +90,7 @@ class DiffusionEngine:
         """
         return [
             model_type
-            for model_type, (_, _, modalities) in cls.PIPELINE_REGISTRY.items()
+            for model_type, (_, _, modalities, _) in cls.PIPELINE_REGISTRY.items()
             if modality in modalities
         ]
 
@@ -119,11 +150,12 @@ class DiffusionEngine:
         self._pipeline = None
         self._initialized = False
 
-        # Get registry entry
+        # Get registry entry (module_path, class_name, modalities, config_overrides)
         (
             self._module_path,
             self._class_name,
             self._supported_modalities,
+            self._config_overrides,
         ) = self.PIPELINE_REGISTRY[model_type]
 
     async def initialize(self) -> None:
@@ -157,10 +189,19 @@ class DiffusionEngine:
         pipeline_class = getattr(module, self._class_name)
 
         # Load the pipeline
-        logger.info(f"Loading pipeline from {self.config.model_path}")
+        # Convert torch_dtype string to actual torch dtype
+        dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
+        torch_dtype = dtype_map.get(self.config.torch_dtype, torch.bfloat16)
+        logger.info(
+            f"Loading pipeline from {self.config.model_path} with dtype={self.config.torch_dtype}"
+        )
         self._pipeline = pipeline_class.from_pretrained(
             self.config.model_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch_dtype,
             **dit_configs,
         )
 
@@ -183,10 +224,11 @@ class DiffusionEngine:
         Returns:
             Configuration dictionary for visual_gen's setup_configs.
         """
-        # Determine torch_compile_models based on model variant
-        torch_compile_models = "transformer"
-        if "Wan2.2" in self.config.model_path:
-            torch_compile_models = "transformer,transformer_2"
+        # Get torch_compile_models from model-specific config overrides in registry
+        # Each model_type in PIPELINE_REGISTRY specifies its required settings
+        torch_compile_models = self._config_overrides.get(
+            "torch_compile_models", "transformer"
+        )
 
         return {
             "pipeline": {

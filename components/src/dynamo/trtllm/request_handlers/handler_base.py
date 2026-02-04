@@ -73,7 +73,11 @@ class RequestHandlerConfig:
 
 class HandlerBase(BaseGenerativeHandler):
     """
-    Base class for request handlers.
+    Base class for LLM request handlers (text generation, multimodal LLM).
+
+    This class is dedicated to LLM-based generation using TensorRT-LLM engine.
+    For diffusion-based handlers (video, image), see VideoGenerationHandler
+    and ImageGenerationHandler which inherit directly from BaseGenerativeHandler.
 
     Inherits from BaseGenerativeHandler to ensure a consistent interface
     across all generative handlers (LLM, video, image).

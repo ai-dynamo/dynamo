@@ -39,6 +39,10 @@ class DiffusionConfig:
         "wan_t2v"  # Must be validated against DiffusionEngine.PIPELINE_REGISTRY
     )
     served_model_name: Optional[str] = None
+    # torch_dtype for model loading. Options: "bfloat16", "float16", "float32"
+    # bfloat16 is recommended for Ampere+ GPUs (A100, H100, etc.)
+    # float16 can be used on older GPUs (V100, etc.)
+    torch_dtype: str = "bfloat16"
 
     # Output config
     output_dir: str = "/tmp/dynamo_videos"
@@ -47,6 +51,7 @@ class DiffusionConfig:
     default_height: int = 480
     default_width: int = 832
     default_num_frames: int = 81
+    default_fps: int = 24  # Used for both frame count calculation and video encoding
     default_num_inference_steps: int = 50
     default_guidance_scale: float = 5.0
 

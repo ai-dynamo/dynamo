@@ -226,12 +226,13 @@ async def init_video_diffusion_worker(
     model_name = config.served_model_name or config.model_path
 
     # Use ModelType.Videos for video generation
-    model_type = getattr(ModelType, "Videos", ModelType.Chat)
-    if model_type == ModelType.Chat:
-        logging.warning(
-            "ModelType.Videos not available, using ModelType.Chat as fallback. "
-            "This may not work correctly with the HTTP frontend."
+    if not hasattr(ModelType, "Videos"):
+        raise RuntimeError(
+            "ModelType.Videos not available in dynamo-runtime. "
+            "Video diffusion requires a compatible dynamo-runtime version. "
+            "See docs/backends/trtllm/README.md for setup instructions."
         )
+    model_type = ModelType.Videos
 
     logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
 

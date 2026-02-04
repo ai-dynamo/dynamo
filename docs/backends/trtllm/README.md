@@ -42,6 +42,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Client](#client)
 - [Benchmarking](#benchmarking)
 - [Multimodal Support](#multimodal-support)
+- [Video Diffusion Support](#video-diffusion-support-experimental)
 - [Logits Processing](#logits-processing)
 - [Performance Sweep](#performance-sweep)
 - [Known Issues and Mitigations](#known-issues-and-mitigations)
@@ -231,6 +232,66 @@ To benchmark your deployment with AIPerf, see this utility script, configuring t
 ## Multimodal support
 
 Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../multimodal/trtllm.md).
+
+## Video Diffusion Support (Experimental)
+
+Dynamo supports video generation using diffusion models through the `--modality video_diffusion` flag.
+
+### Requirements
+
+- **visual_gen package**: Video diffusion requires the `visual_gen` package, which is a separate NVIDIA package for diffusion pipelines. Contact your NVIDIA representative for access.
+- **dynamo-runtime with video API**: The Dynamo runtime must include `ModelType.Videos` support. Ensure you're using a compatible version.
+
+### Supported Models
+
+| Model Type | Description | Usage |
+|------------|-------------|-------|
+| `wan_t2v` | Wan 2.1 Text-to-Video | `--model-type wan_t2v` |
+| `wan2.2_t2v` | Wan 2.2 Text-to-Video (dual transformer) | `--model-type wan2.2_t2v` |
+
+### Quick Start
+
+```bash
+python -m dynamo.trtllm \
+  --modality video_diffusion \
+  --model-type wan_t2v \
+  --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
+  --output-dir /tmp/videos
+```
+
+### API Endpoint
+
+Video generation uses the `/v1/videos/generations` endpoint:
+
+```bash
+curl -X POST http://localhost:8000/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A cat playing piano",
+    "model": "wan_t2v",
+    "size": "832x480",
+    "seconds": 4,
+    "fps": 24
+  }'
+```
+
+### Configuration Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--model-type` | Model type from registry | `wan_t2v` |
+| `--output-dir` | Directory for generated videos | `/tmp/dynamo_videos` |
+| `--default-height` | Default video height | `480` |
+| `--default-width` | Default video width | `832` |
+| `--default-num-frames` | Default frame count | `81` |
+| `--enable-teacache` | Enable TeaCache optimization | `False` |
+| `--disable-torch-compile` | Disable torch.compile | `False` |
+
+### Limitations
+
+- Video diffusion is experimental and not recommended for production use
+- Only text-to-video is supported in this release (image-to-video planned)
+- Requires GPU with sufficient VRAM for the diffusion model
 
 ## Logits Processing
 

@@ -62,9 +62,11 @@ def encode_to_mp4(
         else:
             # Fall back to v2 API
             writer = iio.get_writer(output_path, fps=fps, codec="libx264")
-            for frame in frames:
-                writer.append_data(frame)
-            writer.close()
+            try:
+                for frame in frames:
+                    writer.append_data(frame)
+            finally:
+                writer.close()
 
         logger.info(f"Video saved to {output_path}")
         return output_path
@@ -118,9 +120,11 @@ def encode_to_mp4_bytes(
             writer = iio.get_writer(
                 buffer, format="FFMPEG", mode="I", fps=fps, codec="libx264"
             )
-            for frame in frames:
-                writer.append_data(frame)
-            writer.close()
+            try:
+                for frame in frames:
+                    writer.append_data(frame)
+            finally:
+                writer.close()
 
         video_bytes = buffer.getvalue()
         logger.info(f"Encoded video to {len(video_bytes)} bytes")
