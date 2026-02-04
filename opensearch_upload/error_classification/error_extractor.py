@@ -392,3 +392,102 @@ class ErrorExtractor:
                 'command': command,
             }
         )
+
+    def extract_from_github_job_logs(
+        self,
+        log_content: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> List[ErrorContext]:
+        """
+        Extract errors from GitHub Actions job logs.
+
+        Looks for step failures, error messages, and exit codes.
+
+        Args:
+            log_content: Raw job log content
+            context: Additional context (workflow_id, job_id, etc.)
+
+        Returns:
+            List of ErrorContext objects
+        """
+        errors = []
+        context = context or {}
+
+        # Pattern to detect failed steps and extract error messages
+        # GitHub Actions logs have timestamps like: 2025-01-15T10:30:45.123Z
+        step_pattern = r'##\[group\](.+?)$'
+        error_patterns = [
+            r'##\[error\](.+?)$',
+            r'Error: (.+?)$',
+            r'ERROR: (.+?)$',
+            r'FAILED (.+?)$',
+            r'make: \*\*\* \[.+?\] Error \d+',
+            r'exit code (\d+)',
+        ]
+
+        lines = log_content.split('\n')
+        current_step = None
+        error_buffer = []
+        in_error_context = False
+
+        for i, line in enumerate(lines):
+            # Track current step
+            step_match = re.search(step_pattern, line)
+            if step_match:
+                current_step = step_match.group(1).strip()
+                # Reset error buffer when entering new step
+                if error_buffer and in_error_context:
+                    # Create error from buffer
+                    error_text = '\n'.join(error_buffer)
+                    errors.append(self._create_github_log_error(
+                        error_text,
+                        current_step,
+                        context
+                    ))
+                error_buffer = []
+                in_error_context = False
+
+            # Check for error patterns
+            for pattern in error_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    in_error_context = True
+                    # Capture context: previous lines and next lines
+                    start = max(0, i - 3)
+                    end = min(len(lines), i + 10)
+                    error_buffer = lines[start:end]
+                    break
+
+        # Create error from final buffer
+        if error_buffer and in_error_context:
+            error_text = '\n'.join(error_buffer)
+            errors.append(self._create_github_log_error(
+                error_text,
+                current_step,
+                context
+            ))
+
+        return errors
+
+    def _create_github_log_error(
+        self,
+        error_text: str,
+        step_name: Optional[str],
+        context: Dict[str, Any]
+    ) -> ErrorContext:
+        """Create ErrorContext for GitHub job log error."""
+        return ErrorContext(
+            error_text=error_text,
+            source_type="github_job_log",
+            workflow_id=context.get('workflow_id'),
+            job_id=context.get('job_id'),
+            step_name=step_name,
+            job_name=context.get('job_name'),
+            repo=context.get('repo'),
+            workflow_name=context.get('workflow_name'),
+            branch=context.get('branch'),
+            pr_id=context.get('pr_id'),
+            commit_sha=context.get('commit_sha'),
+            user_alias=context.get('user_alias'),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
