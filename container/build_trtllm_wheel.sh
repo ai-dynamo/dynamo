@@ -42,7 +42,7 @@ fi
 
 # Set default TensorRT-LLM git URL if not specified
 if [ -z "$TRTLLM_GIT_URL" ]; then
-    TRTLLM_GIT_URL="https://github.com/NVIDIA/TensorRT-LLM.git"
+    TRTLLM_GIT_URL="https://github.com/Tabrizian/TensorRT-LLM.git"
 fi
 
 # Store directory where script is being launched from
@@ -58,9 +58,7 @@ cd TensorRT-LLM
 
 # Checkout the specified commit.
 # Switch to the main branch to pull the latest changes.
-git checkout main
-git pull
-git checkout $TRTLLM_COMMIT
+git checkout usesr/imant/dynamoDisaggHang
 
 # Update the submodules.
 git submodule update --init --recursive
