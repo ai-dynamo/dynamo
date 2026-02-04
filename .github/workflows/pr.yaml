@@ -130,7 +130,7 @@ jobs:
           NO_CACHE_FLAG: 'false' # placeholder for future logic to add no cache flag if needed
         run: |
           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
+          DEFAULT_TAG="${{ github.sha }}-operator"
           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           IMAGE_URIS=(
             "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
@@ -139,10 +139,8 @@ jobs:
 
           if [[ "${{ github.ref_name }}" == "main" ]]; then
             IMAGE_URIS+=(
-              "${ECR_DEFAULT_IMAGE_BASE}:main-dynamo-operator"
-              "${ECR_DEFAULT_IMAGE_BASE}:main-${DEFAULT_TAG}"
-              "${ACR_IMAGE_BASE}:main-dynamo-operator"
-              "${ACR_IMAGE_BASE}:main-${DEFAULT_TAG}"
+              "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
+              "${ACR_IMAGE_BASE}:main-operator"
             )
           fi
 
