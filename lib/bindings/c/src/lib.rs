@@ -454,7 +454,7 @@ impl RouterHandles {
         };
 
         self.decode_router
-            .find_best_match(None, tokens, config_override.as_ref(), update_states)
+            .find_best_match(None, tokens, config_override.as_ref(), update_states, None)
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
@@ -545,8 +545,7 @@ pub unsafe extern "C" fn create_routers(
         let instance_count = wait_for_discovery_sync(&drt).await;
         if instance_count == 0 {
             tracing::error!(
-                "Discovery sync failed: no worker instances found after {}s. Is the backend running?",
-                discovery_timeout
+                "Discovery sync failed: no worker instances found. Is the backend running?"
             );
             return Err(QueryRouterResult::ErrInitFailed);
         }
@@ -593,7 +592,7 @@ pub unsafe extern "C" fn create_routers(
 
         // Create decode router
         let decode_router = match model_manager
-            .kv_chooser_for(&endpoint, block_size, Some(kv_router_config.clone()))
+            .kv_chooser_for(&endpoint, block_size, Some(kv_router_config))
             .await
         {
             Ok(r) => r,
@@ -608,7 +607,7 @@ pub unsafe extern "C" fn create_routers(
         let prefill_router = match find_prefill_endpoint(&drt, &namespace_str).await {
             Some(prefill_endpoint) => {
                 tracing::info!("Prefill worker found, running in disaggregated mode");
-                let mut prefill_config = kv_router_config.clone();
+                let mut prefill_config = kv_router_config;
                 prefill_config.router_track_active_blocks = false;
 
                 // Create immediately-resolved channel to activate router
@@ -715,6 +714,7 @@ pub unsafe extern "C" fn add_request(
                     overlap_blocks,
                     None,
                     worker,
+                    None, // lora_name
                 )
                 .await;
 
@@ -1063,7 +1063,10 @@ async fn fetch_preprocessor_from_discovery(
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
                     // Skip prefill-only workers, we want decode workers for routing
-                    if card.model_type.supports_prefill() && !card.model_type.supports_decode() {
+                    if card.model_type.supports_prefill()
+                        && !card.model_type.supports_chat()
+                        && !card.model_type.supports_completions()
+                    {
                         continue;
                     }
                     model_card = Some(card);

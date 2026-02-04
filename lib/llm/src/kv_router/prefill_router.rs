@@ -457,7 +457,7 @@ impl PrefillRouter {
             };
             let (worker, _overlap) = kv_router
                 .chooser
-                .find_best_match(None, token_ids, None, update_states)
+                .find_best_match(None, token_ids, None, update_states, None)
                 .await?;
             Ok((worker.worker_id, worker.dp_rank))
         } else {
