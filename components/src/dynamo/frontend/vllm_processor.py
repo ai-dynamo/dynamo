@@ -227,21 +227,26 @@ class VllmProcessor:
             # For KV router is is only the inner map: {'token_ids': [7281]}
 
             if self.is_kv_router:
-                output = dynamo_response
+                engine_response = dynamo_response
             else:
-                output = dynamo_response.data()
+                engine_response = dynamo_response.data()
 
-            if output is None or "token_ids" not in output:
+            # engine_response:
+            # Normal: {'token_ids': [151658]}
+            # Last: {'token_ids': [151645], 'finish_reason': 'stop', 'completion_usage': {'prompt_tokens': 190, 'completion_tokens': 168, 'total_tokens': 358, 'prompt_tokens_details': {'cached_tokens': 176}}}
+
+            if engine_response is None or "token_ids" not in engine_response:
                 yield {
                     "finish_reason": "error: No outputs from vLLM engine",
                     "token_ids": [],
                 }
                 break
 
-            finish_reason = output.get("finish_reason")
+            finish_reason = engine_response.get("finish_reason")
+
             vllm_response = EngineCoreOutput(
                 request_id=request_id,
-                new_token_ids=output["token_ids"],
+                new_token_ids=engine_response["token_ids"],
                 finish_reason=finish_reason,
                 # new_logprobs=new_logprobs,
                 # new_prompt_logprobs_tensors=prompt_logprobs_tensors,
@@ -359,9 +364,7 @@ class VllmProcessor:
                         {
                             "index": output.index,
                             "delta": delta,
-                            # TODO: These three likely need converting
                             "finish_reason": output.finish_reason,
-                            "stop_reason": output.stop_reason,
                             "logprobs": output.logprobs,
                         }
                     )
@@ -378,13 +381,21 @@ class VllmProcessor:
                                     in_progress_tool_call.model_dump(exclude_none=True)
                                 ],
                             },
-                            # TODO: These three likely need converting
                             "finish_reason": output.finish_reason,
-                            "stop_reason": output.stop_reason,
                             "logprobs": output.logprobs,
                         }
                     )
                     in_progress_tool_call = None
+                elif output.finish_reason:
+                    # Last response often has no content, but we need the finish reason
+                    choices.append(
+                        {
+                            "index": output.index,
+                            "delta": {},
+                            "finish_reason": output.finish_reason,
+                            "logprobs": output.logprobs,
+                        }
+                    )
 
                 previous_text = current_text
                 previous_token_ids = current_token_ids
@@ -397,9 +408,12 @@ class VllmProcessor:
                     "created": int(time.time()),
                     "model": request["model"],
                     "object": "chat.completion.chunk",
-                    # usage (from output.metrics maybe)
                 }
-                # Rust handles Server Sent Events back to user
+                if usage := engine_response.get("completion_usage"):
+                    # The engine only includes this on the last response
+                    dynamo_out["usage"] = usage
+
+                # Rust handles HTTP / Server Sent Events back to user
                 yield dynamo_out
 
 
