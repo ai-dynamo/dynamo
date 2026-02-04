@@ -45,12 +45,14 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--dyn-tool-call-parser"],
         "type": str,
         "default": None,
+        "choices": get_tool_parser_names(),
         "help": "Tool call parser name for the model.",
     },
     "reasoning-parser": {
         "flags": ["--dyn-reasoning-parser"],
         "type": str,
         "default": None,
+        "choices": get_reasoning_parser_names(),
         "help": "Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     },
     "custom-jinja-template": {
@@ -212,17 +214,12 @@ def _preprocess_for_encode_config(
     }
 
 
-def _validate_parser(
-    sglang_val: Optional[str], dynamo_val: Optional[str], name: str, valid: list
+def _validate_parser_flags(
+    sglang_val: Optional[str], dynamo_val: Optional[str], name: str
 ) -> None:
-    """Validate --{name} (SGLang) and --dyn-{name} (Dynamo) parser flags."""
+    """Validate that --{name} (SGLang) and --dyn-{name} (Dynamo) are not both set."""
     if sglang_val and dynamo_val:
         logging.error(f"Cannot use both --{name} and --dyn-{name}.")
-        sys.exit(1)
-    if dynamo_val and dynamo_val not in valid:
-        logging.error(
-            f"--dyn-{name} '{dynamo_val}' is not supported. Valid choices: {valid}"
-        )
         sys.exit(1)
 
 
@@ -440,20 +437,17 @@ async def parse_args(args: list[str]) -> Config:
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
 
-    # Validate parser flags: error if both --{name} and --dyn-{name} are set,
-    # and validate --dyn-{name} against Dynamo's supported parsers.
-    # SGLang's --{name} is validated by SGLang's own argparse choices.
-    _validate_parser(
+    # Validate parser flags: error if both --{name} and --dyn-{name} are set.
+    # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
+    _validate_parser_flags(
         parsed_args.tool_call_parser,
         parsed_args.dyn_tool_call_parser,
         "tool-call-parser",
-        get_tool_parser_names(),
     )
-    _validate_parser(
+    _validate_parser_flags(
         parsed_args.reasoning_parser,
         parsed_args.dyn_reasoning_parser,
         "reasoning-parser",
-        get_reasoning_parser_names(),
     )
     tool_call_parser = parsed_args.dyn_tool_call_parser
     reasoning_parser = parsed_args.dyn_reasoning_parser
