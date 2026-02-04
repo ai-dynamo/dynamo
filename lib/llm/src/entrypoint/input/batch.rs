@@ -241,7 +241,15 @@ async fn evaluate(
                 let choice = data.choices.first();
                 let chat_comp = choice.as_ref().unwrap();
                 if let Some(c) = &chat_comp.delta.content {
-                    output += c;
+                    match c {
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => {
+                            output += text;
+                        }
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => {
+                            // Multimodal content - skip for now in batch processing
+                            // TODO: Handle multimodal content in batch mode
+                        }
+                    }
                 }
                 entry.finish_reason = chat_comp.finish_reason;
                 if chat_comp.finish_reason.is_some() {

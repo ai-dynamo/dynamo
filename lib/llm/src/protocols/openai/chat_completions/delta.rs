@@ -270,7 +270,7 @@ impl DeltaGenerator {
         stop_reason: Option<dynamo_async_openai::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: text,
+            content: text.map(dynamo_async_openai::types::ChatCompletionMessageContent::Text),
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
