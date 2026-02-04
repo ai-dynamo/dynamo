@@ -18,7 +18,10 @@ import logging
 
 from pydantic import BaseModel
 
-from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
+from dynamo.planner.utils.planner_argparse import (
+    create_sla_planner_parser,
+    validate_planner_args,
+)
 from dynamo.planner.utils.planner_core import start_sla_planner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -52,4 +55,5 @@ async def init_planner(runtime: DistributedRuntime, args):
 if __name__ == "__main__":
     parser = create_sla_planner_parser()
     args = parser.parse_args()
+    validate_planner_args(args)
     asyncio.run(init_planner(args))

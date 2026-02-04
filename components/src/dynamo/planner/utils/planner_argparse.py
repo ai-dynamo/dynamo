@@ -191,5 +191,6 @@ def validate_planner_args(args):
     if args.environment == "global-planner":
         if not args.global_planner_namespace:
             raise ValueError(
-                "--global-planner-namespace required when environment=global-planner"
+                "--global-planner-namespace required when environment=global-planner. "
+                "Please specify the namespace where GlobalPlanner is running."
             )

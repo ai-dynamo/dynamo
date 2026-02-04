@@ -878,15 +878,6 @@ class DisaggPlanner:
 
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
-    # Validate planner configuration
-    if args.environment == "global-planner" and not getattr(
-        args, "global_planner_namespace", None
-    ):
-        raise ValueError(
-            "--global-planner-namespace required when environment=global-planner. "
-            "Please specify the namespace where GlobalPlanner is running."
-        )
-
     mode = getattr(args, "mode", "disagg")
     if mode == "disagg":
         planner = DisaggPlanner(runtime, args)
