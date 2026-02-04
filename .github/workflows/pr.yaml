@@ -9,6 +9,10 @@ on:
       - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
+  # TEMPORARY: Add pull_request trigger for testing
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       run_deploy_operator:
