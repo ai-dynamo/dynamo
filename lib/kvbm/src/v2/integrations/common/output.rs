@@ -1,9 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Scheduler output types shared between scheduler and connector.
 
 use crate::v2::BlockId;
+use crate::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -54,6 +55,12 @@ pub struct SchedulerOutput {
     pub num_scheduled_tokens: HashMap<String, usize>,
     /// Total number of tokens scheduled across all requests.
     pub total_num_scheduled_tokens: usize,
+    /// Optional connector metadata for workers.
+    ///
+    /// Present when a connector is attached to the scheduler. Contains forward pass
+    /// completion events and intra-pass load information for KV cache transfers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_connector_metadata: Option<KvConnectorMetadata>,
 }
 
 impl SchedulerOutput {

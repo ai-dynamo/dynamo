@@ -71,17 +71,18 @@ impl PySchedulerConfig {
         projection_lookahead: usize,
         total_blocks: Option<usize>,
     ) -> Self {
-        let inner = SchedulerConfig {
-            max_num_batched_tokens,
-            max_num_seqs,
-            block_size,
-            enable_prefix_caching,
-            enable_chunked_prefill,
-            max_prefill_chunk_size,
-            max_seq_len,
-            enable_projection,
-            projection_lookahead,
-        };
+        let inner = SchedulerConfig::builder()
+            .max_num_batched_tokens(max_num_batched_tokens)
+            .max_num_seqs(max_num_seqs)
+            .block_size(block_size)
+            .enable_prefix_caching(enable_prefix_caching)
+            .enable_chunked_prefill(enable_chunked_prefill)
+            .max_prefill_chunk_size(max_prefill_chunk_size)
+            .max_seq_len(max_seq_len)
+            .enable_projection(enable_projection)
+            .projection_lookahead(projection_lookahead)
+            .build()
+            .expect("Should build SchedulerConfig");
 
         Self {
             inner,

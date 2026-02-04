@@ -54,10 +54,13 @@ pub fn create_test_scheduler(
             .expect("Should create KVCacheManager");
 
     let config = SchedulerConfig::builder()
+        .max_seq_len(8192)
         .max_num_batched_tokens(8192)
         .max_num_seqs(256)
         .block_size(block_size)
         .enable_prefix_caching(enable_prefix_caching)
+        .enable_chunked_prefill(false)
+        .max_prefill_chunk_size(None)
         .build()
         .expect("Should build config");
 
@@ -242,10 +245,13 @@ mod tests {
             .expect("Should create KVCacheManager");
 
         let config = SchedulerConfig::builder()
+            .max_seq_len(8192)
             .max_num_batched_tokens(8192)
             .max_num_seqs(256)
             .block_size(block_size)
             .enable_prefix_caching(true)
+            .enable_chunked_prefill(false)
+            .max_prefill_chunk_size(None)
             .build()
             .expect("Should build config");
 
@@ -323,10 +329,13 @@ mod tests {
             .expect("Should create KVCacheManager");
 
         let config = SchedulerConfig::builder()
+            .max_seq_len(8192)
             .max_num_batched_tokens(8192)
             .max_num_seqs(256)
             .block_size(block_size)
             .enable_prefix_caching(true)
+            .enable_chunked_prefill(false)
+            .max_prefill_chunk_size(None)
             .build()
             .expect("Should build config");
 
@@ -369,10 +378,13 @@ mod tests {
             .expect("Should create KVCacheManager");
 
         let config = SchedulerConfig::builder()
+            .max_seq_len(8192)
             .max_num_batched_tokens(8192)
             .max_num_seqs(256)
             .block_size(block_size)
             .enable_prefix_caching(true)
+            .enable_chunked_prefill(false)
+            .max_prefill_chunk_size(None)
             .build()
             .expect("Should build config");
 

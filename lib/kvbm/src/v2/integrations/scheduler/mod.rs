@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Rust scheduler for G1 (GPU) block management.
@@ -130,6 +130,7 @@
 //! [`RequestSlot::has_inflight_offloads()`]: crate::v2::integrations::connector::leader::slot::RequestSlot::has_inflight_offloads
 
 mod config;
+mod connector_shim;
 mod core;
 mod kv_cache;
 mod policy;
@@ -143,12 +144,15 @@ mod tests;
 #[cfg(test)]
 mod trace_tests;
 
+
 pub use config::{SchedulerConfig, SchedulerConfigBuilder, SchedulerConfigBuilderError};
+pub use connector_shim::SchedulerConnectorShim;
 pub use core::{Scheduler, SchedulerBuilder, SchedulerBuilderError};
 pub use kv_cache::{AllocatedBlocks, KVCacheManager, RequestBlockState};
 pub use policy::{FCFSPolicy, SchedulingPolicy};
 pub use projection::{
-    BlockBudgetProjector, ChokePoint, PlannedEviction, PlannedEvictionTracker, ProjectionState,
+    AggregateDemandEvent, BlockEvent, ChokePoint, FinishEntry, GlobalProjectionState, NextFinish,
+    PlannedEviction, PlannedEvictionTracker, ProjectionState, RequestBlockSchedule, RequestPhase,
 };
 pub use queues::{PausedRequests, RunningRequests, WaitingQueue};
-pub use request::{RequestStatus, SchedulerRequest};
+pub use request::{OnboardingStatus, RequestStatus, SchedulerRequest};
