@@ -267,6 +267,18 @@ impl KvRouterConfig {
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
         }
     }
+
+    /// Check if KV event subscription should be started.
+    ///
+    /// Returns false if:
+    /// - KV events are disabled (`use_kv_events=false`)
+    /// - Overlap scoring is disabled (`overlap_score_weight=0`)
+    ///
+    /// When false, the router skips starting the KV event subscription entirely,
+    /// avoiding the need to query workers for their local indexer state.
+    pub fn should_subscribe_to_kv_events(&self) -> bool {
+        self.use_kv_events && self.overlap_score_weight > 0.0
+    }
 }
 
 pub enum Indexer {
@@ -394,86 +406,105 @@ impl KvRouter {
         )
         .await?;
 
-        // Initialize worker query client using namespace abstraction
-        // (for query/recovery API methods - no lifecycle tracking needed)
-        // Uses a subscriber from workers_with_configs
+        // Early return if KV event subscription is not needed (use_kv_events=false or overlap_score_weight=0)
+        if !kv_router_config.should_subscribe_to_kv_events() {
+            tracing::info!(
+                "Skipping KV event subscription (use_kv_events={}, overlap_score_weight={})",
+                kv_router_config.use_kv_events,
+                kv_router_config.overlap_score_weight,
+            );
+            return Ok(Self {
+                indexer,
+                scheduler,
+                block_size,
+                kv_router_config,
+                cancellation_token,
+                client,
+                worker_query_client: None,
+            });
+        }
+
+        // Guaranteed to be KvIndexer since overlap_score_weight > 0.0
+        let Indexer::KvIndexer(kv_indexer) = &indexer else {
+            unreachable!(
+                "should_subscribe_to_kv_events implies overlap_score_weight > 0 implies KvIndexer"
+            )
+        };
+
+        tracing::info!(
+            "Found {} worker(s), starting KV event subscriber",
+            workers_with_configs.num_workers()
+        );
+
+        let transport_kind = EventTransportKind::from_env_or_default();
+
+        // Start subscriber - durable_kv_events flag determines the mode:
+        // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
+        // - durable_kv_events=true: Use JetStream for durability and multi-replica consistency
+        if kv_router_config.durable_kv_events {
+            if transport_kind == EventTransportKind::Zmq {
+                tracing::warn!(
+                    "--durable-kv-events requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
+                );
+            }
+            tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
+
+            // Convert router_id to string for NATS consumer naming
+            let consumer_id = router_id.to_string();
+            start_kv_router_background(
+                component.clone(),
+                consumer_id,
+                kv_indexer.event_sender(),
+                kv_indexer.remove_worker_sender(),
+                kv_router_config
+                    .router_snapshot_threshold
+                    .map(|_| kv_indexer.get_workers_sender()),
+                kv_router_config
+                    .router_snapshot_threshold
+                    .map(|_| kv_indexer.snapshot_event_sender()),
+                cancellation_token.clone(),
+                kv_router_config.router_snapshot_threshold,
+                kv_router_config.router_reset_states,
+            )
+            .await?;
+        } else {
+            // Default: Use NATS Core / generic event plane (ZMQ or NATS Core)
+            // This mode requires workers to have local_indexer enabled (which is now the default)
+            if transport_kind == EventTransportKind::Zmq {
+                if kv_router_config.router_snapshot_threshold.is_some()
+                    || kv_router_config.router_reset_states
+                {
+                    tracing::warn!(
+                        "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
+                    );
+                }
+                tracing::info!("Using ZMQ event plane subscription (local_indexer mode)");
+            } else {
+                tracing::info!("Using NATS Core subscription (local_indexer mode)");
+            }
+
+            start_kv_router_background_event_plane(
+                component.clone(),
+                kv_indexer.event_sender(),
+                cancellation_token.clone(),
+                worker_query::WorkerQueryClient::new(
+                    component.clone(),
+                    workers_with_configs.subscribe(),
+                    Some(kv_indexer.remove_worker_sender()),
+                ),
+                transport_kind,
+            )
+            .await?;
+        }
+
+        // Initialize worker query client for external query API
+        // (only needed when KV events are enabled)
         let worker_query_client = worker_query::WorkerQueryClient::new(
             component.clone(),
             workers_with_configs.subscribe(),
             None, // No removal channel - query only
         );
         tracing::info!("Worker query client initialized");
-
-        // Start KV event subscriber background process (only when use_kv_events is enabled)
-        if kv_router_config.use_kv_events
-            && let Indexer::KvIndexer(ref kv_indexer) = indexer
-        {
-            tracing::info!(
-                "Found {} worker(s), starting KV event subscriber",
-                workers_with_configs.num_workers()
-            );
-
-            let transport_kind = EventTransportKind::from_env_or_default();
-
-            // Start subscriber - durable_kv_events flag determines the mode:
-            // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
-            // - durable_kv_events=true: Use JetStream for durability and multi-replica consistency
-            if kv_router_config.durable_kv_events {
-                if transport_kind == EventTransportKind::Zmq {
-                    tracing::warn!(
-                        "--durable-kv-events requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
-                    );
-                }
-                tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
-
-                // Convert router_id to string for NATS consumer naming
-                let consumer_id = router_id.to_string();
-                start_kv_router_background(
-                    component.clone(),
-                    consumer_id,
-                    kv_indexer.event_sender(),
-                    kv_indexer.remove_worker_sender(),
-                    kv_router_config
-                        .router_snapshot_threshold
-                        .map(|_| kv_indexer.get_workers_sender()),
-                    kv_router_config
-                        .router_snapshot_threshold
-                        .map(|_| kv_indexer.snapshot_event_sender()),
-                    cancellation_token.clone(),
-                    kv_router_config.router_snapshot_threshold,
-                    kv_router_config.router_reset_states,
-                )
-                .await?;
-            } else {
-                // Default: Use NATS Core / generic event plane (ZMQ or NATS Core)
-                // This mode requires workers to have local_indexer enabled (which is now the default)
-                if transport_kind == EventTransportKind::Zmq {
-                    if kv_router_config.router_snapshot_threshold.is_some()
-                        || kv_router_config.router_reset_states
-                    {
-                        tracing::warn!(
-                            "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
-                        );
-                    }
-                    tracing::info!("Using ZMQ event plane subscription (local_indexer mode)");
-                } else {
-                    tracing::info!("Using NATS Core subscription (local_indexer mode)");
-                }
-
-                start_kv_router_background_event_plane(
-                    component.clone(),
-                    kv_indexer.event_sender(),
-                    cancellation_token.clone(),
-                    worker_query::WorkerQueryClient::new(
-                        component.clone(),
-                        workers_with_configs.subscribe(),
-                        Some(kv_indexer.remove_worker_sender()),
-                    ),
-                    transport_kind,
-                )
-                .await?;
-            }
-        }
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
