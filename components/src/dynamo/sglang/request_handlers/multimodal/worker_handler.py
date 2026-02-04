@@ -157,6 +157,10 @@ class EmbeddingsProcessor:
         grid_thw_tensor = torch.tensor(mm_group.image_grid_thw)
 
         mm_item = dict(
+            # Required by SGLang to treat this dict as precomputed processor output.
+            # Without this, SGLang may assume `image_data` items are URL strings and
+            # call `.startswith()` on the dict.
+            format="processor_output",
             modality="IMAGE",
             image_grid_thw=grid_thw_tensor,
             precomputed_embeddings=precomputed_embeddings,
