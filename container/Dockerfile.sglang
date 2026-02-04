@@ -132,7 +132,8 @@ ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
 ARG CARGO_INCREMENTAL
-
+ARG RUST_VERSION=1.90.0
+ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
 WORKDIR /workspace
 
 # Copy CUDA from base stage
@@ -147,9 +148,16 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
     CARGO_TARGET_DIR=/opt/dynamo/target \
     PATH=/usr/local/cargo/bin:$PATH
 
-# Copy artifacts from base stage
-COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
-COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
+# CRITICAL FIX: Do NOT copy Rust from dynamo_base.
+# dynamo_base is Ubuntu 24.04 (GLIBC 2.39), while this stage is Manylinux_2_28 (GLIBC 2.28).
+# Copying binaries between them causes "OS Error 2" (No such file or directory) because
+# the dynamic linker/loader paths do not match.
+# DELETE: COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
+# DELETE: COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
 # Install system dependencies
 RUN dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
