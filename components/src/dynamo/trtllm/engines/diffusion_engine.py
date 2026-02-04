@@ -164,13 +164,15 @@ class DiffusionEngine:
             **dit_configs,
         )
 
-        # Move to GPU if not using CPU offload
+        # Move to target device
         # NOTE: HuggingFace's from_pretrained() loads to CPU by default,
         # so we must explicitly move to GPU for optimal performance.
-        if not self.config.enable_async_cpu_offload:
+        if self.device == "cuda":
             logger.info("Moving pipeline to GPU...")
-            self._pipeline.to("cuda")
+            self._pipeline.to(self.device)
             logger.info("Pipeline moved to GPU successfully")
+        else:
+            logger.info("CPU offload enabled, pipeline stays on CPU")
 
         self._initialized = True
         logger.info(f"DiffusionEngine initialization complete: {self.model_type}")
@@ -263,9 +265,10 @@ class DiffusionEngine:
         )
 
         # Create generator for reproducibility
+        # Device must match pipeline device (CPU if offload enabled, CUDA otherwise)
         generator = None
         if seed is not None:
-            generator = torch.Generator(device="cuda").manual_seed(seed)
+            generator = torch.Generator(device=self.device).manual_seed(seed)
 
         # Run the pipeline
         with torch.no_grad():
@@ -293,7 +296,8 @@ class DiffusionEngine:
             del self._pipeline
             self._pipeline = None
         self._initialized = False
-        torch.cuda.empty_cache()
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
         logger.info(f"DiffusionEngine cleanup complete: {self.model_type}")
 
     @property
@@ -305,3 +309,12 @@ class DiffusionEngine:
     def supported_modalities(self) -> list[str]:
         """Get the modalities supported by this engine's model type."""
         return self._supported_modalities
+
+    @property
+    def device(self) -> str:
+        """Get the device where the pipeline runs.
+
+        Returns:
+            "cpu" if CPU offload is enabled, "cuda" otherwise.
+        """
+        return "cpu" if self.config.enable_async_cpu_offload else "cuda"
