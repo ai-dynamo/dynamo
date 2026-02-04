@@ -177,25 +177,44 @@ def extract_from_github_job_logs(
         current_job_id = os.getenv("GITHUB_JOB")
         current_job = None
 
-        print(f"\n🔎 Searching for current job: {current_job_id}")
+        print(f"\n🔎 Searching for current job: '{current_job_id}'")
+
+        # First, show all jobs for debugging
+        print(f"\n  All jobs in workflow:")
+        for i, job in enumerate(jobs_data.get("jobs", []), 1):
+            print(f"    {i}. '{job.get('name')}' [status: {job.get('status')}, conclusion: {job.get('conclusion')}]")
 
         # Try multiple strategies to find the current job
+        # Strategy 1: Exact job name match
         for job in jobs_data.get("jobs", []):
             job_name = job.get("name", "")
-            job_status = job.get("status", "")
-            job_conclusion = job.get("conclusion", "")
-
-            # Strategy 1: Match by job name (matrix jobs have expanded names)
-            if current_job_id and current_job_id in job_name:
+            if current_job_id and job_name.startswith(current_job_id + "-") or job_name.startswith(current_job_id + " "):
                 current_job = job
-                print(f"  ✅ Found job by name match: {job_name}")
+                print(f"\n  ✅ Found job by exact prefix match: '{job_name}'")
                 break
 
-            # Strategy 2: Match by status (in_progress or completed with failure)
-            if job_status == "in_progress" or job_conclusion == "failure":
-                current_job = job
-                print(f"  ✅ Found job by status/conclusion: {job_name} [status: {job_status}, conclusion: {job_conclusion}]")
-                break
+        # Strategy 2: Substring match (for matrix jobs)
+        if not current_job:
+            for job in jobs_data.get("jobs", []):
+                job_name = job.get("name", "")
+                # Match if job name starts with current_job_id
+                if current_job_id and job_name.lower().startswith(current_job_id.lower()):
+                    current_job = job
+                    print(f"\n  ✅ Found job by prefix match: '{job_name}'")
+                    break
+
+        # Strategy 3: Look for jobs that are failing or recently completed with failure
+        # Only use this if we still haven't found the job AND the classification step is running
+        # (which means something must have failed)
+        if not current_job:
+            for job in jobs_data.get("jobs", []):
+                job_name = job.get("name", "")
+                job_conclusion = job.get("conclusion", "")
+                # Only match failed jobs, not in_progress ones (to avoid matching wrong jobs)
+                if job_conclusion == "failure":
+                    current_job = job
+                    print(f"\n  ⚠️  Found job by failure status (fallback): '{job_name}'")
+                    break
 
         if not current_job:
             # Debug: print available jobs
