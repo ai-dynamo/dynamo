@@ -17,23 +17,61 @@ The disaggregation design in Dynamo features a flexible framework that delivers 
 
 ## Efficient KV Transfer
 
-The key to high-performance disaggregation is efficient KV transfer. Dynamo leverages NIXL to transfer KV cache directly from the VRAM of prefill engine to the VRAM of decode engine. In addition, the KV transfer is non-blocking, allowing GPU forward pass to serve other requests in addition to the KV transfer.
+The key to high-performance disaggregation is efficient KV transfer. Dynamo leverages NIXL to transfer KV cache directly from the VRAM of the prefill engine to the VRAM of the decode engine. The KV transfer is non-blocking, allowing GPU forward passes to continue serving other requests during the transfer.
 
-After the KV blocks are allocated, the router sends the remote prefill requests, which contain the memory descriptors for the allocated KV blocks, to the prefill worker scheduler. This allows the prefill worker to read and write from the remote KV blocks without explicit handling in the remote worker engine, thanks to the RDMA read and write NIXL operations. Once the remote prefill is done, worker scheduler simply adds the decode request to the worker in-flight. This allows workers to execute forward passes of ongoing decode/prefill requests while waiting for the remote prefill to finish.
+### Router Orchestration
 
-To reduce the size of memory descriptors, Dynamo applies two optimizations:
-1. After each worker finishes its initialization and allocates all the KV cache pool, it stores the memory descriptor of all blocks (which is also referred to as the NIXL metadata) in ETCD, a distributed key-value store. Prefill workers load and cache the memory descriptors in one worker at the first time that it serves a remote prefill request issued by this worker. Thus, only the KV block ID instead of the full memory descriptor is needed when issuing the remote prefill request.
+The disaggregated serving flow is orchestrated by the `PrefillRouter`:
 
-2. Dynamo promotes the memory allocator in the prefill engine to allocate continuous blocks and merge continuous blocks into larger blocks to reduce the total number of KV blocks.
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Frontend
+    participant Router as PrefillRouter
+    participant Prefill as Prefill Worker
+    participant Decode as Decode Worker
 
-For decode and prefill with different KV layouts (i.e., due to different TP), Dynamo applies a high-performance kernel that transposes the KV blocks into their matching layout in the KV receiver after the NIXL reads and before the NIXL writes.
+    Client->>Frontend: Request
+    Frontend->>Router: Preprocessed Request
+    Router->>Router: Select prefill worker
+    Router->>Prefill: Prefill request
+    Prefill->>Prefill: Compute KV cache
+    Prefill-->>Router: disaggregated_params
+    Router->>Router: Select decode worker
+    Router->>Decode: Decode request + transfer metadata
+    Decode->>Prefill: KV transfer (NIXL)
+    Decode->>Decode: Generate tokens
+    Decode-->>Frontend: Stream tokens
+    Frontend-->>Client: Response
+```
+
+1. **Worker Selection**: The router selects a prefill worker using KV-aware routing (based on cache overlap scores and load) or simple load balancing.
+
+2. **Prefill Execution**: The router sends the prefill request to the selected prefill worker. The prefill worker computes the KV cache and returns `disaggregated_params` containing backend-specific transfer metadata.
+
+3. **Decode Routing**: The router injects the prefill result into the decode request, then routes to the decode worker.
+
+4. **KV Transfer**: The decode worker uses the transfer metadata to coordinate with the prefill worker. NIXL handles the direct GPU-to-GPU transfer using the optimal available transport (NVLink, InfiniBand/UCX, etc.).
+
+### Backend-Specific Transfer Metadata
+
+The transfer metadata format varies by backend:
+
+- **SGLang**: Uses `bootstrap_info` (host, port, room_id) for RDMA bootstrap coordination. SGLang prefill workers publish their bootstrap endpoint to the discovery service during initialization. With this mechanism, prefill can run as a background task, allowing the decode phase to begin immediately while the KV transfer proceeds in parallel.
+
+- **vLLM**: Uses `kv_transfer_params` containing block IDs and remote worker connection info. Prefill runs synchronously; decode waits for prefill to complete before proceeding.
+
+- **TRTLLM**: Uses `opaque_state` containing serialized TRT-LLM internal metadata. Prefill runs synchronously; decode waits for prefill to complete before proceeding.
+
 
 ## Runtime-Reconfigurable xPyD
 
-The prefill queue and NIXL-based KV transfer design in Dynamo naturally allows runtime-reconfigurable xPyD. Workers and prefill workers can be added and removed at runtime without any system-level synchronization or overheads. New and existing prefill workers both just simply pull remote prefill requests from NATS prefill queue. The NIXL metadata of the new or existing workers (for new prefill workers) are lazily loaded and cached when necessary. Specifically, adding and removing workers and prefill workers is as easy as:
+Dynamo's disaggregation design supports runtime-reconfigurable xPyD (x prefill workers, y decode workers). Workers can be added and removed at runtime without system-level synchronization:
 
-- Add worker: add NIXL metadata in ETCD.
-- Remove worker: flush engine and delete NIXL metadata in ETCD.
-- Add prefill worker: no explicit action needed.
-- Delete prefill worker: flush engine.
+- **Add decode worker**: Worker registers with the discovery service and publishes its `RuntimeConfig` (including KV capacity).
+- **Remove decode worker**: Worker drains active requests and deregisters from discovery.
+- **Add prefill worker**: Worker registers with discovery and publishes its endpoint information (e.g., `DisaggregatedEndpoint` for SGLang).
+- **Remove prefill worker**: Worker drains active requests and deregisters from discovery.
+
+The router automatically discovers new workers via the discovery service and incorporates them into routing decisions.
 
