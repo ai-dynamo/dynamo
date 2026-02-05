@@ -680,9 +680,9 @@ class HandlerBase:
         # Build trace headers for distributed tracing
         trace_headers = build_trace_headers(context)
 
-        # Extract dp_rank from request for attention DP scheduling
-        # This allows dynamo's router to control which DP rank processes the request
-        dp_rank = request.get("dp_rank")
+        # Extract dp_rank from request's routing hints for attention DP routing
+        routing = request.get("routing", {})
+        dp_rank = routing.get("dp_rank") if routing else None
         scheduling_params = None
         if dp_rank is not None:
             scheduling_params = SchedulingParams(
