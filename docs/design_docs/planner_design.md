@@ -58,7 +58,7 @@ prefill_correction = actual_ttft / expected_ttft
 decode_correction  = actual_itl  / expected_itl
 ```
 
-These factors account for:
+These factors account for hard to model factors such as:
 - **Request queueing**: Bursty traffic causes higher TTFT than profiled steady-state
 - **Prefix cache hits**: KV reuse reduces effective prefill tokens, lowering actual TTFT
 - **Chunked prefill in decode**: Small prefills processed in decode engine affect ITL
