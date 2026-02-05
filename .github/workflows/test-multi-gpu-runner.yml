@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test workflow to validate multi-GPU GitHub Actions runner setup
+
+name: Test Multi-GPU Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-gpu-runners:
+    name: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - prod-tester-amd-gpu-2-v1
+          - prod-tester-amd-gpu-v1
+          - prod-builder-amd-gpu-v1
+    steps:
+      - name: Check GPUs
+        run: |
+          nvidia-smi
+          echo "GPU count: $(nvidia-smi -L | wc -l)"
