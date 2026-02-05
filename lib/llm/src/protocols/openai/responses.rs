@@ -229,7 +229,9 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
         let text_content = match content_text {
             dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => text,
             dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => {
-                tracing::warn!("Multimodal content in responses API not yet supported, using placeholder");
+                tracing::warn!(
+                    "Multimodal content in responses API not yet supported, using placeholder"
+                );
                 "[multimodal content]".to_string()
             }
         };
@@ -373,7 +375,11 @@ mod tests {
             choices: vec![dynamo_async_openai::types::ChatChoice {
                 index: 0,
                 message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                    content: Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text("This is a reply".to_string())),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "This is a reply".to_string(),
+                        ),
+                    ),
                     refusal: None,
                     tool_calls: None,
                     role: dynamo_async_openai::types::Role::Assistant,

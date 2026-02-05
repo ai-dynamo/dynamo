@@ -12,8 +12,7 @@ use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStrea
 
 use dynamo_async_openai::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
-    ChatCompletionStreamResponseDelta, ChatCompletionTokenLogprob, FinishReason, Role,
-    TopLogprobs,
+    ChatCompletionStreamResponseDelta, ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
 };
 
 // Type aliases to simplify complex test data structures

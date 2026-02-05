@@ -141,7 +141,9 @@ async fn main_loop(
                     let chat_comp = entry.as_ref().unwrap();
                     if let Some(c) = &chat_comp.delta.content {
                         match c {
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => {
+                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                                text,
+                            ) => {
                                 let _ = stdout.write(text.as_bytes());
                                 let _ = stdout.flush();
                                 assistant_message += text;
