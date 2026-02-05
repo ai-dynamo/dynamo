@@ -235,10 +235,10 @@ func loadDynamoConfig() {
 	ffiComponent = "backend" // The pipeline uses backend not DYN_COMPONENT which is epp
 	ffiModel = getEnvOrDefault("DYN_MODEL", "Qwen/Qwen3-0.6B")
 	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)
-	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", false)
+	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
 
-	ffiOverlapScoreWeight = getEnvFloatOrDefault("DYNAMO_OVERLAP_SCORE_WEIGHT", -1.0)
-	ffiRouterTemperature = getEnvFloatOrDefault("DYNAMO_ROUTER_TEMPERATURE", -1.0)
+	ffiOverlapScoreWeight = getEnvFloatOrDefault("DYN_OVERLAP_SCORE_WEIGHT", -1.0)
+	ffiRouterTemperature = getEnvFloatOrDefault("DYN_ROUTER_TEMPERATURE", -1.0)
 
 	kvBlockSizeStr := os.Getenv("DYN_KV_BLOCK_SIZE")
 	if kvBlockSizeStr == "" {
@@ -324,11 +324,11 @@ func initFFI() error {
 			ns,
 			cm,
 			model,
-			C.bool(getEnvBoolOrDefault("DYNAMO_USE_KV_ROUTING", true)),
-			C.double(getEnvFloatOrDefault("DYNAMO_BUSY_THRESHOLD", -1.0)),
+			C.bool(getEnvBoolOrDefault("DYN_USE_KV_ROUTING", true)),
+			C.double(getEnvFloatOrDefault("DYN_BUSY_THRESHOLD", -1.0)),
 			C.double(ffiOverlapScoreWeight),
 			C.double(ffiRouterTemperature),
-			C.bool(getEnvBoolOrDefault("DYNAMO_USE_KV_EVENTS", true)),
+			C.bool(getEnvBoolOrDefault("DYN_USE_KV_EVENTS", true)),
 			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", false)), // no need as long as we call the Router Book keeping operations from the EPP.
 			C.bool(ffiEnforceDisagg),
 			&pipeline,

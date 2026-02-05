@@ -148,6 +148,77 @@ The `render.py` script is responsible for generating Dockerfiles for different A
 - **Build Caching**: Docker layer caching and sccache support
 - **GPU Optimization**: CUDA, EFA, and NIXL support
 
+#### BuildKit cache mounts in Dockerfiles
+
+The framework Dockerfiles use BuildKit cache mounts (`RUN --mount=type=cache,...`) to reduce repeated downloads across builds. These caches are stored in Docker/BuildKit’s cache storage on the host (not in your host `~/.cache`), and are shared across builds that use the same builder.
+
+Common cache mount targets:
+- `--mount=type=cache,target=/root/.cache/uv`: `uv` download cache (wheels/sdists, git checkouts used by `uv`, etc.)
+- `--mount=type=cache,target=/var/cache/apt,sharing=locked`: apt download cache (`sharing=locked` avoids apt/dpkg races with concurrent builds)
+- `--mount=type=cache,target=/var/cache/{yum,dnf},sharing=locked`: yum/dnf metadata cache (`sharing=locked` avoids corruption with concurrent builds)
+- `--mount=type=cache,target=/root/.cargo/{registry,git}`: Cargo crate/git download caches (Cargo has its own locking; no `sharing=locked` needed)
+
+To inspect cache usage:
+```bash
+docker buildx du
+docker info --format 'DockerRootDir: {{.DockerRootDir}}'
+```
+
+##### Inspecting BuildKit cache on the host (quick checklist)
+
+1. Quick summary:
+```bash
+docker buildx du | tail -5
+```
+
+2. Find Docker root:
+```bash
+docker info | grep "Docker Root Dir"
+# Output example: Docker Root Dir: /var/lib/docker
+```
+
+3. Check executor storage size:
+```bash
+DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
+sudo du -sh "${DOCKER_ROOT}/buildkit/executor" 2>/dev/null || true
+```
+
+4. Find specific caches (example: uv cache under BuildKit executor rootfs):
+```bash
+DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
+sudo sh -c 'find '"${DOCKER_ROOT}"'/buildkit/executor/*/rootfs/root/.cache/uv -type d 2>/dev/null | while read -r dir; do
+  parent=$(dirname "$(dirname "$(dirname "$dir")")")
+  du -sh "$parent/root/.cache/uv" 2>/dev/null
+done'
+```
+
+5. List all large cache directories:
+```bash
+DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
+sudo sh -c 'du -sh '"${DOCKER_ROOT}"'/buildkit/executor/* 2>/dev/null | sort -h | tail -10'
+```
+
+Cleanup commands:
+```bash
+# Safe: clean only reclaimable cache
+docker buildx prune
+
+# Aggressive: clean everything
+docker buildx prune --all
+
+# Time-based: remove cache older than 3 days
+docker buildx prune --filter until=72h
+```
+
+Current cache types (as mounted in various Dockerfiles):
+1. `/root/.cache/uv` and `/home/dynamo/.cache/uv` - Python packages (uv; match the current `USER`)
+2. `/root/.cargo/registry` - Rust crates
+3. `/root/.cargo/git` - Rust git deps
+4. `/var/cache/yum`, `/var/cache/dnf` - AlmaLinux packages
+5. `/var/cache/apt` - Ubuntu packages
+
+Note: `uv` commands set `UV_CACHE_DIR` per `RUN` so `uv` always uses the same path as the cache mount (instead of relying on `$HOME`).
+
 > **💡 Tip**: The `dev` and `local-dev` images have source code baked in, but **using `--mount-workspace` with `run.sh` is recommended for development** to bind mount your local workspace for live editing.
 
 **Common Usage Examples:**

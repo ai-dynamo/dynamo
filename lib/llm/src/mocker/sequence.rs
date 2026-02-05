@@ -50,9 +50,6 @@ pub struct ActiveSequence {
     generated_tokens: usize,
 
     #[getter(copy)]
-    already_generated_tokens: usize,
-
-    #[getter(copy)]
     num_input_tokens: usize,
 
     creation_signal: Option<MoveBlock>,
@@ -85,7 +82,6 @@ impl ActiveSequence {
             block_size,
             max_output_tokens,
             generated_tokens: 0,
-            already_generated_tokens: 0,
             num_input_tokens,
             creation_signal,
             enable_prefix_caching,
@@ -228,18 +224,13 @@ impl ActiveSequence {
             .collect()
     }
 
-    /// Reset the sequence to its initial state and return the free signals from freeing current blocks
+    /// Move the request to a preempted state and return the free signals from freeing current blocks
+    /// Upon preemption, the sequence retains the tokens generated during the decode phase (if any).
     pub fn reset_with_signal(&mut self) -> Vec<MoveBlock> {
         let free_signal = self.free_signal();
 
-        self.tokens.truncate(self.num_input_tokens).unwrap();
-        self.unique_blocks = create_unique_blocks_from_sequence(
-            &self.tokens,
-            self.block_size,
-            self.enable_prefix_caching,
-        );
-        self.already_generated_tokens = self.generated_tokens.max(self.already_generated_tokens);
-        self.generated_tokens = 0;
+        // Don't reset generated_tokens since we're keeping the tokens in the sequence
+
         self.creation_signal = Some(MoveBlock::Use(
             self.unique_blocks.clone(),
             self.block_hashes(),
@@ -411,7 +402,7 @@ mod tests {
         let free_signals = seq1.reset_with_signal();
 
         // 49 - 15 generated tokens
-        assert_eq!(seq1.already_generated_tokens, 34);
+        assert_eq!(seq1.generated_tokens(), 34);
 
         // Verify the reset signals include proper cleanup events
         assert!(!free_signals.is_empty());

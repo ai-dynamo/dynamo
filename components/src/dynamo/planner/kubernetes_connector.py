@@ -227,6 +227,57 @@ class KubernetesConnector(PlannerConnector):
 
         return model_name
 
+    def get_gpu_counts(
+        self,
+        deployment: Optional[dict] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[int, int]:
+        """Get the GPU counts for prefill and decode services from the deployment.
+
+        Args:
+            deployment: Optional deployment dict, fetched if not provided
+            require_prefill: Whether to require prefill service
+            require_decode: Whether to require decode service
+
+        Returns:
+            Tuple of (prefill_gpu_count, decode_gpu_count)
+
+        Raises:
+            DeploymentValidationError: If GPU counts cannot be determined from DGD
+        """
+        if deployment is None:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+        prefill_gpu_count = 0
+        decode_gpu_count = 0
+        errors = []
+
+        if require_prefill:
+            try:
+                prefill_service = get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.PREFILL,
+                )
+                prefill_gpu_count = prefill_service.get_gpu_count()
+            except (PlannerError, ValueError) as e:
+                errors.append(f"Failed to get prefill GPU count: {e}")
+
+        if require_decode:
+            try:
+                decode_service = get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.DECODE,
+                )
+                decode_gpu_count = decode_service.get_gpu_count()
+            except (PlannerError, ValueError) as e:
+                errors.append(f"Failed to get decode GPU count: {e}")
+
+        if errors:
+            raise DeploymentValidationError(errors)
+
+        return prefill_gpu_count, decode_gpu_count
+
     async def wait_for_deployment_ready(self):
         """Wait for the deployment to be ready"""
         await self.kube_api.wait_for_graph_deployment_ready(
