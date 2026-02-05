@@ -673,7 +673,7 @@ class DeploymentSpec:
         self,
         pvc_name=None,
         pvc_size="1Gi",
-        storage_class="nebius-shared-fs",
+        storage_class=None,
         container_log_dir="/tmp/service_logs",
         enable_all_services=True,
         service_names=None,
@@ -690,7 +690,7 @@ class DeploymentSpec:
         Args:
             pvc_name: Name of the PVC to create (auto-generated if not provided)
             pvc_size: Size of the PVC (e.g., "1Gi", "500Mi")
-            storage_class: Storage class name (must support RWX). Default: "nebius-shared-fs"
+            storage_class: Storage class name (must support RWX). If None, uses cluster default.
             container_log_dir: Directory inside container where logs are written
             enable_all_services: If True, wrap commands for all services
             service_names: List of specific service names to wrap (used if enable_all_services is False)
@@ -2317,10 +2317,13 @@ fi
                 "accessModes": [
                     "ReadWriteMany"
                 ],  # RWX required for multi-pod log collection
-                "storageClassName": storage_class,
                 "resources": {"requests": {"storage": pvc_size}},
             },
         }
+
+        # Only set storageClassName if explicitly provided (None uses cluster default)
+        if storage_class:
+            pvc_spec["spec"]["storageClassName"] = storage_class
 
         try:
             await self._core_api.create_namespaced_persistent_volume_claim(

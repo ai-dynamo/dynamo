@@ -42,6 +42,13 @@ def pytest_addoption(parser):
         help="Skip restarting NATS and etcd services before deployment. "
         "By default, these services are restarted.",
     )
+    parser.addoption(
+        "--storage-class",
+        type=str,
+        default=None,
+        help="Storage class for PVC log collection (must support RWX). "
+        "If not specified, uses cluster default.",
+    )
 
 
 def pytest_generate_tests(metafunc):
@@ -122,3 +129,9 @@ def client_type(request):
 def skip_service_restart(request):
     """Get skip restart services flag from command line."""
     return request.config.getoption("--skip-service-restart")
+
+
+@pytest.fixture
+def storage_class(request):
+    """Get storage class for PVC log collection from command line."""
+    return request.config.getoption("--storage-class")

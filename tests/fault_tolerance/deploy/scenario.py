@@ -75,6 +75,7 @@ async def run_scenario(
     namespace = request.getfixturevalue("namespace")
     image = request.getfixturevalue("image")
     skip_service_restart = request.getfixturevalue("skip_service_restart")
+    storage_class = request.getfixturevalue("storage_class")
     log_dir = request.node.name
     logger = logging.getLogger(request.node.name)
 
@@ -104,10 +105,13 @@ async def run_scenario(
     deployment_spec.set_logging(True, "info")
 
     # Enable PVC-based log collection
-    deployment_spec.enable_log_collection(
-        pvc_size="500Mi",
-        container_log_dir="/tmp/service_logs",
-    )
+    log_collection_kwargs = {
+        "pvc_size": "500Mi",
+        "container_log_dir": "/tmp/service_logs",
+    }
+    if storage_class:
+        log_collection_kwargs["storage_class"] = storage_class
+    deployment_spec.enable_log_collection(**log_collection_kwargs)
 
     async with ManagedDeployment(
         namespace=namespace,
