@@ -229,7 +229,7 @@ Profiling runs against the real backend (via GPUs or AIC). The mocker deployment
 
 For large models, use a pre-populated PVC instead of downloading from HuggingFace:
 
-See [Model Cache PVC](/docs/benchmarks/sla_driven_profiling.md#model-cache-pvc-advanced) for configuration details.
+See [SLA-Driven Profiling](/docs/benchmarks/sla_driven_profiling.md) for configuration details.
 
 ## Advanced Examples
 
