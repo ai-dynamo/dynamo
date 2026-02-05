@@ -30,7 +30,7 @@ The Planner monitors system performance and automatically scales prefill/decode 
 | **LLM Framework** | vLLM | Supported |
 | | TensorRT-LLM | Supported |
 | | SGLang | Supported |
-| **Serving Type** | Aggregated | Supported |
+| **Serving Type** | Aggregated | Unsupported |
 | | Disaggregated | Supported |
 | **Scaling Mode** | SLA-based (TTFT/ITL targets) | Supported (primary) |
 | | Load-based (KV cache/queue thresholds) | Deprecated |
