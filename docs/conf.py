@@ -96,7 +96,7 @@ redirects = {
     "backends/sglang/multimodal_sglang_guide": "../../multimodal/sglang.html",
     "multimodal/multimodal_intro": "index.html",
     # Speculative decoding consolidation (PR speculative-migration)
-    "backends/vllm/speculative_decoding": "../../features/speculative_decoding/README.html",
+    "backends/vllm/speculative_decoding": "../../features/speculative_decoding/speculative_decoding_vllm.html",
 }
 
 # Custom extensions

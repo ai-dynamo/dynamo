@@ -88,7 +88,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 | Backend | Guide |
 |---------|-------|
-| vLLM | [vLLM Speculative Decoding](../../backends/vllm/speculative_decoding.md) |
+| vLLM | [speculative_decoding_vllm.md](./speculative_decoding_vllm.md) |
 
 ## See Also
 

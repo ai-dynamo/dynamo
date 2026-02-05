@@ -15,8 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-> **Note**: This content has been consolidated into [Speculative Decoding](../../features/speculative_decoding/README.md).
-> This file contains the vLLM-specific guide and will remain here for backend-specific reference.
+> **Note**: This content has moved to [Speculative Decoding with vLLM](../../features/speculative_decoding/speculative_decoding_vllm.md).
+> See [Speculative Decoding Overview](../../features/speculative_decoding/README.md) for cross-backend documentation.
+> This file will be removed in a future release.
 
 # Running **Meta-Llama-3.1-8B-Instruct** with Speculative Decoding (Eagle3)
 
