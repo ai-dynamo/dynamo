@@ -6,7 +6,6 @@ name: PR
 on:
   push:
     branches:
-      - ci/bugfix-deploy-tests
       - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
