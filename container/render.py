@@ -11,32 +11,32 @@ import yaml
 from jinja2 import Environment, FileSystemLoader
 
 def parse_args():
-+    parser = argparse.ArgumentParser(
-+        description="Renders dynamo Dockerfiles from templates"
-+    )
-+    parser.add_argument(
-+        "--framework", type=str, default="vllm", help="Dockerfile framework to use."
-+    )
-+    parser.add_argument(
-+        "--target", type=str, default="runtime", help="Dockerfile target to use."
-+    )
-+    parser.add_argument(
-+        "--platform", type=str, default="amd64", help="Dockerfile platform to use."
-+    )
-+    parser.add_argument(
-+        "--cuda-version", type=str, default="12.9", help="CUDA version to use."
-+    )
-+    parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
-+    parser.add_argument(
-+        "--short-output",
-+        action="store_true",
-+        help="Output filename is just rendered.Dockerfile",
-+    )
-+    parser.add_argument(
-+        "--show-result",
-+        action="store_true",
-+        help="Prints the rendered Dockerfile to stdout.",
-+    )
+    parser = argparse.ArgumentParser(
+        description="Renders dynamo Dockerfiles from templates"
+    )
+    parser.add_argument(
+        "--framework", type=str, default="vllm", help="Dockerfile framework to use."
+    )
+    parser.add_argument(
+        "--target", type=str, default="runtime", help="Dockerfile target to use."
+    )
+    parser.add_argument(
+        "--platform", type=str, default="amd64", help="Dockerfile platform to use."
+    )
+    parser.add_argument(
+        "--cuda-version", type=str, default="12.9", help="CUDA version to use."
+    )
+    parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
+    parser.add_argument(
+        "--short-output",
+        action="store_true",
+        help="Output filename is just rendered.Dockerfile",
+    )
+    parser.add_argument(
+        "--show-result",
+        action="store_true",
+        help="Prints the rendered Dockerfile to stdout.",
+    )
     args = parser.parse_args()
     return args
 
@@ -86,12 +86,12 @@ def main():
     render(args, context, script_dir)
 
     if args.target == "local-dev":
-+        print(
-+            "INFO: Remember to add --build-arg values for USER_UID and USER_GID when building a local-dev image!"
-+        )
-+        print(
-+            "      Recommendation: --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)"
-+        )
+        print(
+            "INFO: Remember to add --build-arg values for USER_UID and USER_GID when building a local-dev image!"
+        )
+        print(
+            "      Recommendation: --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)"
+        )
 
 if __name__ == "__main__":
     main()
