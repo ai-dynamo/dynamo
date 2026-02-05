@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 def setup_engine_factory(
     runtime: DistributedRuntime,
-    router_mode: RouterMode,
+    router_config: RouterConfig,
     flags: argparse.Namespace,
 ):  # Returns EngineFactory:
     """
@@ -58,7 +58,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_mode, flags).engine_factory
+    return EngineFactory(runtime, router_config, flags).engine_factory
 
 
 def validate_model_name(value):
@@ -103,10 +103,8 @@ def parse_args():
         except ImportError:
             try:
                 from vllm.utils.argparse_utils import FlexibleArgumentParser
-            except ModuleNotFoundError as e:
-                logger.error(
-                    f"Flag '--processor vllm' requires vllm be installed. {e}."
-                )
+            except ModuleNotFoundError:
+                logger.exception("Flag '--processor vllm' requires vllm be installed.")
                 sys.exit(1)
 
         parser = FlexibleArgumentParser(
@@ -342,8 +340,8 @@ def parse_args():
 
             parser = FrontendArgs.add_cli_args(parser)
             parser = AsyncEngineArgs.add_cli_args(parser)
-        except ModuleNotFoundError as e:
-            logger.error(f"Flag '--processor vllm' requires vllm be installed. {e}.")
+        except ModuleNotFoundError:
+            logger.exception("Flag '--processor vllm' requires vllm be installed.")
             sys.exit(1)
 
     flags = parser.parse_args()
