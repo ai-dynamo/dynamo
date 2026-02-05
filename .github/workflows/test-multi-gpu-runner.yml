@@ -7,6 +7,9 @@ name: Test Multi-GPU Runner
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/test-multi-gpu-runner.yml'
 
 jobs:
   test-gpu-runners:
