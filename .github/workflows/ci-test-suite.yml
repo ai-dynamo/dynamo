@@ -1093,7 +1093,7 @@ jobs:
       contents: read
       actions: read
     env:
-      OPENSEARCH_ENDPOINT: https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*/_search
+      OPENSEARCH_ENDPOINT: https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
       SLACK_OPS_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
       FLAKY_THRESHOLD: "0.80"
