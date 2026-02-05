@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Extension, State},
     http::Request,
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -52,6 +52,8 @@ use crate::protocols::openai::{
     responses::{NvCreateResponse, NvResponse},
 };
 use crate::request_template::RequestTemplate;
+use crate::http::middleware::session::{extract_session_middleware, RequestSession};
+use crate::storage::{ResponseStorage, ResponseStorageManager};
 use crate::types::Annotated;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
@@ -1141,6 +1143,7 @@ pub fn validate_completion_fields_generic(
 /// This method will handle the incoming request for the /v1/responses endpoint.
 async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Extension(session): Extension<RequestSession>,
     headers: HeaderMap,
     Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
@@ -1159,7 +1162,7 @@ async fn handler_responses(
         create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
     let response =
-        tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
+        tokio::spawn(responses(state, template, session, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
                 ErrorMessage::internal_server_error(&format!(
@@ -1179,6 +1182,7 @@ async fn handler_responses(
 async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
+    session: RequestSession,
     mut request: Context<NvCreateResponse>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
@@ -1213,7 +1217,13 @@ async fn responses(
 
     let streaming = request.inner.stream.unwrap_or(false);
     let request_id = request.id().to_string();
+    // Initialize response storage
+    let storage = ResponseStorageManager::new();
+    
     let (orig_request, context) = request.into_parts();
+
+    // Save store flag before orig_request is consumed
+    let should_store = orig_request.inner.store.unwrap_or(false);
 
     let mut chat_request: NvCreateChatCompletionRequest =
         orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -1363,6 +1373,42 @@ async fn responses(
 
         inflight_guard.mark_ok();
 
+        // Store response if requested
+        if should_store {
+            // Serialize response for storage
+            let response_json = serde_json::to_value(&response).unwrap_or_else(|e| {
+                tracing::warn!("Failed to serialize response for storage: {}", e);
+                serde_json::json!({})
+            });
+            
+            let store_result = storage.store_response(
+                &session.tenant_id,
+                &session.session_id,
+                Some(&response.inner.id),  // Use the response's existing ID
+                response_json,
+                Some(std::time::Duration::from_secs(86400)), // 24 hour TTL
+            ).await;
+            
+            match store_result {
+                Ok(stored_id) => {
+                    tracing::info!(
+                        tenant_id = %session.tenant_id,
+                        session_id = %session.session_id,
+                        response_id = %stored_id,
+                        "Stored response successfully"
+                    );
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        tenant_id = %session.tenant_id,
+                        session_id = %session.session_id,
+                        error = %e,
+                        "Failed to store response"
+                    );
+                }
+            }
+        }
+
         Ok(Json(response).into_response())
     }
 }
@@ -1382,11 +1428,6 @@ pub fn validate_response_unsupported_fields(
     if inner.include.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`include` is not supported.",
-        ));
-    }
-    if inner.previous_response_id.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
         ));
     }
     if inner.prompt.is_some() {
@@ -1562,6 +1603,7 @@ pub fn responses_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .layer(middleware::from_fn(extract_session_middleware))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state((state, template));
     (vec![doc], router)

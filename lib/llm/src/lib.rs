@@ -18,6 +18,7 @@ pub mod engines;
 pub mod entrypoint;
 pub mod grpc;
 pub mod http;
+pub mod storage;
 pub mod hub;
 // pub mod key_value_store;
 pub mod audit;
