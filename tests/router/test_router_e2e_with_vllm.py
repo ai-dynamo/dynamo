@@ -489,11 +489,9 @@ def test_router_decisions_vllm_dp(
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [
-        ("etcd", True, "nats"),  # JetStream mode
-        # ("etcd", False, "tcp"),  # nats_core mode - disabled for now
-        # ("file", True, "nats"),  # File backend
+        ("file", False, "nats"),
     ],
-    ids=["jetstream"],
+    ids=["file_nats"],
     indirect=["durable_kv_events", "request_plane"],
 )
 def test_vllm_indexers_sync(
@@ -511,8 +509,7 @@ def test_vllm_indexers_sync(
     with vLLM workers. This test verifies that both routers converge to the same internal state.
 
     Tests with configuration:
-    - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+    - file_nats: file backend, local indexer with NATS Core, NATS request plane
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     nats_process, _etcd_process = runtime_services_dynamic_ports
