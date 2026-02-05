@@ -4,5 +4,7 @@
 """Multimodal utilities for Dynamo components."""
 
 from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
+from dynamo.common.multimodal.image_batch_loader import load_image_batch
+from dynamo.common.multimodal.image_loader import ImageLoader
 
-__all__ = ["AsyncEncoderCache"]
+__all__ = ["AsyncEncoderCache", "ImageLoader", "load_image_batch"]
