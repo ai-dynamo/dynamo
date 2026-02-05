@@ -23,8 +23,9 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.multimodal.image_batch_loader import load_image_batch
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import (
     KvEventPublisher,
@@ -34,8 +35,6 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.multimodal_utils.image_batch_loader import load_image_batch
-from dynamo.multimodal_utils.image_loader import ImageLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -889,68 +888,6 @@ class BaseWorkerHandler(ABC):
 
         return prompt, sequence_length, embeddings_tensor
 
-    async def _load_image_batch(
-        self, image_mm_items: list[Dict[str, Any]]
-    ) -> list[Any]:
-        """
-        Load a batch of images from multimodal data items.
-
-        Supports two paths:
-        1. Url variant: Download and decode image from URL (default)
-        2. Decoded variant: Read pre-decoded image via NIXL RDMA (requires --frontend-decoding)
-
-        Args:
-            image_mm_items: List of multimodal data items for images
-        Returns:
-            List of loaded image data
-        Raises:
-            Exception: If any image fails to load
-        """
-        image_futures = []
-
-        for item in image_mm_items:
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
-                # URL path: download and decode in Python backend
-                url = item[URL_VARIANT_KEY]
-                image_futures.append(self.image_loader.load_image(url))
-                logger.debug(f"Preparing to load image from URL: {url[:80]}...")
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                if self.enable_frontend_decoding:
-                    async with self._nixl_connector_lock:
-                        if self._nixl_connector is None:
-                            self._nixl_connector = nixl_connect.Connector()
-                            await self._nixl_connector.initialize()
-
-                    metadata = item[DECODED_VARIANT_KEY]
-                    image_futures.append(
-                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
-                    )
-                else:
-                    logger.error(
-                        "Received Decoded multimodal data but --frontend-decoding not enabled. "
-                        "Use --frontend-decoding flag to enable NIXL RDMA image transfer."
-                    )
-                    raise ValueError("Could not load decoded media from frontend")
-
-        # Process images in parallel
-        results = await asyncio.gather(*image_futures, return_exceptions=True)
-        loaded_images = []
-        collective_exceptions = ""
-        for media_item, result in zip(image_mm_items, results):
-            if isinstance(result, Exception):
-                source = media_item.get(URL_VARIANT_KEY, "decoded")
-                logger.error(f"Failed to load image from {source[:80]}...: {result}")
-                collective_exceptions += (
-                    f"Failed to load image from {source[:80]}...: {result}\n"
-                )
-                continue
-            loaded_images.append(result)
-
-        if collective_exceptions:
-            raise Exception(collective_exceptions)
-
-        return loaded_images
-
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
@@ -970,9 +907,17 @@ class BaseWorkerHandler(ABC):
         mm_map = request["multi_modal_data"]
         vllm_mm_data = {}
 
+        async with self._nixl_connector_lock:
+            if self._nixl_connector is None:
+                self._nixl_connector = nixl_connect.Connector()
+                await self._nixl_connector.initialize()
+
         # Process image_url entries
         images = await load_image_batch(
-            mm_map.get(IMAGE_URL_KEY, []), self.image_loader
+            mm_map.get(IMAGE_URL_KEY, []),
+            self.image_loader,
+            enable_frontend_decoding=self.enable_frontend_decoding,
+            nixl_connector=self._nixl_connector,
         )
 
         if images:
