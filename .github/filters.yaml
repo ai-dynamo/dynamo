@@ -68,6 +68,10 @@ ci: &ci
   - '.github/scripts/parse_buildkit_output.py'
 
 core:
+  # Exclude documentation files first, then include patterns override for specific paths
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
   - *ci
   - 'container/build.sh'
   - 'container/Dockerfile'
@@ -86,9 +90,6 @@ core:
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
-  - '!**/*.md'
-  - '!**/*.rst'
-  - '!**/*.txt'
 
 operator:
   - *ci
