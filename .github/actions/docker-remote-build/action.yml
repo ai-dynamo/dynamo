@@ -133,9 +133,9 @@ runs:
           EXTRA_ARGS+=" --build-arg CARGO_BUILD_JOBS=4 --use-sccache"
         fi
         if [ "${{ inputs.push_image }}" == "true" ]; then
-          EXTRA_ARGS+=" --push --no-load"
-        elif [ "${{ inputs.no_load }}" == "true" ]; then
-          EXTRA_ARGS+=" --no-load"
+          EXTRA_ARGS+=" --push"
+        elif [ "${{ inputs.no_load }}" == "false" ]; then
+          EXTRA_ARGS+=" --load"
         fi
 
         # Add extra tags (each as a separate --tag argument)
