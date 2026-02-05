@@ -455,4 +455,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(page5.len(), 0);
-    }}
+    }
+}

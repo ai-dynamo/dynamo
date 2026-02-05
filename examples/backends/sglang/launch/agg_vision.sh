@@ -56,8 +56,9 @@ TRACE_ARGS=()
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
-    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
-    TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
+    OTLP_TRACES_ENDPOINT="${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}"
+    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="$OTLP_TRACES_ENDPOINT"
+    TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint "$OTLP_TRACES_ENDPOINT")
 fi
 
 # run ingress

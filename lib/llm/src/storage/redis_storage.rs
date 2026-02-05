@@ -142,7 +142,7 @@ impl ResponseStorage for RedisResponseStorage {
             .await
             .map_err(|e| StorageError::BackendError(format!("Failed to add to index: {}", e)))?;
 
-        // Set TTL on index if specified (extend if already exists)
+        // Keep index TTL aligned with response TTLs
         if let Some(ttl) = ttl {
             // Only set expire if it would extend the current TTL
             let current_ttl: i64 = conn
@@ -156,6 +156,13 @@ impl ResponseStorage for RedisResponseStorage {
                     .await
                     .map_err(|e| StorageError::BackendError(format!("Failed to set index TTL: {}", e)))?;
             }
+        } else {
+            // Remove any existing TTL so non-expiring responses remain listable
+            redis::cmd("PERSIST")
+                .arg(&index_key)
+                .query_async::<i32>(&mut conn)
+                .await
+                .map_err(|e| StorageError::BackendError(format!("Failed to persist index: {}", e)))?;
         }
 
         Ok(response_id)

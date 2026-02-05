@@ -100,9 +100,8 @@ impl StorageConfig {
     /// Validate and clamp TTL to allowed range
     pub fn validate_ttl(&self, requested: Option<Duration>) -> Duration {
         match requested {
-            Some(ttl) if ttl > self.max_ttl => self.max_ttl,
-            Some(ttl) => ttl,
-            None => self.default_ttl,
+            Some(ttl) => ttl.min(self.max_ttl),
+            None => self.default_ttl.min(self.max_ttl),
         }
     }
 }

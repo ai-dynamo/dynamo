@@ -54,7 +54,7 @@ Server manages conversation state; clients send only deltas:
 
 ### Core Components
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                     HTTP Request                             │
 │                 (with Auth Headers)                          │
