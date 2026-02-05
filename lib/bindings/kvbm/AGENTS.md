@@ -8,7 +8,7 @@ KVBM is Dynamo's distributed KV cache block management system for scalable LLM i
 
 ## Code Location
 
-```
+```text
 lib/bindings/kvbm/
 ├── Cargo.toml                  # Rust package manifest
 ├── Cargo.lock                  # Rust dependency lock
@@ -139,7 +139,7 @@ trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --ex
 ## Architecture
 
 ### Entry Flow (vLLM)
-```
+```text
 DynamoConnector (dynamo_connector.py)
     ├── role == SCHEDULER → KvConnectorLeader (connector_leader.py)
     │   ├── Creates KvbmLeader (Rust binding)
@@ -157,7 +157,7 @@ DynamoConnector (dynamo_connector.py)
 ```
 
 ### Entry Flow (TensorRT-LLM)
-```
+```text
 DynamoKVBMConnectorLeader (kvbm_connector_leader.py)
     ├── Implements KvCacheConnectorScheduler interface
     ├── Creates KvbmLeader + RustKvConnectorLeader
@@ -174,7 +174,7 @@ DynamoKVBMConnectorWorker (kvbm_connector_worker.py)
 ```
 
 ### Memory Tier Architecture
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Inference Engine                         │
 │              (vLLM / TensorRT-LLM / SGLang)                │
@@ -198,7 +198,7 @@ DynamoKVBMConnectorWorker (kvbm_connector_worker.py)
 ```
 
 ### Block State Machine
-```
+```text
 Reset → Partial → Complete → Registered → Reset
   │        │         │           │
   │        │         │           └── drop() triggers Remove event

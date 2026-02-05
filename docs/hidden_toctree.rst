@@ -37,13 +37,11 @@
    kubernetes/README.md
    reference/cli.md
    observability/metrics.md
-   kvbm/vllm-setup.md
-   kvbm/trtllm-setup.md
+   integrations/kv_events_custom_engines.md
    agents/tool-calling.md
    development/jail_stream.md
 
-   router/kv_cache_routing.md
-   router/kv_events.md
+   router/router_examples.md
    planner/load_planner.md
    fault_tolerance/README.md
    fault_tolerance/request_migration.md
@@ -77,7 +75,7 @@
 
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
-   backends/vllm/LMCache_Integration.md
+   integrations/lmcache_integration.md
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
    backends/vllm/prompt-embeddings.md

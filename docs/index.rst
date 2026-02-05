@@ -88,5 +88,6 @@ Quickstart
    Architecture Flow <design_docs/dynamo_flow.md>
    Disaggregated Serving <design_docs/disagg_serving.md>
    Distributed Runtime <design_docs/distributed_runtime.md>
+   Router Design <design_docs/router_design.md>
    Request Plane <design_docs/request_plane.md>
    Event Plane <design_docs/event_plane.md>

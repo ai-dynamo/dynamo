@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Overview
 
-For quick start instructions, start with the [Router README](README.md). This guide covers details into further configuration, disaggregated serving setup, and parameter tuning. 
+For quick start instructions, start with the [Router README](README.md). This guide covers details into further configuration, disaggregated serving setup, and parameter tuning.
 
 ## KV Cache Routing
 
@@ -58,8 +58,8 @@ Example calculation with `overlap_score_weight = 1.0`:
 
 ### Using the KV Cache Router
 
-To enable KV cache aware routing start the frontend node like this:
-```
+To enable KV cache-aware routing, start the frontend node like this:
+```bash
 python -m dynamo.frontend --router-mode kv
 ```
 
@@ -149,7 +149,7 @@ For custom routing logic and advanced patterns, see [Routing Patterns](router_ex
 ### 2. Monitor Key Metrics
 
 The router logs the cost calculation for each worker:
-```
+```text
 Formula for worker_1: 125.3 = 1.0 * 100.5 + 25.0 (cached_blocks: 15)
 ```
 
