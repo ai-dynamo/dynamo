@@ -23,6 +23,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ![Internal Components of Dynamo KVBM](../images/kvbm-components.png)
 
+
 *Internal Components of Dynamo KVBM*
 
 ### Core
