@@ -359,8 +359,12 @@ impl KvEventPublisher {
         })
     }
 
-    fn shutdown(&self) {
-        self.inner.shutdown()
+    fn shutdown(&mut self) {
+        // If no other Arc clones exist, shut down eagerly.
+        // Otherwise the Drop impl handles cleanup when the last reference is freed.
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.shutdown();
+        }
     }
 }
 
