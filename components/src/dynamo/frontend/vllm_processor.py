@@ -11,6 +11,8 @@ import os
 import time
 import uuid
 from argparse import Namespace
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.openai.protocol import (
@@ -41,9 +43,11 @@ from dynamo.runtime import DistributedRuntime
 logger = logging.getLogger(__name__)
 
 
+_MASK_64_BITS = (1 << 64) - 1
+
+
 def random_uuid() -> str:
-    MASK_64_BITS = (1 << 64) - 1
-    return f"{uuid.uuid4().int & MASK_64_BITS:016x}"  # 16 hex chars
+    return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"  # 16 hex chars
 
 
 class VllmProcessor:
@@ -67,7 +71,9 @@ class VllmProcessor:
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
     # request: dynamo.NVCreateChatCompletionRequest
-    async def generator(self, request):
+    async def generator(
+        self, request: dict[str, Any]
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Run a single request through the engine. Does pre and post processing on this machine, delegates
         model inference to a worker using the router.
@@ -86,7 +92,8 @@ class VllmProcessor:
                 add_generation_prompt=request.get("add_generation_prompt", True),
             )
         except TypeError:
-            # tokenizer is an impl of TokenizerLike. This is the declared type.
+            # apply_chat_template has two incompatible signatures depending on tokenizer type:
+            # PreTrainedTokenizerBase uses 'conversation=' while TokenizerLike uses 'messages='
 
             # For "role":"user" messages, mistral-common only allows 'role' and 'content', nothing else or pydantic validation breaks.
             # This deletes the optional 'name' field.
@@ -144,9 +151,12 @@ class VllmProcessor:
 
         # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
 
+        prompt = (
+            request["messages"][0].get("content") if request.get("messages") else None
+        )
         self.output_processor.add_request(
             vllm_preproc,
-            request["messages"][0]["content"],  # prompt
+            prompt,
             # parent_req: ParentRequest | None = None,
             # request_index: int = 0,
             # queue: RequestOutputCollector | None = None,
@@ -154,6 +164,9 @@ class VllmProcessor:
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
+        if sp.n != 1:
+            logger.error("Ignoring unsupported SamplingParams.n != 1")
+            sp.n = 1
         dynamo_preproc = {
             "model": request["model"],
             "token_ids": tokens,
@@ -165,8 +178,8 @@ class VllmProcessor:
                 "ignore_eos": sp.ignore_eos,
             },
             # protocols.common.SamplingOptions
+            # Is there a better way than typing it out like this?
             "sampling_options": {
-                # Is there a better way than typing it out like this?
                 "n": sp.n,
                 "presence_penalty": sp.presence_penalty,
                 "frequency_penalty": sp.frequency_penalty,
@@ -183,7 +196,9 @@ class VllmProcessor:
                 "prompt_logprobs": sp.prompt_logprobs,
                 "skip_special_tokens": sp.skip_special_tokens,
             },
-            "eos_token_ids": [vllm_preproc.eos_token_id],
+            "eos_token_ids": [vllm_preproc.eos_token_id]
+            if vllm_preproc.eos_token_id is not None
+            else [],
             "annotations": [],
             # "prompt_embeds": vllm_preproc.prompt_embeds,
         }
@@ -209,14 +224,14 @@ class VllmProcessor:
         reasoning_parser = (
             self.reasoning_parser_class(
                 self.tokenizer,
-                # chat_temmplate_kwargs=..
+                # chat_template_kwargs=..
             )
             if self.reasoning_parser_class
             else None
         )
 
         previous_text = ""
-        previous_token_ids = []
+        previous_token_ids: list[int] = []
         reasoning_is_done = False
         in_progress_tool_call: DeltaToolCall | None = None
 
@@ -269,6 +284,8 @@ class VllmProcessor:
 
             # Vec<ChatChoiceStream>
             choices = []
+            if not vllm_out.request_outputs:
+                continue
             for output in vllm_out.request_outputs[0].outputs:
                 delta_text = output.text
                 delta_token_ids = output.token_ids
@@ -297,7 +314,7 @@ class VllmProcessor:
                     no_prev_reasoning = (
                         delta_message
                         and delta_message.content
-                        and not delta_message.reasoning
+                        and not delta_message.reasoning_content
                     )
 
                     if reasoning_is_done or no_prev_reasoning:
@@ -308,7 +325,7 @@ class VllmProcessor:
                                 delta_text=delta_text,
                                 previous_token_ids=previous_token_ids,
                                 current_token_ids=current_token_ids,
-                                delta_token_ids=output.token_ids,
+                                delta_token_ids=delta_token_ids,
                                 request=ChatCompletionRequest(**request),
                             )
                         )
@@ -328,23 +345,24 @@ class VllmProcessor:
                     # tokens being held back, might be tool call marker
                     pass
 
-                elif delta_message.tool_calls:
-                    if delta_message.tool_calls[0].function:
-                        # delta_message.tool_calls = DeltaToolCall objects to stream
-                        if in_progress_tool_call is None:
-                            in_progress_tool_call = delta_message.tool_calls[0]
-                            if not in_progress_tool_call.function.arguments:
-                                # Ensure + works later
-                                in_progress_tool_call.function.arguments = ""
-                        else:
-                            delta_arg = delta_message.tool_calls[0]
-                            in_progress_tool_call.function.arguments += (
-                                delta_arg.function.arguments
-                            )
+                elif delta_message.tool_calls and delta_message.tool_calls[0].function:
+                    # delta_message.tool_calls = DeltaToolCall objects to stream
+                    if in_progress_tool_call is None:
+                        in_progress_tool_call = delta_message.tool_calls[0]
+                        if not in_progress_tool_call.function.arguments:
+                            # Ensure + works later
+                            in_progress_tool_call.function.arguments = ""
                     else:
-                        logger.warn(
-                            f"Unknown tool call type in: {delta_message.tool_calls[0]}. Only type 'function' supported."
+                        delta_arg = delta_message.tool_calls[0]
+                        in_progress_tool_call.function.arguments += (
+                            delta_arg.function.arguments or ""
                         )
+
+                elif delta_message.tool_calls:
+                    # tool_calls exists but function is missing
+                    logger.warning(
+                        f"Unknown tool call type in: {delta_message.tool_calls[0]}. Only type 'function' supported."
+                    )
 
                 elif delta_message.content or delta_message.reasoning_content:
                     # Stream content to user
@@ -461,16 +479,16 @@ class EngineFactory:
             stream_interval=1,
         )
 
-        tool_parser_name = (
-            self.flags.tool_call_parser or mdc.runtime_config()["tool_call_parser"]
+        tool_parser_name = self.flags.tool_call_parser or mdc.runtime_config().get(
+            "tool_call_parser"
         )
         if tool_parser_name:
             tool_parser_class = ToolParserManager.get_tool_parser(tool_parser_name)
         else:
             tool_parser_class = None
 
-        reasoning_parser_name = (
-            self.flags.reasoning_parser or mdc.runtime_config()["reasoning_parser"]
+        reasoning_parser_name = self.flags.reasoning_parser or mdc.runtime_config().get(
+            "reasoning_parser"
         )
         if reasoning_parser_name:
             reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
