@@ -205,11 +205,13 @@ impl ResponseStorage for MyStorageBackend {
         // 2. Serialize response
         let data = serde_json::to_vec(&stored)
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        let size_bytes = data.len();
+        let mut s3_key: Option<String> = None;
 
         // 3. Store in your backend
         // Option A: Store in S3 for large responses
-        if data.len() > 1_000_000 {  // 1MB threshold
-            let s3_key = format!(
+        if size_bytes > 1_000_000 {  // 1MB threshold
+            let key = format!(
                 "{}/responses/{}.json",
                 auth.tenant_id,
                 stored.response_id
@@ -217,11 +219,12 @@ impl ResponseStorage for MyStorageBackend {
             self.s3_client
                 .put_object()
                 .bucket("dynamo-responses")
-                .key(&s3_key)
-                .body(data.into())
+                .key(&key)
+                .body(data.clone().into())
                 .send()
                 .await
                 .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            s3_key = Some(key);
         }
 
         // Option B: Store metadata in Postgres for fast queries
@@ -237,8 +240,8 @@ impl ResponseStorage for MyStorageBackend {
         .bind(&stored.response_id)
         .bind(&auth.tenant_id)
         .bind(&auth.user_id)
-        .bind(&s3_key)
-        .bind(data.len() as i64)
+        .bind(s3_key.as_deref())
+        .bind(size_bytes as i64)
         .bind(stored.created_at as i64)
         .bind(stored.expires_at.map(|e| e as i64))
         .execute(&self.db_pool)
