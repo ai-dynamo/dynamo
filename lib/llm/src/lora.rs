@@ -8,8 +8,10 @@
 
 mod cache;
 mod downloader;
+pub mod load_estimator;
 mod source;
 
 pub use cache::LoRACache;
 pub use downloader::LoRADownloader;
+pub use load_estimator::{LoadEstimator, LoadEstimatorConfig, LoadSample};
 pub use source::{LoRASource, LocalLoRASource, S3LoRASource};

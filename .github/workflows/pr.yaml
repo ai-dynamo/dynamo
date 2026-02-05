@@ -240,7 +240,7 @@ jobs:
           - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
           - { arch: arm64, runner: prod-builder-arm-v1 }
         cuda_version:
-          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '13.1', major: '13' }
     name: trtllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90

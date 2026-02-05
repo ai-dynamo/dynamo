@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "bench")]
+use std::time::Instant;
 
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
@@ -44,9 +46,6 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
-    #[error("all workers busy")]
-    AllWorkersBusy,
-
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
 
@@ -71,6 +70,8 @@ pub struct SchedulingRequest {
     pub router_config_override: Option<RouterConfigOverride>,
     // Whether to update scheduler states (false for query_instance_id requests)
     pub update_states: bool,
+    // LORA adapter name extracted from request.model field
+    pub lora_name: Option<String>,
     // Option to take it out to send the response without moving the struct
     resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
@@ -102,6 +103,7 @@ impl KvScheduler {
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_id: u64,
+        worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -120,6 +122,7 @@ impl KvScheduler {
                 initial_workers,
                 replica_sync,
                 router_id,
+                worker_type,
             )
             .await
             .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
@@ -251,6 +254,7 @@ impl KvScheduler {
                                 selection.overlap_blocks,
                                 None, // expected_output_tokens not available in scheduler loop
                                 selection.worker,
+                                request.lora_name.clone(),
                             )
                             .await
                         {
@@ -259,12 +263,6 @@ impl KvScheduler {
                     }
                     Err(KvSchedulerError::NoEndpoints) => {
                         tracing::trace!("no endpoints available; waiting for endpoints update");
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        continue;
-                    }
-                    // TODO: this is not actually hooked up
-                    Err(KvSchedulerError::AllWorkersBusy) => {
-                        tracing::trace!("all workers busy; waiting for more capacity");
                         tokio::time::sleep(Duration::from_millis(5)).await;
                         continue;
                     }
@@ -281,6 +279,7 @@ impl KvScheduler {
         Ok(KvScheduler { request_tx, slots })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
         maybe_request_id: Option<String>,
@@ -289,7 +288,11 @@ impl KvScheduler {
         overlaps: OverlapScores,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
+        lora_name: Option<String>,
     ) -> Result<WorkerWithDpRank, KvSchedulerError> {
+        #[cfg(feature = "bench")]
+        let start = Instant::now();
+
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             maybe_request_id,
@@ -300,6 +303,7 @@ impl KvScheduler {
             prefill_tokens: HashMap::new(),
             router_config_override: router_config_override.cloned(),
             update_states,
+            lora_name,
             resp_tx: Some(resp_tx), // Wrap in Some()
         };
 
@@ -307,13 +311,28 @@ impl KvScheduler {
             .send(request)
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+
+        #[cfg(feature = "bench")]
+        let send_elapsed = start.elapsed();
+
         let response = resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
 
+        #[cfg(feature = "bench")]
+        let total_elapsed = start.elapsed();
+        #[cfg(feature = "bench")]
+        tracing::info!(
+            isl_tokens,
+            send_us = send_elapsed.as_micros() as u64,
+            total_us = total_elapsed.as_micros() as u64,
+            "scheduler.schedule completed"
+        );
+
         Ok(response.best_worker)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_request(
         &self,
         request_id: String,
@@ -322,6 +341,7 @@ impl KvScheduler {
         overlap: u32,
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
+        lora_name: Option<String>,
     ) -> Result<(), SequenceError> {
         self.slots
             .add_request(
@@ -331,6 +351,7 @@ impl KvScheduler {
                 overlap,
                 expected_output_tokens,
                 worker,
+                lora_name,
             )
             .await
     }
@@ -343,6 +364,12 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
+    }
+
+    /// Get the worker type for this scheduler ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.slots.worker_type()
     }
 
     pub async fn add_output_block(
@@ -386,6 +413,11 @@ impl KvScheduler {
         }
 
         loads
+    }
+
+    /// Get active request counts grouped by LORA name
+    pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
+        self.slots.get_active_lora_counts()
     }
 }
 

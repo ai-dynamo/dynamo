@@ -23,6 +23,10 @@ use std::thread::JoinHandle;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use std::time::Duration;
+#[cfg(feature = "bench")]
+use std::time::Instant;
+
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
     RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
@@ -250,6 +254,25 @@ impl PositionalIndexer {
             thread_handles: Mutex::new(thread_handles),
         }
     }
+
+    /// Wait for all pending events and requests to be processed. Used primarily for debugging and benchmarking.
+    pub async fn flush(&self) {
+        loop {
+            let mut all_empty = true;
+
+            for worker_event_channel in self.worker_event_channels.iter() {
+                if !worker_event_channel.is_empty() {
+                    all_empty = false;
+                    break;
+                }
+            }
+
+            if all_empty && self.worker_request_channel.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -263,6 +286,8 @@ impl KvIndexerInterface for PositionalIndexer {
             sequence,
             early_exit: false,
             resp: resp_tx,
+            #[cfg(feature = "bench")]
+            created_at: Instant::now(),
         };
 
         if let Err(e) = self.worker_request_channel.send(req) {
@@ -543,8 +568,11 @@ impl PositionalIndexer {
     /// Compute sequence hash incrementally from previous hash and current local hash.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
-        let combined = [prev_seq_hash, current_local_hash];
-        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
+        let mut bytes = [0u8; 16];
+
+        bytes[..8].copy_from_slice(&prev_seq_hash.to_le_bytes());
+        bytes[8..].copy_from_slice(&current_local_hash.to_le_bytes());
+
         crate::protocols::compute_hash(&bytes)
     }
 
@@ -606,9 +634,7 @@ impl PositionalIndexer {
         lo: usize,
         hi: usize,
         early_exit: bool,
-    ) -> usize {
-        let mut highest_active_pos = lo.saturating_sub(1);
-
+    ) {
         for pos in lo..hi {
             if active.is_empty() {
                 break;
@@ -617,34 +643,27 @@ impl PositionalIndexer {
             let workers_at_pos =
                 Self::get_workers_lazy(index, pos, sequence[pos], seq_hashes, sequence);
 
-            let still_active: HashSet<WorkerWithDpRank> = match &workers_at_pos {
-                Some(workers) => active.intersection(workers).cloned().collect(),
-                None => HashSet::new(),
-            };
-
-            // Record scores for workers that drained (stopped matching)
-            let drained: Vec<_> = active.difference(&still_active).cloned().collect();
-            for worker in drained {
-                // Score is the position where they stopped matching (i.e., pos)
-                // which represents they matched positions 0..pos
-                scores.scores.insert(worker, pos as u32);
-            }
-
-            // Record frequency for this position if workers matched
-            if !still_active.is_empty() {
-                scores.add_frequency(still_active.len());
-                highest_active_pos = pos;
-            }
-
-            *active = still_active;
-
-            if early_exit && !active.is_empty() {
-                // Found at least one match, can exit early
-                break;
+            match workers_at_pos {
+                Some(workers) => {
+                    for worker in active.difference(&workers) {
+                        // Score is the position where they stopped matching (i.e., pos)
+                        // which represents they matched positions 0..pos
+                        scores.scores.insert(*worker, pos as u32);
+                    }
+                    *active = workers;
+                    if early_exit && !active.is_empty() {
+                        // Found at least one match, can exit early
+                        break;
+                    }
+                }
+                None => {
+                    for worker in active.iter() {
+                        scores.scores.insert(*worker, pos as u32);
+                    }
+                    active.clear();
+                }
             }
         }
-
-        highest_active_pos
     }
 
     /// Jump-based search to find matches for a sequence of block hashes.

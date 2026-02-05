@@ -7,6 +7,8 @@
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
 pub mod approx;
+#[cfg(feature = "bench")]
+pub mod bench_utils;
 pub mod indexer;
 pub mod nested_map;
 pub mod protocols;

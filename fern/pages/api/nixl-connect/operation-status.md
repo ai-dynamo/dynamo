@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "dynamo.nixl_connect.OperationStatus(IntEnum)"
 ---
+
+# dynamo.nixl_connect.OperationStatus(IntEnum)
 
 Represents the current state or status of an operation.
 

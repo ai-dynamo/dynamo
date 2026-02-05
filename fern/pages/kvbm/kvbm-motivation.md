@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Motivation behind KVBM"
 ---
+
+# Motivation behind KVBM
 
 Large language models (LLMs) and other AI workloads increasingly rely on KV caches that extend beyond GPU and local CPU memory into remote storage tiers. However, efficiently managing the lifecycle of KV blocks in remote storage presents challenges:
 
