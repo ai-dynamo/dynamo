@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-"""Omni handler for text-to-text/text-to-image generation using vLLM-Omni orchestrator."""
-
 import asyncio
 import logging
 import time
@@ -32,21 +29,11 @@ class OmniHandler(BaseWorkerHandler):
             f"Initializing OmniHandler for multi-stage pipelines with model: {config.model}"
         )
 
-        # Initialize AsyncOmni with stage configuration
-        # Note: stage_configs_path is validated as required in args.py
-        logger.info(f"Using stage config from: {config.stage_configs_path}")
-
-        if config.stage_configs_path:
-            omni_kwargs = {
-                "model": config.model,
-                "trust_remote_code": config.engine_args.trust_remote_code,
-                "stage_configs_path": config.stage_configs_path,
-            }
-        else:
-            omni_kwargs = {
-                "model": config.model,
-                "trust_remote_code": config.engine_args.trust_remote_code,
-            }
+        omni_kwargs = {
+            "model": config.model,
+            "trust_remote_code": config.engine_args.trust_remote_code,
+            "stage_configs_path": config.stage_configs_path,
+        }
 
         self.engine_client = AsyncOmni(**omni_kwargs)
 
