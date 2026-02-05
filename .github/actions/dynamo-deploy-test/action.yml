@@ -10,10 +10,6 @@ inputs:
     description: 'Kubernetes namespace for deployment'
     required: true
 
-  # Deployment Configuration
-  deployment_file:
-    description: 'Path to the DynamoGraphDeployment YAML file (relative to examples/backends/<framework>)'
-    required: true
   framework:
     description: 'Framework name (vllm, sglang, trtllm)'
     required: true
