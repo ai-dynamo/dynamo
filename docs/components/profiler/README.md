@@ -117,8 +117,8 @@ Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 
 | Document | Description |
 |----------|-------------|
-| [Profiler Guide](profiler_guide.md) | Detailed configuration and advanced usage |
-| [SLA-Driven Profiling](/docs/benchmarks/sla_driven_profiling.md) | Technical deep dive |
+| [Profiler Guide](profiler_guide.md) | Configuration, methods, and troubleshooting |
+| [Profiler Examples](profiler_examples.md) | Complete DGDR YAMLs, WebUI, script examples |
 | [SLA Planner Quick Start](/docs/planner/sla_planner_quickstart.md) | End-to-end deployment workflow |
 | [SLA Planner Architecture](/docs/planner/sla_planner.md) | How the Planner uses profiling data |
 
@@ -126,4 +126,5 @@ Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 :hidden:
 
 profiler_guide
+profiler_examples
 ```
