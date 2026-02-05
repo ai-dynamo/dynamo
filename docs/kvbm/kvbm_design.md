@@ -54,6 +54,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ![KVBM Data Flows](../images/kvbm-data-flows.png)
 
+
 *KVBM Data Flows from device to other memory hierarchies*
 
 ### Device → Host (Offload)
