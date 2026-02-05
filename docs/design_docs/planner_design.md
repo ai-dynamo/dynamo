@@ -79,7 +79,7 @@ Four predictor implementations are available:
 |-----------|-----------|----------|
 | **Constant** | `next = current` | Stable workloads, long intervals |
 | **ARIMA** | Auto-ARIMA with optional log1p transform | Trending/seasonal patterns |
-| **Kalman** | Local linear trend Kalman filter | Low-latency online forecasting |
+| **Kalman** | Local linear trend Kalman filter | Bursty traffics |
 | **Prophet** | Facebook Prophet time-series model | Complex seasonality |
 
 All predictors support warm-starting from trace files (`--load-predictor-warmup-trace`).
