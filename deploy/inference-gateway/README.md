@@ -124,6 +124,9 @@ you could deploy it as a standalone pod
 We provide an example for llama-3-70b vLLM below.
 
 ```bash
+# Deploy PVC, first Update `storageClassName` in recipes/llama-3-70b/model-cache/model-cache.yaml to match your cluster before deploying
+kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml
+kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml
 # Deploy your model
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
 # Deploy the GAIE http-route CR.
@@ -132,6 +135,15 @@ kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPAC
 
 -When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
 -You must enable the `--direct-route` flag in the FrontEnd cli.
+```bash
+    command:
+      - python3
+    args:
+      - -m
+      - dynamo.frontend
+      - --router-mode
+      - direct
+```
 -The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
 -The flag assures the routing respects this selection.
 
@@ -158,8 +170,14 @@ If you installed it into a different namespace, you need to adjust the HttpRoute
 We provide an example for Qwen vLLM below.
 Before deploying you must enable the `--direct-route` flag in the FrontEnd cli in your Dynamo Graph.
 ```bash
+    command:
+      - python3
     args:
-      - --direct-route
+      - -m
+      - dynamo.frontend
+      - --router-mode
+      - direct
+```
 ```
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
