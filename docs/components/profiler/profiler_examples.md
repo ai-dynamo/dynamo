@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Profiler Examples
 
 Complete examples for profiling with DGDRs, the interactive WebUI, and direct script usage.
@@ -63,7 +68,7 @@ spec:
 
       sweep:
         useAiConfigurator: true
-        aicSystem: h200_sxm
+        aicSystem: h200_sxm  # Also supports h100_sxm, b200_sxm, gb200_sxm, a100_sxm
         aicHfId: Qwen/Qwen3-32B
         aicBackendVersion: "0.20.0"
 
@@ -232,7 +237,7 @@ python -m benchmarks.profiler.profile_sla \
 ```bash
 python -m benchmarks.profiler.profile_sla \
   --backend sglang \
-  --config path/to/disagg.yaml \
+  --config examples/backends/sglang/deploy/disagg.yaml \
   --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --ttft 200 --itl 15 \
   --isl 3000 --osl 150 \

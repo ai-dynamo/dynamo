@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Profiler Guide
 
 This guide covers deployment, configuration, integration, and troubleshooting for the Dynamo Profiler.
@@ -206,8 +211,11 @@ profilingConfig:
       useAiConfigurator: true
       aicSystem: h200_sxm
       aicHfId: Qwen/Qwen3-32B
-      aicBackendVersion: "0.20.0"
+      aicBackendVersion: "0.20.0"      # TRT-LLM version simulated by AIC
 ```
+
+> [!NOTE]
+> `aicBackendVersion` specifies the TensorRT-LLM version that AI Configurator simulates. See the [AI Configurator supported features](https://github.com/ai-dynamo/aiconfigurator#supported-features) for available versions.
 
 **Currently supports:**
 - **Backends**: TensorRT-LLM (versions 0.20.0, 1.0.0rc3, 1.0.0rc6)
@@ -280,12 +288,13 @@ hardware:
   minNumGpusPerEngine: 2      # Auto-determined from model size and VRAM if not provided
   maxNumGpusPerEngine: 8      # Maximum GPUs to test
   numGpusPerNode: 8           # GPUs per node (for multi-node MoE)
-  gpuType: h200_sxm           # GPU type hint
+  gpuType: h200_sxm           # GPU type hint (informational, auto-detected)
 ```
 
 - **minNumGpusPerEngine**: Skip small TP sizes if your model is large
 - **maxNumGpusPerEngine**: Limit search space or work around constraints (e.g., [AIC attention heads](#ai-configurator-attention-head-constraint-error))
 - **numGpusPerNode**: Determine the upper bound of GPUs per node for dense models and configure Grove for multi-node MoE engines
+- **gpuType**: Informational only, auto-detected by the controller. For AI Configurator, use `aicSystem` in the [sweep configuration](#ai-configurator-configuration) instead
 
 > [!TIP]
 > If you don't specify hardware constraints, the controller auto-detects based on your model size and available cluster resources.
@@ -403,6 +412,9 @@ The profiler uses the DGD config as a **base template**, then optimizes it based
 | `--use-ai-configurator` | flag | false | Use offline AI Configurator |
 | `--pick-with-webui` | flag | false | Launch interactive WebUI |
 | `--webui-port` | int | 8000 | Port for WebUI |
+
+> [!NOTE]
+> CLI arguments map to DGDR config fields: `--min-num-gpus` = `hardware.minNumGpusPerEngine`, `--max-num-gpus` = `hardware.maxNumGpusPerEngine`, `--use-ai-configurator` = `sweep.useAiConfigurator`. See [DGDR Configuration Structure](#dgdr-configuration-structure) for all field mappings.
 
 ## Integration
 
