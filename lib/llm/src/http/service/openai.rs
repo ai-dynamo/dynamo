@@ -40,6 +40,7 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
+use crate::http::middleware::session::{RequestSession, extract_session_middleware};
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
@@ -53,7 +54,6 @@ use crate::protocols::openai::{
     responses::{NvCreateResponse, NvResponse},
 };
 use crate::request_template::RequestTemplate;
-use crate::http::middleware::session::{extract_session_middleware, RequestSession};
 use crate::storage::StorageError;
 use crate::types::Annotated;
 use dynamo_runtime::logging::get_distributed_tracing_context;
@@ -1228,7 +1228,10 @@ async fn responses(
 
     // Handle previous_response_id - fetch previous context and prepend to input
     if let Some(ref prev_id) = orig_request.inner.previous_response_id {
-        match storage.get_response(&session.tenant_id, &session.session_id, prev_id).await {
+        match storage
+            .get_response(&session.tenant_id, &session.session_id, prev_id)
+            .await
+        {
             Ok(prev_response) => {
                 tracing::info!(
                     tenant_id = %session.tenant_id,
@@ -1236,22 +1239,27 @@ async fn responses(
                     previous_response_id = %prev_id,
                     "Retrieved previous response for context"
                 );
-                
+
                 // Extract output items from previous response and prepend to current input
-                if let Some(output_items) = prev_response.response.get("output")
+                if let Some(output_items) = prev_response
+                    .response
+                    .get("output")
                     .and_then(|o| o.as_array())
                 {
-                    use dynamo_async_openai::types::responses::{InputItem, InputParam, EasyInputMessage, EasyInputContent, Role, MessageType};
-                    
+                    use dynamo_async_openai::types::responses::{
+                        EasyInputContent, EasyInputMessage, InputItem, InputParam, MessageType,
+                        Role,
+                    };
+
                     let mut new_items: Vec<InputItem> = Vec::new();
-                    
+
                     // Add previous output items as context (they become input for next turn)
                     for item in output_items {
                         if let Ok(input_item) = serde_json::from_value::<InputItem>(item.clone()) {
                             new_items.push(input_item);
                         }
                     }
-                    
+
                     // Add current input
                     match &orig_request.inner.input {
                         InputParam::Text(text) => {
@@ -1266,7 +1274,7 @@ async fn responses(
                             new_items.extend(items.clone());
                         }
                     }
-                    
+
                     // Update the request with combined input
                     orig_request.inner.input = InputParam::Items(new_items);
                 }
@@ -1352,7 +1360,13 @@ async fn responses(
             converter = converter.with_storage_callback(move |response_json| {
                 tokio::spawn(async move {
                     match storage_for_callback
-                        .store_response(&tenant_id, &session_id, Some(&response_id), response_json, ttl)
+                        .store_response(
+                            &tenant_id,
+                            &session_id,
+                            Some(&response_id),
+                            response_json,
+                            ttl,
+                        )
                         .await
                     {
                         Ok(stored_id) => {
@@ -1474,15 +1488,17 @@ async fn responses(
                 tracing::warn!("Failed to serialize response for storage: {}", e);
                 serde_json::json!({})
             });
-            
-            let store_result = storage.store_response(
-                &session.tenant_id,
-                &session.session_id,
-                Some(&response.inner.id),  // Use the response's existing ID
-                response_json,
-                Some(std::time::Duration::from_secs(86400)), // 24 hour TTL
-            ).await;
-            
+
+            let store_result = storage
+                .store_response(
+                    &session.tenant_id,
+                    &session.session_id,
+                    Some(&response.inner.id), // Use the response's existing ID
+                    response_json,
+                    Some(std::time::Duration::from_secs(86400)), // 24 hour TTL
+                )
+                .await;
+
             match store_result {
                 Ok(stored_id) => {
                     tracing::info!(
@@ -1491,7 +1507,7 @@ async fn responses(
                         response_id = %stored_id,
                         "Stored response successfully"
                     );
-                },
+                }
                 Err(e) => {
                     tracing::warn!(
                         tenant_id = %session.tenant_id,
@@ -1682,7 +1698,6 @@ pub fn list_models_router(
     (vec![doc_for_openai], router)
 }
 
-
 /// Handle GET /v1/responses/{id} - retrieve a stored response
 async fn handler_get_response(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
@@ -1691,7 +1706,10 @@ async fn handler_get_response(
 ) -> Result<Response, StatusCode> {
     let storage = state.response_storage();
 
-    match storage.get_response(&session.tenant_id, &session.session_id, &response_id).await {
+    match storage
+        .get_response(&session.tenant_id, &session.session_id, &response_id)
+        .await
+    {
         Ok(stored) => {
             tracing::info!(
                 tenant_id = %session.tenant_id,
@@ -1731,7 +1749,10 @@ async fn handler_delete_response(
 ) -> Result<StatusCode, StatusCode> {
     let storage = state.response_storage();
 
-    match storage.delete_response(&session.tenant_id, &session.session_id, &response_id).await {
+    match storage
+        .delete_response(&session.tenant_id, &session.session_id, &response_id)
+        .await
+    {
         Ok(()) => {
             tracing::info!(
                 tenant_id = %session.tenant_id,

@@ -17,7 +17,7 @@ This enables local development and testing of multi-turn conversations using rea
 
 We support Braintrust JSONL format with span hierarchy:
 
-```jsonl
+```json
 {"id": "root-123", "span_id": "root-123", "root_span_id": "root-123", "metadata": {"session_id": "root-123"}, "span_attributes": {"name": "Session", "type": "task"}}
 {"id": "turn-1", "span_id": "turn-1", "root_span_id": "root-123", "span_parents": ["root-123"], "input": "Hello", "span_attributes": {"name": "Turn 1", "type": "task"}}
 {"id": "llm-1", "span_id": "llm-1", "root_span_id": "root-123", "span_parents": ["turn-1"], "output": {"role": "assistant", "content": "Hi!"}, "span_attributes": {"type": "llm"}}

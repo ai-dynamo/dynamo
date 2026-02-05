@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Redis-based distributed session locking using Redlock algorithm
 //!
 //! Provides distributed locking for session-level concurrency control
@@ -251,11 +254,10 @@ impl SessionLock for RedisSessionLock {
         let lock_key = Self::lock_key(key);
 
         let result: Result<bool, _> = async {
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| LockError::BackendError(format!("Failed to get connection: {}", e)))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    LockError::BackendError(format!("Failed to get connection: {}", e))
+                })?;
 
             let exists: bool = conn
                 .exists(&lock_key)

@@ -10,18 +10,18 @@
 //! 4. Multi-turn conversation handling
 
 use axum::{
+    Extension, Json, Router,
     body::Body,
     extract::State,
     http::{Request, StatusCode},
     middleware,
     routing::post,
-    Extension, Json, Router,
 };
 use dynamo_llm::{
-    http::middleware::session::{extract_session_middleware, RequestSession},
+    http::middleware::session::{RequestSession, extract_session_middleware},
     storage::{
-        InMemoryResponseStorage, InMemorySessionLock, LockError, ResponseStorage,
-        SessionLock, StorageError, parse_trace_content, parse_trace_file, replay_trace,
+        InMemoryResponseStorage, InMemorySessionLock, LockError, ResponseStorage, SessionLock,
+        StorageError, parse_trace_content, parse_trace_file, replay_trace,
     },
 };
 use serde_json::json;
@@ -431,7 +431,13 @@ async fn test_ttl_metadata() {
         .as_secs();
 
     let response_id = storage
-        .store_response("tenant_ttl", "session_ttl", None, response_data.clone(), Some(ttl))
+        .store_response(
+            "tenant_ttl",
+            "session_ttl",
+            None,
+            response_data.clone(),
+            Some(ttl),
+        )
         .await
         .unwrap();
 
@@ -522,15 +528,19 @@ async fn test_storage_key_pattern() {
     assert_eq!(retrieved_2.response["data"], 2);
 
     // Cross-access should fail
-    assert!(storage
-        .get_response("tenant1", "session1", &response_id_2)
-        .await
-        .is_err());
+    assert!(
+        storage
+            .get_response("tenant1", "session1", &response_id_2)
+            .await
+            .is_err()
+    );
 
-    assert!(storage
-        .get_response("tenant2", "session2", &response_id_1)
-        .await
-        .is_err());
+    assert!(
+        storage
+            .get_response("tenant2", "session2", &response_id_1)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -638,7 +648,13 @@ async fn test_get_response_success() {
     });
 
     let response_id = storage
-        .store_response("tenant_get", "session_get", Some("resp_get_test"), response_data.clone(), None)
+        .store_response(
+            "tenant_get",
+            "session_get",
+            Some("resp_get_test"),
+            response_data.clone(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -669,7 +685,13 @@ async fn test_get_response_wrong_tenant() {
 
     // Store for tenant_a
     let response_id = storage
-        .store_response("tenant_a", "session_1", None, json!({"secret": "data"}), None)
+        .store_response(
+            "tenant_a",
+            "session_1",
+            None,
+            json!({"secret": "data"}),
+            None,
+        )
         .await
         .unwrap();
 
@@ -691,12 +713,20 @@ async fn test_delete_response_success() {
 
     // Store a response
     let response_id = storage
-        .store_response("tenant_del", "session_del", None, json!({"data": "to_delete"}), None)
+        .store_response(
+            "tenant_del",
+            "session_del",
+            None,
+            json!({"data": "to_delete"}),
+            None,
+        )
         .await
         .unwrap();
 
     // Verify it exists
-    let exists = storage.get_response("tenant_del", "session_del", &response_id).await;
+    let exists = storage
+        .get_response("tenant_del", "session_del", &response_id)
+        .await;
     assert!(exists.is_ok());
 
     // Delete it
@@ -729,7 +759,13 @@ async fn test_delete_response_wrong_session() {
 
     // Store for session_1
     let response_id = storage
-        .store_response("tenant_a", "session_1", None, json!({"data": "protected"}), None)
+        .store_response(
+            "tenant_a",
+            "session_1",
+            None,
+            json!({"data": "protected"}),
+            None,
+        )
         .await
         .unwrap();
 
@@ -741,7 +777,9 @@ async fn test_delete_response_wrong_session() {
     assert!(matches!(result, Err(StorageError::NotFound)));
 
     // Original should still exist
-    let still_exists = storage.get_response("tenant_a", "session_1", &response_id).await;
+    let still_exists = storage
+        .get_response("tenant_a", "session_1", &response_id)
+        .await;
     assert!(still_exists.is_ok());
 }
 
@@ -804,7 +842,12 @@ async fn test_fork_session_rewind() {
 
     // Clone only up to resp_3 (rewind point)
     let cloned_count = storage
-        .fork_session("tenant_rewind", "original_session", "rewound_session", Some("resp_3"))
+        .fork_session(
+            "tenant_rewind",
+            "original_session",
+            "rewound_session",
+            Some("resp_3"),
+        )
         .await
         .unwrap();
 
@@ -841,7 +884,13 @@ async fn test_previous_response_id_retrieval() {
     });
 
     storage
-        .store_response("tenant_session", "session_1", Some("resp_turn1"), first_response.clone(), None)
+        .store_response(
+            "tenant_session",
+            "session_1",
+            Some("resp_turn1"),
+            first_response.clone(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -852,7 +901,9 @@ async fn test_previous_response_id_retrieval() {
         .unwrap();
 
     // Check we can extract output items
-    let output_items = retrieved.response.get("output")
+    let output_items = retrieved
+        .response
+        .get("output")
         .and_then(|o| o.as_array())
         .expect("Should have output items");
 
@@ -878,7 +929,13 @@ async fn test_multi_turn_with_previous_response_id() {
     });
 
     storage
-        .store_response("tenant_math", "calc_session", Some("resp_001"), turn1_response, None)
+        .store_response(
+            "tenant_math",
+            "calc_session",
+            Some("resp_001"),
+            turn1_response,
+            None,
+        )
         .await
         .unwrap();
 
@@ -896,7 +953,13 @@ async fn test_multi_turn_with_previous_response_id() {
     });
 
     storage
-        .store_response("tenant_math", "calc_session", Some("resp_002"), turn2_response, None)
+        .store_response(
+            "tenant_math",
+            "calc_session",
+            Some("resp_002"),
+            turn2_response,
+            None,
+        )
         .await
         .unwrap();
 
@@ -916,14 +979,18 @@ async fn test_multi_turn_with_previous_response_id() {
         .await
         .unwrap();
 
-    let prev_output = prev.response.get("output")
+    let prev_output = prev
+        .response
+        .get("output")
         .and_then(|o| o.as_array())
         .unwrap();
 
-    assert!(prev_output[0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("4"));
+    assert!(
+        prev_output[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("4")
+    );
 }
 
 // ============================================================================
@@ -955,7 +1022,13 @@ async fn test_trace_based_session_flow() {
     });
 
     storage
-        .store_response(tenant_id, session_id, Some("resp_turn1_trace"), turn1_response.clone(), None)
+        .store_response(
+            tenant_id,
+            session_id,
+            Some("resp_turn1_trace"),
+            turn1_response.clone(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -983,7 +1056,13 @@ async fn test_trace_based_session_flow() {
     });
 
     storage
-        .store_response(tenant_id, session_id, Some("resp_turn2_trace"), turn2_response, None)
+        .store_response(
+            tenant_id,
+            session_id,
+            Some("resp_turn2_trace"),
+            turn2_response,
+            None,
+        )
         .await
         .unwrap();
 
@@ -1005,7 +1084,9 @@ async fn test_trace_based_session_flow() {
         .await
         .unwrap();
 
-    let prev_output = prev_context.response.get("output")
+    let prev_output = prev_context
+        .response
+        .get("output")
         .and_then(|o| o.as_array())
         .unwrap();
 
@@ -1022,7 +1103,10 @@ async fn test_braintrust_trace_format_parsing() {
     let parsed: serde_json::Value = serde_json::from_str(trace_line).unwrap();
 
     assert_eq!(parsed["id"], "4de2bcf7-793e-494f-a8a6-ef8556bd352f");
-    assert_eq!(parsed["metadata"]["session_id"], "4de2bcf7-793e-494f-a8a6-ef8556bd352f");
+    assert_eq!(
+        parsed["metadata"]["session_id"],
+        "4de2bcf7-793e-494f-a8a6-ef8556bd352f"
+    );
 
     // This session_id is what we'd use for our storage
     let session_id = parsed["metadata"]["session_id"].as_str().unwrap();
@@ -1046,13 +1130,22 @@ async fn test_trace_replay_parse_real_trace() {
     let parsed_trace = parse_trace_content(trace_content).expect("Should parse trace");
 
     // Verify session extraction
-    assert_eq!(parsed_trace.session_id, "4de2bcf7-793e-494f-a8a6-ef8556bd352f");
+    assert_eq!(
+        parsed_trace.session_id,
+        "4de2bcf7-793e-494f-a8a6-ef8556bd352f"
+    );
     assert_eq!(parsed_trace.raw_spans.len(), 4); // root + turn + tool + llm
 
     // Verify we found the turn
     assert_eq!(parsed_trace.turns.len(), 1);
-    assert_eq!(parsed_trace.turns[0].user_input, "how many lines in the README.md?");
-    assert_eq!(parsed_trace.turns[0].assistant_output, Some("The README.md has **225 lines**.".to_string()));
+    assert_eq!(
+        parsed_trace.turns[0].user_input,
+        "how many lines in the README.md?"
+    );
+    assert_eq!(
+        parsed_trace.turns[0].assistant_output,
+        Some("The README.md has **225 lines**.".to_string())
+    );
 
     // Verify tool calls were captured
     assert_eq!(parsed_trace.turns[0].tool_calls.len(), 1);
@@ -1097,10 +1190,12 @@ async fn test_trace_replay_through_storage() {
 
     // Verify the content was stored correctly
     let first_response = &responses[0];
-    assert!(first_response.response["metadata"]["user_input"]
-        .as_str()
-        .unwrap()
-        .contains("2+2"));
+    assert!(
+        first_response.response["metadata"]["user_input"]
+            .as_str()
+            .unwrap()
+            .contains("2+2")
+    );
 
     // Verify we can chain via previous_response_id
     let second_response = &responses[1];
@@ -1191,16 +1286,19 @@ async fn test_trace_replay_from_real_file() {
     };
 
     // Find the most recent trace file
-    let trace_file = std::fs::read_dir(&traces_dir)
-        .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map(|ext| ext == "jsonl").unwrap_or(false))
-                .filter(|e| e.file_name().to_string_lossy() != "claude-code.jsonl") // Skip aggregated
-                .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
-                .map(|e| e.path())
-        });
+    let trace_file = std::fs::read_dir(&traces_dir).ok().and_then(|entries| {
+        entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "jsonl")
+                    .unwrap_or(false)
+            })
+            .filter(|e| e.file_name().to_string_lossy() != "claude-code.jsonl") // Skip aggregated
+            .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+            .map(|e| e.path())
+    });
 
     let Some(trace_path) = trace_file else {
         println!("Skipping: No .jsonl trace files found in {:?}", traces_dir);
@@ -1217,10 +1315,16 @@ async fn test_trace_replay_from_real_file() {
     println!("  Turns found: {}", trace.turns.len());
 
     // Verify we found at least one turn
-    assert!(!trace.turns.is_empty(), "Real trace should have at least one turn");
+    assert!(
+        !trace.turns.is_empty(),
+        "Real trace should have at least one turn"
+    );
 
     // Verify session_id was extracted
-    assert!(!trace.session_id.is_empty(), "Session ID should be extracted");
+    assert!(
+        !trace.session_id.is_empty(),
+        "Session ID should be extracted"
+    );
 
     // Replay through storage
     let storage = InMemoryResponseStorage::new();
@@ -1271,12 +1375,18 @@ async fn test_trace_replay_from_real_file() {
         }
     }
 
-    assert!(has_first, "Should have at least one response with no previous (turn 1)");
+    assert!(
+        has_first,
+        "Should have at least one response with no previous (turn 1)"
+    );
     if stored_responses.len() > 1 {
         assert!(has_chain, "Multi-turn trace should have chained responses");
     }
 
-    println!("✓ Real trace replay successful: {} turns", result.turns_replayed);
+    println!(
+        "✓ Real trace replay successful: {} turns",
+        result.turns_replayed
+    );
 }
 
 // ============================================================================
@@ -1289,7 +1399,10 @@ async fn test_session_lock_basic() {
     let lock = InMemorySessionLock::new();
 
     // Acquire lock
-    let guard = lock.acquire("test:session", Duration::from_secs(1)).await.unwrap();
+    let guard = lock
+        .acquire("test:session", Duration::from_secs(1))
+        .await
+        .unwrap();
     assert_eq!(guard.key(), "test:session");
 
     // Should be locked
@@ -1308,7 +1421,10 @@ async fn test_session_lock_contention() {
     let lock = InMemorySessionLock::new();
 
     // Acquire lock
-    let _guard = lock.acquire("contention:test", Duration::from_secs(1)).await.unwrap();
+    let _guard = lock
+        .acquire("contention:test", Duration::from_secs(1))
+        .await
+        .unwrap();
 
     // Try acquire should fail
     let result = lock.try_acquire("contention:test").await;
@@ -1321,10 +1437,15 @@ async fn test_session_lock_timeout() {
     let lock = InMemorySessionLock::new();
 
     // Acquire lock
-    let _guard = lock.acquire("timeout:test", Duration::from_secs(10)).await.unwrap();
+    let _guard = lock
+        .acquire("timeout:test", Duration::from_secs(10))
+        .await
+        .unwrap();
 
     // Try to acquire with short timeout - should timeout
-    let result = lock.acquire("timeout:test", Duration::from_millis(50)).await;
+    let result = lock
+        .acquire("timeout:test", Duration::from_millis(50))
+        .await;
     assert!(matches!(result, Err(LockError::Timeout(_))));
 }
 
@@ -1334,10 +1455,15 @@ async fn test_session_lock_independence() {
     let lock = InMemorySessionLock::new();
 
     // Lock session 1
-    let _guard1 = lock.acquire("tenant:session1", Duration::from_secs(1)).await.unwrap();
+    let _guard1 = lock
+        .acquire("tenant:session1", Duration::from_secs(1))
+        .await
+        .unwrap();
 
     // Session 2 should still be lockable
-    let guard2 = lock.acquire("tenant:session2", Duration::from_secs(1)).await;
+    let guard2 = lock
+        .acquire("tenant:session2", Duration::from_secs(1))
+        .await;
     assert!(guard2.is_ok());
 
     // Verify both are locked
@@ -1404,7 +1530,10 @@ async fn test_concurrent_storage_with_lock() {
 
         handles.push(tokio::spawn(async move {
             // Acquire session lock
-            let _guard = lock.acquire(&lock_key, Duration::from_secs(5)).await.unwrap();
+            let _guard = lock
+                .acquire(&lock_key, Duration::from_secs(5))
+                .await
+                .unwrap();
 
             // Store response while holding lock
             let response_data = json!({
@@ -1470,7 +1599,10 @@ async fn test_previous_response_id_concurrent_chaining() {
 
         handles.push(tokio::spawn(async move {
             // Acquire lock to prevent race on previous_response_id
-            let _guard = lock.acquire(&lock_key, Duration::from_secs(5)).await.unwrap();
+            let _guard = lock
+                .acquire(&lock_key, Duration::from_secs(5))
+                .await
+                .unwrap();
 
             // Read current last response ID
             let prev_id = last_response_id.lock().await.clone();
@@ -1640,7 +1772,10 @@ async fn test_load_concurrent_read_write_same_session() {
         let lock_key = lock_key.clone();
 
         handles.push(tokio::spawn(async move {
-            let _guard = lock.acquire(&lock_key, Duration::from_secs(10)).await.unwrap();
+            let _guard = lock
+                .acquire(&lock_key, Duration::from_secs(10))
+                .await
+                .unwrap();
             storage
                 .store_response(
                     tenant_id,
@@ -1786,10 +1921,8 @@ async fn test_streaming_response_storage_callback() {
     let _start_events = converter.emit_start_events();
 
     // Simulate some text content chunks
+    use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta};
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-    use dynamo_async_openai::types::{
-        ChatCompletionStreamResponseDelta, ChatChoiceStream,
-    };
 
     #[allow(deprecated)]
     let chunk1 = NvCreateChatCompletionStreamResponse {
@@ -1854,29 +1987,36 @@ async fn test_streaming_response_storage_callback() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify callback was invoked
-    assert!(callback_invoked.load(Ordering::SeqCst), "Storage callback should have been invoked");
+    assert!(
+        callback_invoked.load(Ordering::SeqCst),
+        "Storage callback should have been invoked"
+    );
 
     // Verify the stored response contains the accumulated text
     let stored = stored_response.lock().await;
     assert!(stored.is_some(), "Response should have been captured");
 
     let response_json = stored.as_ref().unwrap();
-    let output = response_json.get("output")
+    let output = response_json
+        .get("output")
         .and_then(|o| o.as_array())
         .expect("Response should have output array");
 
     assert!(!output.is_empty(), "Output should not be empty");
 
     // Find the message output item
-    let message_item = output.iter()
+    let message_item = output
+        .iter()
         .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("message"))
         .expect("Should have a message output item");
 
-    let content = message_item.get("content")
+    let content = message_item
+        .get("content")
         .and_then(|c| c.as_array())
         .expect("Message should have content array");
 
-    let text = content.iter()
+    let text = content
+        .iter()
         .find(|c| c.get("type").and_then(|t| t.as_str()) == Some("output_text"))
         .and_then(|c| c.get("text"))
         .and_then(|t| t.as_str())
@@ -1910,11 +2050,11 @@ async fn test_streaming_response_storage_with_function_calls() {
     let _start_events = converter.emit_start_events();
 
     // Simulate function call chunks
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
     use dynamo_async_openai::types::{
-        ChatCompletionStreamResponseDelta, ChatChoiceStream,
-        ChatCompletionMessageToolCallChunk, FunctionCallStream,
+        ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+        FunctionCallStream,
     };
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
     #[allow(deprecated)]
     let fc_chunk = NvCreateChatCompletionStreamResponse {
@@ -1960,24 +2100,35 @@ async fn test_streaming_response_storage_with_function_calls() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify callback was invoked
-    assert!(callback_invoked.load(Ordering::SeqCst), "Storage callback should have been invoked");
+    assert!(
+        callback_invoked.load(Ordering::SeqCst),
+        "Storage callback should have been invoked"
+    );
 
     // Verify the stored response contains the function call
     let stored = stored_response.lock().await;
     assert!(stored.is_some(), "Response should have been captured");
 
     let response_json = stored.as_ref().unwrap();
-    let output = response_json.get("output")
+    let output = response_json
+        .get("output")
         .and_then(|o| o.as_array())
         .expect("Response should have output array");
 
     // Find the function call output item
-    let fc_item = output.iter()
+    let fc_item = output
+        .iter()
         .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
         .expect("Should have a function_call output item");
 
-    assert_eq!(fc_item.get("name").and_then(|n| n.as_str()), Some("get_weather"));
-    assert_eq!(fc_item.get("call_id").and_then(|c| c.as_str()), Some("call_abc123"));
+    assert_eq!(
+        fc_item.get("name").and_then(|n| n.as_str()),
+        Some("get_weather")
+    );
+    assert_eq!(
+        fc_item.get("call_id").and_then(|c| c.as_str()),
+        Some("call_abc123")
+    );
 }
 
 /// Test that streaming without store flag does not invoke callback
@@ -1992,10 +2143,8 @@ async fn test_streaming_without_store_flag_no_callback() {
     let _start_events = converter.emit_start_events();
 
     // Simulate a chunk
+    use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta};
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-    use dynamo_async_openai::types::{
-        ChatCompletionStreamResponseDelta, ChatChoiceStream,
-    };
 
     #[allow(deprecated)]
     let chunk = NvCreateChatCompletionStreamResponse {
@@ -2029,7 +2178,10 @@ async fn test_streaming_without_store_flag_no_callback() {
     let end_events = converter.emit_end_events();
 
     // Should still emit proper end events
-    assert!(!end_events.is_empty(), "Should emit end events even without storage callback");
+    assert!(
+        !end_events.is_empty(),
+        "Should emit end events even without storage callback"
+    );
 }
 
 // ============================================================================
@@ -2119,7 +2271,13 @@ mod redis_tests {
 
         // Store for tenant A
         let response_id = storage
-            .store_response("tenant_a_redis", "session_1", None, response_data.clone(), None)
+            .store_response(
+                "tenant_a_redis",
+                "session_1",
+                None,
+                response_data.clone(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -2246,10 +2404,14 @@ mod redis_tests {
 
         // Cleanup
         for id in &source_ids {
-            let _ = storage.delete_response(tenant_id, "source_session", id).await;
+            let _ = storage
+                .delete_response(tenant_id, "source_session", id)
+                .await;
         }
         for resp in &cloned_responses {
-            let _ = storage.delete_response(tenant_id, "cloned_session", &resp.response_id).await;
+            let _ = storage
+                .delete_response(tenant_id, "cloned_session", &resp.response_id)
+                .await;
         }
     }
 
@@ -2426,7 +2588,10 @@ mod redis_tests {
             let lock_key = lock_key.clone();
 
             handles.push(tokio::spawn(async move {
-                let _guard = lock.acquire(&lock_key, Duration::from_secs(10)).await.unwrap();
+                let _guard = lock
+                    .acquire(&lock_key, Duration::from_secs(10))
+                    .await
+                    .unwrap();
 
                 let response_data = json!({
                     "turn": i,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Storage backends for Dynamo
 //!
 //! This module provides pluggable storage interfaces for stateful responses.
@@ -24,7 +27,9 @@ pub use config::{StorageBackend, StorageConfig};
 pub use manager::InMemoryResponseStorage;
 pub use response_storage::{ResponseStorage, StorageError, StoredResponse};
 pub use session_lock::{InMemorySessionLock, LockConfig, LockError, LockGuard, SessionLock};
-pub use trace_replay::{parse_trace_content, parse_trace_file, replay_trace, ParsedTrace, ReplayResult};
+pub use trace_replay::{
+    ParsedTrace, ReplayResult, parse_trace_content, parse_trace_file, replay_trace,
+};
 
 #[cfg(feature = "redis-storage")]
 pub use redis_lock::RedisSessionLock;
