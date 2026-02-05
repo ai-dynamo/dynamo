@@ -24,9 +24,7 @@ jobs:
           - prod-tester-amd-gpu-v1
           - prod-builder-amd-gpu-v1
     steps:
-      - name: Check GPUs
+      - name: Check GPUs (inside Docker)
         run: |
-          sleep 120
-          nvidia-smi
-          echo "GPU count: $(nvidia-smi -L | wc -l)"
-
+          docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+          echo "GPU count: $(docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi -L | wc -l)"
