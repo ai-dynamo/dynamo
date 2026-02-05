@@ -133,9 +133,7 @@ class BaseConfigModifier:
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
 
     @classmethod
-    def _get_model_name_and_path_from_args(
-        cls, args: list[str], default_model_name: str, logger
-    ) -> tuple[str, str]:
+    def _get_model_name_and_path_from_args(cls, args: list[str]) -> Tuple[str, str]:
         """
         Extract model name and path from worker args.
 
@@ -144,14 +142,14 @@ class BaseConfigModifier:
 
         Args:
             args: Broken argument list
-            default_model_name: Default to use if neither arg found
-            logger: Logger instance for warnings
 
         Returns:
             Tuple of (model_name, model_path)
-        """
-        model_name = default_model_name
 
+        Raises:
+            ValueError: If neither --served-model-name nor model path arg is found
+        """
+        model_name = None
         # Check for --served-model-name first (API model name)
         for i, arg in enumerate(args):
             if arg == cls.WORKER_SERVED_MODEL_NAME_ARG and i + 1 < len(args):
@@ -159,21 +157,25 @@ class BaseConfigModifier:
                 break
 
         # Check for backend-specific path argument
-        model_path = model_name
+        model_path = None
         for i, arg in enumerate(args):
             if arg == cls.WORKER_MODEL_PATH_ARG and i + 1 < len(args):
                 model_path = args[i + 1]
                 break
 
-        # If model_name not found, use model_path as model_name
-        if model_name == default_model_name and model_path != default_model_name:
-            model_name = model_path
-
-        # Warn if neither argument was found
-        if model_name == default_model_name and model_path == default_model_name:
-            logger.warning(
-                f"Model name not found in configuration args, using default model name: {default_model_name}"
+        # Require at least one to be specified
+        if model_name is None and model_path is None:
+            raise ValueError(
+                f"Cannot determine model: neither {cls.WORKER_MODEL_PATH_ARG} nor "
+                f"{cls.WORKER_SERVED_MODEL_NAME_ARG} found in worker configuration. "
+                f"Please specify a model name/path in your config."
             )
+
+        # If only one is specified, use it for both
+        if model_path is None:
+            model_path = model_name
+        elif model_name is None:
+            model_name = model_path
 
         return model_name, model_path
 
