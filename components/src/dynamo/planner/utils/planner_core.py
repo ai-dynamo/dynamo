@@ -18,6 +18,7 @@ from dynamo.planner import (
     VirtualConnector,
 )
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner.utils.exceptions import DeploymentValidationError
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
@@ -122,8 +123,8 @@ class PlannerPrometheusMetrics:
 @dataclass
 class PlannerSharedState:
     last_metrics: Metrics = field(default_factory=Metrics)
-    p_endpoints: list = field(default_factory=list)
-    d_endpoints: list = field(default_factory=list)
+    num_p_workers: int = 0
+    num_d_workers: int = 0
     cumulative_gpu_hours: float = 0.0
     last_adjustment_time: float = 0.0
 
@@ -204,6 +205,54 @@ def _apply_component_gpu_budget(
         f"scaling down to {next_num} replicas"
     )
     return next_num
+
+
+def _initialize_gpu_counts(
+    args: argparse.Namespace,
+    connector,
+    require_prefill: bool,
+    require_decode: bool,
+) -> None:
+    """Initialize GPU counts from DGD (Kubernetes) or CLI args (virtual).
+
+    In Kubernetes mode: reads from DGD, falls back to CLI flags if not found
+    (useful for mockers that don't specify GPU resources).
+    In virtual mode: requires CLI flags, errors if not provided.
+
+    Raises:
+        DeploymentValidationError: If GPU counts cannot be determined
+    """
+    # Try to read from DGD in Kubernetes mode
+    if hasattr(connector, "get_gpu_counts"):
+        try:
+            prefill_gpu, decode_gpu = connector.get_gpu_counts(
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+            )
+            args.prefill_engine_num_gpu = prefill_gpu
+            args.decode_engine_num_gpu = decode_gpu
+            logger.info(
+                f"Detected GPU counts from DGD: prefill={prefill_gpu}, decode={decode_gpu}"
+            )
+            return
+        except Exception as e:
+            # Fall back to CLI flags (e.g., for mockers without GPU resources in DGD)
+            logger.warning(
+                f"Could not read GPU counts from DGD ({e}), falling back to CLI flags"
+            )
+
+    # Use CLI flags (virtual mode, or K8s fallback when DGD lacks GPU resources)
+    errors = []
+    if require_prefill and args.prefill_engine_num_gpu is None:
+        errors.append("Missing --prefill-engine-num-gpu flag")
+    if require_decode and args.decode_engine_num_gpu is None:
+        errors.append("Missing --decode-engine-num-gpu flag")
+    if errors:
+        raise DeploymentValidationError(errors)
+    logger.info(
+        f"Using GPU counts from CLI: prefill={args.prefill_engine_num_gpu}, "
+        f"decode={args.decode_engine_num_gpu}"
+    )
 
 
 class BasePlanner:
@@ -395,12 +444,41 @@ class BasePlanner:
 
     async def get_workers_info(
         self, require_prefill: bool = True, require_decode: bool = True
-    ):
+    ) -> tuple[int, int, bool]:
+        """
+        Get worker counts for prefill and decode components.
+
+        Returns:
+            tuple[int, int, bool]: (num_p_workers, num_d_workers, is_stable)
+            - is_stable: False if rollout in progress (scaling should be skipped)
+        """
+        num_p_workers = 0
+        num_d_workers = 0
+
+        # For Kubernetes, use DGD status instead of runtime client
+        if hasattr(self, "connector") and isinstance(
+            self.connector, KubernetesConnector
+        ):
+            (
+                prefill_count,
+                decode_count,
+                is_stable,
+            ) = self.connector.get_actual_worker_counts(
+                prefill_component_name=(
+                    self.prefill_component_name if require_prefill else None
+                ),
+                decode_component_name=(
+                    self.decode_component_name if require_decode else None
+                ),
+            )
+            num_p_workers = prefill_count if require_prefill else 0
+            num_d_workers = decode_count if require_decode else 0
+            return num_p_workers, num_d_workers, is_stable
+
+        # Fall back to runtime client for non-Kubernetes environments
         if self.runtime is None:
             raise RuntimeError("Runtime is not initialized")
 
-        p_endpoints = []
-        d_endpoints = []
         worker_names = WORKER_COMPONENT_NAMES[self.args.backend]
 
         if require_prefill:
@@ -410,9 +488,9 @@ class BasePlanner:
                         worker_names.prefill_worker_component_name,
                         worker_names.prefill_worker_endpoint,
                     )
-                p_endpoints = self.prefill_client.instance_ids()  # type: ignore
+                num_p_workers = len(self.prefill_client.instance_ids())  # type: ignore
             except Exception:
-                p_endpoints = []
+                num_p_workers = 0
                 logger.warning(
                     "No prefill workers found, aggregated mode is not supported yet"
                 )
@@ -424,35 +502,39 @@ class BasePlanner:
                         worker_names.decode_worker_component_name,
                         worker_names.decode_worker_endpoint,
                     )
-                d_endpoints = self.workers_client.instance_ids()  # type: ignore
+                num_d_workers = len(self.workers_client.instance_ids())  # type: ignore
             except Exception as e:
                 raise RuntimeError(f"Failed to get decode worker endpoints: {e}")
 
-        return p_endpoints, d_endpoints
+        return num_p_workers, num_d_workers, True  # Always stable for non-K8s
 
     async def observe_metrics(
         self, require_prefill: bool = True, require_decode: bool = True
-    ):
-        p_endpoints, d_endpoints = await self.get_workers_info(
+    ) -> None:
+        """
+        Observe metrics from Prometheus and update shared state.
+        """
+        num_p_workers, num_d_workers, _ = await self.get_workers_info(
             require_prefill=require_prefill, require_decode=require_decode
         )
-        self.shared_state.p_endpoints = p_endpoints
-        self.shared_state.d_endpoints = d_endpoints
+
+        self.shared_state.num_p_workers = num_p_workers
+        self.shared_state.num_d_workers = num_d_workers
         logger.debug(
-            f"Number of prefill workers: {len(p_endpoints)}, number of decode workers: {len(d_endpoints)}"
+            f"Number of prefill workers: {num_p_workers}, number of decode workers: {num_d_workers}"
         )
 
         # Update Prometheus metrics if server is running
         if self.prometheus_port != 0 and self.prometheus_metrics is not None:
-            self.prometheus_metrics.num_p_workers.set(len(p_endpoints))
-            self.prometheus_metrics.num_d_workers.set(len(d_endpoints))
+            self.prometheus_metrics.num_p_workers.set(num_p_workers)
+            self.prometheus_metrics.num_d_workers.set(num_d_workers)
 
             # Calculate and accumulate GPU hours for this interval
             # TODO: track startup and shutdown times to get more accurate GPU hours
             interval_gpu_hours = (
                 (
-                    len(p_endpoints) * self.args.prefill_engine_num_gpu
-                    + len(d_endpoints) * self.args.decode_engine_num_gpu
+                    num_p_workers * self.args.prefill_engine_num_gpu
+                    + num_d_workers * self.args.decode_engine_num_gpu
                 )
                 * self.args.adjustment_interval
                 / 3600
@@ -636,6 +718,14 @@ class BasePlanner:
             )
             logger.info("Successfully validated the deployment")
 
+            # Initialize GPU counts
+            _initialize_gpu_counts(
+                self.args,
+                self.connector,
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+            )
+
             await self.connector.wait_for_deployment_ready()
 
             model_name = await self._get_model_name(
@@ -712,14 +802,14 @@ class DecodePlanner(BasePlanner):
     component_type = SubComponentType.DECODE
 
     def _update_correction_factor(self) -> bool:
-        if not self.shared_state.d_endpoints:
+        if self.shared_state.num_d_workers == 0:
             logger.warning(
                 "No decode workers found for correction factor, skipping correction update"
             )
             return True
         expect_itl = self.decode_interpolator.interpolate_itl(
             concurrency=self.last_metrics.num_req  # type: ignore
-            / len(self.shared_state.d_endpoints)
+            / self.shared_state.num_d_workers
             * self.last_metrics.request_duration  # type: ignore
             / self.args.adjustment_interval,
             context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
@@ -807,6 +897,14 @@ class DisaggPlanner:
                 require_decode=True,
             )
             logger.info("Successfully validated the deployment")
+
+            # Initialize GPU counts
+            _initialize_gpu_counts(
+                self.args,
+                self.prefill_planner.connector,
+                require_prefill=True,
+                require_decode=True,
+            )
 
             await self.prefill_planner.connector.wait_for_deployment_ready()
 
