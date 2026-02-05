@@ -69,6 +69,10 @@ ci: &ci
 
 core:
   - *ci
+  # Exclude documentation files first, then include patterns override for specific paths
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
   - 'container/build.sh'
   - 'container/Dockerfile'
   - '.dockerignore'
@@ -86,9 +90,6 @@ core:
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
-  - '!**/*.md'
-  - '!**/*.rst'
-  - '!**/*.txt'
 
 operator:
   - *ci
