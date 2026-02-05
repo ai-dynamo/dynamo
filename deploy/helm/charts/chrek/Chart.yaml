@@ -12,11 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+apiVersion: v2
+name: chrek
+description: Checkpoint/Restore infrastructure for Dynamo (PVC + DaemonSet + CRIU Agent)
+type: application
+version: 0.1.0
+appVersion: "1.0"
+keywords:
+  - nvidia
+  - dynamo
+  - checkpoint
+  - criu
+  - gpu
+home: https://github.com/ai-dynamo/dynamo
+sources:
+  - https://github.com/ai-dynamo/dynamo
+maintainers:
+  - name: NVIDIA
 
-"""
-Protocol-level constants for synthetic data graph structure.
-"""
-
-SUPER_ROOT = -1  # Dummy node preceding all real nodes; not an actual data root
-CACHE_END = -2  # Special node indicating end of a path
-END_NODE = -3  # Special node indicating to skip leaf sampling

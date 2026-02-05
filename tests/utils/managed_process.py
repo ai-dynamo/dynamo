@@ -21,13 +21,20 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 
 def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
+    """Terminate a single process.
+
+    Kill Strategy:
+    - immediate_kill=False: Send SIGTERM (graceful, signal 15)
+    - immediate_kill=True:  Send SIGKILL (force, signal 9, aka kill -9)
+    """
     try:
         logger.info("Terminating PID: %s name: %s", process.pid, process.name())
         if immediate_kill:
-            logger.info("Sending Kill: %s %s", process.pid, process.name())
-            process.kill()
+            logger.info("Sending SIGKILL (kill -9): %s %s", process.pid, process.name())
+            process.kill()  # SIGKILL (9)
         else:
-            process.terminate()
+            logger.info("Sending SIGTERM (kill): %s %s", process.pid, process.name())
+            process.terminate()  # SIGTERM (15)
     except psutil.AccessDenied:
         logger.warning("Access denied for PID %s", process.pid)
     except psutil.NoSuchProcess:
@@ -37,6 +44,24 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False)
 def terminate_process_tree(
     pid, logger=logging.getLogger(), immediate_kill=False, timeout=10
 ):
+    """Terminate a process and all its children.
+
+    Kill Sequence:
+    ==============
+    1. Snapshot all children (recursive)
+    2. Send SIGTERM to parent IMMEDIATELY (no delay)
+    3. Wait up to `timeout` seconds (default 10s) for parent to exit
+    4. If parent still alive after timeout: Send SIGKILL to parent (force)
+    5. Send SIGTERM to all children IMMEDIATELY
+    6. Wait up to `timeout` seconds for all processes to exit
+    7. If any still alive after timeout: Send SIGKILL to remaining (force)
+
+    Timeout Parameter:
+    - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
+    - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
+
+    Summary: SIGTERM (immediate) → wait → SIGKILL if still alive
+    """
     try:
         parent = psutil.Process(pid)
     except psutil.NoSuchProcess:
@@ -71,6 +96,32 @@ def terminate_process_tree(
 
 @dataclass
 class ManagedProcess:
+    """Manages a subprocess with health checks and automatic cleanup.
+
+    Parallel Execution Safety:
+    -------------------------
+    For pytest-xdist or parallel test execution, use terminate_all_matching_process_names=False:
+
+        # ❌ NOT SAFE for parallel tests (kills ALL vllm processes system-wide):
+        ManagedProcess(
+            command=["vllm", "serve", "--port", "8000"],
+            terminate_all_matching_process_names=True,  # Kills all vllm, including other tests!
+            stragglers=["vllm"],
+        )
+
+        # ✅ SAFE for parallel tests (only kills what we launch):
+        ManagedProcess(
+            command=["vllm", "serve", "--port", "8000"],
+            terminate_all_matching_process_names=False,  # Don't kill other processes
+        )
+
+    With terminate_all_matching_process_names=False and dynamic/randomized ports:
+    - Each test gets unique ports, so zombies from previous runs won't conflict
+    - ManagedProcess only terminates the process it launched (via self.proc.pid)
+    - No risk of killing other tests' processes or developer's manual processes
+    - Pytest will clean up any remaining processes when the test process exits
+    """
+
     command: List[str]
     env: Optional[dict] = None
     health_check_ports: List[int] = field(default_factory=list)
@@ -81,7 +132,11 @@ class ManagedProcess:
     working_dir: Optional[str] = None
     display_output: bool = False
     data_dir: Optional[str] = None
-    terminate_existing: bool = True
+    # WARNING: terminate_all_matching_process_names=True is NOT safe for pytest-xdist
+    # Kills ALL processes system-wide with matching name (other tests, dev processes, etc.)
+    # Use False for parallel tests with dynamic ports to only kill launched process.
+    # TODO: Change default to False once all tests use dynamic ports
+    terminate_all_matching_process_names: bool = True
     stragglers: List[str] = field(default_factory=list)
     straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
@@ -141,7 +196,7 @@ class ManagedProcess:
             if self.data_dir:
                 self._remove_directory(self.data_dir)
 
-            self._terminate_existing()
+            self._terminate_all_matching_process_names()  # Name-based cleanup (NOT xdist safe)
             self._start_process()
             time.sleep(self.delayed_start)
             elapsed = self._check_ports(self.timeout)
@@ -206,6 +261,29 @@ class ManagedProcess:
             self._logger.error("Error during straggler cleanup: %s", e)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Cleanup: Terminate launched processes.
+
+        Termination Strategy (Graceful → Escalate to Force):
+        =====================================================
+        1. Send SIGTERM to process group immediately (no delay before SIGTERM)
+        2. Wait up to 2s (poll every 0.1s) for processes to exit
+        3. If still alive after 2s: Send SIGKILL (force kill)
+        4. Terminate individual processes (self.proc, tee, sed):
+           - Send SIGTERM immediately (no delay)
+           - Wait up to 10s for exit
+           - If still alive after 10s: Send SIGKILL (force kill)
+        5. Clean up straggler processes (if configured)
+
+        Signal Details:
+        - SIGTERM (15): Graceful - allows cleanup handlers to run
+        - SIGKILL (9): Force kill - immediate, cannot be caught
+
+        Timeout Parameter:
+        - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
+        - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
+
+        This ALWAYS runs regardless of terminate_all_matching_process_names setting.
+        """
         try:
             self._terminate_process_group()
 
@@ -295,14 +373,25 @@ class ManagedProcess:
     def _terminate_process_group(self, timeout: float = 2.0):
         """Terminate the entire process group/session started for the child.
 
-        This catches cases where the launcher shell exits and its children are reparented,
-        leaving no parent PID to traverse, but they remain in the same process group.
+        Kill Sequence:
+        ==============
+        1. Send SIGTERM to entire process group IMMEDIATELY (no delay)
+        2. Wait up to `timeout` seconds (default 2s), polling every 0.1s
+        3. If still alive after timeout: Send SIGKILL (force kill, immediate)
+
+        Timeout Parameter:
+        - Controls how long to WAIT AFTER SIGTERM before escalating to SIGKILL
+        - NOT a delay before sending SIGTERM (SIGTERM is sent immediately)
+
+        Process groups catch cases where the launcher shell exits and its
+        children are reparented, leaving no parent PID to traverse, but they
+        remain in the same process group.
         """
         if self._pgid is None:
             return
         try:
             self._logger.info("Terminating process group: %s", self._pgid)
-            os.killpg(self._pgid, signal.SIGTERM)
+            os.killpg(self._pgid, signal.SIGTERM)  # Step 1: Graceful SIGTERM
         except ProcessLookupError:
             return
         except Exception as e:
@@ -311,13 +400,13 @@ class ManagedProcess:
             )
             return
 
-        # Poll for process exit instead of fixed sleep to minimize teardown time
+        # Step 2: Poll for process exit instead of fixed sleep to minimize teardown time
         poll_interval = 0.1
         elapsed = 0.0
         while elapsed < timeout:
             try:
                 # Check if any process in the group is still alive
-                os.killpg(self._pgid, 0)  # Signal 0 = check existence
+                os.killpg(self._pgid, 0)  # Signal 0 = check existence (no kill)
             except ProcessLookupError:
                 # Process group no longer exists - done
                 return
@@ -327,9 +416,9 @@ class ManagedProcess:
             time.sleep(poll_interval)
             elapsed += poll_interval
 
-        # Force kill if anything remains after timeout
+        # Step 3: Force kill if anything remains after timeout
         try:
-            os.killpg(self._pgid, signal.SIGKILL)
+            os.killpg(self._pgid, signal.SIGKILL)  # SIGKILL (kill -9) - immediate
         except ProcessLookupError:
             pass
         except Exception as e:
@@ -554,8 +643,19 @@ class ManagedProcess:
         )
         raise RuntimeError("FAILED: Custom health check")
 
-    def _terminate_existing(self):
-        if self.terminate_existing:
+    def _terminate_all_matching_process_names(self):
+        # WARNING: This method is NOT pytest-xdist safe! Kills ALL matching processes system-wide.
+        # DANGER: When terminate_all_matching_process_names=True, this kills:
+        #   - Processes with matching name (self._command_name)
+        #   - Processes in stragglers list
+        #   - Processes with matching command substring (straggler_commands)
+        # It does NOT check:
+        #   - Port numbers (kills processes on ALL ports, not just ours)
+        #   - Process ownership (kills other tests' processes)
+        #   - Working directory (kills unrelated processes)
+        # RECOMMENDED: Use terminate_all_matching_process_names=False for parallel tests.
+        # ManagedProcess already only kills what it launched (self.proc.pid) on exit.
+        if self.terminate_all_matching_process_names:
             for proc in psutil.process_iter(["name", "cmdline"]):
                 try:
                     if (
@@ -624,7 +724,7 @@ class DynamoFrontendProcess(ManagedProcess):
         extra_args: Optional[list[str]] = None,
         extra_env: Optional[dict[str, str]] = None,
         # Default to false so pytest-xdist workers don't kill each other's frontends.
-        terminate_existing: bool = False,
+        terminate_all_matching_process_names: bool = False,
         display_name: Optional[str] = None,
     ):
         # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
@@ -673,7 +773,7 @@ class DynamoFrontendProcess(ManagedProcess):
             command=command,
             env=env,
             display_output=True,
-            terminate_existing=terminate_existing,
+            terminate_all_matching_process_names=terminate_all_matching_process_names,
             log_dir=log_dir,
             display_name=display_name,
         )
@@ -695,10 +795,12 @@ class DynamoFrontendProcess(ManagedProcess):
 def main():
     # NOTE: This entrypoint is for manual testing/debugging of `ManagedProcess` only.
     # It is not used by the pytest suite.
+
+    # Example: Safe for parallel tests with terminate_all_matching_process_names=False
     with ManagedProcess(
-        command=["python", "-m", "dynamo.frontend"],
+        command=["python", "-m", "dynamo.frontend", "--port", "8000"],
         display_output=True,
-        terminate_existing=True,
+        terminate_all_matching_process_names=False,  # ✅ Safe - only kills what we launch
         health_check_ports=[8000],
         health_check_urls=["http://localhost:8000/v1/models"],
         timeout=10,
