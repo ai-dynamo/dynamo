@@ -14,6 +14,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 -->
+
+> **Note**: This content has been consolidated into [Speculative Decoding](../../features/speculative_decoding/README.md).
+> This file contains the vLLM-specific guide and will remain here for backend-specific reference.
+
 # Running **Meta-Llama-3.1-8B-Instruct** with Speculative Decoding (Eagle3)
 
 This guide walks through how to deploy **Meta-Llama-3.1-8B-Instruct** using **aggregated speculative decoding** with **Eagle3** on a single node.

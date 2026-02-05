@@ -83,6 +83,8 @@
    backends/vllm/prompt-embeddings.md
    backends/vllm/speculative_decoding.md
 
+   features/speculative_decoding/README.md
+
    benchmarks/kv-router-ab-testing.md
 
    mocker/mocker.md
