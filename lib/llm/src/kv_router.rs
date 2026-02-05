@@ -796,7 +796,7 @@ impl KvPushRouter {
             }
             RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
         }) else {
-            // No preselected worker ID - find the best match
+            // No preselected worker - find the best match
             // Don't update states if this is a query-only request
             let (best_worker, overlap_amount) = self
                 .chooser

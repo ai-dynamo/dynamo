@@ -273,7 +273,6 @@ impl PrefillRouter {
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        // Ensure prefill router is activated (check for disaggregated mode)
         let _prefill_router = self.prefill_router.get()?;
 
         // Worker selection
@@ -287,8 +286,10 @@ impl PrefillRouter {
             (id, dp_rank)
         } else {
             // Use shared worker selection logic (update_states=false for peek behavior)
+            // Extract LORA name from routing hints
+            let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
             match self
-                .query_prefill_worker(&req.token_ids, false)
+                .query_prefill_worker(&req.token_ids, false, lora_name)
                 .instrument(tracing::info_span!("query_prefill_worker"))
                 .await
             {
@@ -479,6 +480,7 @@ impl PrefillRouter {
         &self,
         token_ids: &[u32],
         update_states: bool,
+        lora_name: Option<String>,
     ) -> Result<(u64, u32)> {
         let prefill_router = self
             .prefill_router
@@ -492,7 +494,7 @@ impl PrefillRouter {
             };
             let (worker, _overlap) = kv_router
                 .chooser
-                .find_best_match(None, token_ids, None, update_states, None)
+                .find_best_match(None, token_ids, None, update_states, lora_name)
                 .await?;
             Ok((worker.worker_id, worker.dp_rank))
         } else {

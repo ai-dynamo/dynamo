@@ -422,9 +422,10 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         update_states: bool,
+        lora_name: Option<String>,
     ) -> Result<(u64, u32), QueryRouterResult> {
         self.prefill_router
-            .query_prefill_worker(tokens, update_states)
+            .query_prefill_worker(tokens, update_states, lora_name)
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
@@ -595,7 +596,12 @@ pub unsafe extern "C" fn create_routers(
 
         // Create decode router
         let decode_router = match model_manager
-            .kv_chooser_for(&endpoint, block_size, Some(kv_router_config), WORKER_TYPE_DECODE)
+            .kv_chooser_for(
+                &endpoint,
+                block_size,
+                Some(kv_router_config),
+                WORKER_TYPE_DECODE,
+            )
             .await
         {
             Ok(r) => r,
@@ -970,7 +976,7 @@ pub unsafe extern "C" fn route_request(
     let result = handles.runtime.secondary().block_on(async {
         // Query prefill worker if disaggregated
         let prefill_worker_id = if is_disaggregated {
-            handles.query_prefill_worker(tokens, true).await?.0
+            handles.query_prefill_worker(tokens, true, None).await?.0
         } else {
             0
         };

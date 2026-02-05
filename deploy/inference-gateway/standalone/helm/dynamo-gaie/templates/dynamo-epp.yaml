@@ -112,7 +112,6 @@ spec:
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYN_NAMESPACE
             value: "{{ $ns }}"
-          # Note: DYN_KV_BLOCK_SIZE and DYN_MODEL are auto-discovered from the model card
           - name: USE_STREAMING
             value: "true"
           # HuggingFace token for downloading model config files
