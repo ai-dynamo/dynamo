@@ -153,6 +153,44 @@ class KubernetesAPI:
 
         return ready_condition is not None and ready_condition.get("status") == "True"
 
+    def get_service_replica_status(
+        self, deployment: dict, service_name: str
+    ) -> tuple[int, bool]:
+        """
+        Get the actual ready replica count for a service from DGD status.
+
+        Returns:
+            tuple[int, bool]: (replica_count, is_stable)
+            - replica_count: number of replicas serving traffic (availableReplicas if present, else readyReplicas)
+            - is_stable: no rollout is in progress (desired == updated == ready/available)
+        """
+        # Get desired replicas from spec
+        service_spec = (
+            deployment.get("spec", {}).get("services", {}).get(service_name, {})
+        )
+        desired_replicas = service_spec.get("replicas", 0)
+
+        # Get status fields
+        service_status = (
+            deployment.get("status", {}).get("services", {}).get(service_name, {})
+        )
+        available = service_status.get("availableReplicas")
+        ready = service_status.get("readyReplicas", 0)
+        updated = service_status.get("updatedReplicas", 0)
+
+        # availableReplicas takes precedence over readyReplicas for the count
+        # refer to ServiceReplicaStatus type (https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/api/v1alpha1/dynamographdeployment_types.go#L157)
+        if available is not None:
+            traffic_serving_replicas = available
+        else:
+            traffic_serving_replicas = ready
+
+        # Stable means: desired == updated == ready/available
+        # This ensures we're not in a scale-up, scale-down, or rollout
+        is_stable = desired_replicas == updated == traffic_serving_replicas
+
+        return traffic_serving_replicas, is_stable
+
     async def wait_for_graph_deployment_ready(
         self,
         graph_deployment_name: str,
