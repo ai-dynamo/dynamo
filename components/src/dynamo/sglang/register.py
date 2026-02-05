@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import socket
-from typing import Optional
+from typing import Any, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
@@ -269,3 +269,43 @@ async def register_llm_with_readiness_gate(
         readiness_gate.set()
 
     logging.info("Model registration succeeded; processing queued requests")
+
+
+async def register_image_diffusion_model(
+    generator: Any,  # DiffGenerator
+    endpoint: Endpoint,
+    server_args: ServerArgs,
+    readiness_gate: Optional[asyncio.Event] = None,
+) -> None:
+    """Register diffusion model with Dynamo runtime.
+
+    Args:
+        generator: The SGLang DiffGenerator instance.
+        endpoint: The Dynamo endpoint for generation requests.
+        server_args: SGLang server configuration.
+        readiness_gate: Optional event to signal when registration completes.
+
+    Note:
+        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
+    """
+    # Use model_path as the model name (diffusion workers don't have served_model_name)
+    model_name = server_args.model_path
+
+    try:
+        await register_llm(
+            ModelInput.Text,
+            ModelType.Images,
+            endpoint,
+            model_name,
+            model_name,
+        )
+        logging.info(f"Successfully registered diffusion model: {model_name}")
+    except Exception as e:
+        logging.error(f"Failed to register diffusion model: {e}")
+        raise RuntimeError("Image diffusion model registration failed")
+
+    # Signal readiness
+    if readiness_gate:
+        readiness_gate.set()
+
+    logging.info(f"Image diffusion model ready: {model_name}")

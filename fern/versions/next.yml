@@ -54,6 +54,14 @@ navigation:
             path: ../pages/kubernetes/webhooks.md
           - page: Autoscaling
             path: ../pages/kubernetes/autoscaling.md
+      - section: Checkpointing (ChReK)
+        contents:
+          - page: Overview
+            path: ../pages/kubernetes/chrek/README.md
+          - page: Integration with Dynamo
+            path: ../pages/kubernetes/chrek/dynamo.md
+          - page: Standalone Usage
+            path: ../pages/kubernetes/chrek/standalone.md
       - section: Observability (K8s)
         contents:
           - page: Metrics

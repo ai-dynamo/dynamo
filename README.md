@@ -133,7 +133,7 @@ sudo apt install python3-dev
 uv pip install "ai-dynamo[sglang]"
 ```
 
-> **Note:** For CUDA 13 (B300/GB300), the container is recommended. See [SGLang install docs](https://docs.sglang.ai/start/install.html) for details.
+> **Note:** For CUDA 13 (B300/GB300), the container is recommended. See [SGLang install docs](https://docs.sglang.io/get_started/install.html) for details.
 
 **TensorRT-LLM**
 
