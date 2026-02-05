@@ -15,7 +15,7 @@ const (
 	// CheckpointDataFilename is the name of the metadata file in checkpoint directories
 	CheckpointDataFilename = "metadata.yaml"
 	// DescriptorsFilename is the name of the file descriptors file
-	DescriptorsFilename = "descriptors.json"
+	DescriptorsFilename = "descriptors.yaml"
 )
 
 // CheckpointData combines static config and dynamic state into one struct.

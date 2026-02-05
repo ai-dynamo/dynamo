@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // RemoveSemaphores removes POSIX semaphores from the container's /dev/shm.
@@ -62,10 +64,6 @@ func RemoveSemaphores(pid int, hostProc string, log *logrus.Entry) error {
 	return nil
 }
 
-const (
-    // DevShmDirName is the directory name for captured /dev/shm contents
-    DevShmDirName = "dev-shm"
-)
 
 // CaptureDevShm captures files from /dev/shm to the checkpoint directory.
 // This is needed because /dev/shm is a tmpfs mount that is not part of the
@@ -119,7 +117,7 @@ func CaptureDevShm(pid int, hostProc, checkpointDir string, log *logrus.Entry) e
     }
 
     // Create destination directory
-    destDir := filepath.Join(checkpointDir, DevShmDirName)
+    destDir := filepath.Join(checkpointDir, config.DevShmDirName)
     if err := os.MkdirAll(destDir, 0755); err != nil {
         return fmt.Errorf("failed to create dev-shm directory: %w", err)
     }
@@ -182,6 +180,11 @@ func copyFile(src, dest string, mode os.FileMode) error {
 
     if _, err := io.Copy(destFile, srcFile); err != nil {
         return fmt.Errorf("failed to copy contents: %w", err)
+    }
+
+    // Sync to ensure durability for checkpoint data
+    if err := destFile.Sync(); err != nil {
+        return fmt.Errorf("failed to sync destination: %w", err)
     }
 
     return nil

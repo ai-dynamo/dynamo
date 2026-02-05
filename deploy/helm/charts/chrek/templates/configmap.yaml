@@ -54,14 +54,11 @@ data:
 
       rootfsExclusions:
         # System directories excluded from rootfs diff (NVIDIA GPU Operator injected)
-        systemDirs:
-          {{- toYaml .Values.config.checkpoint.rootfsExclusions.systemDirs | nindent 10 }}
+        systemDirs: {{ toYaml .Values.config.checkpoint.rootfsExclusions.systemDirs | nindent 10 }}
         # Cache directories to exclude (reduces checkpoint size)
-        cacheDirs:
-          {{- toYaml .Values.config.checkpoint.rootfsExclusions.cacheDirs | nindent 10 }}
+        cacheDirs: {{ toYaml .Values.config.checkpoint.rootfsExclusions.cacheDirs | nindent 10 }}
         # Additional custom exclusions
-        additionalExclusions:
-          {{- toYaml .Values.config.checkpoint.rootfsExclusions.additionalExclusions | nindent 10 }}
+        additionalExclusions: {{ toYaml .Values.config.checkpoint.rootfsExclusions.additionalExclusions | nindent 10 }}
 
       # Skip mount prefixes for cross-node restore (enumerated at checkpoint time)
       skipMountPrefixes:

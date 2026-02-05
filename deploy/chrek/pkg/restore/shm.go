@@ -8,11 +8,8 @@ import (
     "path/filepath"
 
     "github.com/sirupsen/logrus"
-)
 
-const (
-    // DevShmDirName is the directory name for captured /dev/shm contents
-    DevShmDirName = "dev-shm"
+    "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // RestoreDevShm restores files from the checkpoint's dev-shm directory to /dev/shm.
@@ -22,7 +19,7 @@ const (
 // The files were captured by CaptureDevShm during checkpoint and exclude
 // semaphores (sem.* files) which cannot be correctly restored.
 func RestoreDevShm(checkpointPath string, log *logrus.Entry) error {
-    srcDir := filepath.Join(checkpointPath, DevShmDirName)
+    srcDir := filepath.Join(checkpointPath, config.DevShmDirName)
 
     // Check if dev-shm directory exists in checkpoint
     entries, err := os.ReadDir(srcDir)
@@ -92,7 +89,7 @@ func RestoreDevShm(checkpointPath string, log *logrus.Entry) error {
 }
 
 // copyFileToShm copies a file from src to dest in /dev/shm.
-// Uses mode 0666 by default to allow access from restored processes.
+// Uses mode 0666 as default when mode is 0, otherwise preserves the original mode.
 func copyFileToShm(src, dest string, mode os.FileMode) error {
     srcFile, err := os.Open(src)
     if err != nil {
@@ -100,8 +97,7 @@ func copyFileToShm(src, dest string, mode os.FileMode) error {
     }
     defer srcFile.Close()
 
-    // Use 0666 for shared memory files to ensure restored processes can access them
-    // The original mode may have been more restrictive
+    // Default to 0666 when mode is not set (mode == 0)
     if mode == 0 {
         mode = 0666
     }

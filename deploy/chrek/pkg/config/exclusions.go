@@ -1,6 +1,8 @@
 // exclusions.go defines rootfs exclusion configuration for checkpoint operations.
 package config
 
+import "strings"
+
 // RootfsExclusionConfig defines paths to exclude from the rootfs diff capture.
 // These exclusions prevent conflicts during restore and reduce checkpoint size.
 type RootfsExclusionConfig struct {
@@ -25,6 +27,9 @@ type RootfsExclusionConfig struct {
 // GetAllExclusions returns all exclusion paths combined.
 // This is used when building tar arguments for rootfs diff capture.
 func (c *RootfsExclusionConfig) GetAllExclusions() []string {
+	if c == nil {
+		return nil
+	}
 	total := len(c.SystemDirs) + len(c.CacheDirs) + len(c.AdditionalExclusions)
 	exclusions := make([]string, 0, total)
 	exclusions = append(exclusions, c.SystemDirs...)
@@ -35,9 +40,12 @@ func (c *RootfsExclusionConfig) GetAllExclusions() []string {
 
 // Validate checks that the RootfsExclusionConfig has valid values.
 func (c *RootfsExclusionConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
 	// All paths should start with "./" for tar relative path handling
 	for _, path := range c.GetAllExclusions() {
-		if len(path) < 2 || path[:2] != "./" {
+		if !strings.HasPrefix(path, "./") {
 			return &ConfigError{
 				Field:   "rootfsExclusions",
 				Message: "all exclusion paths must start with './' (got: " + path + ")",

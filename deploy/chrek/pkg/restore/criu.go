@@ -88,13 +88,8 @@ func OpenWorkDir(workDir string, log *logrus.Entry) (*os.File, int32) {
 //   - MntnsCompatMode: cross-container restore
 //   - EvasiveDevices, ForceIrmap: device/inode handling
 func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
-	// Determine cgroup mode from config (default to IGNORE if not set)
+	// Currently only "ignore" mode is supported - K8s manages cgroups
 	cgMode := criurpc.CriuCgMode_IGNORE
-	if cfg.ManageCgroupsMode != "" && cfg.ManageCgroupsMode != "ignore" {
-		// Map string to enum - currently only "ignore" is supported
-		// Add more modes here if needed in the future
-		cgMode = criurpc.CriuCgMode_IGNORE
-	}
 
 	criuOpts := &criurpc.CriuOpts{
 		ImagesDirFd: proto.Int32(cfg.ImageDirFD),

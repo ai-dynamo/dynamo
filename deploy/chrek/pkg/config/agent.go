@@ -73,6 +73,12 @@ func (c *AgentConfig) Validate() error {
 			Message: "must be 'http' or 'watcher'",
 		}
 	}
+	if c.SignalSource == string(SignalFromHTTP) && c.ListenAddr == "" {
+		return &ConfigError{
+			Field:   "listenAddr",
+			Message: "cannot be empty when signalSource is 'http'",
+		}
+	}
 	if c.ContainerdSocket == "" {
 		return &ConfigError{
 			Field:   "containerdSocket",

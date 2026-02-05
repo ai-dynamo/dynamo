@@ -1,4 +1,4 @@
-// metadata_builder provides checkpoint data construction.
+// checkpoint_data_builder provides checkpoint data construction.
 package checkpoint
 
 import (
