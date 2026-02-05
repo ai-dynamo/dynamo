@@ -185,7 +185,6 @@ For migrating existing documentation to the new structure:
 
 - [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) - Comprehensive migration guide with link update checklist
 - [EXAMPLE_SKILL.md](EXAMPLE_SKILL.md) - AI-assisted migration skill (works with Cursor and Claude)
-- [EXAMPLE_migration_planner.md](EXAMPLE_migration_planner.md) - Example migration prompt for Planner
 
 ### Using the AI Skill
 
