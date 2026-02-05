@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-mocker"
+description = "Mock LLM scheduler and KV manager for testing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# repo
+dynamo-tokens = { workspace = true }
+dynamo-kv-router = { workspace = true }
+
+# workspace
+anyhow = { workspace = true }
+dashmap = { workspace = true }
+derive_builder = { workspace = true }
+derive-getters = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+# crate-specific
+ndarray = "0.16"
+ndarray-npy = "0.9"
+ndarray-interp = "0.5"
+
+[dev-dependencies]
+rstest = "0.18.2"

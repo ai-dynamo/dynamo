@@ -1270,9 +1270,6 @@ pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Route
 
 /// Unified metrics handler
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
-    // Gather and encode metrics
-    // Note: If nim_on_demand is enabled, the NimMetricsCollector registered with the registry
-    // will automatically call poll_nim_backend_stats when gather() is invoked
     let encoder = prometheus::TextEncoder::new();
     let metric_families = state.registry.gather();
     let mut buffer = vec![];
