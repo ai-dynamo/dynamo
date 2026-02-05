@@ -245,6 +245,8 @@ jobs:
         BRANCH_SANITIZED="${BRANCH//\//-}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        # Cap at 10 chars
+        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
         NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
@@ -450,7 +452,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda12-amd64
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
           model_name: "Qwen/Qwen3-0.6B"
           test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
 
