@@ -1,3 +1,7 @@
+{#
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 
+#}
 # Copy artifacts from NGC PyTorch image
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS pytorch_base
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # This file represents the default ARG values of Dockerfiles generated
 # by render.py. These are the recommended default values for users and
 # is the source of truth for the values used in our delivered images.
