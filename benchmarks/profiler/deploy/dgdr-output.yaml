@@ -1,0 +1,206 @@
+- apiVersion: nvidia.com/v1alpha1
+  kind: DynamoGraphDeploymentRequest
+  metadata:
+    annotations:
+      dgdr.nvidia.com/additional-resources: |
+        apiVersion: v1
+        data:
+          decode_raw_data.json: '{"x_kv_usage": [0.0005435702626686815, 0.11686760647376652,
+            0.23319164268486436, 0.3500592491586309, 0.46638328536972873, 0.5832508918434952,
+            0.011015839637454165, 0.198285113474175, 0.3855543873108958, 0.5728236611476166,
+            0.7600929349843374, 0.9583780484585124, 0.02148810901223965, 0.19339298111015685,
+            0.3867859622203137, 0.5801789433304705, 0.7735719244406274, 0.9669649055507842,
+            0.03196037838702513, 0.1917622703221508, 0.3835245406443016, 0.5752868109664524,
+            0.7670490812886032, 0.958811351610754, 0.04243264776181062, 0.21216323880905308,
+            0.38189382985629555, 0.5940570686653487, 0.7637876597125911, 0.9759508985216442,
+            0.0529049171365961, 0.2116196685463844, 0.3703344199561727, 0.5819540885025571,
+            0.7406688399123454, 0.9522885084587298], "y_context_length": [350.0, 350.0, 350.0,
+            350.0, 350.0, 350.0, 7093.0, 7093.0, 7093.0, 7093.0, 7093.0, 7093.0, 13836.0,
+            13836.0, 13836.0, 13836.0, 13836.0, 13836.0, 20579.0, 20579.0, 20579.0, 20579.0,
+            20579.0, 20579.0, 27322.0, 27322.0, 27322.0, 27322.0, 27322.0, 27322.0, 34065.0,
+            34065.0, 34065.0, 34065.0, 34065.0, 34065.0], "z_itl": [3.202203044088176, 21.170602832957087,
+            22.55422287621086, 23.739731744921503, 24.4968580338677, 25.407915007605837, 3.838073248,
+            14.178365483517672, 26.457085585263325, 32.90340281538822, 44.41356391826573,
+            57.53897490386369, 4.40180877755511, 11.373845126098864, 23.99307496234392, 30.461977277592222,
+            46.87676024560231, 52.45783511911364, 4.858885204408818, 13.79060509018036, 24.265942606045424,
+            33.995877765099586, 38.52425552454607, 62.59175947294589, 5.404800450901804, 15.581658006012026,
+            20.95160085771543, 31.334285098482674, 43.07887419861946, 49.376418508982844,
+            5.993404885771542, 14.284724505238389, 21.388953332379042, 34.647390790371176,
+            39.99358599402418, 53.56458195702516], "z_thpt_per_gpu": [310.4223363185176, 9831.488537106923,
+            9669.956025884218, 9463.06265479563, 9435.309144936395, 9398.742767872769, 257.11615638882773,
+            1254.383739555463, 1307.9158682622253, 1561.095944598262, 1534.4577803799807,
+            1493.9387394845805, 222.52647436296365, 777.4827077393301, 740.1601778658714,
+            874.1406452575973, 759.4267996713825, 845.8817223330416, 201.71143324213634, 429.88443762863494,
+            487.9867906374162, 522.1245298642186, 613.5325587230768, 474.06501968596916, 180.0637412319244,
+            315.8739240075391, 422.58143699468985, 435.49529271181484, 410.9355915646019,
+            458.8230916802798, 161.366182749139, 274.39959236382555, 322.10091055878854, 313.30066546401946,
+            345.4741897535459, 331.73716010781806], "max_kv_tokens": 643891}'
+          prefill_raw_data.json: '{"prefill_isl": [100, 2621, 5142, 7663, 10184, 12705, 15226,
+            17747, 20268, 22789, 25310, 27831, 30352, 32873, 35394, 37915, 40436], "prefill_ttft":
+            [34.755885, 48.17237, 65.146338, 109.05955499999999, 158.85334699999999, 211.056837,
+            281.823482, 356.56206599999996, 443.08178599999997, 529.445018, 649.9692739999999,
+            750.0153349999999, 872.102263, 1015.406034, 1146.590088, 1280.3760069999998, 1445.6564979999998],
+            "prefill_thpt_per_gpu": [2877.2105788703125, 54408.782461813695, 78929.99296445488,
+            70264.36152247275, 64109.44555042961, 60197.054881477256, 54026.725849622424,
+            49772.54086249322, 45743.24795197066, 43043.18526990087, 38940.30227650423, 37107.24128060662,
+            34803.25792939721, 32374.241337234358, 30868.922006588986, 29612.394947041525,
+            27970.683254245647]}'
+        kind: ConfigMap
+        metadata:
+          name: planner-profile-data
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeploymentRequest","metadata":{"annotations":{},"name":"sla-online","namespace":"default"},"spec":{"autoApply":true,"backend":"vllm","deploymentOverrides":{"workersImage":"nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0"},"model":"Qwen/Qwen3-0.6B","profilingConfig":{"config":{"planner":{"metricPullingPrometheusEndpoint":"http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"},"sla":{"isl":3000,"itl":20,"osl":150,"ttft":200},"sweep":{"useAiConfigurator":false}},"profilerImage":"nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0"}}}
+    creationTimestamp: "2026-01-24T01:29:22Z"
+    finalizers:
+    - nvidia.com/finalizer
+    generation: 1
+    name: sla-online
+    namespace: default
+    resourceVersion: "59000"
+    uid: 86f0101c-423b-4c60-b9cd-d2d26d9c0f1b
+  spec:
+    autoApply: true
+    backend: vllm
+    deploymentOverrides:
+      workersImage: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+    enableGpuDiscovery: false
+    model: Qwen/Qwen3-0.6B
+    profilingConfig:
+      config:
+        planner:
+          metricPullingPrometheusEndpoint: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        sla:
+          isl: 3000
+          itl: 20
+          osl: 150
+          ttft: 200
+        sweep:
+          useAiConfigurator: false
+      profilerImage: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+    useMocker: false
+  status:
+    backend: vllm
+    conditions:
+    - lastTransitionTime: "2026-01-24T01:29:22Z"
+      message: Profiling is in progress
+      observedGeneration: 1
+      reason: ProfilingRunning
+      status: "False"
+      type: Profiling
+    - lastTransitionTime: "2026-01-24T03:05:42Z"
+      message: DynamoGraphDeployment spec generated successfully
+      observedGeneration: 1
+      reason: SpecGenerated
+      status: "True"
+      type: SpecGenerated
+    - lastTransitionTime: "2026-01-24T03:05:42Z"
+      message: DGD vllm-disagg created, waiting for Ready
+      reason: DeploymentCreated
+      status: "False"
+      type: DeploymentReady
+    deployment:
+      created: true
+      name: vllm-disagg
+      namespace: default
+      state: successful
+    generatedDeployment:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      metadata:
+        name: vllm-disagg
+      spec:
+        services:
+          Frontend:
+            componentType: frontend
+            extraPodSpec:
+              containers: null
+              mainContainer:
+                image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+                name: ""
+                resources: {}
+            replicas: 1
+          Planner:
+            componentType: planner
+            extraPodSpec:
+              containers: null
+              mainContainer:
+                args:
+                - --itl=20
+                - --ttft=200
+                - --prefill-engine-num-gpu=1
+                - --decode-engine-num-gpu=1
+                - --profile-results-dir=/workspace/profiling_results
+                command:
+                - python3
+                - -m
+                - dynamo.planner.planner_sla
+                image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+                name: ""
+                resources: {}
+                volumeMounts:
+                - mountPath: /workspace/profiling_results
+                  name: planner-profile-data
+                  readOnly: true
+                workingDir: /workspace/components/src/dynamo/planner
+              volumes:
+              - configMap:
+                  name: planner-profile-data
+                name: planner-profile-data
+            replicas: 1
+          VllmDecodeWorker:
+            componentType: worker
+            envFromSecret: hf-token-secret
+            extraPodSpec:
+              containers: null
+              mainContainer:
+                args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --is-decode-worker
+                - --tensor-parallel-size
+                - "1"
+                command:
+                - python3
+                - -m
+                - dynamo.vllm
+                image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+                name: ""
+                resources: {}
+                workingDir: /workspace/examples/backends/vllm
+            replicas: 1
+            resources:
+              limits:
+                gpu: "1"
+            subComponentType: decode
+          VllmPrefillWorker:
+            componentType: worker
+            envFromSecret: hf-token-secret
+            extraPodSpec:
+              containers: null
+              mainContainer:
+                args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --is-prefill-worker
+                - --tensor-parallel-size
+                - "1"
+                command:
+                - python3
+                - -m
+                - dynamo.vllm
+                image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+                name: ""
+                resources: {}
+                workingDir: /workspace/examples/backends/vllm
+            replicas: 1
+            resources:
+              limits:
+                gpu: "1"
+            subComponentType: prefill
+      status: {}
+    observedGeneration: 1
+    profilingResults: configmap/dgdr-output-sla-online
+    state: Deploying
+kind: List
+metadata:
+  resourceVersion: ""

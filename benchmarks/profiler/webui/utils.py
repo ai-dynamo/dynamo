@@ -200,18 +200,18 @@ def generate_config_data(
 
     # Set SLA targets
     data[PlotType.PREFILL]["chart"]["target_line"]["value"] = args.ttft
-    data[PlotType.PREFILL]["chart"]["target_line"][
-        "label"
-    ] = f"Target TTFT: {args.ttft} ms"
+    data[PlotType.PREFILL]["chart"]["target_line"]["label"] = (
+        f"Target TTFT: {args.ttft} ms"
+    )
 
     data[PlotType.DECODE]["chart"]["target_line"]["value"] = args.itl
-    data[PlotType.DECODE]["chart"]["target_line"][
-        "label"
-    ] = f"Target ITL: {args.itl} ms"
+    data[PlotType.DECODE]["chart"]["target_line"]["label"] = (
+        f"Target ITL: {args.itl} ms"
+    )
 
-    data[PlotType.COST]["chart"][
-        "title"
-    ] = f"GPU Hours Per 1000 i{args.isl}o{args.osl} requests"
+    data[PlotType.COST]["chart"]["title"] = (
+        f"GPU Hours Per 1000 i{args.isl}o{args.osl} requests"
+    )
 
     # Populate data sections
     populate_prefill_data(data, prefill_data, args)
@@ -620,7 +620,7 @@ def create_gradio_interface(
 
             > 📝 **Note:** The dotted red line in the prefill and decode charts are default TTFT and ITL SLAs if not specified.
 
-            > ⚠️ **Warning:** The TTFT values here represent the ideal case when requests arrive uniformly, minimizing queueing. Real-world TTFT may be higher than profiling results. To mitigate the issue, planner uses [correction factors](https://github.com/ai-dynamo/dynamo/blob/main/docs/planner/sla_planner.md#2-correction-factor-calculation) to adjust dynamically at runtime.
+            > ⚠️ **Warning:** The TTFT values here represent the ideal case when requests arrive uniformly, minimizing queueing. Real-world TTFT may be higher than profiling results. To mitigate the issue, planner uses [correction factors](https://github.com/ai-dynamo/dynamo/blob/main/docs/pages/planner/sla-planner.md#2-correction-factor-calculation) to adjust dynamically at runtime.
 
             > 💡 **Tip:** Use the GPU cost checkbox and input in the charts section to convert GPU hours to cost.
             """

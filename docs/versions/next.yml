@@ -224,6 +224,8 @@ navigation:
         contents:
           - page: KV Cache Routing
             path: ../pages/router/kv-cache-routing.md
+          - page: KV Events
+            path: ../pages/router/kv-events.md
       - section: Benchmarks
         contents:
           - page: KV Router A/B Testing
@@ -294,6 +296,8 @@ navigation:
                 path: ../pages/backends/sglang/gpt-oss.md
               - page: Disaggregation
                 path: ../pages/backends/sglang/sglang-disaggregation.md
+              - page: Diffusion LM
+                path: ../pages/backends/sglang/diffusion-lm.md
               - page: Expert Distribution (EPLB)
                 path: ../pages/backends/sglang/expert-distribution-eplb.md
               - page: HiCache Example
