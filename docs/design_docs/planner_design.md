@@ -15,7 +15,7 @@ The Planner is Dynamo's autoscaling controller. It observes system metrics, pred
 │  ┌──────────────┐  ┌───────────────┐  ┌──────────────┐ │
 │  │    Metric     │  │     Load      │  │  Performance │ │
 │  │   Collector   │  │   Predictor   │  │ Interpolator │ │
-│  │  (Prometheus) │  │ (ARIMA/etc.)  │  │   (NPZ data) │ │
+│  │  (Prometheus) │  │ (ARIMA/etc.)  │  │   (JSON data) │ │
 │  └──────┬───────┘  └───────┬───────┘  └──────┬───────┘ │
 │         │                  │                  │         │
 │         ▼                  ▼                  ▼         │
