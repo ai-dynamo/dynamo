@@ -22,6 +22,7 @@ This document provides an in-depth look at the architecture, components, framewo
 ## KVBM Components
 
 ![Internal Components of Dynamo KVBM](../images/kvbm-components.png)
+
 *Internal Components of Dynamo KVBM*
 
 ### Core
@@ -46,10 +47,12 @@ This document provides an in-depth look at the architecture, components, framewo
 - **Device Pool (G1)**: GPU-resident KV block pool. Allocates mutable GPU blocks, registers completed blocks (immutable), serves lookups by sequence hash, and is the target for onboarding (Host→Device, Disk→Device).
 - **Host Pool (G2)**: CPU pinned-memory KV block pool. Receives Device offloads (Device→Host), can onboard to Device (Host→Device), and offloads to Disk. Uses pinned (page-locked) memory for efficient CUDA transfers and NIXL I/O.
 - **Disk Pool (G3)**: Local SSD NVMe-backed KV block pool. Receives Host offloads (Host→Disk) and provides blocks for onboarding to Device (Disk→Device). NIXL descriptors expose file offsets/regions for zero-copy I/O and optional GDS.
+- **Remote Storage (G4)**: Remote or cloud-backed KV block storage. KVBM treats G4 as an opaque blob store accessed through NIXL, unaware of internal layout optimizations.
 
 ## KVBM Data Flows
 
 ![KVBM Data Flows](../images/kvbm-data-flows.png)
+
 *KVBM Data Flows from device to other memory hierarchies*
 
 ### Device → Host (Offload)
@@ -60,8 +63,8 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ### Host → Disk (Offload)
 
-- **Local Disk**: NIXL Write via POSIX; GDS when available
-- **Remote Disk** (Network FS like NFS/Lustre/GPFS): NIXL Write via POSIX to the mounted FS; batching/concurrency identical
+- **Local Disk (G3)**: NIXL Write via POSIX; GDS when available
+- **Remote Disk (G4)** (Network FS like NFS/Lustre/GPFS): NIXL Write via POSIX to the mounted FS; batching/concurrency identical
 - Triggered on registered host blocks or explicit offload requests
 - Worker allocates a Disk block and performs NIXL Write (Host→Disk)
 - Disk pool registers the new immutable block (dedup by sequence hash)
@@ -81,6 +84,7 @@ This document provides an in-depth look at the architecture, components, framewo
 ## Internal Architecture Deep Dive
 
 ![Internal architecture and key modules in the Dynamo KVBM](../images/kvbm-internal-arch.png)
+
 *Internal architecture and key modules in the Dynamo KVBM*
 
 ### KvBlockManager as Orchestration Layer
@@ -327,19 +331,23 @@ There are two components of the interface:
 - **Worker**: Responsible for reading metadata built by the scheduler (leader), performs async onboarding/offloading at the end of the forward pass.
 
 ![vLLM KVBM Integration](../images/kvbm-integrations.png)
+
 *Typical integration of KVBM with inference frameworks (vLLM shown as example)*
 
 ### Onboarding Operations
 
 ![Onboarding blocks from Host to Device](../images/kvbm-onboard-host2device.png)
+
 *Onboarding blocks from Host to Device*
 
 ![Onboarding blocks from Disk to Device](../images/kvbm-onboard-disk2device.png)
+
 *Onboarding blocks from Disk to Device*
 
 ### Offloading Operations
 
 ![Offloading blocks from Device to Host & Disk](../images/kvbm-offload.png)
+
 *Offloading blocks from Device to Host & Disk*
 
 ## Further Reading
