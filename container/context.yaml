@@ -5,8 +5,8 @@
 # by render.py. These are the recommended default values for users and
 # is the source of truth for the values used in our delivered images.
 #
-# Some ARGs have multiple valid values and can be changed for local testing, 
-# you can do so locally in this file, or pass the --build-arg into docker build 
+# Some ARGs have multiple valid values and can be changed for local testing,
+# you can do so locally in this file, or pass the --build-arg into docker build
 # when building.
 
 dynamo:

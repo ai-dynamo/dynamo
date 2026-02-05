@@ -12,7 +12,7 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
 
 ## Rendering Requirements:
 - Python
-- Python Packages: 
+- Python Packages:
   - pyyaml
   - jinja2
 
