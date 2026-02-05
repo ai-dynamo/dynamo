@@ -197,20 +197,20 @@ pub trait ResponseStorage: Send + Sync {
         let mut cloned = 0;
         for response in responses {
             // Stop at rewind point if specified
-            if let Some(stop_id) = up_to_response_id {
-                if response.response_id == stop_id {
-                    // Clone this one and stop
-                    self.store_response(
-                        tenant_id,
-                        target_session_id,
-                        Some(&response.response_id),
-                        response.response.clone(),
-                        None,
-                    )
-                    .await?;
-                    cloned += 1;
-                    break;
-                }
+            if let Some(stop_id) = up_to_response_id
+                && response.response_id == stop_id
+            {
+                // Clone this one and stop
+                self.store_response(
+                    tenant_id,
+                    target_session_id,
+                    Some(&response.response_id),
+                    response.response.clone(),
+                    None,
+                )
+                .await?;
+                cloned += 1;
+                break;
             }
 
             self.store_response(

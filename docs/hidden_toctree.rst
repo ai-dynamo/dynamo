@@ -57,6 +57,14 @@
    backends/trtllm/gpt-oss.md
    backends/trtllm/prometheus.md
 
+   design_docs/distributed_runtime.md
+   design_docs/dynamo_flow.md
+   design_docs/stateful_responses_plan.md
+   design_docs/stateful_responses_custom_providers.md
+   design_docs/stateful_responses_trace_replay.md
+
+   integrations/lmcache_integration.md
+
    features/speculative_decoding/README.md
    features/speculative_decoding/speculative_decoding_vllm.md
 

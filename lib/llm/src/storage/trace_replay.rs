@@ -151,7 +151,7 @@ pub fn parse_trace_content(content: &str) -> Result<ParsedTrace, TraceParseError
                             .map(|s| s.to_string())
                     })
                 })
-                .last();
+                .next_back();
 
             // Find tool calls
             let tool_calls: Vec<ToolCall> = spans

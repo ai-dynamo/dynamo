@@ -18,6 +18,12 @@ pub struct InMemoryResponseStorage {
     storage: Arc<RwLock<HashMap<String, StoredResponse>>>,
 }
 
+impl Default for InMemoryResponseStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryResponseStorage {
     pub fn new() -> Self {
         Self {
