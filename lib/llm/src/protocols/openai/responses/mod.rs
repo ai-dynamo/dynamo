@@ -12,6 +12,7 @@ use dynamo_async_openai::types::responses::{
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestDeveloperMessage, ChatCompletionRequestDeveloperMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartVideo,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
@@ -236,11 +237,22 @@ fn convert_input_items_to_messages(
                 Item::Message(msg_item) => match msg_item {
                     MessageItem::Input(msg) => {
                         let chat_msg = match msg.role {
-                            InputRole::System | InputRole::Developer => {
+                            InputRole::System => {
                                 let text = convert_input_content_to_text(&msg.content);
                                 ChatCompletionRequestMessage::System(
                                     ChatCompletionRequestSystemMessage {
                                         content: ChatCompletionRequestSystemMessageContent::Text(
+                                            text,
+                                        ),
+                                        name: None,
+                                    },
+                                )
+                            }
+                            InputRole::Developer => {
+                                let text = convert_input_content_to_text(&msg.content);
+                                ChatCompletionRequestMessage::Developer(
+                                    ChatCompletionRequestDeveloperMessage {
+                                        content: ChatCompletionRequestDeveloperMessageContent::Text(
                                             text,
                                         ),
                                         name: None,
@@ -334,9 +346,15 @@ fn convert_input_items_to_messages(
                     }
                 };
                 let chat_msg = match easy.role {
-                    ResponseRole::System | ResponseRole::Developer => {
+                    ResponseRole::System => {
                         ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
                             content: ChatCompletionRequestSystemMessageContent::Text(content_text),
+                            name: None,
+                        })
+                    }
+                    ResponseRole::Developer => {
+                        ChatCompletionRequestMessage::Developer(ChatCompletionRequestDeveloperMessage {
+                            content: ChatCompletionRequestDeveloperMessageContent::Text(content_text),
                             name: None,
                         })
                     }
