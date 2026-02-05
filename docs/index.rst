@@ -76,6 +76,7 @@ Quickstart
    Frontends <_sections/frontends>
    Router <router/README>
    Planner <planner/planner_intro>
+   Profiler <components/profiler/README>
    KVBM <kvbm/kvbm_intro>
 
 .. toctree::
