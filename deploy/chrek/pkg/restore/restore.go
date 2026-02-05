@@ -1,11 +1,15 @@
 package restore
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	criu "github.com/checkpoint-restore/go-criu/v7"
@@ -14,6 +18,180 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
+
+// LogGPUDiagnostics logs nvidia-smi and /dev/nvidia* for debugging GPU visibility.
+func LogGPUDiagnostics(label string, log *logrus.Entry) {
+	log.Infof("=== GPU DIAGNOSTICS [%s] ===", label)
+	if out, err := exec.Command("nvidia-smi", "-L").CombinedOutput(); err != nil {
+		log.Infof("nvidia-smi -L: error: %v", err)
+	} else {
+		log.Infof("nvidia-smi -L:\n%s", string(out))
+	}
+	// Also log memory usage per GPU to detect OOM conditions
+	if out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total,memory.free", "--format=csv,noheader").CombinedOutput(); err != nil {
+		log.Infof("nvidia-smi memory query: error: %v", err)
+	} else {
+		log.Infof("nvidia-smi memory:\n%s", string(out))
+	}
+	matches, _ := filepath.Glob("/dev/nvidia*")
+	log.Infof("/dev/nvidia* devices: %s", strings.Join(matches, ", "))
+	log.Infof("NVIDIA_VISIBLE_DEVICES=%s", os.Getenv("NVIDIA_VISIBLE_DEVICES"))
+	log.Infof("=== END GPU DIAGNOSTICS [%s] ===", label)
+}
+
+func processSnapshotPIDs(restoredPID int) []int {
+	pidSet := map[int]struct{}{
+		1:           {},
+		os.Getpid(): {},
+	}
+	if restoredPID > 0 {
+		pidSet[restoredPID] = struct{}{}
+	}
+	pids := make([]int, 0, len(pidSet))
+	for pid := range pidSet {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	return pids
+}
+
+func logProcessNamespaces(pid int, log *logrus.Entry) {
+	for _, ns := range []string{"mnt", "pid", "ipc", "net", "uts", "cgroup"} {
+		nsPath := fmt.Sprintf("/proc/%d/ns/%s", pid, ns)
+		link, err := os.Readlink(nsPath)
+		if err != nil {
+			log.WithError(err).WithFields(logrus.Fields{
+				"pid":  pid,
+				"path": nsPath,
+			}).Warn("Failed to read namespace symlink")
+			continue
+		}
+		log.WithFields(logrus.Fields{
+			"pid":       pid,
+			"namespace": ns,
+			"value":     link,
+		}).Info("Namespace snapshot")
+	}
+}
+
+func logProcessCgroupPath(pid int, log *logrus.Entry) {
+	path := fmt.Sprintf("/proc/%d/cgroup", pid)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.WithError(err).WithFields(logrus.Fields{
+			"pid":  pid,
+			"path": path,
+		}).Warn("Failed to read cgroup path")
+		return
+	}
+	log.WithFields(logrus.Fields{
+		"pid":      pid,
+		"path":     path,
+		"contents": strings.TrimSpace(string(data)),
+	}).Info("Cgroup membership snapshot")
+}
+
+func logProcessFilteredMountInfo(pid int, log *logrus.Entry) {
+	path := fmt.Sprintf("/proc/%d/mountinfo", pid)
+	f, err := os.Open(path)
+	if err != nil {
+		log.WithError(err).WithFields(logrus.Fields{
+			"pid":  pid,
+			"path": path,
+		}).Warn("Failed to open mountinfo")
+		return
+	}
+	defer f.Close()
+
+	var selected []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, " /dev ") ||
+			strings.Contains(line, "/dev/") ||
+			strings.Contains(line, "nvidia") ||
+			strings.Contains(line, "cgroup2") {
+			selected = append(selected, line)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.WithError(err).WithFields(logrus.Fields{
+			"pid":  pid,
+			"path": path,
+		}).Warn("Failed while scanning mountinfo")
+		return
+	}
+
+	log.WithFields(logrus.Fields{
+		"pid":   pid,
+		"path":  path,
+		"count": len(selected),
+	}).Info("Filtered mountinfo snapshot count")
+	if len(selected) > 0 {
+		log.Infof("Filtered mountinfo snapshot (pid=%d):\n%s", pid, strings.Join(selected, "\n"))
+	}
+}
+
+func logNvidiaDeviceNodeMetadata(log *logrus.Entry) {
+	devices, err := filepath.Glob("/dev/nvidia*")
+	if err != nil {
+		log.WithError(err).Warn("Failed to glob /dev/nvidia*")
+		return
+	}
+	if len(devices) == 0 {
+		log.Info("No /dev/nvidia* entries found")
+		return
+	}
+
+	for _, path := range devices {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			log.WithError(err).WithField("path", path).Warn("Failed to stat NVIDIA device entry")
+			continue
+		}
+		stat, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			log.WithFields(logrus.Fields{
+				"path": path,
+				"mode": fi.Mode().String(),
+			}).Warn("Unexpected stat type for NVIDIA device entry")
+			continue
+		}
+		log.WithFields(logrus.Fields{
+			"path":  path,
+			"mode":  fi.Mode().String(),
+			"inode": stat.Ino,
+			"rdev":  fmt.Sprintf("0x%x", stat.Rdev),
+		}).Info("NVIDIA device entry metadata")
+	}
+}
+
+func logCgroupV2HostInfo(log *logrus.Entry) {
+	const controllersPath = "/sys/fs/cgroup/cgroup.controllers"
+	data, err := os.ReadFile(controllersPath)
+	if err != nil {
+		log.WithError(err).WithField("path", controllersPath).Warn("Failed to read cgroup v2 controllers")
+		return
+	}
+	log.WithFields(logrus.Fields{
+		"path":        controllersPath,
+		"controllers": strings.TrimSpace(string(data)),
+	}).Info("cgroup v2 controllers")
+}
+
+// LogRestoreBoundaryDiagnostics captures cgroup and namespace state around CRIU restore.
+func LogRestoreBoundaryDiagnostics(label string, restoredPID int, log *logrus.Entry) {
+	log.Infof("=== RESTORE BOUNDARY DIAGNOSTICS [%s] ===", label)
+	for _, pid := range processSnapshotPIDs(restoredPID) {
+		logProcessNamespaces(pid, log)
+		logProcessCgroupPath(pid, log)
+		logProcessFilteredMountInfo(pid, log)
+	}
+	logCgroupV2HostInfo(log)
+	logNvidiaDeviceNodeMetadata(log)
+	log.Infof("=== END RESTORE BOUNDARY DIAGNOSTICS [%s] ===", label)
+}
 
 // Restore performs the CRIU restore operation using go-criu.
 // All CRIU options are read from the saved CheckpointData - no hardcoding.
@@ -265,6 +443,10 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	if v := os.Getenv("DYN_RESTORE_MARKER_FILE"); v != "" {
 		restoreMarkerFile = v
 	}
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(restoreMarkerFile), 0755); err != nil {
+		log.WithError(err).Warn("Failed to create restore marker directory")
+	}
 	if err := os.WriteFile(restoreMarkerFile, []byte("restored"), 0644); err != nil {
 		log.WithError(err).Warn("Failed to write restore marker file")
 	} else {
@@ -280,6 +462,18 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	}
 	log.WithField("duration", time.Since(shmRestoreStart)).Info("RestoreDevShm completed")
 
+	// Create link_remap stub files for unlinked files referenced in CRIU images
+	// This handles files (e.g., semaphores) that were unlink()'d before checkpoint but still had open FDs
+	linkRemapStart := time.Now()
+	if err := CreateLinkRemapStubs(checkpointPath, log); err != nil {
+		log.WithError(err).Warn("Failed to create link_remap stubs")
+	}
+	log.WithField("duration", time.Since(linkRemapStart)).Info("CreateLinkRemapStubs completed")
+
+	// Log GPU diagnostics right before CRIU restore to track device visibility changes
+	LogGPUDiagnostics("PRE-CRIU-RESTORE", log)
+	LogRestoreBoundaryDiagnostics("PRE-CRIU-RESTORE", 0, log)
+
 	// Perform CRIU restore (CUDA plugin handles CUDA state automatically)
 	criuRestoreStart := time.Now()
 	pid, err := Restore(ctx, checkpointPath, data, log)
@@ -293,6 +487,10 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	}
 	criuRestoreDuration := time.Since(criuRestoreStart)
 	log.WithField("duration", criuRestoreDuration).Info("CRIU Restore completed (CUDA state restored by plugin)")
+
+	// Log GPU diagnostics AFTER restore to compare with pre-restore
+	LogGPUDiagnostics("POST-RESTORE", log)
+	LogRestoreBoundaryDiagnostics("POST-RESTORE", pid, log)
 
 	totalDuration := time.Since(restoreStart)
 	log.WithFields(logrus.Fields{

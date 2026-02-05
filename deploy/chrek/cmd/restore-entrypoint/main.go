@@ -5,8 +5,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/sirupsen/logrus"
@@ -15,7 +19,48 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/restore"
 )
 
+// logGPUDiagnostics logs nvidia-smi output and /dev/nvidia* devices for debugging GPU visibility.
+func logGPUDiagnostics(label string) {
+	fmt.Printf("=== GPU DIAGNOSTICS [%s] ===\n", label)
+
+	// nvidia-smi
+	if out, err := exec.Command("nvidia-smi", "-L").CombinedOutput(); err != nil {
+		fmt.Printf("nvidia-smi -L: error: %v\n", err)
+	} else {
+		fmt.Printf("nvidia-smi -L:\n%s", out)
+	}
+
+	// GPU memory usage
+	if out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total,memory.free", "--format=csv,noheader").CombinedOutput(); err != nil {
+		fmt.Printf("nvidia-smi memory query: error: %v\n", err)
+	} else {
+		fmt.Printf("nvidia-smi memory:\n%s", out)
+	}
+
+	// /dev/nvidia* devices
+	matches, _ := filepath.Glob("/dev/nvidia*")
+	fmt.Printf("/dev/nvidia* devices: %s\n", strings.Join(matches, ", "))
+
+	// NVIDIA_VISIBLE_DEVICES env
+	fmt.Printf("NVIDIA_VISIBLE_DEVICES=%s\n", os.Getenv("NVIDIA_VISIBLE_DEVICES"))
+	fmt.Printf("CUDA_VISIBLE_DEVICES=%s\n", os.Getenv("CUDA_VISIBLE_DEVICES"))
+
+	// Linux namespaces for PID 1
+	for _, ns := range []string{"mnt", "pid", "ipc", "net", "uts", "cgroup"} {
+		link, err := os.Readlink(fmt.Sprintf("/proc/1/ns/%s", ns))
+		if err != nil {
+			link = err.Error()
+		}
+		fmt.Printf("ns/%s: %s\n", ns, link)
+	}
+
+	fmt.Printf("=== END GPU DIAGNOSTICS [%s] ===\n", label)
+}
+
 func main() {
+	// Log GPU diagnostics BEFORE anything else
+	logGPUDiagnostics("PRE-RESTORE")
+
 	// Set up logging
 	log := logrus.New()
 	log.SetOutput(os.Stdout)

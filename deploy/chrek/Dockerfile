@@ -191,7 +191,7 @@ COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /
 RUN chmod +x /usr/local/sbin/cuda-checkpoint
 
 # Create directories
-RUN mkdir -p /checkpoints /var/run/criu /tmp /var/criu-work
+RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
 
 # Copy restore binaries
 COPY --from=builder /restore-entrypoint /restore-entrypoint

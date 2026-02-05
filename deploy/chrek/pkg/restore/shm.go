@@ -16,8 +16,13 @@ import (
 // This must be called BEFORE CRIU restore so that the shared memory files exist
 // when CRIU tries to restore file descriptors pointing to them.
 //
-// The files were captured by CaptureDevShm during checkpoint and exclude
-// semaphores (sem.* files) which cannot be correctly restored.
+// /dev/shm may contain various types of files including:
+//   - POSIX semaphores (sem.*)
+//   - PSM/shared memory files used by communication libraries
+//   - Other tmpfs-backed shared memory regions
+//
+// The kernel state for these files won't be perfectly restored, but the files
+// will exist for CRIU to restore file descriptors and for cleanup operations.
 func RestoreDevShm(checkpointPath string, log *logrus.Entry) error {
     srcDir := filepath.Join(checkpointPath, config.DevShmDirName)
 

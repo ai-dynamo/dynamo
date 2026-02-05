@@ -6,71 +6,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
-// RemoveSemaphores removes POSIX semaphores from the container's /dev/shm.
-// Semaphores cause CRIU restore to fail with "Can't link dev/shm/link_remap.X -> dev/shm/sem.Y"
-// because they maintain kernel state that cannot be correctly restored.
-// This accesses the container's filesystem via /proc/<pid>/root/dev/shm/.
-// Returns an error if any semaphore removal fails.
-func RemoveSemaphores(pid int, hostProc string, log *logrus.Entry) error {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
-	shmPath := filepath.Join(hostProc, fmt.Sprintf("%d/root/dev/shm", pid))
-
-	entries, err := os.ReadDir(shmPath)
-	if err != nil {
-		// It's okay if /dev/shm doesn't exist (container may not have it)
-		log.WithError(err).Debug("Could not read container /dev/shm (may not exist)")
-		return nil
-	}
-
-	var removed []string
-	var errors []error
-	for _, entry := range entries {
-		name := entry.Name()
-		// Check for both "sem." and "sem_" prefixes for consistency with CaptureDevShm
-		if strings.HasPrefix(name, "sem.") || strings.HasPrefix(name, "sem_") {
-			semPath := filepath.Join(shmPath, name)
-			if err := os.Remove(semPath); err != nil {
-				log.WithError(err).WithField("semaphore", name).Error("Failed to remove semaphore")
-				errors = append(errors, fmt.Errorf("failed to remove semaphore %s: %w", name, err))
-			} else {
-				removed = append(removed, name)
-			}
-		}
-	}
-
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to remove %d semaphore(s): %v", len(errors), errors)
-	}
-
-	if len(removed) > 0 {
-		log.WithFields(logrus.Fields{
-			"count":      len(removed),
-			"semaphores": removed,
-		}).Info("Removed semaphores from container /dev/shm before checkpoint")
-	} else {
-		log.Debug("No semaphores found in container /dev/shm")
-	}
-
-	return nil
-}
-
-
 // CaptureDevShm captures files from /dev/shm to the checkpoint directory.
 // This is needed because /dev/shm is a tmpfs mount that is not part of the
 // container's overlay filesystem, so rootfs diff doesn't capture it.
 //
-// Files starting with "sem." are excluded because they are POSIX semaphores
-// whose kernel state cannot be correctly restored by copying the file.
+// Semaphores (sem.* files) are included so that sem_unlink() calls succeed
+// after restore. The semaphore kernel state won't be perfectly restored,
+// but the files will exist for cleanup operations.
 //
 // The files are saved to <checkpointDir>/dev-shm/ and can be restored
 // using RestoreDevShm before CRIU restore.
@@ -91,20 +39,12 @@ func CaptureDevShm(pid int, hostProc, checkpointDir string, log *logrus.Entry) e
         return fmt.Errorf("failed to read container /dev/shm: %w", err)
     }
 
-    // Filter out semaphores and empty entries
+    // Filter out directories
     var filesToCapture []os.DirEntry
     for _, entry := range entries {
-        name := entry.Name()
-
-        // Skip semaphores - they have kernel state that can't be restored correctly
-        if strings.HasPrefix(name, "sem.") || strings.HasPrefix(name, "sem_") {
-            log.WithField("file", name).Debug("Skipping semaphore file")
-            continue
-        }
-
         // Skip directories (unlikely in /dev/shm but be safe)
         if entry.IsDir() {
-            log.WithField("dir", name).Debug("Skipping directory in /dev/shm")
+            log.WithField("dir", entry.Name()).Debug("Skipping directory in /dev/shm")
             continue
         }
 

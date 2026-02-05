@@ -188,13 +188,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 		return nil, fmt.Errorf("failed to save checkpoint data: %w", err)
 	}
 
-	// 10. Remove semaphores from /dev/shm before checkpoint
-	// Semaphores cause CRIU restore to fail with "Can't link dev/shm/link_remap.X -> dev/shm/sem.Y"
-	if err := RemoveSemaphores(pid, c.hostProc, c.log); err != nil {
-		return nil, fmt.Errorf("failed to remove semaphores: %w", err)
-	}
-
-	// 11. Execute CRIU dump via go-criu
+	// 10. Execute CRIU dump via go-criu
 	criuDumpStart := time.Now()
 	criuClient := criu.MakeCriu()
 	if err := criuClient.Dump(criuOpts, nil); err != nil {
@@ -204,7 +198,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	criuDumpDuration := time.Since(criuDumpStart)
 	c.log.WithField("duration", criuDumpDuration).Info("CRIU dump completed successfully")
 
-	// 12. Capture /dev/shm contents (excluding semaphores)
+	// 11. Capture /dev/shm contents
 	// This must happen after CRIU dump since we want the final process state
 	shmCaptureStart := time.Now()
 	if err := CaptureDevShm(pid, c.hostProc, checkpointDir, c.log); err != nil {
@@ -212,7 +206,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	}
 	c.log.WithField("duration", time.Since(shmCaptureStart)).Info("/dev/shm capture completed")
 
-	// 13. Capture rootfs diff and deleted files
+	// 12. Capture rootfs diff and deleted files
 	rootfsCaptureStart := time.Now()
 	CaptureRootfsState(upperDir, checkpointDir, data, c.log)
 	c.log.WithField("duration", time.Since(rootfsCaptureStart)).Info("Rootfs capture completed")

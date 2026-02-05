@@ -102,8 +102,13 @@ func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
 		// Restore in detached mode - process runs in background (restore-specific)
 		RstSibling: proto.Bool(true),
 
-		// Mount namespace compatibility mode for cross-container restore (restore-specific)
-		MntnsCompatMode: proto.Bool(true),
+		// Mount namespace mode:
+		// - MntnsCompatMode=false (default): Uses mount-v2 with MOVE_MOUNT_SET_GROUP (kernel 5.15+)
+		//   This is preferred as it doesn't create temp dirs in /tmp
+		// - MntnsCompatMode=true: Uses compat mode which creates /tmp/cr-tmpfs.XXX
+		//   This can cause "Device or resource busy" errors on cleanup
+		// We explicitly set to false to use mount-v2 (requires kernel 5.15+)
+		MntnsCompatMode: proto.Bool(false),
 
 		// Options from saved CheckpointData.CRIU
 		ShellJob:  proto.Bool(cfg.ShellJob),
