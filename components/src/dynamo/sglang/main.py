@@ -180,10 +180,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     handler.register_engine_routes(runtime)
 
-    print(f"Config: {config}")
-    # Use different health check payloads based on serving mode:
-    # - DECODE (disaggregated): requires bootstrap_info with FAKE_BOOTSTRAP_HOST
-    # - AGGREGATED: standard health check without bootstrap_info
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
