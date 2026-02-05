@@ -44,7 +44,7 @@ pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
-    discovery::{MultiPoolManager, RuntimeConfigs},
+    discovery::{WorkerSetManager, RuntimeConfigs},
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
@@ -505,7 +505,7 @@ impl KvRouter {
     pub async fn new_with_pool_manager(
         endpoint: Endpoint,
         client: Client,
-        pool_manager: Arc<MultiPoolManager>,
+        pool_manager: Arc<WorkerSetManager>,
         workers_with_configs: Arc<RuntimeConfigs>,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,

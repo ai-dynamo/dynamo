@@ -21,7 +21,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    discovery::MultiPoolManager,
+    discovery::WorkerSetManager,
     kv_router::{
         KvRouter, KvRouterConfig, protocols::WorkerId, router_endpoint_id,
         scheduler::DefaultWorkerSelector,
@@ -81,7 +81,7 @@ pub struct ModelManager {
     runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
 
     /// Multi-pool managers per model name for prefix-mode routing.
-    multi_pool_managers: DashMap<String, Arc<MultiPoolManager>>,
+    worker_set_managers: DashMap<String, Arc<WorkerSetManager>>,
 }
 
 impl Default for ModelManager {
@@ -104,7 +104,7 @@ impl ModelManager {
             prefill_router_activators: DashMap::new(),
             worker_monitors: DashMap::new(),
             runtime_configs: DashMap::new(),
-            multi_pool_managers: DashMap::new(),
+            worker_set_managers: DashMap::new(),
         }
     }
 
@@ -403,8 +403,8 @@ impl ModelManager {
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
 
-        // Check if we have a MultiPoolManager for this model (multi-pool mode)
-        let pool_manager = model_name.and_then(|name| self.get_multi_pool_manager(name));
+        // Check if we have a WorkerSetManager for this model (multi-pool mode)
+        let pool_manager = model_name.and_then(|name| self.get_worker_set_manager(name));
 
         let chooser = if let Some(pool_manager) = pool_manager {
             tracing::info!(
@@ -558,31 +558,31 @@ impl ModelManager {
         crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
     }
 
-    /// Get or create a MultiPoolManager for a model in prefix mode.
+    /// Get or create a WorkerSetManager for a model in prefix mode.
     ///
     /// The manager tracks all workers across namespaces matching the prefix,
     /// enabling weighted pool selection during routing.
-    pub fn get_or_create_multi_pool_manager(
+    pub fn get_or_create_worker_set_manager(
         &self,
         model_name: &str,
         prefix: &str,
-    ) -> Arc<MultiPoolManager> {
-        self.multi_pool_managers
+    ) -> Arc<WorkerSetManager> {
+        self.worker_set_managers
             .entry(model_name.to_string())
             .or_insert_with(|| {
                 tracing::info!(
                     model_name,
                     prefix,
-                    "Creating MultiPoolManager for model"
+                    "Creating WorkerSetManager for model"
                 );
-                Arc::new(MultiPoolManager::new(prefix.to_string()))
+                Arc::new(WorkerSetManager::new(prefix.to_string()))
             })
             .clone()
     }
 
-    /// Get an existing MultiPoolManager for a model, if one exists.
-    pub fn get_multi_pool_manager(&self, model_name: &str) -> Option<Arc<MultiPoolManager>> {
-        self.multi_pool_managers
+    /// Get an existing WorkerSetManager for a model, if one exists.
+    pub fn get_worker_set_manager(&self, model_name: &str) -> Option<Arc<WorkerSetManager>> {
+        self.worker_set_managers
             .get(model_name)
             .map(|entry| entry.value().clone())
     }

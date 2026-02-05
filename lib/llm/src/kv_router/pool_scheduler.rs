@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::discovery::{MultiPoolManager, WorkerPool};
+use crate::discovery::{WorkerSetManager, WorkerSet};
 use crate::kv_router::{
     KvRouterConfig, WorkerSelector,
     protocols::{WorkerId, WorkerSelectionResult},
@@ -27,7 +27,7 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 /// In single-pool mode (when pool_manager is None), behaves like the regular scheduler.
 pub struct PoolAwareScheduler {
     /// Multi-pool manager (Some when in prefix mode)
-    pool_manager: Option<Arc<MultiPoolManager>>,
+    pool_manager: Option<Arc<WorkerSetManager>>,
 
     /// Block size for KV routing
     block_size: u32,
@@ -45,7 +45,7 @@ impl PoolAwareScheduler {
     /// If `pool_manager` is Some, enables multi-pool routing.
     /// If None, this scheduler won't be used (caller should use regular scheduler).
     pub fn new(
-        pool_manager: Option<Arc<MultiPoolManager>>,
+        pool_manager: Option<Arc<WorkerSetManager>>,
         block_size: u32,
         kv_router_config: KvRouterConfig,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
@@ -66,7 +66,7 @@ impl PoolAwareScheduler {
     /// Select a pool using weighted random selection.
     ///
     /// Returns None if no pools have workers.
-    pub fn select_pool(&self) -> Option<Arc<WorkerPool>> {
+    pub fn select_pool(&self) -> Option<Arc<WorkerSet>> {
         self.pool_manager.as_ref()?.select_pool_weighted()
     }
 
@@ -102,7 +102,7 @@ impl PoolAwareScheduler {
     pub fn select_worker_from_pool(
         &self,
         request: &SchedulingRequest,
-    ) -> Result<(Arc<WorkerPool>, WorkerSelectionResult), KvSchedulerError> {
+    ) -> Result<(Arc<WorkerSet>, WorkerSelectionResult), KvSchedulerError> {
         let pool = self
             .select_pool()
             .ok_or(KvSchedulerError::NoEndpoints)?;
@@ -130,7 +130,7 @@ impl PoolAwareScheduler {
     /// Select a random worker from a weighted-selected pool.
     ///
     /// Used for random load balancing with pool awareness.
-    pub fn select_random_from_pool(&self) -> Option<(Arc<WorkerPool>, WorkerId)> {
+    pub fn select_random_from_pool(&self) -> Option<(Arc<WorkerSet>, WorkerId)> {
         let pool = self.select_pool()?;
         let worker_id = pool.select_random()?;
         Some((pool, worker_id))
@@ -139,7 +139,7 @@ impl PoolAwareScheduler {
     /// Select a worker using round-robin from a weighted-selected pool.
     ///
     /// Used for round-robin load balancing with pool awareness.
-    pub fn select_round_robin_from_pool(&self) -> Option<(Arc<WorkerPool>, WorkerId)> {
+    pub fn select_round_robin_from_pool(&self) -> Option<(Arc<WorkerSet>, WorkerId)> {
         let pool = self.select_pool()?;
         let worker_id = pool.select_round_robin()?;
         Some((pool, worker_id))
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn test_pool_aware_scheduler_with_pools() {
-        let manager = Arc::new(MultiPoolManager::new("prefix".to_string()));
+        let manager = Arc::new(WorkerSetManager::new("prefix".to_string()));
 
         // Add workers to pools
         manager.add_worker("prefix-a", 1, "cs1", None);
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_random_and_round_robin_selection() {
-        let manager = Arc::new(MultiPoolManager::new("p".to_string()));
+        let manager = Arc::new(WorkerSetManager::new("p".to_string()));
         manager.add_worker("p-a", 10, "cs", None);
         manager.add_worker("p-a", 20, "cs", None);
 

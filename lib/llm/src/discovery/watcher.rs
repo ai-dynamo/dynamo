@@ -204,7 +204,7 @@ impl ModelWatcher {
 
                     // In prefix mode, add worker to multi-pool manager
                     if namespace_filter.is_prefix() {
-                        self.add_to_multi_pool(&mcid, &card);
+                        self.add_to_worker_set(&mcid, &card);
                     }
 
                     match self.handle_put(&mcid, &mut card).await {
@@ -275,7 +275,7 @@ impl ModelWatcher {
 
         // In prefix mode, remove worker from multi-pool manager
         if namespace_filter.is_prefix() {
-            self.remove_from_multi_pool(mcid, &model_name);
+            self.remove_from_worker_set(mcid, &model_name);
         }
         let active_instances = self
             .cards_for_model(&model_name, namespace_filter)
@@ -699,50 +699,50 @@ impl ModelWatcher {
     /// Add a worker to the multi-pool manager (prefix mode only).
     ///
     /// Extracts worker_id from instance_id and adds to the appropriate pool.
-    fn add_to_multi_pool(&self, mcid: &ModelCardInstanceId, card: &ModelDeploymentCard) {
+    fn add_to_worker_set(&self, mcid: &ModelCardInstanceId, card: &ModelDeploymentCard) {
         let Some(prefix) = self.namespace_filter.prefix() else {
             return;
         };
 
-        let pool_manager = self
+        let set_manager = self
             .manager
-            .get_or_create_multi_pool_manager(card.name(), prefix);
+            .get_or_create_worker_set_manager(card.name(), prefix);
 
         // instance_id is the worker_id
         let worker_id = mcid.instance_id;
 
-        pool_manager.add_worker(&mcid.namespace, worker_id, card.mdcsum(), None);
+        set_manager.add_worker(&mcid.namespace, worker_id, card.mdcsum(), None);
 
         tracing::debug!(
             model_name = card.name(),
             namespace = mcid.namespace,
             worker_id,
-            total_workers = pool_manager.total_instances(),
-            pool_count = pool_manager.pool_count(),
+            total_workers = set_manager.total_instances(),
+            pool_count = set_manager.pool_count(),
             "Added worker to multi-pool manager"
         );
     }
 
     /// Remove a worker from the multi-pool manager (prefix mode only).
-    fn remove_from_multi_pool(&self, mcid: &ModelCardInstanceId, model_name: &str) {
+    fn remove_from_worker_set(&self, mcid: &ModelCardInstanceId, model_name: &str) {
         if !self.namespace_filter.is_prefix() {
             return;
         }
 
-        let Some(pool_manager) = self.manager.get_multi_pool_manager(model_name) else {
+        let Some(set_manager) = self.manager.get_worker_set_manager(model_name) else {
             return;
         };
 
         let worker_id = mcid.instance_id;
 
-        pool_manager.remove_worker(&mcid.namespace, worker_id);
+        set_manager.remove_worker(&mcid.namespace, worker_id);
 
         tracing::debug!(
             model_name,
             namespace = mcid.namespace,
             worker_id,
-            total_workers = pool_manager.total_instances(),
-            pool_count = pool_manager.pool_count(),
+            total_workers = set_manager.total_instances(),
+            pool_count = set_manager.pool_count(),
             "Removed worker from multi-pool manager"
         );
     }
