@@ -5,15 +5,17 @@ use crate::discovery::RuntimeConfigs;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
+use dynamo_runtime::config::environment_names::llm::kv_router as env_kv_router;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "bench")]
 use std::time::Instant;
+use tokio::sync::{Mutex, Notify};
 
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
@@ -23,6 +25,127 @@ use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, W
 use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
 use dynamo_tokens::SequenceHash;
+
+/// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
+const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
+
+/// Returns the queue threshold fraction if set, None if queueing is disabled
+fn queue_threshold_frac() -> Option<f64> {
+    std::env::var(env_kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC)
+        .ok()
+        .and_then(|val| val.parse::<f64>().ok())
+}
+
+/// Queue for managing scheduling requests with interior mutability.
+/// Requests are held in `pending` when all workers are busy, and moved to `ready` when capacity frees up.
+/// If queueing is disabled (env var not set), all requests go directly to `ready`.
+pub struct SchedulerQueue {
+    pending: Mutex<VecDeque<SchedulingRequest>>,
+    ready: Mutex<VecDeque<SchedulingRequest>>,
+    slots: Arc<ActiveSequencesMultiWorker>,
+    workers_with_configs: Arc<RuntimeConfigs>,
+    ready_notify: Arc<Notify>,
+}
+
+impl SchedulerQueue {
+    pub fn new(
+        slots: Arc<ActiveSequencesMultiWorker>,
+        workers_with_configs: Arc<RuntimeConfigs>,
+        ready_notify: Arc<Notify>,
+    ) -> Self {
+        Self {
+            pending: Mutex::new(VecDeque::new()),
+            ready: Mutex::new(VecDeque::new()),
+            slots,
+            workers_with_configs,
+            ready_notify,
+        }
+    }
+
+    /// Enqueue a new request.
+    /// If queueing is disabled (env var not set), fast-track to ready.
+    /// Otherwise, check busy condition and place in ready or pending.
+    pub async fn enqueue(&self, request: SchedulingRequest) {
+        let Some(threshold) = queue_threshold_frac() else {
+            self.ready.lock().await.push_back(request);
+            return;
+        };
+
+        if self.all_workers_busy(threshold).await {
+            tracing::debug!("all workers busy, queueing request");
+            self.pending.lock().await.push_back(request);
+        } else {
+            self.ready.lock().await.push_back(request);
+        }
+    }
+
+    /// Try to dequeue one request from ready queue.
+    pub async fn try_dequeue(&self) -> Option<SchedulingRequest> {
+        self.ready.lock().await.pop_front()
+    }
+
+    /// Re-enqueue a request at the front of the ready queue (used when scheduling fails temporarily).
+    pub async fn requeue_front(&self, request: SchedulingRequest) {
+        self.ready.lock().await.push_front(request);
+    }
+
+    /// Called on prefill_complete/free. Re-checks pending requests and moves eligible to ready.
+    /// Notifies scheduler loop if any requests were moved.
+    pub async fn update(&self) {
+        let Some(threshold) = queue_threshold_frac() else {
+            return;
+        };
+
+        let mut moved = false;
+        loop {
+            // Check if pending is empty first (short lock)
+            if self.pending.lock().await.is_empty() {
+                break;
+            }
+            // Check busy condition (no lock held during this check)
+            if self.all_workers_busy(threshold).await {
+                break;
+            }
+            // Try to move one request
+            let req = self.pending.lock().await.pop_front();
+            if let Some(req) = req {
+                tracing::debug!("moving request from pending to ready");
+                self.ready.lock().await.push_back(req);
+                moved = true;
+            } else {
+                break;
+            }
+        }
+        if moved {
+            self.ready_notify.notify_one();
+        }
+    }
+
+    /// Check if all workers are busy based on threshold.
+    /// Returns true only if ALL workers exceed the threshold (no worker has capacity).
+    async fn all_workers_busy(&self, threshold: f64) -> bool {
+        let active_tokens = self.slots.active_tokens().await;
+
+        for entry in self.workers_with_configs.configs.iter() {
+            let worker_id = *entry.key();
+            let config = entry.value();
+            let dp_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1);
+            let max_batched = config
+                .as_ref()
+                .and_then(|c| c.max_num_batched_tokens)
+                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+
+            for dp_rank in 0..dp_size {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+                if (tokens as f64) <= threshold * (max_batched as f64) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
@@ -93,6 +216,7 @@ impl SchedulingRequest {
 pub struct KvScheduler {
     request_tx: tokio::sync::mpsc::Sender<SchedulingRequest>,
     slots: Arc<ActiveSequencesMultiWorker>,
+    queue: Arc<SchedulerQueue>,
 }
 
 impl KvScheduler {
@@ -180,95 +304,120 @@ impl KvScheduler {
                 .await
                 .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
+        // Create queue with shared notify for waking the scheduler loop
+        let ready_notify = Arc::new(Notify::new());
+        let queue = Arc::new(SchedulerQueue::new(
+            slots.clone(),
+            workers_with_configs.clone(),
+            ready_notify.clone(),
+        ));
+        let queue_clone = queue.clone();
+
         // Background task to handle scheduling requests
         tokio::spawn(async move {
             let mut request_rx = request_rx;
+            let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
             tracing::trace!("scheduler background task started");
 
             loop {
-                // Check for cancellation at beginning of loop
-                if scheduler_cancel_token.is_cancelled() {
-                    tracing::trace!("scheduler background task shutting down");
-                    break;
+                // Use select! to wait on: new request, ready_notify, periodic recheck, or cancellation
+                tokio::select! {
+                    _ = scheduler_cancel_token.cancelled() => {
+                        tracing::trace!("scheduler background task shutting down");
+                        break;
+                    }
+                    request = request_rx.recv() => {
+                        let Some(request) = request else {
+                            tracing::warn!("scheduler shutdown");
+                            break;
+                        };
+                        tracing::trace!("received request to be scheduled");
+                        queue_clone.enqueue(request).await;
+                    }
+                    _ = ready_notify.notified() => {
+                        // Woken by update() after prefill_complete/free - just continue to drain ready queue
+                    }
+                    _ = recheck_interval.tick() => {
+                        // Periodic recheck to prevent requests stuck in pending
+                        queue_clone.update().await;
+                    }
                 }
 
-                // Wait for a new request
-                let Some(mut request) = request_rx.recv().await else {
-                    tracing::warn!("scheduler shutdown");
-                    break;
-                };
-                tracing::trace!("received request to be scheduled");
+                // Drain ALL ready requests (each iteration uses fresh slot state)
+                while let Some(mut request) = queue_clone.try_dequeue().await {
+                    let (decode_blocks, prefill_tokens) = slots_clone
+                        .potential_blocks_and_tokens(
+                            request.token_seq.clone(),
+                            request.isl_tokens,
+                            request.overlaps.clone(),
+                        )
+                        .await;
+                    request.decode_blocks = decode_blocks;
+                    request.prefill_tokens = prefill_tokens;
 
-                let (decode_blocks, prefill_tokens) = slots_clone
-                    .potential_blocks_and_tokens(
-                        request.token_seq.clone(),
-                        request.isl_tokens,
-                        request.overlaps.clone(),
-                    )
-                    .await;
-                request.decode_blocks = decode_blocks;
-                request.prefill_tokens = prefill_tokens;
+                    // Read the current workers configuration from DashMap
+                    let workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_scheduler
+                        .configs
+                        .iter()
+                        .map(|r| (*r.key(), r.value().clone()))
+                        .collect();
 
-                // Read the current workers configuration from DashMap
-                let workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_scheduler
-                    .configs
-                    .iter()
-                    .map(|r| (*r.key(), r.value().clone()))
-                    .collect();
+                    match selector.select_worker(&workers, &request, block_size) {
+                        Ok(selection) => {
+                            let event = KVHitRateEvent {
+                                worker_id: selection.worker.worker_id,
+                                dp_rank: selection.worker.dp_rank,
+                                isl_blocks: selection.required_blocks as usize,
+                                overlap_blocks: selection.overlap_blocks,
+                            };
+                            if let Err(e) = hit_rate_publisher.publish(&event).await {
+                                tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
+                            }
 
-                match selector.select_worker(&workers, &request, block_size) {
-                    Ok(selection) => {
-                        let event = KVHitRateEvent {
-                            worker_id: selection.worker.worker_id,
-                            dp_rank: selection.worker.dp_rank,
-                            isl_blocks: selection.required_blocks as usize,
-                            overlap_blocks: selection.overlap_blocks,
-                        };
-                        if let Err(e) = hit_rate_publisher.publish(&event).await {
-                            tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
+                            let response = SchedulingResponse {
+                                best_worker: selection.worker,
+                                overlap_blocks: selection.overlap_blocks,
+                            };
+                            request.respond(response);
+
+                            // Skip state update if not requested
+                            if !request.update_states {
+                                continue;
+                            }
+
+                            let Some(request_id) = request.maybe_request_id else {
+                                tracing::error!(
+                                    "No request_id provided to add_request to the slot tracker"
+                                );
+                                continue;
+                            };
+
+                            if let Err(e) = slots_clone
+                                .add_request(
+                                    request_id.clone(),
+                                    request.token_seq,
+                                    request.isl_tokens,
+                                    selection.overlap_blocks,
+                                    None, // expected_output_tokens not available in scheduler loop
+                                    selection.worker,
+                                    request.lora_name.clone(),
+                                )
+                                .await
+                            {
+                                tracing::warn!("Failed to add request {request_id}: {e}");
+                            }
                         }
-
-                        let response = SchedulingResponse {
-                            best_worker: selection.worker,
-                            overlap_blocks: selection.overlap_blocks,
-                        };
-                        request.respond(response);
-
-                        // Skip state update if not requested
-                        if !request.update_states {
-                            continue;
+                        Err(KvSchedulerError::NoEndpoints) => {
+                            tracing::trace!("no endpoints available; waiting for endpoints update");
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                            // Re-enqueue the request to try again later
+                            queue_clone.requeue_front(request).await;
+                            break; // Exit while let to go back to select!
                         }
-
-                        let Some(request_id) = request.maybe_request_id else {
-                            tracing::error!(
-                                "No request_id provided to add_request to the slot tracker"
-                            );
-                            continue;
-                        };
-
-                        if let Err(e) = slots_clone
-                            .add_request(
-                                request_id.clone(),
-                                request.token_seq,
-                                request.isl_tokens,
-                                selection.overlap_blocks,
-                                None, // expected_output_tokens not available in scheduler loop
-                                selection.worker,
-                                request.lora_name.clone(),
-                            )
-                            .await
-                        {
-                            tracing::warn!("Failed to add request {request_id}: {e}");
+                        Err(e) => {
+                            tracing::error!("error scheduling request: {:?}", e);
+                            // Don't break the whole loop, just skip this request
                         }
-                    }
-                    Err(KvSchedulerError::NoEndpoints) => {
-                        tracing::trace!("no endpoints available; waiting for endpoints update");
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::error!("error scheduling request: {:?}", e);
-                        break;
                     }
                 }
             }
@@ -276,7 +425,11 @@ impl KvScheduler {
             tracing::trace!("background endpoint subscriber shutting down");
         });
 
-        Ok(KvScheduler { request_tx, slots })
+        Ok(KvScheduler {
+            request_tx,
+            slots,
+            queue,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -359,11 +512,15 @@ impl KvScheduler {
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots
             .mark_prefill_completed(&request_id.to_string())
-            .await
+            .await?;
+        self.queue.update().await;
+        Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string()).await
+        self.slots.free(&request_id.to_string()).await?;
+        self.queue.update().await;
+        Ok(())
     }
 
     /// Get the worker type for this scheduler ("prefill" or "decode").
