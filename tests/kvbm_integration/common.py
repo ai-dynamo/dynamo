@@ -584,6 +584,12 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     if gpu_blocks is not None:
         command.extend(["--num-gpu-blocks-override", str(gpu_blocks)])
 
+    # Chunked prefill configuration
+    if "max_num_batched_tokens" in params:
+        command.extend(
+            ["--max-num-batched-tokens", str(params["max_num_batched_tokens"])]
+        )
+
     # Set up environment
     # Note: NATS_SERVER and ETCD_ENDPOINTS are already set by runtime_services_dynamic_ports fixture
     env = os.environ.copy()

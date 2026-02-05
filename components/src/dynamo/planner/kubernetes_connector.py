@@ -284,6 +284,52 @@ class KubernetesConnector(PlannerConnector):
             self.graph_deployment_name,
         )
 
+    def get_actual_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        """
+        Get actual ready worker counts for prefill and decode from DGD status.
+
+        Returns:
+            tuple[int, int, bool]: (prefill_count, decode_count, is_stable)
+            - is_stable: False if any service is in a rollout (scaling should be skipped)
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+        prefill_count = 0
+        decode_count = 0
+        all_stable = True
+
+        if prefill_component_name:
+            service = get_service_from_sub_component_type_or_name(
+                deployment,
+                SubComponentType.PREFILL,
+                component_name=prefill_component_name,
+            )
+            ready_replicas, is_stable = self.kube_api.get_service_replica_status(
+                deployment, service.name
+            )
+            if not is_stable:
+                all_stable = False
+            prefill_count = ready_replicas
+
+        if decode_component_name:
+            service = get_service_from_sub_component_type_or_name(
+                deployment,
+                SubComponentType.DECODE,
+                component_name=decode_component_name,
+            )
+            ready_replicas, is_stable = self.kube_api.get_service_replica_status(
+                deployment, service.name
+            )
+            if not is_stable:
+                all_stable = False
+            decode_count = ready_replicas
+
+        return prefill_count, decode_count, all_stable
+
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
     ):
