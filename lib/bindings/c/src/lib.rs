@@ -18,7 +18,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 
 use dynamo_runtime::Runtime;
 
-use dynamo_llm::discovery::ModelManager;
+use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
@@ -575,14 +575,14 @@ pub unsafe extern "C" fn create_routers(
         let model_manager = Arc::new(ModelManager::new());
 
         // Fetch model card via discovery and create preprocessor + get block_size
-        let (preprocessor, block_size) =
+        let (preprocessor, block_size, model_name) =
             match fetch_preprocessor_from_discovery(&drt, &namespace_str).await {
-                Ok((prep, bs)) => {
+                Ok((prep, bs, name)) => {
                     tracing::info!(
                         kv_cache_block_size = bs,
                         "Preprocessor created from discovery"
                     );
-                    (Some(prep), bs)
+                    (Some(prep), bs, name)
                 }
                 Err(e) => {
                     tracing::error!(
@@ -595,7 +595,7 @@ pub unsafe extern "C" fn create_routers(
 
         // Create decode router
         let decode_router = match model_manager
-            .kv_chooser_for(&endpoint, block_size, Some(kv_router_config))
+            .kv_chooser_for(&endpoint, block_size, Some(kv_router_config), WORKER_TYPE_DECODE)
             .await
         {
             Ok(r) => r,
@@ -624,6 +624,7 @@ pub unsafe extern "C" fn create_routers(
                     block_size,
                     Some(prefill_config),
                     enforce_disagg,
+                    model_name.clone(),
                 )
             }
             None if enforce_disagg => {
@@ -1046,11 +1047,11 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 /// 2. Finds the first model in the target namespace (decode workers only)
 /// 3. Downloads the model config (tokenizer files) if needed
 /// 4. Creates an OpenAIPreprocessor from the model card
-/// 5. Returns the preprocessor and the kv_cache_block_size from the model card
+/// 5. Returns the preprocessor, the kv_cache_block_size, and model_name from the model card
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
     target_namespace: &str,
-) -> anyhow::Result<(Arc<OpenAIPreprocessor>, u32)> {
+) -> anyhow::Result<(Arc<OpenAIPreprocessor>, u32, String)> {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_runtime::discovery::DiscoveryInstance;
 
@@ -1097,8 +1098,9 @@ async fn fetch_preprocessor_from_discovery(
     })?;
 
     let kv_cache_block_size = card.kv_cache_block_size;
+    let model_name = card.name().to_string();
     tracing::info!(
-        model_name = card.name(),
+        model_name = model_name,
         kv_cache_block_size = kv_cache_block_size,
         "Found model card via discovery"
     );
@@ -1108,7 +1110,7 @@ async fn fetch_preprocessor_from_discovery(
 
     // Create preprocessor
     let preprocessor = OpenAIPreprocessor::new(card)?;
-    Ok((preprocessor, kv_cache_block_size))
+    Ok((preprocessor, kv_cache_block_size, model_name))
 }
 
 /// Find a prefill endpoint from already-discovered instances (one-time filter).
