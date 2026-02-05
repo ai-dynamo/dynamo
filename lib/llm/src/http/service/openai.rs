@@ -53,7 +53,7 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::http::middleware::session::{extract_session_middleware, RequestSession};
-use crate::storage::{ResponseStorage, ResponseStorageManager, StorageError};
+use crate::storage::StorageError;
 use crate::types::Annotated;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
@@ -1217,13 +1217,70 @@ async fn responses(
 
     let streaming = request.inner.stream.unwrap_or(false);
     let request_id = request.id().to_string();
-    // Initialize response storage
-    let storage = ResponseStorageManager::new();
-    
-    let (orig_request, context) = request.into_parts();
+    // Get shared response storage from state
+    let storage = state.response_storage().clone();
+
+    let (mut orig_request, context) = request.into_parts();
 
     // Save store flag before orig_request is consumed
     let should_store = orig_request.inner.store.unwrap_or(false);
+
+    // Handle previous_response_id - fetch previous context and prepend to input
+    if let Some(ref prev_id) = orig_request.inner.previous_response_id {
+        match storage.get_response(&session.tenant_id, &session.session_id, prev_id).await {
+            Ok(prev_response) => {
+                tracing::info!(
+                    tenant_id = %session.tenant_id,
+                    session_id = %session.session_id,
+                    previous_response_id = %prev_id,
+                    "Retrieved previous response for context"
+                );
+                
+                // Extract output items from previous response and prepend to current input
+                if let Some(output_items) = prev_response.response.get("output")
+                    .and_then(|o| o.as_array())
+                {
+                    use dynamo_async_openai::types::responses::{InputItem, InputParam, EasyInputMessage, EasyInputContent, Role, MessageType};
+                    
+                    let mut new_items: Vec<InputItem> = Vec::new();
+                    
+                    // Add previous output items as context (they become input for next turn)
+                    for item in output_items {
+                        if let Ok(input_item) = serde_json::from_value::<InputItem>(item.clone()) {
+                            new_items.push(input_item);
+                        }
+                    }
+                    
+                    // Add current input
+                    match &orig_request.inner.input {
+                        InputParam::Text(text) => {
+                            // Convert text to a user message item using EasyInputMessage
+                            new_items.push(InputItem::EasyMessage(EasyInputMessage {
+                                r#type: MessageType::Message,
+                                role: Role::User,
+                                content: EasyInputContent::Text(text.clone()),
+                            }));
+                        }
+                        InputParam::Items(items) => {
+                            new_items.extend(items.clone());
+                        }
+                    }
+                    
+                    // Update the request with combined input
+                    orig_request.inner.input = InputParam::Items(new_items);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tenant_id = %session.tenant_id,
+                    session_id = %session.session_id,
+                    previous_response_id = %prev_id,
+                    error = %e,
+                    "Failed to retrieve previous response, continuing without context"
+                );
+            }
+        }
+    }
 
     let mut chat_request: NvCreateChatCompletionRequest =
         orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -1282,6 +1339,42 @@ async fn responses(
         use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
 
         let mut converter = ResponseStreamConverter::new(model.clone());
+
+        // Set up storage callback if storing is requested
+        if should_store {
+            let storage_for_callback = storage.clone();
+            let tenant_id = session.tenant_id.clone();
+            let session_id = session.session_id.clone();
+            let response_id = converter.response_id().to_string();
+            let ttl = Some(std::time::Duration::from_secs(86400)); // 24 hour TTL
+
+            converter = converter.with_storage_callback(move |response_json| {
+                tokio::spawn(async move {
+                    match storage_for_callback
+                        .store_response(&tenant_id, &session_id, Some(&response_id), response_json, ttl)
+                        .await
+                    {
+                        Ok(stored_id) => {
+                            tracing::info!(
+                                tenant_id = %tenant_id,
+                                session_id = %session_id,
+                                response_id = %stored_id,
+                                "Stored streaming response successfully"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant_id = %tenant_id,
+                                session_id = %session_id,
+                                error = %e,
+                                "Failed to store streaming response"
+                            );
+                        }
+                    }
+                });
+            });
+        }
+
         let start_events = converter.emit_start_events();
 
         // Use std::sync::Mutex (not tokio) since process_chunk/emit_end_events are
@@ -1445,11 +1538,7 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`service_tier` is not supported.",
         ));
     }
-    if inner.store == Some(true) {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
-        ));
-    }
+    // Note: store: true is now supported via the stateful responses storage layer
     if inner.text.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`text` is not supported.",
@@ -1595,12 +1684,12 @@ pub fn list_models_router(
 
 /// Handle GET /v1/responses/{id} - retrieve a stored response
 async fn handler_get_response(
-    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Extension(session): Extension<RequestSession>,
     Path(response_id): Path<String>,
 ) -> Result<Response, StatusCode> {
-    let storage = ResponseStorageManager::new();
-    
+    let storage = state.response_storage();
+
     match storage.get_response(&session.tenant_id, &session.session_id, &response_id).await {
         Ok(stored) => {
             tracing::info!(
@@ -1635,12 +1724,12 @@ async fn handler_get_response(
 
 /// Handle DELETE /v1/responses/{id} - delete a stored response
 async fn handler_delete_response(
-    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Extension(session): Extension<RequestSession>,
     Path(response_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let storage = ResponseStorageManager::new();
-    
+    let storage = state.response_storage();
+
     match storage.delete_response(&session.tenant_id, &session.session_id, &response_id).await {
         Ok(()) => {
             tracing::info!(
@@ -1682,7 +1771,7 @@ pub fn responses_router(
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
-    let path_with_id = format!("{}/:id", &path);
+    let path_with_id = format!("{}/{{id}}", &path);
     let router = Router::new()
         .route(&path, post(handler_responses))
         .route(&path_with_id, get(handler_get_response))
@@ -1817,10 +1906,7 @@ mod tests {
                 "include",
                 Box::new(|r| r.include = Some(vec![IncludeEnum::FileSearchCallResults])),
             ),
-            (
-                "previous_response_id",
-                Box::new(|r| r.previous_response_id = Some("prev-id".into())),
-            ),
+            // Note: previous_response_id is now supported via stateful responses
             (
                 "prompt",
                 Box::new(|r| {
@@ -1839,7 +1925,7 @@ mod tests {
                 "service_tier",
                 Box::new(|r| r.service_tier = Some(ServiceTier::Auto)),
             ),
-            ("store", Box::new(|r| r.store = Some(true))),
+            // Note: store is now supported via stateful responses storage
             (
                 "text",
                 Box::new(|r| {

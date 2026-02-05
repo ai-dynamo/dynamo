@@ -8,7 +8,7 @@ use axum::{
     extract::Request,
     http::StatusCode,
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 
 /// Request session extracted from trusted upstream headers
@@ -105,6 +105,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
         middleware,
+        response::IntoResponse,
         routing::get,
         Router,
     };
