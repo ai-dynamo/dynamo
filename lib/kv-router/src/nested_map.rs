@@ -23,6 +23,10 @@ use std::thread::JoinHandle;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use std::time::Duration;
+#[cfg(feature = "bench")]
+use std::time::Instant;
+
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
     RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
@@ -250,6 +254,26 @@ impl PositionalIndexer {
             thread_handles: Mutex::new(thread_handles),
         }
     }
+
+    /// Wait for all pending events and requests to be processed. Used primarily for debugging and benchmarking.
+    pub async fn flush(&self) {
+        loop {
+
+            let mut all_empty = true;
+
+            for worker_event_channel in self.worker_event_channels.iter() {
+                if !worker_event_channel.is_empty() {
+                    all_empty = false;
+                    break;
+                }
+            }
+
+            if all_empty && self.worker_request_channel.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -263,6 +287,8 @@ impl KvIndexerInterface for PositionalIndexer {
             sequence,
             early_exit: false,
             resp: resp_tx,
+            #[cfg(feature = "bench")]
+            created_at: Instant::now(),
         };
 
         if let Err(e) = self.worker_request_channel.send(req) {
