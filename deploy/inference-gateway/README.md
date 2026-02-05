@@ -280,7 +280,7 @@ b. use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n my-model
+kubectl port-forward svc/inference-gateway 8000:80 -n kgateway-system
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
@@ -365,6 +365,14 @@ Sample inference output:
     "total_tokens": 225
   }
 }
+```
+
+***If you have ore than one HttpRoute running on the cluster***
+Add the host to your HttpRoute.yaml and add the header `curl -H "Host: llama3-70b-agg.example.com" ... ` to every request.
+```bash
+spec:
+  hostnames:
+    - llama3-70b-agg.example.com
 ```
 
 ### 8. Deleting the installation ###
