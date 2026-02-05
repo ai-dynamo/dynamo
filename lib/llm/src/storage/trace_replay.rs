@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Trace replay utilities for stateful responses
 //!
 //! Parses Braintrust-style JSONL trace files and replays them through
@@ -61,8 +64,8 @@ pub struct ParsedTrace {
 
 /// Parse a Braintrust JSONL trace file
 pub fn parse_trace_file(path: &Path) -> Result<ParsedTrace, TraceParseError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| TraceParseError::IoError(e.to_string()))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| TraceParseError::IoError(e.to_string()))?;
     parse_trace_content(&content)
 }
 
@@ -84,14 +87,16 @@ pub fn parse_trace_content(content: &str) -> Result<ParsedTrace, TraceParseError
     }
 
     // Find root span (the one with no parents or self-referencing)
-    let root_span = spans.iter()
+    let root_span = spans
+        .iter()
         .find(|s| s.span_parents.is_empty() || s.span_parents.contains(&s.span_id))
         .ok_or(TraceParseError::NoRootSpan)?;
 
     let root_span_id = root_span.span_id.clone();
 
     // Extract session_id from root span metadata
-    let session_id = root_span.metadata
+    let session_id = root_span
+        .metadata
         .get("session_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
@@ -105,7 +110,9 @@ pub fn parse_trace_content(content: &str) -> Result<ParsedTrace, TraceParseError
         // Check if this is a turn span
         let is_turn = span.span_parents.contains(&root_span_id)
             && span.span_attributes.get("type").and_then(|v| v.as_str()) == Some("task")
-            && span.span_attributes.get("name")
+            && span
+                .span_attributes
+                .get("name")
                 .and_then(|v| v.as_str())
                 .map(|n| n.starts_with("Turn"))
                 .unwrap_or(false);
@@ -133,22 +140,27 @@ pub fn parse_trace_content(content: &str) -> Result<ParsedTrace, TraceParseError
             };
 
             // Find LLM spans that are children of this turn to get output
-            let assistant_output = spans.iter()
+            let assistant_output = spans
+                .iter()
                 .filter(|s| s.span_parents.contains(&span.span_id))
                 .filter(|s| s.span_attributes.get("type").and_then(|v| v.as_str()) == Some("llm"))
                 .filter_map(|s| {
                     s.output.as_ref().and_then(|o| {
-                        o.get("content").and_then(|c| c.as_str()).map(|s| s.to_string())
+                        o.get("content")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
                     })
                 })
                 .last();
 
             // Find tool calls
-            let tool_calls: Vec<ToolCall> = spans.iter()
+            let tool_calls: Vec<ToolCall> = spans
+                .iter()
                 .filter(|s| s.span_parents.contains(&span.span_id))
                 .filter(|s| s.span_attributes.get("type").and_then(|v| v.as_str()) == Some("tool"))
                 .map(|s| {
-                    let tool_name = s.metadata
+                    let tool_name = s
+                        .metadata
                         .get("tool_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown")
@@ -217,13 +229,15 @@ pub async fn replay_trace<S: ResponseStorage>(
         });
 
         // Store with the turn_id as response_id for deterministic replay
-        let response_id = storage.store_response(
-            tenant_id,
-            &trace.session_id,
-            Some(&format!("resp_{}", turn.turn_id)),
-            response_data,
-            None,
-        ).await?;
+        let response_id = storage
+            .store_response(
+                tenant_id,
+                &trace.session_id,
+                Some(&format!("resp_{}", turn.turn_id)),
+                response_data,
+                None,
+            )
+            .await?;
 
         response_ids.push(response_id.clone());
         previous_response_id = Some(response_id);
@@ -279,7 +293,10 @@ mod tests {
         assert_eq!(trace.session_id, "root-123");
         assert_eq!(trace.turns.len(), 1);
         assert_eq!(trace.turns[0].user_input, "Hello, how are you?");
-        assert_eq!(trace.turns[0].assistant_output, Some("I'm doing well!".to_string()));
+        assert_eq!(
+            trace.turns[0].assistant_output,
+            Some("I'm doing well!".to_string())
+        );
     }
 
     #[test]

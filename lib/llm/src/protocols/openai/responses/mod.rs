@@ -352,12 +352,14 @@ fn convert_input_items_to_messages(
                             name: None,
                         })
                     }
-                    ResponseRole::Developer => {
-                        ChatCompletionRequestMessage::Developer(ChatCompletionRequestDeveloperMessage {
-                            content: ChatCompletionRequestDeveloperMessageContent::Text(content_text),
+                    ResponseRole::Developer => ChatCompletionRequestMessage::Developer(
+                        ChatCompletionRequestDeveloperMessage {
+                            content: ChatCompletionRequestDeveloperMessageContent::Text(
+                                content_text,
+                            ),
                             name: None,
-                        })
-                    }
+                        },
+                    ),
                     ResponseRole::User => {
                         ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                             content: ChatCompletionRequestUserMessageContent::Text(content_text),

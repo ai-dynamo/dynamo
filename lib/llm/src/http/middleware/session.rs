@@ -1,15 +1,13 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Request session extraction middleware
 //!
 //! Extracts tenant_id and session_id from trusted headers provided by upstream
 //! authentication/gateway service. Dynamo runs in a trusted environment and
 //! does not perform authentication itself.
 
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 
 /// Request session extracted from trusted upstream headers
 ///
@@ -89,12 +87,12 @@ pub async fn extract_session_middleware(
 mod tests {
     use super::*;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         middleware,
         response::IntoResponse,
         routing::get,
-        Router,
     };
     use tower::ServiceExt;
 
@@ -133,7 +131,6 @@ mod tests {
         assert!(body_str.contains("tenant=tenant_123"));
         assert!(body_str.contains("session=session_456"));
     }
-
 
     #[tokio::test]
     async fn test_missing_tenant_id() {
@@ -196,5 +193,4 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
-
 }
