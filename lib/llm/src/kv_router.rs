@@ -1,20 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
 use anyhow::Result;
+use dashmap::DashMap;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::{DiscoveryQuery, EventTransportKind},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
-        SingleIn, async_trait,
+        RouterMode, SingleIn, async_trait,
     },
     protocols::EndpointId,
     protocols::annotated::Annotated,
@@ -44,7 +45,7 @@ pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
-    discovery::{WorkerSetManager, RuntimeConfigs},
+    discovery::{WorkerSet, WorkerSetManager, RuntimeConfigs},
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
@@ -674,6 +675,11 @@ impl KvRouter {
             .is_some_and(|ss| ss.is_multi_set())
     }
 
+    /// Get the WorkerSetManager if in multi-set mode.
+    pub fn worker_set_manager(&self) -> Option<&Arc<WorkerSetManager>> {
+        self.set_scheduler.as_ref()?.set_manager()
+    }
+
     /// Get worker set weights for metrics/debugging (multi-set mode only).
     pub fn set_weights(&self) -> HashMap<String, usize> {
         self.set_scheduler
@@ -703,6 +709,65 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
+        // Multi-set branch: select set first, filter overlap scores, constrain scheduling
+        if let Some(ref set_scheduler) = self.set_scheduler {
+            if set_scheduler.is_multi_set() {
+                // 1. Select worker set (weighted by worker count)
+                let selected_set = set_scheduler
+                    .select_set()
+                    .ok_or_else(|| anyhow::anyhow!("No worker sets available"))?;
+
+                // 2. Get overlap scores from indexer (global across all namespaces)
+                let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+                let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+
+                // 3. Filter overlap_scores to selected set's workers
+                let set_instance_ids: HashSet<u64> =
+                    selected_set.instance_ids().iter().copied().collect();
+                let filtered_scores = OverlapScores {
+                    scores: overlap_scores
+                        .scores
+                        .iter()
+                        .filter(|(w, _)| set_instance_ids.contains(&w.worker_id))
+                        .map(|(k, v)| (*k, *v))
+                        .collect(),
+                    frequencies: overlap_scores.frequencies.clone(),
+                    tree_sizes: overlap_scores
+                        .tree_sizes
+                        .iter()
+                        .filter(|(w, _)| set_instance_ids.contains(&w.worker_id))
+                        .map(|(k, v)| (*k, *v))
+                        .collect(),
+                };
+
+                // 4. Schedule with worker_filter constraining to selected set
+                let maybe_seq_hashes = self
+                    .kv_router_config
+                    .compute_seq_hashes_for_tracking(tokens, self.block_size);
+                let best_worker = self
+                    .scheduler
+                    .schedule(
+                        context_id.map(|s| s.to_string()),
+                        isl_tokens,
+                        maybe_seq_hashes,
+                        filtered_scores.clone(),
+                        router_config_override,
+                        update_states,
+                        lora_name,
+                        Some(set_instance_ids),
+                    )
+                    .await?;
+
+                let overlap_amount = filtered_scores
+                    .scores
+                    .get(&best_worker)
+                    .copied()
+                    .unwrap_or(0);
+                return Ok((best_worker, overlap_amount));
+            }
+        }
+
+        // Single-set path (original logic)
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
         #[cfg(feature = "bench")]
         let hash_elapsed = start.elapsed();
@@ -725,6 +790,7 @@ impl KvRouter {
                 router_config_override,
                 update_states,
                 lora_name,
+                None, // No worker_filter in single-set mode
             )
             .await?;
 
@@ -940,6 +1006,8 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    /// Cached PushRouters per namespace for cross-namespace routing in multi-set mode.
+    set_routers: DashMap<String, Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -954,7 +1022,30 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
+        KvPushRouter {
+            inner,
+            chooser,
+            set_routers: DashMap::new(),
+        }
+    }
+
+    /// Get or create a cached PushRouter for the given worker set's namespace.
+    ///
+    /// Used for cross-namespace routing when the selected worker is in a different
+    /// namespace than the primary inner PushRouter's client.
+    async fn get_or_create_set_router(
+        &self,
+        set: &Arc<WorkerSet>,
+    ) -> Result<Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>> {
+        let namespace = set.namespace().to_string();
+        if let Some(router) = self.set_routers.get(&namespace) {
+            return Ok(router.value().clone());
+        }
+        let router = Arc::new(
+            PushRouter::from_client(set.client().clone(), RouterMode::KV).await?,
+        );
+        self.set_routers.insert(namespace, router.clone());
+        Ok(router)
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -1193,7 +1284,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let updated_request = context.map(|_| backend_input);
 
         let chooser = self.chooser.clone();
-        let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
+        // Route to the worker, using cross-namespace routing if needed
+        let mut response_stream =
+            if self.inner.client.instance_ids_avail().contains(&instance_id) {
+                self.inner.direct(updated_request, instance_id).await?
+            } else if let Some(wsm) = self.chooser.worker_set_manager() {
+                let set = wsm.find_set_for_instance(instance_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Instance {} not found in any worker set",
+                        instance_id
+                    )
+                })?;
+                let router = self.get_or_create_set_router(&set).await?;
+                router.direct(updated_request, instance_id).await?
+            } else {
+                self.inner.direct(updated_request, instance_id).await? // fallback
+            };
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 

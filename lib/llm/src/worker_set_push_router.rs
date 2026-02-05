@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use dynamo_runtime::{
     engine::AsyncEngine,
     pipeline::{Error, ManyOut, PushRouter, RouterMode, SingleIn},
@@ -17,7 +18,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    discovery::WorkerSetManager,
+    discovery::{WorkerSet, WorkerSetManager},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
 
@@ -28,9 +29,12 @@ use crate::{
 /// 2. Selects a worker within that set (random or round-robin)
 /// 3. Routes to that specific worker via the underlying PushRouter
 pub struct WorkerSetPushRouter {
+    #[allow(dead_code)] // Kept for constructor compatibility; routing uses per-set cached routers
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     worker_set_manager: Arc<WorkerSetManager>,
     router_mode: RouterMode,
+    /// Cached PushRouters per namespace for cross-namespace routing.
+    set_routers: DashMap<String, Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>>,
 }
 
 impl WorkerSetPushRouter {
@@ -43,13 +47,14 @@ impl WorkerSetPushRouter {
             inner,
             worker_set_manager,
             router_mode,
+            set_routers: DashMap::new(),
         }
     }
 
     /// Select a worker using worker set selection.
     ///
-    /// Returns the instance ID to route to, or an error if no workers are available.
-    fn select_worker(&self) -> Result<u64, Error> {
+    /// Returns the selected worker set and instance ID, or an error if no workers are available.
+    fn select_worker(&self) -> Result<(Arc<WorkerSet>, u64), Error> {
         // Step 1: Select a worker set (weighted by worker count)
         let worker_set = self
             .worker_set_manager
@@ -71,11 +76,29 @@ impl WorkerSetPushRouter {
             }
         };
 
-        instance_id.ok_or_else(|| {
+        let instance_id = instance_id.ok_or_else(|| {
             Error::from(anyhow::anyhow!(
                 "Selected worker set has no available instances"
             ))
-        })
+        })?;
+
+        Ok((worker_set, instance_id))
+    }
+
+    /// Get or create a cached PushRouter for the given worker set's namespace.
+    async fn get_or_create_router(
+        &self,
+        set: &Arc<WorkerSet>,
+    ) -> Result<Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>, Error> {
+        let namespace = set.namespace().to_string();
+        if let Some(router) = self.set_routers.get(&namespace) {
+            return Ok(router.value().clone());
+        }
+        let router = Arc::new(
+            PushRouter::from_client(set.client().clone(), RouterMode::KV).await?,
+        );
+        self.set_routers.insert(namespace, router.clone());
+        Ok(router)
     }
 }
 
@@ -87,8 +110,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        // Select worker using worker set selection
-        let instance_id = self.select_worker()?;
+        // Select worker set and worker using worker set selection
+        let (worker_set, instance_id) = self.select_worker()?;
 
         tracing::debug!(
             instance_id,
@@ -97,7 +120,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             "WorkerSetPushRouter selected worker"
         );
 
-        // Route to the selected worker via the underlying PushRouter
-        self.inner.direct(request, instance_id).await
+        // Route via a cached PushRouter for the selected set's namespace
+        let router = self.get_or_create_router(&worker_set).await?;
+        router.direct(request, instance_id).await
     }
 }

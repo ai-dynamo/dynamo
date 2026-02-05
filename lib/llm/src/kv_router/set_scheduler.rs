@@ -63,6 +63,11 @@ impl SetAwareScheduler {
         self.set_manager.is_some()
     }
 
+    /// Get the worker set manager, if multi-set mode is enabled.
+    pub fn set_manager(&self) -> Option<&Arc<WorkerSetManager>> {
+        self.set_manager.as_ref()
+    }
+
     /// Select a worker set using weighted random selection.
     ///
     /// Returns None if no sets have workers.

@@ -72,6 +72,9 @@ pub struct SchedulingRequest {
     pub update_states: bool,
     // LORA adapter name extracted from request.model field
     pub lora_name: Option<String>,
+    // Optional filter to constrain worker selection to a specific set of workers.
+    // Used in multi-set mode to restrict scheduling to a selected worker set.
+    pub worker_filter: Option<HashSet<WorkerId>>,
     // Option to take it out to send the response without moving the struct
     resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
@@ -210,11 +213,29 @@ impl KvScheduler {
                 request.prefill_tokens = prefill_tokens;
 
                 // Read the current workers configuration from DashMap
-                let workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_scheduler
-                    .configs
-                    .iter()
-                    .map(|r| (*r.key(), r.value().clone()))
-                    .collect();
+                let workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> =
+                    if let Some(ref filter) = request.worker_filter {
+                        // Multi-set mode: only consider workers in the filter.
+                        // Use config from RuntimeConfigs if available, None otherwise.
+                        filter
+                            .iter()
+                            .map(|wid| {
+                                let config = workers_scheduler
+                                    .configs
+                                    .get(wid)
+                                    .map(|r| r.value().clone())
+                                    .unwrap_or(None);
+                                (*wid, config)
+                            })
+                            .collect()
+                    } else {
+                        // Single-set mode: use all workers from RuntimeConfigs
+                        workers_scheduler
+                            .configs
+                            .iter()
+                            .map(|r| (*r.key(), r.value().clone()))
+                            .collect()
+                    };
 
                 match selector.select_worker(&workers, &request, block_size) {
                     Ok(selection) => {
@@ -289,6 +310,7 @@ impl KvScheduler {
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        worker_filter: Option<HashSet<WorkerId>>,
     ) -> Result<WorkerWithDpRank, KvSchedulerError> {
         #[cfg(feature = "bench")]
         let start = Instant::now();
@@ -304,6 +326,7 @@ impl KvScheduler {
             router_config_override: router_config_override.cloned(),
             update_states,
             lora_name,
+            worker_filter,
             resp_tx: Some(resp_tx), // Wrap in Some()
         };
 
