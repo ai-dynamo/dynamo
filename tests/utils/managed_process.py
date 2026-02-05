@@ -8,7 +8,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -179,15 +178,13 @@ class ManagedProcess:
             else:
                 self._command_name = self.command[0]
 
-            # Keep test logs out of the git working tree: many tests pass a relative
-            # `log_dir` derived from `request.node.name`, which otherwise creates a large
-            # number of untracked directories under the repo root during pytest runs.
+            # If DYN_TEST_OUTPUT_PATH is set, redirect relative log_dir paths there
+            # to keep test logs out of the git working tree. Otherwise, use the
+            # relative path as-is (old behavior).
             if not os.path.isabs(self.log_dir):
-                log_root = os.environ.get(
-                    "DYN_TEST_OUTPUT_PATH",
-                    os.path.join(tempfile.gettempdir(), "dynamo_tests"),
-                )
-                self.log_dir = os.path.join(log_root, self.log_dir)
+                log_root = os.environ.get("DYN_TEST_OUTPUT_PATH")
+                if log_root:
+                    self.log_dir = os.path.join(log_root, self.log_dir)
 
             os.makedirs(self.log_dir, exist_ok=True)
             log_name = f"{self._command_name}.log.txt"
