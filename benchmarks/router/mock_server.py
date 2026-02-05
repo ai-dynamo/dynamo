@@ -62,7 +62,10 @@ class RequestLogger:
         # Extract useful fields
         model = request_data.get("model", "unknown")
         messages = request_data.get("messages", [])
-        max_tokens = request_data.get("max_tokens", "N/A")
+        # Support both max_completion_tokens (new) and max_tokens (legacy)
+        max_tokens = request_data.get(
+            "max_completion_tokens", request_data.get("max_tokens", "N/A")
+        )
 
         # Check for session tracking via x-correlation-id header
         correlation_id = headers.get(
@@ -140,7 +143,8 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
 
     # Check if streaming is requested
     stream = body.get("stream", False)
-    max_tokens = body.get("max_tokens", 10)
+    # Support both max_completion_tokens (new) and max_tokens (legacy)
+    max_tokens = body.get("max_completion_tokens", body.get("max_tokens", 10))
 
     if stream:
         # Return a streaming response
