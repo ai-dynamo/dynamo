@@ -13,6 +13,9 @@ inputs:
     description: 'Docker platform to build on, ie. linux/amd64'
     required: false
     default: 'linux/amd64'
+  cuda_version:
+    description: 'Optional override for CUDA_VERSION build-arg'
+    required: true
   image_tag:
     description: 'Custom image tag'
     required: true
@@ -33,21 +36,6 @@ inputs:
     required: false
   aws_secret_access_key:
     description: 'AWS Secret Access Key'
-    required: false
-  base_image_tag:
-    description: 'Optional override for base image tag passed to build.sh'
-    required: false
-  runtime_image_tag:
-    description: 'Optional override for RUNTIME_IMAGE_TAG build-arg'
-    required: false
-  cuda_version:
-    description: 'Optional override for CUDA_VERSION build-arg'
-    required: true
-  enable_kvbm:
-    description: 'Enable KVBM support (optional)'
-    required: false
-  dynamo_base_image:
-    description: 'Pre-built Dynamo base image to use instead of building from scratch'
     required: false
   no_cache:
     description: 'Disable Docker build cache'
@@ -117,21 +105,20 @@ runs:
         # Collect optional overrides provided by the workflow
         # Set base cache args and set --cache-to if this is a main commit
         # TODO: Fix this - Skip cache for frontend target - a different docker driver is used for the EPP build, which causes issues with cache export
-        EXTRA_ARGS=""
+        CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          EXTRA_ARGS="--cache-to type=inline "
-          EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
-          EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/} "
-          EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
+          CACHE_ARGS="--cache-to type=inline "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/} "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
           if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
             # Release branches also use release cache
-            EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
           elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
           fi
         fi
-
-        echo "$EXTRA_ARGS"
+        echo "$CACHE_ARGS"
         # Collect optional overrides provided by the workflow
 
         if [[ "${{ inputs.ci }}" == "true" ]]; then
@@ -139,21 +126,6 @@ runs:
           EXTRA_ARGS+=" --ci"
         fi
 
-        if [ -n "${{ inputs.base_image_tag }}" ]; then
-          EXTRA_ARGS+="--base-image-tag ${{ inputs.base_image_tag }} "
-        fi
-        if [ -n "${{ inputs.runtime_image_tag }}" ]; then
-          EXTRA_ARGS+="--build-arg RUNTIME_IMAGE_TAG=${{ inputs.runtime_image_tag }} "
-        fi
-        if [ -n "${{ inputs.cuda_version }}" ]; then
-          EXTRA_ARGS+="--build-arg CUDA_VERSION=${{ inputs.cuda_version }} "
-        fi
-        if [ -n "${{ inputs.dynamo_base_image }}" ]; then
-          EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"
-        fi
-        if [ -n "${{ inputs.enable_kvbm }}" ]; then
-          EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
-        fi
         if [ "${{ inputs.no_cache }}" == "true" ]; then
           EXTRA_ARGS+=" --no-cache"
         fi
@@ -176,16 +148,19 @@ runs:
           done <<< "$EXTRA_TAGS"
         fi
 
-        # Execute build and capture output (show on console AND save to file)
-        ./container/build.sh --tag "$IMAGE_TAG" \
-          --target ${{ inputs.target }} \
-          --vllm-max-jobs 10 \
-          --no-tag-latest \
-          --framework ${{ inputs.framework }} \
-          --platform ${{ inputs.platform }} \
-          --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" \
-          $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
+          # --build-arg USE_SCCACHE=true \
+          # --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET} \
+          # --build-arg SCCACHE_REGION=${SCCACHE_REGION} \
+          # --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+          # --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+        docker buildx build \
+          --progress=plain \
+          --tag "$IMAGE_TAG" \
+          --platform linux/${{ inputs.platform }}
+          -f ./container/rendered.Dockerfile \
+          $CACHE_ARGS \
+          $EXTRA_ARGS \
+          $EPP_IMAGE_ARG . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 

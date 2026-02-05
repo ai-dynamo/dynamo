@@ -105,7 +105,11 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
+        with:
+          python-version: '3.12'
+          pip-install: jinja2 pyyaml
       - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
         id: extra-tags
         shell: bash
@@ -134,7 +138,6 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -146,7 +149,6 @@ jobs:
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
@@ -154,7 +156,6 @@ jobs:
           flavor: ${{ inputs.framework }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
-
       - name: Print Build Container inputs
         run: |
           echo "=== Build Container Inputs ==="
@@ -167,7 +168,19 @@ jobs:
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ inputs.push_image }}"
           echo "no_load: ${{ inputs.no_load }}"
-
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "::group::Generating Dockerfile"
+          echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+          python ./container/render.py \
+              --target=${{ inputs.target }} \
+              --framework=${{ inputs.framework }} \
+              --platform=${{ inputs.platform }} \
+              --cuda-version=${{ inputs.cuda_version }} \
+              --show-result \
+              --short-output
+          echo "::endgroup::"
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-remote-build
