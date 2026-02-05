@@ -390,7 +390,11 @@ async def init(
         runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
-        runtime_config.enable_local_indexer = config.enable_local_indexer
+        # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+        runtime_config.enable_local_indexer = (
+            config.enable_local_indexer
+            and config.disaggregation_mode != DisaggregationMode.DECODE
+        )
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(

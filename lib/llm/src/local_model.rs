@@ -253,7 +253,11 @@ impl LocalModelBuilder {
             self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
             self.runtime_config.max_num_batched_tokens =
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer;
+            // Decode workers don't create the WorkerKvQuery endpoint (scheduler_component is None),
+            // so they must not advertise enable_local_indexer=true or the router will hang
+            // trying to query them during initial recovery.
+            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer
+                && mocker_engine_args.worker_type != WorkerType::Decode;
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
             self.media_decoder = Some(MediaDecoder {
                 image: Some(ImageDecoder::default()),

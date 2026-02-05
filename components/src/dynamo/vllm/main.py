@@ -523,7 +523,10 @@ async def register_vllm_model(
     runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
-    runtime_config.enable_local_indexer = config.enable_local_indexer
+    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+    runtime_config.enable_local_indexer = (
+        config.enable_local_indexer and not config.is_decode_worker
+    )
 
     # Add tool/reasoning parsers for decode models
     if model_type != ModelType.Prefill:
