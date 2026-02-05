@@ -26,5 +26,7 @@ jobs:
     steps:
       - name: Check GPUs
         run: |
+          sleep 120
           nvidia-smi
           echo "GPU count: $(nvidia-smi -L | wc -l)"
+
