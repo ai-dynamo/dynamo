@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use dynamo_llm::{
     discovery::{KvWorkerMonitor, ModelWatcher},
     kv_router::{protocols::*, publisher::KvEventPublisher},
+    namespace::NamespaceFilter,
 };
 use dynamo_runtime::discovery::DiscoveryQuery;
 use dynamo_runtime::{DistributedRuntime, Worker};
@@ -1380,15 +1381,17 @@ pub async fn create_worker_selection_pipeline_chat(
     };
     // Create metrics for migration tracking (not exposed via /metrics in C bindings)
     let metrics = Arc::new(Metrics::new());
+    let namespace_filter = NamespaceFilter::from_options(Some(namespace), None);
     let watcher = ModelWatcher::new(
         component.drt().clone(),
         model_manager.clone(),
         router_config,
+        namespace_filter.clone(),
         None,
         metrics.clone(),
     );
     let cards = watcher
-        .cards_for_model(model_name, Some(namespace), false)
+        .cards_for_model(model_name, &namespace_filter)
         .await
         .with_context(|| format!("Failed to discover model: {}", model_name))?;
 
@@ -1407,6 +1410,7 @@ pub async fn create_worker_selection_pipeline_chat(
                     card.kv_cache_block_size,
                     kv_router_config,
                     WORKER_TYPE_DECODE,
+                    Some(model_name),
                 )
                 .await?,
         )

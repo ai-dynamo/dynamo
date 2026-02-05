@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_runtime::{
-    engine::{AsyncEngine, AsyncEngineStream, Data},
-    pipeline::{Context, Error, ManyOut, PushRouter, RouterMode, SingleIn},
+    engine::AsyncEngine,
+    pipeline::{Error, ManyOut, PushRouter, RouterMode, SingleIn},
     protocols::annotated::Annotated,
 };
 
@@ -100,9 +100,4 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Route to the selected worker via the underlying PushRouter
         self.inner.direct(request, instance_id).await
     }
-}
-
-impl AsyncEngineStream<ManyOut<Annotated<LLMEngineOutput>>>
-    for WorkerSetPushRouter
-{
 }
