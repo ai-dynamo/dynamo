@@ -120,7 +120,7 @@ Reference a custom DGD configuration via ConfigMap:
 ```bash
 # Create ConfigMap from your DGD config file
 kubectl create configmap deepseek-r1-config \
-  --from-file=disagg.yaml=/path/to/your/disagg.yaml \
+  --from-file=/path/to/your/disagg.yaml \
   --namespace $NAMESPACE \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
