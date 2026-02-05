@@ -191,7 +191,6 @@ After the delay:
 
 ## Future Work
 
-- Replace the 30-second startup delay with proper runtime readiness probing
 - Support aggregated (non-disaggregated) scaling mode for single-worker deployments
 - Multi-DGD coordination for shared-cluster scenarios
 - Distribution-aware interpolation (beyond mean ISL/OSL)
