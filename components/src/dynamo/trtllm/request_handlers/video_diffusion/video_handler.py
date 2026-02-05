@@ -70,15 +70,48 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
         Returns:
             Tuple of (width, height).
+
+        Raises:
+            ValueError: If dimensions exceed configured max_width/max_height.
         """
         if not size:
-            return self.config.default_width, self.config.default_height
-        try:
-            w, h = size.split("x")
-            return int(w), int(h)
-        except (ValueError, AttributeError):
-            logger.warning(f"Invalid size format: {size}, using defaults")
-            return self.config.default_width, self.config.default_height
+            width, height = self.config.default_width, self.config.default_height
+        else:
+            try:
+                w, h = size.split("x")
+                width, height = int(w), int(h)
+            except (ValueError, AttributeError):
+                logger.warning(f"Invalid size format: {size}, using defaults")
+                width, height = self.config.default_width, self.config.default_height
+
+        # Validate dimensions to prevent OOM
+        self._validate_dimensions(width, height)
+        return width, height
+
+    def _validate_dimensions(self, width: int, height: int) -> None:
+        """Validate that dimensions don't exceed configured limits.
+
+        Args:
+            width: Requested width in pixels.
+            height: Requested height in pixels.
+
+        Raises:
+            ValueError: If width or height exceeds the configured maximum.
+        """
+        errors = []
+        if width > self.config.max_width:
+            errors.append(f"width {width} exceeds max_width {self.config.max_width}")
+        if height > self.config.max_height:
+            errors.append(
+                f"height {height} exceeds max_height {self.config.max_height}"
+            )
+
+        if errors:
+            raise ValueError(
+                f"Requested dimensions too large: {', '.join(errors)}. "
+                f"This is a safety check to prevent out-of-memory errors. "
+                f"To allow larger sizes, increase --max-width and/or --max-height."
+            )
 
     def _compute_num_frames(self, req: NvCreateVideoRequest) -> int:
         """Compute num_frames from request parameters.
@@ -100,7 +133,9 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
         # Priority 2: If user provided seconds and/or fps, calculate frame count
         # Use config defaults for any unspecified value
-        seconds = req.seconds if req.seconds is not None else 4
+        seconds = (
+            req.seconds if req.seconds is not None else self.config.default_seconds
+        )
         fps = req.fps if req.fps is not None else self.config.default_fps
         computed = seconds * fps
 

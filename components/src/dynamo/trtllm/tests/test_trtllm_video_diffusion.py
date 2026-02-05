@@ -246,6 +246,9 @@ class MockDiffusionConfig:
     default_height: int = 480
     default_num_frames: int = 81
     default_fps: int = 24
+    default_seconds: int = 4
+    max_width: int = 4096
+    max_height: int = 4096
 
 
 @dataclass
@@ -313,6 +316,34 @@ class TestVideHandlerParseSize:
 
         # Trailing 'x'
         assert self.handler._parse_size("832x") == (832, 480)
+
+    def test_parse_size_exceeds_max_width(self):
+        """Test that width exceeding max_width raises ValueError."""
+        with pytest.raises(ValueError) as exc_info:
+            self.handler._parse_size("5000x480")
+        assert "width 5000 exceeds max_width 4096" in str(exc_info.value)
+        assert "safety check to prevent out-of-memory" in str(exc_info.value)
+
+    def test_parse_size_exceeds_max_height(self):
+        """Test that height exceeding max_height raises ValueError."""
+        with pytest.raises(ValueError) as exc_info:
+            self.handler._parse_size("832x5000")
+        assert "height 5000 exceeds max_height 4096" in str(exc_info.value)
+
+    def test_parse_size_exceeds_both_dimensions(self):
+        """Test that both dimensions exceeding raises ValueError with both errors."""
+        with pytest.raises(ValueError) as exc_info:
+            self.handler._parse_size("10000x10000")
+        error_msg = str(exc_info.value)
+        assert "width 10000 exceeds max_width 4096" in error_msg
+        assert "height 10000 exceeds max_height 4096" in error_msg
+
+    def test_parse_size_at_max_boundary(self):
+        """Test that dimensions exactly at max are allowed."""
+        # Should not raise - exactly at limit
+        width, height = self.handler._parse_size("4096x4096")
+        assert width == 4096
+        assert height == 4096
 
 
 class TestVideoHandlerComputeNumFrames:

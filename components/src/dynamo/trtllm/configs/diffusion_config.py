@@ -50,8 +50,12 @@ class DiffusionConfig:
     # Default generation parameters
     default_height: int = 480
     default_width: int = 832
+    # Maximum allowed dimensions to prevent OOM. Can be increased if GPU has sufficient VRAM.
+    max_height: int = 4096
+    max_width: int = 4096
     default_num_frames: int = 81
     default_fps: int = 24  # Used for both frame count calculation and video encoding
+    default_seconds: int = 4  # Default video duration when only fps is specified
     default_num_inference_steps: int = 50
     default_guidance_scale: float = 5.0
 
