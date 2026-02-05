@@ -15,7 +15,8 @@ use axum::http::Response;
 use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
-use crate::discovery::ModelManager;
+use super::metrics::register_worker_timing_metrics;
+use crate::discovery::{ModelManager, register_worker_load_metrics};
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
@@ -391,6 +392,18 @@ impl HttpServiceConfigBuilder {
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
+
+        // Register worker load metrics (active_decode_blocks, active_prefill_tokens per worker)
+        // These are updated by KvWorkerMonitor when receiving ActiveLoad events
+        if let Err(e) = register_worker_load_metrics(&registry) {
+            tracing::warn!("Failed to register worker load metrics: {}", e);
+        }
+
+        // Register worker timing metrics (last_ttft, last_itl per worker)
+        // These are updated by ResponseMetricCollector when observing TTFT/ITL
+        if let Err(e) = register_worker_timing_metrics(&registry) {
+            tracing::warn!("Failed to register worker timing metrics: {}", e);
+        }
 
         // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
         // Setup custom backend metrics if configured

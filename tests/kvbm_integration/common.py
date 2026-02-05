@@ -336,7 +336,7 @@ class DeterminismTester(ApiTester):
 
         top_k = -1
         if check_module_available("tensorrt_llm"):
-            top_k = 0
+            top_k = 1  # TensorRT-LLM requires top_k>=0 and dynamo frontend does not support top_k=0
         # For determinism: use temperature=0 which should trigger greedy decoding in vLLM
         # Setting top_p=1.0 and top_k=-1 to avoid any sampling/filtering
         return super().make_request(
@@ -584,6 +584,12 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     if gpu_blocks is not None:
         command.extend(["--num-gpu-blocks-override", str(gpu_blocks)])
 
+    # Chunked prefill configuration
+    if "max_num_batched_tokens" in params:
+        command.extend(
+            ["--max-num-batched-tokens", str(params["max_num_batched_tokens"])]
+        )
+
     # Set up environment
     # Note: NATS_SERVER and ETCD_ENDPOINTS are already set by runtime_services_dynamic_ports fixture
     env = os.environ.copy()
@@ -635,7 +641,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
             except Exception:
                 pass  # Continue cleanup even if one process fails
 
-    # SAFETY: Do NOT use terminate_existing=True or stragglers=["vllm"] here.
+    # SAFETY: Do NOT use terminate_all_matching_process_names=True or stragglers=["vllm"] here.
     # Those kill ALL vLLM processes system-wide, breaking parallel test execution.
     # Port-based cleanup above is targeted and xdist-safe.
     with ManagedProcess(
@@ -644,7 +650,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         health_check_ports=[port, metrics_port],  # vLLM server + KVBM metrics
         timeout=timeout,
         display_output=True,
-        terminate_existing=False,  # Port-based cleanup done above instead
+        terminate_all_matching_process_names=False,  # Port-based cleanup done above instead
         stragglers=[],  # Empty - we handle cleanup manually per port
         straggler_commands=[],  # Empty - we handle cleanup manually per port
         log_dir=log_dir,

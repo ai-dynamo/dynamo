@@ -549,7 +549,10 @@ pub unsafe extern "C" fn create_routers(
             );
             return Err(QueryRouterResult::ErrInitFailed);
         }
-        tracing::info!("Discovery sync complete, {} worker(s) found", instance_count);
+        tracing::info!(
+            "Discovery sync complete, {} worker(s) found",
+            instance_count
+        );
 
         let kv_router_config = KvRouterConfig::default();
 
@@ -633,7 +636,13 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        Ok((prefill_router, decode_router, model_manager, namespace_str, preprocessor))
+        Ok((
+            prefill_router,
+            decode_router,
+            model_manager,
+            namespace_str,
+            preprocessor,
+        ))
     });
 
     match result {

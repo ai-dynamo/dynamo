@@ -7,7 +7,7 @@ import os
 import random
 
 import pandas as pd
-from prefix_data_generator.hasher import RollingHasher
+from aiperf.dataset.synthesis import RollingHasher
 from tqdm import tqdm
 
 
@@ -213,7 +213,7 @@ def convert_to_mooncake(df, block_size, num_hash_blocks):
             (random.randint(0, num_hash_blocks),) for _ in range(hash_array_length)
         ]
 
-        hash_ids = hasher(content_blocks)
+        hash_ids = hasher.hash_token_blocks(content_blocks)
 
         mooncake_data.append(
             {
