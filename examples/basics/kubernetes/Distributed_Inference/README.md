@@ -69,6 +69,7 @@ aiconfigurator cli default --model LLAMA3.1_70B --total_gpus 16 --system h200_sx
 ```
 and from the output, you can see the Pareto curve with the suggested P/D settings
 ![text](images/pareto.png)
+
 3. Start the serving with 1 prefill worker with tensor parallelism 4 and 1 decoding worker with tensor parallelism 8 as AI Configurator suggested. Update the `my-tag` in `disagg_router.yaml` with the latest Dynamo version and your local cache folder path and run following command.
 ![text](images/settings.png)
 ```sh

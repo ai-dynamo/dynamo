@@ -18,7 +18,8 @@ import os
 import re
 from collections import defaultdict
 
-from prefix_data_generator.hasher import texts_to_hashes
+from aiperf.common.tokenizer import Tokenizer
+from aiperf.dataset.synthesis.rolling_hasher import texts_to_hashes
 from tqdm import tqdm
 
 
@@ -264,7 +265,8 @@ def convert_to_mooncake(
     all_texts = [entry[3] for entry in all_entries]
     print(f"Hashing {len(all_texts)} texts...")
 
-    all_hash_ids = texts_to_hashes(tokenizer_name, all_texts, block_size)
+    tokenizer = Tokenizer.from_pretrained(tokenizer_name)
+    all_hash_ids = texts_to_hashes(tokenizer, all_texts, block_size)
 
     # Phase 3: Build mooncake entries
     mooncake_data = []
