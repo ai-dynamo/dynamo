@@ -86,10 +86,25 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 k: v for k, v in sampling_params.items() if v is not None
             }
 
-        # Use provided bootstrap_room from bootstrap_info if available, otherwise generate one
+        # Use provided bootstrap_info if available (e.g., for health checks with FAKE_BOOTSTRAP_HOST)
+        # Otherwise use real bootstrap host/port from engine and generate room locally
+        bootstrap_host = self.bootstrap_host
+        bootstrap_port = self.bootstrap_port
         bootstrap_room = None
+
         bootstrap_info_from_req = inner_request.get("bootstrap_info")
         if isinstance(bootstrap_info_from_req, dict):
+            # Allow overriding bootstrap_host for fake-transfer mode (health checks)
+            if "bootstrap_host" in bootstrap_info_from_req:
+                bootstrap_host = bootstrap_info_from_req["bootstrap_host"]
+                logging.debug(
+                    f"Using request-provided bootstrap_host: {bootstrap_host}"
+                )
+            if "bootstrap_port" in bootstrap_info_from_req:
+                bootstrap_port = bootstrap_info_from_req["bootstrap_port"]
+                logging.debug(
+                    f"Using request-provided bootstrap_port: {bootstrap_port}"
+                )
             bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
             if bootstrap_room is not None:
                 logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
@@ -99,8 +114,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
 
         bootstrap_info = {
-            "bootstrap_host": self.bootstrap_host,
-            "bootstrap_port": self.bootstrap_port,
+            "bootstrap_host": bootstrap_host,
+            "bootstrap_port": bootstrap_port,
             "bootstrap_room": bootstrap_room,
         }
 
@@ -121,8 +136,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             **input_param,
             sampling_params=sampling_params,
             stream=True,
-            bootstrap_host=self.bootstrap_host,
-            bootstrap_port=self.bootstrap_port,
+            bootstrap_host=bootstrap_host,
+            bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
