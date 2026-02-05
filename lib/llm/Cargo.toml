@@ -29,6 +29,7 @@ media-nixl = ["dep:nixl-sys", "dep:flate2"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
+redis-storage = ["dep:deadpool-redis", "dep:redis"]
 
 [[bench]]
 name = "tokenizer"
@@ -124,6 +125,9 @@ flate2 = { version = "1", optional = true }
 clap = { version = "4.5.49", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 
+# redis-storage
+deadpool-redis = { version = "0.18", optional = true }
+redis = { version = "0.27", features = ["tokio-comp", "script"], optional = true }
 
 # protocols
 unicode-segmentation = "1.12"
@@ -219,4 +223,3 @@ tonic-build = { version = "0.13.1" }
 name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
-
