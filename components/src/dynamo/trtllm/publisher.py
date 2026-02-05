@@ -111,6 +111,7 @@ class ZmqKvEventPublisher:
         block_hashes: list[int],
         lora_id: int = 0,
         parent_hash: Optional[int] = None,
+        attention_dp_rank: int = 0,
     ):
         """Publish a BlockStored event.
 
@@ -133,9 +134,9 @@ class ZmqKvEventPublisher:
             "lora_id": lora_id if lora_id != 0 else None,
         }
 
-        self._publish_event(event)
+        self._publish_event(event, attention_dp_rank)
 
-    def publish_removed(self, block_hashes: list[int]):
+    def publish_removed(self, block_hashes: list[int], attention_dp_rank: int = 0):
         """Publish a BlockRemoved event.
 
         Note: event_id is managed internally via self.sequence counter.
@@ -148,24 +149,23 @@ class ZmqKvEventPublisher:
             "block_hashes": block_hashes_signed,
         }
 
-        self._publish_event(event)
+        self._publish_event(event, attention_dp_rank)
 
     def publish_all_cleared(self):
         """Publish an AllBlocksCleared event."""
         event = {"type": "AllBlocksCleared"}
         self._publish_event(event)
 
-    def _publish_event(self, event: dict):
+    def _publish_event(self, event: dict, attention_dp_rank: int = 0):
         """Publish a single event to ZMQ in vLLM batch format."""
         try:
             # Create batch in vLLM format: [timestamp, [events], data_parallel_rank]
-            # Use attention_dp_rank from event if present (attention DP enabled), otherwise default to 0
+            # The third element (data_parallel_rank) is used by the router for dp_rank routing
             timestamp = time.time()
-            data_parallel_rank = event.get("attention_dp_rank", self.data_parallel_rank)
-            batch = [timestamp, [event], data_parallel_rank]
+            batch = [timestamp, [event], attention_dp_rank]
             event_type = event.get("type", "Unknown")
             logging.debug(
-                f"TensorRT-LLM: ZMQ publisher sending {event_type} event (attention_dp_rank={data_parallel_rank}) to {self.zmq_endpoint}"
+                f"TensorRT-LLM: ZMQ publisher sending {event_type} event (dp_rank={attention_dp_rank}) to {self.zmq_endpoint}"
             )
 
             # Serialize with msgpack (vLLM uses msgpack/rmp_serde compatible format)
@@ -561,6 +561,7 @@ class Publisher:
                     block_hashes,
                     lora_id,
                     parent_hash,
+                    attention_dp_rank,
                 )
             elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
@@ -604,7 +605,9 @@ class Publisher:
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
             if self.zmq_kv_event_publisher:
                 # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_removed(removed_block_hashes)
+                self.zmq_kv_event_publisher.publish_removed(
+                    removed_block_hashes, attention_dp_rank
+                )
             elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
                 # Route to correct publisher based on attention_dp_rank

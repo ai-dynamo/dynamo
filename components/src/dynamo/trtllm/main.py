@@ -395,9 +395,7 @@ async def init(
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
-        attention_dp_size = (
-            config.tensor_parallel_size if config.enable_attention_dp else 1
-        )
+        attention_dp_size = engine.get_attention_dp_size()
         runtime_config.data_parallel_size = attention_dp_size
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
