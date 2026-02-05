@@ -1,0 +1,86 @@
+[2m2026-01-22T00:50:05.434493Z[0m [33m WARN[0m [2mdefaults._get_default_prometheus_endpoint[0m[2m:[0m Cannot determine Prometheus endpoint. Running in namespace 'default'. Ensure the planner is deployed in a Kubernetes cluster with proper namespace configuration.   
+[2m2026-01-22T00:50:06.074638Z[0m [32m INFO[0m [2mfont_manager._load_fontmanager[0m[2m:[0m generated new fontManager   
+/opt/dynamo/venv/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+2026-01-22 00:50:11 - benchmarks.profiler.utils.search_space_autogen - INFO - DGD config file not provided, using default config file
+[2m2026-01-22T00:50:11.665734Z[0m [32m INFO[0m [2msearch_space_autogen.auto_generate_search_space[0m[2m:[0m DGD config file not provided, using default config file   
+2026-01-22 00:50:11 - benchmarks.profiler.utils.search_space_autogen - INFO - Updating model in DGD config file to Qwen/Qwen3-0.6B
+[2m2026-01-22T00:50:11.669279Z[0m [32m INFO[0m [2msearch_space_autogen.auto_generate_search_space[0m[2m:[0m Updating model in DGD config file to Qwen/Qwen3-0.6B   
+2026-01-22 00:50:11 - benchmarks.profiler.utils.search_space_autogen - INFO - Updating DGD image to nvcr.io/nvidia/ai-dynamo/vllm-runtime:${VERSION}
+[2m2026-01-22T00:50:11.669518Z[0m [32m INFO[0m [2msearch_space_autogen.auto_generate_search_space[0m[2m:[0m Updating DGD image to nvcr.io/nvidia/ai-dynamo/vllm-runtime:${VERSION}   
+2026-01-22 00:50:11 - benchmarks.profiler.utils.search_space_autogen - INFO - Saving generated disagg DGD config for profiling to /data/disagg_config.yaml
+[2m2026-01-22T00:50:11.669653Z[0m [32m INFO[0m [2msearch_space_autogen.auto_generate_search_space[0m[2m:[0m Saving generated disagg DGD config for profiling to /data/disagg_config.yaml   
+Traceback (most recent call last):
+  File "/workspace/deploy/utils/gpu_inventory.py", line 169, in collect_gpu_inventory
+    return _via_client(), ",".join(sources_tried)
+           ^^^^^^^^^^^^^
+  File "/workspace/deploy/utils/gpu_inventory.py", line 159, in _via_client
+    items = _list_nodes_via_client()
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/deploy/utils/gpu_inventory.py", line 140, in _list_nodes_via_client
+    items = v1.list_node().items  # type: ignore[attr-defined]
+            ^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/kubernetes/client/api/core_v1_api.py", line 17150, in list_node
+    return self.list_node_with_http_info(**kwargs)  # noqa: E501
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/kubernetes/client/api/core_v1_api.py", line 17261, in list_node_with_http_info
+    return self.api_client.call_api(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/kubernetes/client/api_client.py", line 348, in call_api
+    return self.__call_api(resource_path, method,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/kubernetes/client/api_client.py", line 180, in __call_api
+    response_data = self.request(
+                    ^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/kubernetes/client/api_client.py", line 373, in request
+    return self.rest_client.GET(url,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/kubernetes/client/rest.py", line 244, in GET
+    return self.request("GET", url,
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/kubernetes/client/rest.py", line 238, in request
+    raise ApiException(http_resp=r)
+kubernetes.client.exceptions.ApiException: (403)
+Reason: Forbidden
+HTTP response headers: HTTPHeaderDict({'Audit-Id': 'a579d0cc-1f1b-46c9-a3e3-d1883753720c', 'Cache-Control': 'no-cache, private', 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff', 'X-Kubernetes-Pf-Flowschema-Uid': '878922fc-f364-4132-96c6-be67541974b0', 'X-Kubernetes-Pf-Prioritylevel-Uid': '1d63c168-4eae-4746-bf7b-bb71ba164347', 'Date': 'Thu, 22 Jan 2026 00:50:12 GMT', 'Content-Length': '288'})
+HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"nodes is forbidden: User \"system:serviceaccount:default:dgdr-profiling-job\" cannot list resource \"nodes\" in API group \"\" at the cluster scope","reason":"Forbidden","details":{"kind":"nodes"},"code":403}
+
+
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspace/deploy/utils/gpu_inventory.py", line 174, in collect_gpu_inventory
+    return _via_kubectl(), ",".join(sources_tried)
+           ^^^^^^^^^^^^^^
+  File "/workspace/deploy/utils/gpu_inventory.py", line 163, in _via_kubectl
+    items = _list_nodes_via_kubectl()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/deploy/utils/gpu_inventory.py", line 146, in _list_nodes_via_kubectl
+    raise RuntimeError("kubectl not found in PATH for fallback")
+RuntimeError: kubectl not found in PATH for fallback
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/workspace/benchmarks/profiler/profile_sla.py", line 759, in <module>
+    args = create_profiler_parser()
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/benchmarks/profiler/utils/profiler_argparse.py", line 308, in create_profiler_parser
+    auto_generate_search_space(args)
+  File "/workspace/benchmarks/profiler/utils/search_space_autogen.py", line 61, in auto_generate_search_space
+    gpu_info = get_gpu_summary()
+               ^^^^^^^^^^^^^^^^^
+  File "/workspace/deploy/utils/gpu_inventory.py", line 397, in get_gpu_summary
+    rows, _ = collect_gpu_inventory(prefer_client=prefer_client)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/deploy/utils/gpu_inventory.py", line 177, in collect_gpu_inventory
+    raise RuntimeError("Failed to list nodes: " + " | ".join(errors))
+RuntimeError: Failed to list nodes: (403)
+Reason: Forbidden
+HTTP response headers: HTTPHeaderDict({'Audit-Id': 'a579d0cc-1f1b-46c9-a3e3-d1883753720c', 'Cache-Control': 'no-cache, private', 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff', 'X-Kubernetes-Pf-Flowschema-Uid': '878922fc-f364-4132-96c6-be67541974b0', 'X-Kubernetes-Pf-Prioritylevel-Uid': '1d63c168-4eae-4746-bf7b-bb71ba164347', 'Date': 'Thu, 22 Jan 2026 00:50:12 GMT', 'Content-Length': '288'})
+HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"nodes is forbidden: User \"system:serviceaccount:default:dgdr-profiling-job\" cannot list resource \"nodes\" in API group \"\" at the cluster scope","reason":"Forbidden","details":{"kind":"nodes"},"code":403}
+
+ | kubectl not found in PATH for fallback

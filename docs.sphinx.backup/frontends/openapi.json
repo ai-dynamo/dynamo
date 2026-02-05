@@ -1,0 +1,2893 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "NVIDIA Dynamo OpenAI Frontend",
+    "description": "OpenAI-compatible HTTP API for NVIDIA Dynamo.",
+    "contact": {
+      "name": "NVIDIA Dynamo",
+      "url": "https://github.com/ai-dynamo/dynamo"
+    },
+    "license": {
+      "name": "Apache-2.0"
+    },
+    "version": "0.7.0"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Current server"
+    }
+  ],
+  "paths": {
+    "/busy_threshold": {
+      "get": {
+        "summary": "Endpoint: /busy_threshold",
+        "description": "Endpoint for path: /busy_threshold",
+        "operationId": "get_busy_threshold",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "summary": "API documentation",
+        "description": "Interactive API documentation powered by Swagger UI.",
+        "operationId": "get_docs",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "description": "Returns the health status of the service. Used for readiness probes.",
+        "operationId": "get_health",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/live": {
+      "get": {
+        "summary": "Liveness check",
+        "description": "Returns the liveness status of the service. Used for liveness probes.",
+        "operationId": "get_live",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Prometheus metrics",
+        "description": "Returns Prometheus metrics for monitoring the service.",
+        "operationId": "get_metrics",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI specification",
+        "description": "Returns the OpenAPI 3.0 specification for this API in JSON format.",
+        "operationId": "get_openapi.json",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Create chat completion",
+        "description": "Creates a completion for a chat conversation. Supports both streaming and non-streaming modes. Compatible with OpenAI's chat completions API.",
+        "operationId": "post_v1_chat_completions",
+        "requestBody": {
+          "description": "Chat completion request with model, messages, and optional parameters",
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateChatCompletionRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CommonExt"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "chat_template_args": {
+                        "type": [
+                          "object",
+                          "null"
+                        ],
+                        "description": "Extra args to pass to the chat template rendering context",
+                        "additionalProperties": {},
+                        "propertyNames": {
+                          "type": "string"
+                        }
+                      },
+                      "nvext": {
+                        "oneOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "$ref": "#/components/schemas/NvExt"
+                          }
+                        ]
+                      }
+                    },
+                    "additionalProperties": {
+                      "description": "Catch-all for unsupported fields - checked during validation"
+                    }
+                  }
+                ],
+                "description": "A request structure for creating a chat completion, extending OpenAI's\n`CreateChatCompletionRequest` with [`NvExt`] extensions and common fields.\n\n# Fields\n- `inner`: The base OpenAI chat completion request, embedded using `serde(flatten)`.\n- `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.\n- `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.\n  Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence."
+              },
+              "example": {
+                "model": "Qwen/Qwen3-0.6B",
+                "messages": [
+                  {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                  },
+                  {
+                    "role": "user",
+                    "content": "Hello! Can you help me understand what this API does?"
+                  }
+                ],
+                "temperature": 0.7,
+                "max_tokens": 50,
+                "stream": false
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "summary": "Create text completion",
+        "description": "Creates a completion for a given prompt. Supports both streaming and non-streaming modes. Compatible with OpenAI's completions API.",
+        "operationId": "post_v1_completions",
+        "requestBody": {
+          "description": "Text completion request with model, prompt, and optional parameters",
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateCompletionRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CommonExt"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "metadata": {},
+                      "nvext": {
+                        "oneOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "$ref": "#/components/schemas/NvExt"
+                          }
+                        ]
+                      }
+                    },
+                    "additionalProperties": {
+                      "description": "Catch-all for unsupported fields - checked during validation"
+                    }
+                  }
+                ]
+              },
+              "example": {
+                "model": "Qwen/Qwen3-0.6B",
+                "prompt": "Once upon a time",
+                "temperature": 0.7,
+                "max_tokens": 50,
+                "stream": false
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "summary": "Create embeddings",
+        "description": "Creates an embedding vector representing the input text. Compatible with OpenAI's embeddings API.",
+        "operationId": "post_v1_embeddings",
+        "requestBody": {
+          "description": "Embedding request with model and input text",
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateEmbeddingRequest"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "nvext": {
+                        "oneOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "$ref": "#/components/schemas/NvExt"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              },
+              "example": {
+                "model": "Qwen/Qwen3-Embedding-4B",
+                "input": "The quick brown fox jumps over the lazy dog"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "List available models",
+        "description": "Lists the currently available models and provides basic information about each.",
+        "operationId": "get_v1_models",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "summary": "Create response",
+        "description": "Creates a response for a given input. Compatible with OpenAI's responses API.",
+        "operationId": "post_v1_responses",
+        "requestBody": {
+          "description": "Response request with model and input",
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateResponse",
+                    "description": "Flattened CreateResponse fields (model, input, temperature, etc.)"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "nvext": {
+                        "oneOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "$ref": "#/components/schemas/NvExt"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              },
+              "example": {
+                "model": "Qwen/Qwen3-0.6B",
+                "input": "What is the capital of France?"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AudioUrl": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL of the audio file"
+          },
+          "uuid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Optional unique identifier for the audio."
+          }
+        }
+      },
+      "ChatCompletionAudio": {
+        "type": "object",
+        "required": [
+          "voice",
+          "format"
+        ],
+        "properties": {
+          "format": {
+            "$ref": "#/components/schemas/ChatCompletionAudioFormat",
+            "description": "Specifies the output audio format. Must be one of `wav`, `mp3`, `flac`, `opus`, or `pcm16`."
+          },
+          "voice": {
+            "$ref": "#/components/schemas/ChatCompletionAudioVoice",
+            "description": "The voice the model uses to respond. Supported voices are `ash`, `ballad`, `coral`, `sage`, and `verse` (also supported but not recommended are `alloy`, `echo`, and `shimmer`; these voices are less expressive)."
+          }
+        }
+      },
+      "ChatCompletionAudioFormat": {
+        "type": "string",
+        "enum": [
+          "wav",
+          "mp3",
+          "flac",
+          "opus",
+          "pcm16"
+        ]
+      },
+      "ChatCompletionAudioVoice": {
+        "type": "string",
+        "enum": [
+          "alloy",
+          "ash",
+          "ballad",
+          "coral",
+          "echo",
+          "sage",
+          "shimmer",
+          "verse"
+        ]
+      },
+      "ChatCompletionFunctionCall": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The model does not call a function, and responds to the end-user.",
+            "enum": [
+              "none"
+            ]
+          },
+          {
+            "type": "string",
+            "description": "The model can pick between an end-user or calling a function.",
+            "enum": [
+              "auto"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "Forces the model to call the specified function.",
+            "required": [
+              "Function"
+            ],
+            "properties": {
+              "Function": {
+                "type": "object",
+                "description": "Forces the model to call the specified function.",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "ChatCompletionFunctions": {
+        "type": "object",
+        "required": [
+          "name",
+          "parameters"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A description of what the function does, used by the model to choose when and how to call the function."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the function to be called. Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64."
+          },
+          "parameters": {
+            "description": "The parameters the functions accepts, described as a JSON Schema object. See the [guide](https://platform.openai.com/docs/guides/text-generation/function-calling) for examples, and the [JSON Schema reference](https://json-schema.org/understanding-json-schema/) for documentation about the format.\n\nOmitting `parameters` defines a function with an empty parameter list."
+          }
+        },
+        "deprecated": true
+      },
+      "ChatCompletionMessageToolCall": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "function"
+        ],
+        "properties": {
+          "function": {
+            "$ref": "#/components/schemas/FunctionCall",
+            "description": "The function that the model called."
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the tool call."
+          },
+          "type": {
+            "$ref": "#/components/schemas/ChatCompletionToolType",
+            "description": "The type of the tool. Currently, only `function` is supported."
+          }
+        }
+      },
+      "ChatCompletionModalities": {
+        "type": "string",
+        "description": "Output types that you would like the model to generate for this request.\n\nMost models are capable of generating text, which is the default: `[\"text\"]`\n\nThe `gpt-4o-audio-preview` model can also be used to [generate\naudio](https://platform.openai.com/docs/guides/audio). To request that this model generate both text and audio responses, you can use: `[\"text\", \"audio\"]`",
+        "enum": [
+          "text",
+          "audio"
+        ]
+      },
+      "ChatCompletionNamedToolChoice": {
+        "type": "object",
+        "description": "Specifies a tool the model should use. Use to force the model to call a specific function.",
+        "required": [
+          "type",
+          "function"
+        ],
+        "properties": {
+          "function": {
+            "$ref": "#/components/schemas/FunctionName"
+          },
+          "type": {
+            "$ref": "#/components/schemas/ChatCompletionToolType",
+            "description": "The type of the tool. Currently, only `function` is supported."
+          }
+        }
+      },
+      "ChatCompletionRequestAssistantMessage": {
+        "type": "object",
+        "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestAssistantMessageAudio",
+                "description": "Data about a previous audio response from the model.\n[Learn more](https://platform.openai.com/docs/guides/audio)."
+              }
+            ]
+          },
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestAssistantMessageContent",
+                "description": "The contents of the assistant message. Required unless `tool_calls` or `function_call` is specified."
+              }
+            ]
+          },
+          "function_call": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FunctionCall",
+                "description": "Deprecated and replaced by `tool_calls`. The name and arguments of a function that should be called, as generated by the model."
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional name for the participant. Provides the model information to differentiate between participants of the same role."
+          },
+          "refusal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The refusal message by the assistant."
+          },
+          "tool_calls": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionMessageToolCall"
+            }
+          }
+        }
+      },
+      "ChatCompletionRequestAssistantMessageAudio": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for a previous audio response from the model."
+          }
+        }
+      },
+      "ChatCompletionRequestAssistantMessageContent": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The text contents of the message."
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionRequestAssistantMessageContentPart"
+            },
+            "description": "An array of content parts with a defined type. Can be one or more of type `text`, or exactly one of type `refusal`."
+          }
+        ]
+      },
+      "ChatCompletionRequestAssistantMessageContentPart": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartText"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartRefusal"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "refusal"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "ChatCompletionRequestDeveloperMessage": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/ChatCompletionRequestDeveloperMessageContent",
+            "description": "The contents of the developer message."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional name for the participant. Provides the model information to differentiate between participants of the same role."
+          }
+        }
+      },
+      "ChatCompletionRequestDeveloperMessageContent": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartText"
+            }
+          }
+        ]
+      },
+      "ChatCompletionRequestFunctionMessage": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The return value from the function call, to return to the model."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the function to call."
+          }
+        }
+      },
+      "ChatCompletionRequestMessage": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestDeveloperMessage"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "developer"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestSystemMessage"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "system"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestUserMessage"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "user"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestAssistantMessage"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "assistant"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestToolMessage"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "tool"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestFunctionMessage"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "function"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "ChatCompletionRequestMessageContentPartAudio": {
+        "type": "object",
+        "description": "Learn about [audio inputs](https://platform.openai.com/docs/guides/audio).",
+        "required": [
+          "input_audio"
+        ],
+        "properties": {
+          "input_audio": {
+            "$ref": "#/components/schemas/InputAudio"
+          }
+        }
+      },
+      "ChatCompletionRequestMessageContentPartAudioUrl": {
+        "type": "object",
+        "required": [
+          "audio_url"
+        ],
+        "properties": {
+          "audio_url": {
+            "$ref": "#/components/schemas/AudioUrl"
+          }
+        }
+      },
+      "ChatCompletionRequestMessageContentPartImage": {
+        "type": "object",
+        "required": [
+          "image_url"
+        ],
+        "properties": {
+          "image_url": {
+            "$ref": "#/components/schemas/ImageUrl"
+          }
+        }
+      },
+      "ChatCompletionRequestMessageContentPartRefusal": {
+        "type": "object",
+        "required": [
+          "refusal"
+        ],
+        "properties": {
+          "refusal": {
+            "type": "string",
+            "description": "The refusal message generated by the model."
+          }
+        }
+      },
+      "ChatCompletionRequestMessageContentPartText": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatCompletionRequestMessageContentPartVideo": {
+        "type": "object",
+        "required": [
+          "video_url"
+        ],
+        "properties": {
+          "video_url": {
+            "$ref": "#/components/schemas/VideoUrl"
+          }
+        }
+      },
+      "ChatCompletionRequestSystemMessage": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/ChatCompletionRequestSystemMessageContent",
+            "description": "The contents of the system message."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional name for the participant. Provides the model information to differentiate between participants of the same role."
+          }
+        }
+      },
+      "ChatCompletionRequestSystemMessageContent": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The text contents of the system message."
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionRequestSystemMessageContentPart"
+            },
+            "description": "An array of content parts with a defined type. For system messages, only type `text` is supported."
+          }
+        ]
+      },
+      "ChatCompletionRequestSystemMessageContentPart": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartText"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "ChatCompletionRequestToolMessage": {
+        "type": "object",
+        "description": "Tool message",
+        "required": [
+          "content",
+          "tool_call_id"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/ChatCompletionRequestToolMessageContent",
+            "description": "The contents of the tool message."
+          },
+          "tool_call_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatCompletionRequestToolMessageContent": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The text contents of the tool message."
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionRequestToolMessageContentPart"
+            },
+            "description": "An array of content parts with a defined type. For tool messages, only type `text` is supported."
+          }
+        ]
+      },
+      "ChatCompletionRequestToolMessageContentPart": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartText"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "ChatCompletionRequestUserMessage": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/ChatCompletionRequestUserMessageContent",
+            "description": "The contents of the user message."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional name for the participant. Provides the model information to differentiate between participants of the same role."
+          }
+        }
+      },
+      "ChatCompletionRequestUserMessageContent": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The text contents of the message."
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionRequestUserMessageContentPart"
+            },
+            "description": "An array of content parts with a defined type. Supported options differ based on the [model](https://platform.openai.com/docs/models) being used to generate the response. Can contain text, image, or audio inputs."
+          }
+        ]
+      },
+      "ChatCompletionRequestUserMessageContentPart": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartText"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartImage"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "image_url"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartVideo"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "video_url"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartAudioUrl"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "audio_url"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartAudio"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "input_audio"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "ChatCompletionStreamOptions": {
+        "type": "object",
+        "description": "Options for streaming response. Only set this when you set `stream: true`.",
+        "required": [
+          "include_usage"
+        ],
+        "properties": {
+          "include_usage": {
+            "type": "boolean",
+            "description": "If set, an additional chunk will be streamed before the `data: [DONE]` message. The `usage` field on this chunk shows the token usage statistics for the entire request, and the `choices` field will always be an empty array. All other chunks will also include a `usage` field, but with a null value."
+          }
+        }
+      },
+      "ChatCompletionTool": {
+        "type": "object",
+        "required": [
+          "type",
+          "function"
+        ],
+        "properties": {
+          "function": {
+            "$ref": "#/components/schemas/FunctionObject"
+          },
+          "type": {
+            "$ref": "#/components/schemas/ChatCompletionToolType"
+          }
+        }
+      },
+      "ChatCompletionToolChoiceOption": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "none"
+            ]
+          },
+          {
+            "type": "string",
+            "enum": [
+              "auto"
+            ]
+          },
+          {
+            "type": "string",
+            "enum": [
+              "required"
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "named"
+            ],
+            "properties": {
+              "named": {
+                "$ref": "#/components/schemas/ChatCompletionNamedToolChoice"
+              }
+            }
+          }
+        ],
+        "description": "Controls which (if any) tool is called by the model.\n`none` means the model will not call any tool and instead generates a message.\n`auto` means the model can pick between generating a message or calling one or more tools.\n`required` means the model must call one or more tools.\nSpecifying a particular tool via `{\"type\": \"function\", \"function\": {\"name\": \"my_function\"}}` forces the model to call that tool.\n\n`none` is the default when no tools are present. `auto` is the default if tools are present."
+      },
+      "ChatCompletionToolType": {
+        "type": "string",
+        "enum": [
+          "function"
+        ]
+      },
+      "CommonExt": {
+        "type": "object",
+        "description": "Common extensions for OpenAI API requests that are not part of the standard OpenAI spec\nbut are commonly needed across different request types.",
+        "properties": {
+          "guided_choice": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "If specified, the output will be exactly one of the choices."
+          },
+          "guided_decoding_backend": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "If specified, the backend to use for guided decoding, can be backends like xgrammar or custom guided decoding backend"
+          },
+          "guided_grammar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "If specified, the output will follow the context-free grammar. Can be a string or null."
+          },
+          "guided_json": {
+            "description": "Guided Decoding Options\nIf specified, the output will be a JSON object. Can be a string, an object, or null."
+          },
+          "guided_regex": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "If specified, the output will follow the regex pattern. Can be a string or null."
+          },
+          "guided_whitespace_pattern": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "If specified, the output will follow the whitespace pattern. Can be a string or null."
+          },
+          "ignore_eos": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "If true, the model will ignore the end of string token and generate to max_tokens.\nThis field can also be specified in nvext, but the root-level value takes precedence."
+          },
+          "include_stop_str_in_output": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "include_stop_str_in_output"
+          },
+          "min_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Relative probability floor"
+          },
+          "min_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The minimum number of tokens to generate.\nThis is a common parameter needed across different request types.",
+            "minimum": 0
+          },
+          "repetition_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "How much to penalize tokens based on how frequently they occur in the text.\nA value of 1 means no penalty, while values larger than 1 discourage and values smaller encourage."
+          },
+          "skip_special_tokens": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to skip special tokens in the decoded output.\nWhen true, special tokens (like EOS, BOS, PAD) are removed from the output text.\nWhen false, special tokens are included in the output text.\nDefaults to false if not specified."
+          },
+          "top_k": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens."
+          }
+        }
+      },
+      "CreateChatCompletionRequest": {
+        "type": "object",
+        "required": [
+          "messages",
+          "model"
+        ],
+        "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionAudio",
+                "description": "Parameters for audio output. Required when audio output is requested with `modalities: [\"audio\"]`. [Learn more](https://platform.openai.com/docs/guides/audio)."
+              }
+            ]
+          },
+          "frequency_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing frequency in the text so far, decreasing the model's likelihood to repeat the same line verbatim."
+          },
+          "function_call": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionFunctionCall",
+                "description": "Deprecated in favor of `tool_choice`.\n\nControls which (if any) function is called by the model.\n`none` means the model will not call a function and instead generates a message.\n`auto` means the model can pick between generating a message or calling a function.\nSpecifying a particular function via `{\"name\": \"my_function\"}` forces the model to call that function.\n\n`none` is the default when no functions are present. `auto` is the default if functions are present."
+              }
+            ]
+          },
+          "functions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionFunctions"
+            },
+            "description": "Deprecated in favor of `tools`.\n\nA list of functions the model may generate JSON inputs for.",
+            "deprecated": true
+          },
+          "logit_bias": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Modify the likelihood of specified tokens appearing in the completion.\n\nAccepts a json object that maps tokens (specified by their token ID in the tokenizer) to an associated bias value from -100 to 100.\nMathematically, the bias is added to the logits generated by the model prior to sampling.\nThe exact effect will vary per model, but values between -1 and 1 should decrease or increase likelihood of selection;\nvalues like -100 or 100 should result in a ban or exclusive selection of the relevant token.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "logprobs": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to return log probabilities of the output tokens or not. If true, returns the log probabilities of each output token returned in the `content` of `message`."
+          },
+          "max_completion_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "An upper bound for the number of tokens that can be generated for a completion, including visible output tokens and [reasoning tokens](https://platform.openai.com/docs/guides/reasoning).",
+            "minimum": 0
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The maximum number of [tokens](https://platform.openai.com/tokenizer) that can be generated in the chat completion.\n\nThis value can be used to control [costs](https://openai.com/api/pricing/) for text generated via API.\nThis value is now deprecated in favor of `max_completion_tokens`, and is\nnot compatible with [o1 series models](https://platform.openai.com/docs/guides/reasoning).",
+            "deprecated": true,
+            "minimum": 0
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionRequestMessage"
+            },
+            "description": "A list of messages comprising the conversation so far. Depending on the [model](https://platform.openai.com/docs/models) you use, different message types (modalities) are supported, like [text](https://platform.openai.com/docs/guides/text-generation), [images](https://platform.openai.com/docs/guides/vision), and [audio](https://platform.openai.com/docs/guides/audio)."
+          },
+          "metadata": {
+            "description": "Developer-defined tags and values used for filtering completions in the [dashboard](https://platform.openai.com/chat-completions)."
+          },
+          "mm_processor_kwargs": {
+            "description": "Multimodal processor configuration parameters"
+          },
+          "modalities": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionModalities"
+            }
+          },
+          "model": {
+            "type": "string",
+            "description": "ID of the model to use.\nSee the [model endpoint compatibility](https://platform.openai.com/docs/models#model-endpoint-compatibility) table for details on which models work with the Chat API."
+          },
+          "n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many chat completion choices to generate for each input message. Note that you will be charged based on the number of generated tokens across all of the choices. Keep `n` as `1` to minimize costs.",
+            "minimum": 0
+          },
+          "parallel_tool_calls": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to enable [parallel function calling](https://platform.openai.com/docs/guides/function-calling/parallel-function-calling) during tool use."
+          },
+          "prediction": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PredictionContent",
+                "description": "Configuration for a [Predicted Output](https://platform.openai.com/docs/guides/predicted-outputs),which can greatly improve response times when large parts of the model response are known ahead of time. This is most common when you are regenerating a file with only minor changes to most of the content."
+              }
+            ]
+          },
+          "presence_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they appear in the text so far, increasing the model's likelihood to talk about new topics."
+          },
+          "reasoning_effort": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReasoningEffort",
+                "description": "**o1 models only**\n\nConstrains effort on reasoning for\n[reasoning models](https://platform.openai.com/docs/guides/reasoning).\n\nCurrently supported values are `low`, `medium`, and `high`. Reducing\n\nreasoning effort can result in faster responses and fewer tokens\nused on reasoning in a response."
+              }
+            ]
+          },
+          "response_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ResponseFormat",
+                "description": "An object specifying the format that the model must output. Compatible with [GPT-4o](https://platform.openai.com/docs/models/gpt-4o), [GPT-4o mini](https://platform.openai.com/docs/models/gpt-4o-mini), [GPT-4 Turbo](https://platform.openai.com/docs/models/gpt-4-and-gpt-4-turbo) and all GPT-3.5 Turbo models newer than `gpt-3.5-turbo-1106`.\n\nSetting to `{ \"type\": \"json_schema\", \"json_schema\": {...} }` enables Structured Outputs which guarantees the model will match your supplied JSON schema. Learn more in the [Structured Outputs guide](https://platform.openai.com/docs/guides/structured-outputs).\n\nSetting to `{ \"type\": \"json_object\" }` enables JSON mode, which guarantees the message the model generates is valid JSON.\n\n**Important:** when using JSON mode, you **must** also instruct the model to produce JSON yourself via a system or user message. Without this, the model may generate an unending stream of whitespace until the generation reaches the token limit, resulting in a long-running and seemingly \"stuck\" request. Also note that the message content may be partially cut off if `finish_reason=\"length\"`, which indicates the generation exceeded `max_tokens` or the conversation exceeded the max context length."
+              }
+            ]
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": " This feature is in Beta.\nIf specified, our system will make a best effort to sample deterministically, such that repeated requests\nwith the same `seed` and parameters should return the same result.\nDeterminism is not guaranteed, and you should refer to the `system_fingerprint` response parameter to monitor changes in the backend."
+          },
+          "service_tier": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceTier",
+                "description": "Specifies the latency tier to use for processing the request. This parameter is relevant for customers subscribed to the scale tier service:\n- If set to 'auto', the system will utilize scale tier credits until they are exhausted.\n- If set to 'default', the request will be processed using the default service tier with a lower uptime SLA and no latency guarentee.\n- When not set, the default behavior is 'auto'.\n\nWhen this parameter is set, the response body will include the `service_tier` utilized."
+              }
+            ]
+          },
+          "stop": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Stop",
+                "description": "Up to 4 sequences where the API will stop generating further tokens."
+              }
+            ]
+          },
+          "store": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether or not to store the output of this chat completion request\n\nfor use in our [model distillation](https://platform.openai.com/docs/guides/distillation) or [evals](https://platform.openai.com/docs/guides/evals) products."
+          },
+          "stream": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "If set, partial message deltas will be sent, like in ChatGPT.\nTokens will be sent as data-only [server-sent events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#Event_stream_format)\nas they become available, with the stream terminated by a `data: [DONE]` message. [Example Python code](https://cookbook.openai.com/examples/how_to_stream_completions)."
+          },
+          "stream_options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionStreamOptions"
+              }
+            ]
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random,\nwhile lower values like 0.2 will make it more focused and deterministic.\n\nWe generally recommend altering this or `top_p` but not both."
+          },
+          "tool_choice": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionToolChoiceOption"
+              }
+            ]
+          },
+          "tools": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionTool"
+            },
+            "description": "A list of tools the model may call. Currently, only functions are supported as a tool.\nUse this to provide a list of functions the model may generate JSON inputs for. A max of 128 functions are supported."
+          },
+          "top_logprobs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "An integer between 0 and 20 specifying the number of most likely tokens to return at each token position, each with an associated log probability. `logprobs` must be set to `true` if this parameter is used.",
+            "minimum": 0
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "An alternative to sampling with temperature, called nucleus sampling,\nwhere the model considers the results of the tokens with top_p probability mass.\nSo 0.1 means only the tokens comprising the top 10% probability mass are considered.\n\n We generally recommend altering this or `temperature` but not both."
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A unique identifier representing your end-user, which can help OpenAI to monitor and detect abuse. [Learn more](https://platform.openai.com/docs/guides/safety-best-practices#end-user-ids)."
+          },
+          "web_search_options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WebSearchOptions",
+                "description": "This tool searches the web for relevant results to use in a response.\nLearn more about the [web search tool](https://platform.openai.com/docs/guides/tools-web-search?api-mode=chat)."
+              }
+            ]
+          }
+        }
+      },
+      "CreateCompletionRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "prompt"
+        ],
+        "properties": {
+          "best_of": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Generates `best_of` completions server-side and returns the \"best\" (the one with the highest log probability per token). Results cannot be streamed.\n\nWhen used with `n`, `best_of` controls the number of candidate completions and `n` specifies how many to return – `best_of` must be greater than `n`.\n\n**Note:** Because this parameter generates many completions, it can quickly consume your token quota. Use carefully and ensure that you have reasonable settings for `max_tokens` and `stop`.",
+            "minimum": 0
+          },
+          "echo": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Echo back the prompt in addition to the completion"
+          },
+          "frequency_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing frequency in the text so far, decreasing the model's likelihood to repeat the same line verbatim.\n\n[See more information about frequency and presence penalties.](https://platform.openai.com/docs/guides/text-generation/parameter-details)"
+          },
+          "logit_bias": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Modify the likelihood of specified tokens appearing in the completion.\n\nAccepts a json object that maps tokens (specified by their token ID in the GPT tokenizer) to an associated bias value from -100 to 100. You can use this [tokenizer tool](/tokenizer?view=bpe) (which works for both GPT-2 and GPT-3) to convert text to token IDs. Mathematically, the bias is added to the logits generated by the model prior to sampling. The exact effect will vary per model, but values between -1 and 1 should decrease or increase likelihood of selection; values like -100 or 100 should result in a ban or exclusive selection of the relevant token.\n\nAs an example, you can pass `{\"50256\": -100}` to prevent the <|endoftext|> token from being generated.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "logprobs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Include the log probabilities on the `logprobs` most likely output tokens, as well the chosen tokens. For example, if `logprobs` is 5, the API will return a list of the 5 most likely tokens. The API will always return the `logprob` of the sampled token, so there may be up to `logprobs+1` elements in the response.\n\nThe maximum value for `logprobs` is 5.",
+            "minimum": 0
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The maximum number of [tokens](https://platform.openai.com/tokenizer) that can be generated in the completion.\n\nThe token count of your prompt plus `max_tokens` cannot exceed the model's context length. [Example Python code](https://cookbook.openai.com/examples/how_to_count_tokens_with_tiktoken) for counting tokens.",
+            "minimum": 0
+          },
+          "model": {
+            "type": "string",
+            "description": "ID of the model to use. You can use the [List models](https://platform.openai.com/docs/api-reference/models/list) API to see all of your available models, or see our [Model overview](https://platform.openai.com/docs/models/overview) for descriptions of them."
+          },
+          "n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many completions to generate for each prompt.\n**Note:** Because this parameter generates many completions, it can quickly consume your token quota. Use carefully and ensure that you have reasonable settings for `max_tokens` and `stop`.\n",
+            "minimum": 0
+          },
+          "presence_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they appear in the text so far, increasing the model's likelihood to talk about new topics.\n\n[See more information about frequency and presence penalties.](https://platform.openai.com/docs/guides/text-generation/parameter-details)"
+          },
+          "prompt": {
+            "$ref": "#/components/schemas/Prompt",
+            "description": "The prompt(s) to generate completions for, encoded as a string, array of strings, array of tokens, or array of token arrays.\n\nNote that <|endoftext|> is the document separator that the model sees during training, so if a prompt is not specified the model will generate as if from the beginning of a new document."
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "If specified, our system will make a best effort to sample deterministically, such that repeated requests with the same `seed` and parameters should return the same result.\n\nDeterminism is not guaranteed, and you should refer to the `system_fingerprint` response parameter to monitor changes in the backend."
+          },
+          "stop": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Stop",
+                "description": "Up to 4 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence."
+              }
+            ]
+          },
+          "stream": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to stream back partial progress. If set, tokens will be sent as data-only [server-sent events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#Event_stream_format)\nas they become available, with the stream terminated by a `data: [DONE]` message."
+          },
+          "stream_options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChatCompletionStreamOptions"
+              }
+            ]
+          },
+          "suffix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The suffix that comes after a completion of inserted text.\n\nThis parameter is only supported for `gpt-3.5-turbo-instruct`."
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic.\n\nWe generally recommend altering this or `top_p` but not both."
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered.\n\n We generally recommend altering this or `temperature` but not both."
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A unique identifier representing your end-user, which will help OpenAI to monitor and detect abuse. [Learn more](https://platform.openai.com/docs/usage-policies/end-user-ids)."
+          }
+        }
+      },
+      "CreateEmbeddingRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "input"
+        ],
+        "properties": {
+          "dimensions": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The number of dimensions the resulting output embeddings should have. Only supported in `text-embedding-3` and later models.",
+            "minimum": 0
+          },
+          "encoding_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EncodingFormat",
+                "description": "The format to return the embeddings in. Can be either `float` or [`base64`](https://pypi.org/project/pybase64/). Defaults to float"
+              }
+            ]
+          },
+          "input": {
+            "$ref": "#/components/schemas/EmbeddingInput",
+            "description": "Input text to embed, encoded as a string or array of tokens. To embed multiple inputs in a single request, pass an array of strings or array of token arrays. The input must not exceed the max input tokens for the model (8192 tokens for `text-embedding-ada-002`), cannot be an empty string, and any array must be 2048 dimensions or less. [Example Python code](https://cookbook.openai.com/examples/how_to_count_tokens_with_tiktoken) for counting tokens."
+          },
+          "model": {
+            "type": "string",
+            "description": "ID of the model to use. You can use the\n[List models](https://platform.openai.com/docs/api-reference/models/list)\nAPI to see all of your available models, or see our\n[Model overview](https://platform.openai.com/docs/models/overview)\nfor descriptions of them."
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A unique identifier representing your end-user, which will help OpenAI\n to monitor and detect abuse. [Learn more](https://platform.openai.com/docs/usage-policies/end-user-ids)."
+          }
+        }
+      },
+      "CreateResponse": {
+        "type": "object",
+        "description": "Builder for a Responses API request.",
+        "required": [
+          "input",
+          "model"
+        ],
+        "properties": {
+          "background": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to run the model response in the background.\nboolean or null."
+          },
+          "include": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Specify additional output data to include in the model response.\n\nSupported values:\n- `file_search_call.results`\n  Include the search results of the file search tool call.\n- `message.input_image.image_url`\n  Include image URLs from the input message.\n- `computer_call_output.output.image_url`\n  Include image URLs from the computer call output.\n- `reasoning.encrypted_content`\n  Include an encrypted version of reasoning tokens in reasoning item outputs.\n  This enables reasoning items to be used in multi-turn conversations when\n  using the Responses API statelessly (for example, when the `store` parameter\n  is set to `false`, or when an organization is enrolled in the zero-data-\n  retention program).\n\nIf `None`, no additional data is returned."
+          },
+          "input": {
+            "type": "object",
+            "description": "Text, image, or file inputs to the model, used to generate a response.\nUsing value_type to prevent deep schema recursion from Input's nested content types."
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inserts a system (or developer) message as the first item in the model's context.\n\nWhen using along with previous_response_id, the instructions from a previous response will\nnot be carried over to the next response. This makes it simple to swap out system\n(or developer) messages in new responses."
+          },
+          "max_output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "An upper bound for the number of tokens that can be generated for a\nresponse, including visible output tokens and reasoning tokens.",
+            "minimum": 0
+          },
+          "max_tool_calls": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The maximum number of total calls to built-in tools that can be processed in a response.\nThis maximum number applies across all built-in tool calls, not per individual tool.\nAny further attempts to call a tool by the model will be ignored.",
+            "minimum": 0
+          },
+          "metadata": {
+            "description": "Arbitrary JSON metadata used as a passthrough parameter"
+          },
+          "model": {
+            "type": "string",
+            "description": "Model ID used to generate the response, like `gpt-4o`.\nOpenAI offers a wide range of models with different capabilities,\nperformance characteristics, and price points."
+          },
+          "parallel_tool_calls": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to allow the model to run tool calls in parallel."
+          },
+          "previous_response_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The unique ID of the previous response to the model. Use this to create\nmulti-turn conversations."
+          },
+          "prompt": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptConfig",
+                "description": "Reference to a prompt template and its variables."
+              }
+            ]
+          },
+          "reasoning": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReasoningConfig",
+                "description": "**o-series models only**: Configuration options for reasoning models."
+              }
+            ]
+          },
+          "service_tier": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceTier",
+                "description": "Specifies the latency tier to use for processing the request.\n\nThis parameter is relevant for customers subscribed to the Scale tier service.\n\nSupported values:\n- `auto`\n  - If the Project is Scale tier enabled, the system will utilize Scale tier credits until\n    they are exhausted.\n  - If the Project is not Scale tier enabled, the request will be processed using the\n    default service tier with a lower uptime SLA and no latency guarantee.\n- `default`\n  The request will be processed using the default service tier with a lower uptime SLA and\n  no latency guarantee.\n- `flex`\n  The request will be processed with the Flex Processing service tier. Learn more.\n\nWhen not set, the default behavior is `auto`.\n\nWhen this parameter is set, the response body will include the `service_tier` utilized."
+              }
+            ]
+          },
+          "store": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to store the generated model response for later retrieval via API."
+          },
+          "stream": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "If set to true, the model response data will be streamed to the client as it is\ngenerated using server-sent events."
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "What sampling temperature to use, between 0 and 2. Higher values like 0.8\nwill make the output more random, while lower values like 0.2 will make it\nmore focused and deterministic. We generally recommend altering this or\n`top_p` but not both."
+          },
+          "text": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TextConfig",
+                "description": "Configuration options for a text response from the model. Can be plain text\nor structured JSON data."
+              }
+            ]
+          },
+          "tool_choice": {
+            "type": "object",
+            "description": "How the model should select which tool (or tools) to use when generating\na response."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "An array of tools the model may call while generating a response.\nCan include built-in tools (file_search, web_search_preview,\ncomputer_use_preview) or custom function definitions."
+          },
+          "top_logprobs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "An integer between 0 and 20 specifying the number of most likely tokens to return\nat each token position, each with an associated log probability.",
+            "minimum": 0
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "An alternative to sampling with temperature, called nucleus sampling,\nwhere the model considers the results of the tokens with top_p probability\nmass. So 0.1 means only the tokens comprising the top 10% probability mass\nare considered. We generally recommend altering this or `temperature` but\nnot both."
+          },
+          "truncation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Truncation",
+                "description": "The truncation strategy to use for the model response:\n- `auto`: drop items in the middle to fit context window.\n- `disabled`: error if exceeding context window."
+              }
+            ]
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A unique identifier representing your end-user, which can help OpenAI to\nmonitor and detect abuse."
+          }
+        }
+      },
+      "EmbeddingInput": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          }
+        ]
+      },
+      "EncodingFormat": {
+        "type": "string",
+        "enum": [
+          "float",
+          "base64"
+        ]
+      },
+      "FunctionCall": {
+        "type": "object",
+        "description": "The name and arguments of a function that should be called, as generated by the model.",
+        "required": [
+          "name",
+          "arguments"
+        ],
+        "properties": {
+          "arguments": {
+            "type": "string",
+            "description": "The arguments to call the function with, as generated by the model in JSON format. Note that the model does not always generate valid JSON, and may hallucinate parameters not defined by your function schema. Validate the arguments in your code before calling your function."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the function to call."
+          }
+        }
+      },
+      "FunctionName": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name of the function to call."
+          }
+        }
+      },
+      "FunctionObject": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A description of what the function does, used by the model to choose when and how to call the function."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the function to be called. Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64."
+          },
+          "parameters": {
+            "description": "The parameters the functions accepts, described as a JSON Schema object. See the [guide](https://platform.openai.com/docs/guides/text-generation/function-calling) for examples, and the [JSON Schema reference](https://json-schema.org/understanding-json-schema/) for documentation about the format.\n\nOmitting `parameters` defines a function with an empty parameter list."
+          },
+          "strict": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to enable strict schema adherence when generating the function call. If set to true, the model will follow the exact schema defined in the `parameters` field. Only a subset of JSON Schema is supported when `strict` is `true`. Learn more about Structured Outputs in the [function calling guide](https://platform.openai.com/docs/guides/function-calling)."
+          }
+        }
+      },
+      "ImageDetail": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "low",
+          "high"
+        ]
+      },
+      "ImageUrl": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "detail": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageDetail",
+                "description": "Specifies the detail level of the image. Learn more in the [Vision guide](https://platform.openai.com/docs/guides/vision/low-or-high-fidelity-image-understanding)."
+              }
+            ]
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Either a URL of the image or the base64 encoded image data."
+          },
+          "uuid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Optional unique identifier for the image."
+          }
+        }
+      },
+      "InputAudio": {
+        "type": "object",
+        "required": [
+          "data",
+          "format"
+        ],
+        "properties": {
+          "data": {
+            "type": "string",
+            "description": "Base64 encoded audio data."
+          },
+          "format": {
+            "$ref": "#/components/schemas/InputAudioFormat",
+            "description": "The format of the encoded audio data. Currently supports \"wav\" and \"mp3\"."
+          }
+        }
+      },
+      "InputAudioFormat": {
+        "type": "string",
+        "enum": [
+          "wav",
+          "mp3"
+        ]
+      },
+      "NvCreateChatCompletionRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CreateChatCompletionRequest"
+          },
+          {
+            "$ref": "#/components/schemas/CommonExt"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "chat_template_args": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Extra args to pass to the chat template rendering context",
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "nvext": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/NvExt"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": {
+              "description": "Catch-all for unsupported fields - checked during validation"
+            }
+          }
+        ],
+        "description": "A request structure for creating a chat completion, extending OpenAI's\n`CreateChatCompletionRequest` with [`NvExt`] extensions and common fields.\n\n# Fields\n- `inner`: The base OpenAI chat completion request, embedded using `serde(flatten)`.\n- `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.\n- `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.\n  Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence."
+      },
+      "NvCreateCompletionRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CreateCompletionRequest"
+          },
+          {
+            "$ref": "#/components/schemas/CommonExt"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "metadata": {},
+              "nvext": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/NvExt"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": {
+              "description": "Catch-all for unsupported fields - checked during validation"
+            }
+          }
+        ]
+      },
+      "NvCreateEmbeddingRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CreateEmbeddingRequest"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "nvext": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/NvExt"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "NvCreateResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CreateResponse",
+            "description": "Flattened CreateResponse fields (model, input, temperature, etc.)"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "nvext": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/NvExt"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "NvExt": {
+        "type": "object",
+        "description": "NVIDIA LLM extensions to the OpenAI API",
+        "properties": {
+          "annotations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Annotations\nUser requests triggers which result in the request issue back out-of-band information in the SSE\nstream using the `event:` field."
+          },
+          "backend_instance_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Targeted backend instance ID for the request\nIf set, the request will be routed to backend instance with the given ID.\nIf not set, the request will be routed to the best matching instance.",
+            "minimum": 0
+          },
+          "extra_fields": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Extra fields to be included in the response's nvext\nThis is a list of field names that should be populated in the response\nSupported fields: \"worker_id\""
+          },
+          "greed_sampling": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "If true, sampling will be forced to be greedy.\nThe backend is responsible for selecting the correct backend-specific options to\nimplement this."
+          },
+          "max_thinking_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum number of thinking tokens allowed\nNOTE: Currently passed through to backends as a no-op for future implementation",
+            "minimum": 0
+          },
+          "token_data": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Pre-tokenized data to use instead of tokenizing the prompt\nIf provided along with backend_instance_id, these tokens will be used directly\nand tokenization will be skipped."
+          },
+          "use_raw_prompt": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "If true, the preproessor will try to bypass the prompt template and pass the prompt directly to\nto the tokenizer."
+          }
+        }
+      },
+      "PredictionContent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The type of the predicted content you want to provide. This type is\ncurrently always `content`.",
+            "required": [
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/PredictionContentContent",
+                "description": "The type of the predicted content you want to provide. This type is\ncurrently always `content`."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "content"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Static predicted output content, such as the content of a text file that is being regenerated."
+      },
+      "PredictionContentContent": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The content used for a Predicted Output. This is often the text of a file you are regenerating with minor changes."
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPartText"
+            },
+            "description": "An array of content parts with a defined type. Supported options differ based on the [model](https://platform.openai.com/docs/models) being used to generate the response. Can contain text inputs."
+          }
+        ],
+        "description": "The content that should be matched when generating a model response. If generated tokens would match this content, the entire model response can be returned much more quickly."
+      },
+      "Prompt": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          }
+        ]
+      },
+      "PromptConfig": {
+        "type": "object",
+        "description": "Service tier request options.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The unique identifier of the prompt template to use."
+          },
+          "variables": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Optional map of values to substitute in for variables in your prompt. The substitution\nvalues can either be strings, or other Response input types like images or files.\nFor now only supporting Strings.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional version of the prompt template."
+          }
+        }
+      },
+      "ReasoningConfig": {
+        "type": "object",
+        "description": "o-series reasoning settings.",
+        "properties": {
+          "effort": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReasoningEffort",
+                "description": "Constrain effort on reasoning."
+              }
+            ]
+          },
+          "summary": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReasoningSummary",
+                "description": "Summary mode for reasoning."
+              }
+            ]
+          }
+        }
+      },
+      "ReasoningEffort": {
+        "type": "string",
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "ReasoningSummary": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "concise",
+          "detailed"
+        ]
+      },
+      "ResponseFormat": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The type of response format being defined: `text`",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The type of response format being defined: `json_object`",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "json_object"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The type of response format being defined: `json_schema`",
+            "required": [
+              "json_schema",
+              "type"
+            ],
+            "properties": {
+              "json_schema": {
+                "$ref": "#/components/schemas/ResponseFormatJsonSchema"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "json_schema"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "ResponseFormatJsonSchema": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A description of what the response format is for, used by the model to determine how to respond in the format."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the response format. Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64."
+          },
+          "schema": {
+            "description": "The schema for the response format, described as a JSON Schema object."
+          },
+          "strict": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to enable strict schema adherence when generating the output. If set to true, the model will always follow the exact schema defined in the `schema` field. Only a subset of JSON Schema is supported when `strict` is `true`. To learn more, read the [Structured Outputs guide](https://platform.openai.com/docs/guides/structured-outputs)."
+          }
+        }
+      },
+      "ServiceTier": {
+        "type": "string",
+        "description": "Service tier request options.",
+        "enum": [
+          "auto",
+          "default",
+          "flex"
+        ]
+      },
+      "Stop": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "TextConfig": {
+        "type": "object",
+        "description": "Configuration for text response format.",
+        "required": [
+          "format"
+        ],
+        "properties": {
+          "format": {
+            "$ref": "#/components/schemas/TextResponseFormat",
+            "description": "Defines the format: plain text, JSON object, or JSON schema."
+          }
+        }
+      },
+      "TextResponseFormat": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The type of response format being defined: `text`",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The type of response format being defined: `json_object`",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "json_object"
+                ]
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ResponseFormatJsonSchema",
+                "description": "The type of response format being defined: `json_schema`"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "json_schema"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "The type of response format being defined: `json_schema`"
+          }
+        ]
+      },
+      "Truncation": {
+        "type": "string",
+        "description": "Truncation strategies.",
+        "enum": [
+          "auto",
+          "disabled"
+        ]
+      },
+      "VideoUrl": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "detail": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageDetail",
+                "description": "Specifies the detail level of the video processing."
+              }
+            ]
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Either a URL of the video or the base64 encoded video data."
+          },
+          "uuid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Optional unique identifier for the video."
+          }
+        }
+      },
+      "WebSearchContextSize": {
+        "type": "string",
+        "description": "The amount of context window space to use for the search.",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "WebSearchLocation": {
+        "type": "object",
+        "description": "Approximate location parameters for the search.",
+        "properties": {
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free text input for the city of the user, e.g. `San Francisco`."
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The two-letter [ISO country code](https://en.wikipedia.org/wiki/ISO_3166-1) of the user, e.g. `US`."
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free text input for the region of the user, e.g. `California`."
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The [IANA timezone](https://timeapi.io/documentation/iana-timezones) of the user, e.g. `America/Los_Angeles`."
+          }
+        }
+      },
+      "WebSearchOptions": {
+        "type": "object",
+        "description": "Options for the web search tool.",
+        "properties": {
+          "search_context_size": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WebSearchContextSize",
+                "description": "High level guidance for the amount of context window space to use for the search. One of `low`, `medium`, or `high`. `medium` is the default."
+              }
+            ]
+          },
+          "user_location": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WebSearchUserLocation",
+                "description": "Approximate location parameters for the search."
+              }
+            ]
+          }
+        }
+      },
+      "WebSearchUserLocation": {
+        "type": "object",
+        "required": [
+          "type",
+          "approximate"
+        ],
+        "properties": {
+          "approximate": {
+            "$ref": "#/components/schemas/WebSearchLocation"
+          },
+          "type": {
+            "$ref": "#/components/schemas/WebSearchUserLocationType"
+          }
+        }
+      },
+      "WebSearchUserLocationType": {
+        "type": "string",
+        "enum": [
+          "approximate"
+        ]
+      }
+    }
+  }
+}

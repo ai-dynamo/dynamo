@@ -1,0 +1,215 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Assign Reviewers
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review]
+
+jobs:
+  assign-reviewers:
+    runs-on: ubuntu-latest
+    # Don't assign reviewers to draft PRs
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      # Note: To list team members, you may need to use a PAT or GitHub App
+      # with read:org scope instead of GITHUB_TOKEN
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v45
+        with:
+          separator: "\n"
+
+      - name: Assign reviewers from CODEOWNERS
+        uses: actions/github-script@v7
+        env:
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          NUM_REVIEWERS: "2"
+        with:
+          # Use a PAT with read:org scope to list team members
+          # Create a secret called ORG_READ_TOKEN with a PAT that has read:org scope
+          # Falls back to GITHUB_TOKEN if not available (but team member listing may fail)
+          github-token: ${{ secrets.ORG_READ_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // Read CODEOWNERS file
+            const codeownersPath = path.join(process.env.GITHUB_WORKSPACE, 'CODEOWNERS');
+            const codeownersContent = fs.readFileSync(codeownersPath, 'utf8');
+
+            // Parse CODEOWNERS into rules
+            const rules = [];
+            for (const line of codeownersContent.split('\n')) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith('#')) continue;
+
+              const parts = trimmed.split(/\s+/);
+              if (parts.length < 2) continue;
+
+              const pattern = parts[0];
+              const owners = parts.slice(1).filter(o => o.startsWith('@'));
+              if (owners.length > 0) {
+                rules.push({ pattern, owners });
+              }
+            }
+
+            // Convert CODEOWNERS pattern to regex
+            function patternToRegex(pattern) {
+              // Remove leading slash for matching
+              let p = pattern.startsWith('/') ? pattern.slice(1) : pattern;
+
+              // Escape special regex chars except * and ?
+              p = p.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+
+              // Convert glob patterns
+              p = p.replace(/\*\*/g, '<<<GLOBSTAR>>>');
+              p = p.replace(/\*/g, '[^/]*');
+              p = p.replace(/<<<GLOBSTAR>>>/g, '.*');
+              p = p.replace(/\?/g, '.');
+
+              // If pattern doesn't start with /, it can match anywhere
+              if (!pattern.startsWith('/')) {
+                p = '(^|.*/?)' + p;
+              } else {
+                p = '^' + p;
+              }
+
+              // If pattern ends with /, match everything under it
+              if (pattern.endsWith('/')) {
+                p = p + '.*';
+              }
+
+              return new RegExp(p);
+            }
+
+            // Function to get team members
+            async function getTeamMembers(org, teamSlug) {
+              try {
+                const members = await github.paginate(
+                  github.rest.teams.listMembersInOrg,
+                  {
+                    org: org,
+                    team_slug: teamSlug,
+                    per_page: 100
+                  }
+                );
+                return members.map(m => m.login);
+              } catch (error) {
+                console.log(`Warning: Could not fetch members for team ${org}/${teamSlug}: ${error.message}`);
+                console.log('Make sure ORG_READ_TOKEN secret is set with a PAT that has read:org scope');
+                return [];
+              }
+            }
+
+            // Get changed files
+            const changedFiles = process.env.CHANGED_FILES.split('\n').filter(f => f.trim());
+            console.log('Changed files:', changedFiles);
+
+            // Find matching owners for each file (last matching rule wins, like CODEOWNERS)
+            const matchedOwners = new Set();
+            for (const file of changedFiles) {
+              let lastMatch = null;
+              for (const rule of rules) {
+                const regex = patternToRegex(rule.pattern);
+                if (regex.test(file)) {
+                  lastMatch = rule;
+                }
+              }
+              if (lastMatch) {
+                console.log(`File "${file}" matched pattern "${lastMatch.pattern}"`);
+                for (const owner of lastMatch.owners) {
+                  matchedOwners.add(owner);
+                }
+              }
+            }
+
+            console.log('All matched owners:', Array.from(matchedOwners));
+
+            // Expand teams to individual members
+            const allPotentialReviewers = new Set();
+            for (const owner of matchedOwners) {
+              const name = owner.replace('@', '');
+              if (name.includes('/')) {
+                // It's a team (org/team-name format)
+                const [org, teamSlug] = name.split('/');
+                console.log(`Fetching members of team: ${org}/${teamSlug}`);
+                const members = await getTeamMembers(org, teamSlug);
+                console.log(`Team ${teamSlug} members:`, members);
+                for (const member of members) {
+                  allPotentialReviewers.add(member);
+                }
+              } else {
+                // It's an individual user
+                allPotentialReviewers.add(name);
+              }
+            }
+
+            console.log('All potential reviewers (from teams):', Array.from(allPotentialReviewers));
+
+            // Remove the PR author from potential reviewers
+            const prAuthor = context.payload.pull_request.user.login;
+            const potentialReviewers = Array.from(allPotentialReviewers).filter(
+              user => user.toLowerCase() !== prAuthor.toLowerCase()
+            );
+
+            console.log('Potential reviewers (excluding author):', potentialReviewers);
+
+            if (potentialReviewers.length === 0) {
+              console.log('No potential reviewers found');
+              return;
+            }
+
+            // Randomly select reviewers
+            const numReviewers = parseInt(process.env.NUM_REVIEWERS, 10);
+            const shuffled = potentialReviewers.sort(() => Math.random() - 0.5);
+            const selectedReviewers = shuffled.slice(0, Math.min(numReviewers, shuffled.length));
+
+            console.log('Selected reviewers:', selectedReviewers);
+
+            // Request reviewers (all are individual users now)
+            if (selectedReviewers.length > 0) {
+              try {
+                await github.rest.pulls.requestReviewers({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.pull_request.number,
+                  reviewers: selectedReviewers
+                });
+                console.log('Successfully requested reviewers:', selectedReviewers);
+              } catch (error) {
+                console.log('Error requesting reviewers:', error.message);
+                // Some users might not have access, try one by one
+                for (const reviewer of selectedReviewers) {
+                  try {
+                    await github.rest.pulls.requestReviewers({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: context.payload.pull_request.number,
+                      reviewers: [reviewer]
+                    });
+                    console.log(`Successfully requested reviewer: ${reviewer}`);
+                  } catch (individualError) {
+                    console.log(`Could not request reviewer ${reviewer}: ${individualError.message}`);
+                  }
+                }
+              }
+            }

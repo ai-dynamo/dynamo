@@ -94,7 +94,7 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  - 'docs/kubernetes/api_reference.md'
+  - 'docs/pages/kubernetes/api-reference.md'
 
 deploy:
   - 'deploy/helm/**'
