@@ -111,7 +111,7 @@ jobs:
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
-          PLATFORM: ${{ inputs.platform }}
+          PLATFORM: linux/${{ inputs.platform }}
         run: |
           if [ -n "$EXTRA_TAGS" ]; then
             RESULT=""
