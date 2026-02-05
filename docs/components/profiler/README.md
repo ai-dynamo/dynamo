@@ -108,7 +108,7 @@ The profiler generates:
 3. **Generated DGD**: Complete deployment manifest with optimized settings
 
 Example recommendations:
-```
+```text
 Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
 Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 ```
