@@ -34,6 +34,16 @@ from common import (
 logger = setup_logger(__name__)
 
 
+def count_dataset_entries(input_dataset):
+    """Count the number of entries in a JSONL dataset file."""
+    count = 0
+    with open(input_dataset, "r") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
 def get_aiperf_cmd(
     model,
     tokenizer,
@@ -42,6 +52,7 @@ def get_aiperf_cmd(
     seed,
     concurrency,
     block_size,
+    request_count,
     url="http://localhost:8000",
 ):
     """Build aiperf command for concurrency-based trace benchmarking."""
@@ -60,6 +71,8 @@ def get_aiperf_cmd(
         "mooncake_trace",
         "--concurrency",
         str(concurrency),
+        "--request-count",
+        str(request_count),
         "--prompt-input-tokens-block-size",
         str(block_size),
         "--random-seed",
@@ -130,6 +143,7 @@ def run_benchmark(
     seed,
     concurrency,
     block_size,
+    request_count,
 ):
     """Run aiperf benchmark with concurrency mode."""
     aiperf_cmd = get_aiperf_cmd(
@@ -140,10 +154,13 @@ def run_benchmark(
         seed,
         concurrency,
         block_size,
+        request_count,
         url,
     )
 
-    logger.info(f"Running aiperf with concurrency={concurrency}")
+    logger.info(
+        f"Running aiperf with concurrency={concurrency}, request_count={request_count}"
+    )
     logger.info(f"Dataset: {trace_dataset}")
     logger.info(f"Command: {' '.join(aiperf_cmd)}")
 
@@ -199,9 +216,22 @@ def main():
         default=DEFAULT_BLOCK_SIZE,
         help=f"Block size for prompt generation from hash_ids (default: {DEFAULT_BLOCK_SIZE})",
     )
+    parser.add_argument(
+        "--request-count",
+        type=int,
+        default=None,
+        help="Number of requests to send. If not set, defaults to number of entries in input dataset.",
+    )
 
     args = parser.parse_args()
     resolve_tokenizer(args)
+
+    # Default request_count to dataset entry count if not specified
+    if args.request_count is None:
+        args.request_count = count_dataset_entries(args.input_dataset)
+        logger.info(
+            f"Request count not specified, using dataset entry count: {args.request_count}"
+        )
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -229,6 +259,7 @@ def main():
         args.seed,
         args.concurrency,
         args.block_size,
+        args.request_count,
     )
 
     logger.info(f"Results saved to: {artifact_dir}")

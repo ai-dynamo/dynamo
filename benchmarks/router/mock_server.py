@@ -28,20 +28,26 @@ from aiohttp import web
 class RequestLogger:
     """Tracks and logs incoming requests with timing information."""
 
-    def __init__(self, output_file: str | None = None):
+    def __init__(self, output_file: str | None = None, payload_file: str | None = None):
         self.request_count = 0
         self.start_time = None
         self.session_last_seen: dict[str, float] = {}
         self.output_file = output_file
+        self.payload_file = payload_file
         self._file_handle = None
+        self._payload_handle = None
 
         if output_file:
             self._file_handle = open(output_file, "w")
+        if payload_file:
+            self._payload_handle = open(payload_file, "w")
 
     def close(self):
-        """Close the output file if open."""
+        """Close the output files if open."""
         if self._file_handle:
             self._file_handle.close()
+        if self._payload_handle:
+            self._payload_handle.close()
 
     def log_request(self, request_data: dict, headers: dict) -> None:
         """Log a request with timestamp and relevant metadata."""
@@ -94,6 +100,23 @@ class RequestLogger:
         if self._file_handle:
             self._file_handle.write(log_line + "\n")
             self._file_handle.flush()
+
+        # Dump full payload to separate file
+        if self._payload_handle:
+            payload_entry = {
+                "request_number": self.request_count,
+                "timestamp": timestamp,
+                "elapsed_s": elapsed,
+                "correlation_id": correlation_id,
+                "headers": {
+                    k: v
+                    for k, v in headers.items()
+                    if k.lower() not in ("authorization", "accept")
+                },
+                "body": request_data,
+            }
+            self._payload_handle.write(json.dumps(payload_entry) + "\n")
+            self._payload_handle.flush()
 
 
 logger: RequestLogger = None  # Initialized in main()
@@ -244,13 +267,20 @@ def main():
         default="mock_server_logs.txt",
         help="Output file for request logs (default: mock_server_logs.txt)",
     )
+    parser.add_argument(
+        "--payload-output",
+        type=str,
+        default="mock_server_payloads.jsonl",
+        help="Output file for full request payloads in JSONL format (default: mock_server_payloads.jsonl)",
+    )
     args = parser.parse_args()
 
-    # Initialize logger with output file
-    logger = RequestLogger(output_file=args.output)
+    # Initialize logger with output files
+    logger = RequestLogger(output_file=args.output, payload_file=args.payload_output)
 
     print(f"Starting mock server on {args.host}:{args.port}")
     print(f"Logging requests to: {args.output}")
+    print(f"Dumping payloads to: {args.payload_output}")
     print("Waiting for requests from aiperf...")
     print("-" * 80)
 
