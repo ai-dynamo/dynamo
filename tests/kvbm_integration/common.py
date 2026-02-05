@@ -336,7 +336,7 @@ class DeterminismTester(ApiTester):
 
         top_k = -1
         if check_module_available("tensorrt_llm"):
-            top_k = 0
+            top_k = 1  # TensorRT-LLM requires top_k>=0 and dynamo frontend does not support top_k=0
         # For determinism: use temperature=0 which should trigger greedy decoding in vLLM
         # Setting top_p=1.0 and top_k=-1 to avoid any sampling/filtering
         return super().make_request(
