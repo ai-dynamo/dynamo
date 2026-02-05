@@ -60,10 +60,20 @@ def print_phase(phase_num: int, description: str) -> None:
     print(f"\n=== Phase {phase_num}: {description} ===")
 
 
-def check_kvbm_metrics(phase_name: str) -> dict[str, int]:
-    """Fetch and display KVBM metrics."""
+def check_kvbm_metrics(phase_name: str, metrics_port: int) -> dict[str, int]:
+    """Fetch and display KVBM metrics.
+
+    Args:
+        phase_name: Name of the test phase for logging
+        metrics_port: Port number for the KVBM metrics endpoint
+
+    Returns:
+        Dictionary containing KVBM metrics with keys:
+        - kvbm_offload_blocks_d2h: Blocks offloaded from GPU to CPU
+        - kvbm_onboard_blocks_h2d: Blocks onboarded from CPU to GPU
+    """
     print(f"\n--- Checking KVBM metrics after {phase_name} ---")
-    metrics = fetch_kvbm_metrics()
+    metrics = fetch_kvbm_metrics(port=metrics_port)
 
     offload_d2h = metrics.get("kvbm_offload_blocks_d2h", 0)
     onboard_h2d = metrics.get("kvbm_onboard_blocks_h2d", 0)
@@ -140,7 +150,7 @@ def test_chunked_prefill_offload(tester, llm_server_kvbm):  # noqa: F811
     response_1 = tester.make_request(LONG_PROMPT, max_tokens=MAX_TOKENS)
     print(f"Response 1: {response_1}")
 
-    metrics_p1 = check_kvbm_metrics("Phase 1")
+    metrics_p1 = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
 
     # Verify offload occurred
     offloaded_blocks = metrics_p1["kvbm_offload_blocks_d2h"]
@@ -178,7 +188,7 @@ def test_chunked_prefill_offload(tester, llm_server_kvbm):  # noqa: F811
     response_2 = tester.make_request(LONG_PROMPT, max_tokens=MAX_TOKENS)
     print(f"Response 2: {response_2}")
 
-    metrics_p3 = check_kvbm_metrics("Phase 3")
+    metrics_p3 = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
 
     # Verify onboarding occurred
     onboarded_blocks = metrics_p3["kvbm_onboard_blocks_h2d"]
