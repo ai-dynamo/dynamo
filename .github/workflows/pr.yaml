@@ -65,13 +65,33 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
+  # TEMPORARY: Quick OpenSearch connectivity test
+  test-opensearch-connectivity:
+    name: Test OpenSearch Connection
+    runs-on: gitlab
+    timeout-minutes: 2
+    steps:
+      - name: Test OpenSearch connectivity
+        run: |
+          echo "Testing OpenSearch connectivity..."
+          OPENSEARCH_ENDPOINT="https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*"
+
+          if curl -s --max-time 5 "$OPENSEARCH_ENDPOINT" > /dev/null 2>&1; then
+            echo "✅ OpenSearch is reachable from gitlab runner"
+            exit 0
+          else
+            echo "⚠️ OpenSearch is NOT reachable from gitlab runner"
+            echo "Flaky detection will work but categorize all tests as legitimate failures"
+            exit 0
+          fi
+
   # TEMPORARY: Flaky test detection for testing
   flaky-test-detection:
     name: Flaky Test Detection
-    runs-on: prod-builder-amd-v1
+    runs-on: gitlab
     timeout-minutes: 15
     if: always()
-    needs: [vllm, sglang, trtllm]
+    needs: [vllm, sglang, trtllm, test-opensearch-connectivity]
     permissions:
       contents: read
       actions: read

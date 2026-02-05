@@ -278,7 +278,12 @@ def query_opensearch_test_history(
         }
 
     except requests.RequestException as e:
-        logger.error(f"OpenSearch query failed for {test_name}: {e}")
+        logger.warning(
+            f"OpenSearch query failed for {test_name} (network unreachable): {e}"
+        )
+        logger.warning(
+            "Test will be categorized as legitimate failure due to missing history"
+        )
         return {"total_runs": 0, "passed_count": 0, "failed_count": 0, "error_count": 0}
     except Exception as e:
         logger.error(f"Error querying OpenSearch for {test_name}: {e}")
@@ -535,6 +540,21 @@ def main():
     logger.info(f"Flaky Threshold: {FLAKY_THRESHOLD:.1%}")
     logger.info(f"Lookback Days: {LOOKBACK_DAYS}")
     logger.info("=" * 80)
+
+    # Check OpenSearch connectivity
+    if OPENSEARCH_ENDPOINT:
+        try:
+            logger.info(f"Testing OpenSearch connectivity: {OPENSEARCH_ENDPOINT}")
+            requests.get(OPENSEARCH_ENDPOINT, timeout=5)
+            logger.info("✅ OpenSearch is reachable")
+        except requests.RequestException as e:
+            logger.warning("⚠️ OpenSearch is NOT reachable from this runner")
+            logger.warning(f"   Error: {e}")
+            logger.warning(
+                "   All tests will be categorized as legitimate failures (no history available)"
+            )
+    else:
+        logger.warning("⚠️ OPENSEARCH_ENDPOINT not configured")
 
     try:
         # Step 1: Parse test artifacts

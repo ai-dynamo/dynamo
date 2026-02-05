@@ -1083,12 +1083,33 @@ jobs:
           retention-days: 7
 
   ############################## FLAKY TEST DETECTION ##############################
+  # Quick connectivity test for fast feedback
+  test-opensearch-connectivity:
+    name: Test OpenSearch Connection
+    runs-on: gitlab
+    timeout-minutes: 2
+    if: inputs.pipeline_type == 'post_merge' && !github.event.repository.fork
+    steps:
+      - name: Test OpenSearch connectivity
+        run: |
+          echo "Testing OpenSearch connectivity..."
+          OPENSEARCH_ENDPOINT="https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*"
+
+          if curl -s --max-time 5 "$OPENSEARCH_ENDPOINT" > /dev/null 2>&1; then
+            echo "✅ OpenSearch is reachable from gitlab runner"
+            exit 0
+          else
+            echo "⚠️ OpenSearch is NOT reachable from gitlab runner"
+            echo "Flaky detection will work but categorize all tests as legitimate failures"
+            exit 0
+          fi
+
   flaky-test-detection:
     name: Flaky Test Detection
-    runs-on: prod-builder-amd-v1
+    runs-on: gitlab
     timeout-minutes: 15
     if: always() && inputs.pipeline_type == 'post_merge' && !github.event.repository.fork
-    needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests, test-opensearch-connectivity]
     permissions:
       contents: read
       actions: read
