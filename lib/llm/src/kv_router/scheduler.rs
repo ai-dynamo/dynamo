@@ -31,9 +31,22 @@ const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
 /// Returns the queue threshold fraction if set, None if queueing is disabled
 fn queue_threshold_frac() -> Option<f64> {
-    std::env::var(env_kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC)
-        .ok()
-        .and_then(|val| val.parse::<f64>().ok())
+    let val = std::env::var(env_kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC).ok()?;
+    let Ok(frac) = val.parse::<f64>() else {
+        tracing::warn!(
+            "{} set to invalid value '{val}', ignoring",
+            env_kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC
+        );
+        return None;
+    };
+    if frac.is_nan() || frac <= 0.0 {
+        tracing::warn!(
+            "{} must be > 0 (got {frac}), ignoring",
+            env_kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC
+        );
+        return None;
+    }
+    Some(frac)
 }
 
 /// Queue for managing scheduling requests with interior mutability.
