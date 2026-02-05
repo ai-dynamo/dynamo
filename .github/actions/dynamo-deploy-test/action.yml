@@ -343,6 +343,13 @@ runs:
         kubectl get dynamographdeployments -n $NAMESPACE || true
         kubectl get pods -n $NAMESPACE || true
 
+        kubectl get dynamographdeployments -n $NAMESPACE --no-headers 2>/dev/null \
+          | awk '$2 == "False" {print $1}' \
+          | while read -r dep_name; do
+              echo ">>> DETAILED DESCRIPTION FOR FAILED DEPLOYMENT: $dep_name"
+              kubectl describe dynamographdeployments "$dep_name" -n $NAMESPACE
+          done || true
+
         echo "Deleting DynamoGraphDeployment: ${GRAPH_NAME}"
         kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s || true
 
