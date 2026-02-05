@@ -166,7 +166,14 @@ class Endpoint:
 
     async def client(self) -> Client:
         """
-        Create a `Client` capable of calling served instances of this endpoint
+        Create a `Client` capable of calling served instances of this endpoint using round-robin routing.
+        """
+        ...
+
+    async def client2(self, router_mode: RouterMode) -> Client:
+        """
+        Create a `Client` capable of calling served instances of this endpoint, using a specific
+        router mode (random, round-robin, kv).
         """
         ...
 
@@ -1507,4 +1514,5 @@ __all__ = [
     "ModelDeploymentCard",
     "PythonAsyncEngine",
     "prometheus_names",
+    "ModelCardInstanceId",
 ]
