@@ -196,13 +196,13 @@ class MultimodalRequestProcessor:
         # Return the encoder's processed prompt and tokens directly
         processed_prompt_from_encoder = request.get("_epd_processed_prompt")
         if processed_prompt_from_encoder is not None:
-            logging.info("Using fully processed prompt from encoder (EPD Case 1)")
+            logging.info("MM: Using fully processed prompt from encoder")
             result = {"prompt": processed_prompt_from_encoder}
             prompt_token_ids = request.get("_epd_prompt_token_ids")
             if prompt_token_ids:
                 result["prompt_token_ids"] = prompt_token_ids
             else:
-                logging.warning("EPD Case 1: No prompt_token_ids from encoder")
+                logging.warning("MM: No prompt_token_ids from encoder")
             return result
 
         # Get token_ids from request (already tokenized by Rust frontend)
@@ -220,14 +220,11 @@ class MultimodalRequestProcessor:
         # We need to pass these embeddings directly to TRT-LLM's generate_async
         if embeddings is not None:
             logging.info(
-                f"Using NIXL embeddings from encoder (EPD Case 2): shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
+                f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
             )
 
             # Structure embeddings in the format TRT-LLM's generate_async expects
-            # Looking at TRT-LLM code, multi_modal_embeddings can be passed directly
-            processed_inputs[
-                "multi_modal_embeddings"
-            ] = embeddings  # Pass NIXL embeddings directly
+            processed_inputs["multi_modal_embeddings"] = embeddings
 
             return processed_inputs
 
