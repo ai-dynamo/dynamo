@@ -35,9 +35,6 @@ class DiffusionConfig:
 
     # Model config
     model_path: str = DEFAULT_VIDEO_MODEL_PATH
-    model_type: str = (
-        "wan_t2v"  # Must be validated against DiffusionEngine.PIPELINE_REGISTRY
-    )
     served_model_name: Optional[str] = None
     # torch_dtype for model loading. Options: "bfloat16", "float16", "float32"
     # bfloat16 is recommended for Ampere+ GPUs (A100, H100, etc.)
@@ -87,7 +84,6 @@ class DiffusionConfig:
             f"component={self.component}, "
             f"endpoint={self.endpoint}, "
             f"model_path={self.model_path}, "
-            f"model_type={self.model_type}, "
             f"served_model_name={self.served_model_name}, "
             f"output_dir={self.output_dir}, "
             f"default_height={self.default_height}, "

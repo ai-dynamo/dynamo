@@ -71,7 +71,6 @@ class Config:
         self.use_kv_events: bool = False
 
         # Diffusion-specific config (only used when modality is video_diffusion or image_diffusion)
-        self.model_type: Optional[str] = None  # e.g., "wan_t2v", "flux"
         self.output_dir: str = "/tmp/dynamo_videos"
         self.default_height: int = 480
         self.default_width: int = 832
@@ -127,7 +126,6 @@ class Config:
             f"event_plane={self.event_plane}, "
             f"enable_local_indexer={self.enable_local_indexer}, "
             f"use_kv_events={self.use_kv_events}, "
-            f"model_type={self.model_type}, "
             f"output_dir={self.output_dir}, "
             f"dit_dp_size={self.dit_dp_size}, "
             f"dit_tp_size={self.dit_tp_size})"
@@ -298,14 +296,6 @@ def cmd_line_args():
         choices=[m.value for m in Modality],
         help="Modality to use for the model. Default: text. "
         "Options: text (LLM), multimodal (VLM), video_diffusion.",
-    )
-    parser.add_argument(
-        "--model-type",
-        type=str,
-        default=None,
-        help="Model type for diffusion modalities (required for video_diffusion). "
-        "Examples: wan_t2v. "
-        "Run with invalid value to see allowed options for your modality.",
     )
     parser.add_argument(
         "--encode-endpoint",
@@ -525,9 +515,8 @@ def cmd_line_args():
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
-    # Set modality and model_type
+    # Set modality
     config.modality = args.modality
-    config.model_type = args.model_type
 
     # Set the disaggregation mode.
     config.disaggregation_mode = DisaggregationMode(args.disaggregation_mode)

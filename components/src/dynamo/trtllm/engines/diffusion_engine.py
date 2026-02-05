@@ -6,6 +6,9 @@
 This module provides a unified interface for various diffusion models
 (Wan, Flux, Cosmos, etc.) through a pipeline registry system.
 
+The pipeline type is auto-detected from model_index.json (shipped with every
+HuggingFace Diffusers model), eliminating the need for a --model-type flag.
+
 Requirements:
     - visual_gen: Part of TensorRT-LLM, located at tensorrt_llm/visual_gen/.
       Currently on the feat/visual_gen branch (not yet merged to main).
@@ -21,7 +24,10 @@ Note on imports:
 """
 
 import importlib
+import json
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
@@ -33,143 +39,135 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class PipelineInfo:
+    """Auto-detected pipeline information from model_index.json."""
+
+    module_path: str
+    class_name: str
+    modalities: list[str]
+    config_overrides: dict[str, Any]
+
+
 class DiffusionEngine:
     """Generic wrapper for visual_gen diffusion pipelines.
 
     This engine provides:
-    - A registry mapping model_type to pipeline classes
-    - Validation of model_type against supported modalities
+    - Auto-detection of pipeline class from model_index.json
+    - A registry mapping diffusers _class_name to visual_gen pipelines
     - Lazy loading of pipeline modules
     - Common interface for video/image generation
 
     Example:
-        >>> engine = DiffusionEngine("wan_t2v", config)
+        >>> engine = DiffusionEngine(config)
         >>> await engine.initialize()
         >>> frames = engine.generate(prompt="A cat playing piano", ...)
     """
 
-    # Registry: model_type -> (module_path, class_name, supported_modalities, config_overrides)
-    # - module_path: Python module path for the pipeline class
-    # - class_name: Name of the pipeline class to instantiate
-    # - supported_modalities: List of modalities this model supports
-    # - config_overrides: Model-specific config overrides for _build_dit_configs()
-    #
-    # When adding new models, specify the torch_compile_models for that architecture.
-    # visual_gen is a generic framework; each model family may need different settings.
+    # Registry: diffusers _class_name -> (module_path, visual_gen_class, supported_modalities)
+    # The _class_name comes from model_index.json shipped with every HF Diffusers model.
+    # torch_compile_models is derived dynamically from transformer* keys in model_index.json.
     #
     # NOTE: This registry is initially focused on Wan text-to-video models.
     # Follow-up PRs will extend support for other model families (Flux, Cosmos, etc.)
     # which may require additional config fields in DiffusionConfig.
-    PIPELINE_REGISTRY: dict[str, tuple[str, str, list[str], dict[str, Any]]] = {
-        # Wan 2.1 text-to-video (single transformer)
-        "wan_t2v": (
+    PIPELINE_REGISTRY: dict[str, tuple[str, str, list[str]]] = {
+        "WanPipeline": (
             "visual_gen.pipelines.wan_pipeline",
             "ditWanPipeline",
             ["video_diffusion"],
-            {"torch_compile_models": "transformer"},
         ),
-        # Wan 2.2 text-to-video (dual transformer architecture)
-        "wan2.2_t2v": (
-            "visual_gen.pipelines.wan_pipeline",
-            "ditWanPipeline",
-            ["video_diffusion"],
-            {"torch_compile_models": "transformer,transformer_2"},
-        ),
-        # TODO(nv-yna): Add support for wan_i2v, cosmos, flux, flux2 in follow-up PR
+        # TODO(nv-yna): Add support for WanImageToVideoPipeline, FluxPipeline, etc.
     }
 
     @classmethod
-    def get_allowed_model_types(cls, modality: str) -> list[str]:
-        """Get list of model types allowed for a given modality.
+    def detect_pipeline_info(cls, model_path: str) -> PipelineInfo:
+        """Auto-detect pipeline class from model's model_index.json.
+
+        Reads model_index.json (local path or HuggingFace Hub) to determine:
+        - Which visual_gen pipeline class to use (via _class_name)
+        - Which transformer models to torch.compile (via transformer* keys)
 
         Args:
-            modality: The modality string (e.g., "video_diffusion", "image_diffusion").
+            model_path: Local path or HuggingFace model identifier.
 
         Returns:
-            List of model_type strings that support the given modality.
-        """
-        return [
-            model_type
-            for model_type, (_, _, modalities, _) in cls.PIPELINE_REGISTRY.items()
-            if modality in modalities
-        ]
-
-    @classmethod
-    def validate_model_type(cls, modality: str, model_type: str) -> None:
-        """Validate that model_type is allowed for the given modality.
-
-        Args:
-            modality: The modality string (e.g., "video_diffusion").
-            model_type: The model type string (e.g., "wan_t2v").
+            PipelineInfo with module_path, class_name, modalities, and config_overrides.
 
         Raises:
-            ValueError: If model_type is not valid for the given modality,
-                with a helpful error message showing allowed values.
+            ValueError: If _class_name is not in the registry.
+            FileNotFoundError: If model_index.json cannot be found locally or on HF Hub.
         """
-        allowed = cls.get_allowed_model_types(modality)
+        # Try local path first
+        local_index = Path(model_path) / "model_index.json"
+        if local_index.exists():
+            with open(local_index) as f:
+                model_index = json.load(f)
+        else:
+            # Download from HuggingFace Hub
+            from huggingface_hub import hf_hub_download
 
-        if model_type not in allowed:
+            index_path = hf_hub_download(model_path, "model_index.json")
+            with open(index_path) as f:
+                model_index = json.load(f)
+
+        class_name = model_index.get("_class_name")
+        if class_name not in cls.PIPELINE_REGISTRY:
+            supported = list(cls.PIPELINE_REGISTRY.keys())
             raise ValueError(
-                f"Invalid --model-type '{model_type}' for --modality '{modality}'.\n"
-                f"Allowed values: {', '.join(allowed)}\n"
-                f"\nUsage: python -m dynamo.trtllm --modality {modality} "
-                f"--model-type {allowed[0] if allowed else '<model>'} --model-path ..."
+                f"Unsupported diffusion pipeline '{class_name}' from model '{model_path}'.\n"
+                f"Supported pipelines: {', '.join(supported)}\n"
+                f"Check that model_index.json has a supported _class_name."
             )
 
-    @classmethod
-    def is_valid_model_type(cls, model_type: str) -> bool:
-        """Check if a model_type exists in the registry.
+        module_path, vg_class, modalities = cls.PIPELINE_REGISTRY[class_name]
 
-        Args:
-            model_type: The model type string to check.
+        # Derive torch_compile_models from transformer* keys in model_index.json
+        transformer_keys = sorted(
+            k for k in model_index if k.startswith("transformer")
+        )
+        torch_compile_models = (
+            ",".join(transformer_keys) if transformer_keys else "transformer"
+        )
 
-        Returns:
-            True if the model_type is registered, False otherwise.
-        """
-        return model_type in cls.PIPELINE_REGISTRY
+        config_overrides = {"torch_compile_models": torch_compile_models}
 
-    def __init__(self, model_type: str, config: "DiffusionConfig"):
+        return PipelineInfo(module_path, vg_class, modalities, config_overrides)
+
+    def __init__(self, config: "DiffusionConfig"):
         """Initialize the engine with configuration.
 
+        Auto-detects the pipeline type from config.model_path's model_index.json.
+
         Args:
-            model_type: The type of model to load (e.g., "wan_t2v", "flux").
             config: Diffusion generation configuration.
 
         Raises:
-            ValueError: If model_type is not in the registry.
+            ValueError: If the model's pipeline type is not supported.
         """
-        if model_type not in self.PIPELINE_REGISTRY:
-            all_types = list(self.PIPELINE_REGISTRY.keys())
-            raise ValueError(
-                f"Unknown model_type '{model_type}'. "
-                f"Available types: {', '.join(all_types)}"
-            )
+        info = self.detect_pipeline_info(config.model_path)
 
-        self.model_type = model_type
         self.config = config
         self._pipeline = None
         self._initialized = False
 
-        # Get registry entry (module_path, class_name, modalities, config_overrides)
-        (
-            self._module_path,
-            self._class_name,
-            self._supported_modalities,
-            self._config_overrides,
-        ) = self.PIPELINE_REGISTRY[model_type]
+        self._module_path = info.module_path
+        self._class_name = info.class_name
+        self._supported_modalities = info.modalities
+        self._config_overrides = info.config_overrides
 
     async def initialize(self) -> None:
         """Load and configure the diffusion pipeline.
 
         This is called once at worker startup to load the model.
-        The specific pipeline class is determined by the model_type.
+        The specific pipeline class is determined by the auto-detected pipeline type.
         """
         if self._initialized:
             logger.warning("Engine already initialized, skipping")
             return
 
         logger.info(
-            f"Initializing DiffusionEngine: model_type={self.model_type}, "
+            f"Initializing DiffusionEngine: pipeline={self._class_name}, "
             f"model_path={self.config.model_path}"
         )
 
@@ -216,7 +214,7 @@ class DiffusionEngine:
             logger.info("CPU offload enabled, pipeline stays on CPU")
 
         self._initialized = True
-        logger.info(f"DiffusionEngine initialization complete: {self.model_type}")
+        logger.info(f"DiffusionEngine initialization complete: {self._class_name}")
 
     def _build_dit_configs(self) -> dict[str, Any]:
         """Build dit_configs dict from DiffusionConfig.
@@ -224,8 +222,8 @@ class DiffusionEngine:
         Returns:
             Configuration dictionary for visual_gen's setup_configs.
         """
-        # Get torch_compile_models from model-specific config overrides in registry
-        # Each model_type in PIPELINE_REGISTRY specifies its required settings
+        # Get torch_compile_models from auto-detected config overrides
+        # Each pipeline in PIPELINE_REGISTRY specifies its required settings
         torch_compile_models = self._config_overrides.get(
             "torch_compile_models", "transformer"
         )
@@ -340,7 +338,7 @@ class DiffusionEngine:
         self._initialized = False
         if self.device == "cuda":
             torch.cuda.empty_cache()
-        logger.info(f"DiffusionEngine cleanup complete: {self.model_type}")
+        logger.info(f"DiffusionEngine cleanup complete: {self._class_name}")
 
     @property
     def is_initialized(self) -> bool:

@@ -249,17 +249,17 @@ Dynamo supports video generation using diffusion models through the `--modality 
 
 ### Supported Models
 
-| Model Type | Description | Usage |
-|------------|-------------|-------|
-| `wan_t2v` | Wan 2.1 Text-to-Video | `--model-type wan_t2v` |
-| `wan2.2_t2v` | Wan 2.2 Text-to-Video (dual transformer) | `--model-type wan2.2_t2v` |
+| Diffusers Pipeline | Description | Example Model |
+|--------------------|-------------|---------------|
+| `WanPipeline` | Wan 2.1/2.2 Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
+
+The pipeline type is **auto-detected** from the model's `model_index.json` — no `--model-type` flag is needed.
 
 ### Quick Start
 
 ```bash
 python -m dynamo.trtllm \
   --modality video_diffusion \
-  --model-type wan_t2v \
   --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
   --output-dir /tmp/videos
 ```
@@ -284,7 +284,6 @@ curl -X POST http://localhost:8000/v1/videos/generations \
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--model-type` | Model type from registry | `wan_t2v` |
 | `--output-dir` | Directory for generated videos | `/tmp/dynamo_videos` |
 | `--default-height` | Default video height | `480` |
 | `--default-width` | Default video width | `832` |

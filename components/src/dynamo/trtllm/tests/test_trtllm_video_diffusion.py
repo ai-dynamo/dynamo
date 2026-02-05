@@ -3,13 +3,16 @@
 
 """Unit tests for video diffusion components.
 
-Tests for Modality enum, DiffusionConfig, DiffusionEngine registry (classmethods only),
+Tests for Modality enum, DiffusionConfig, DiffusionEngine auto-detection,
 VideoGenerationHandler helpers, and video protocol types.
 
 These tests do NOT require visual_gen or GPU - they test logic only.
 """
 
+import json
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -95,7 +98,6 @@ class TestDiffusionConfig:
         assert config.default_guidance_scale == 5.0
 
         # Model defaults
-        assert config.model_type == "wan_t2v"
         assert config.output_dir == "/tmp/dynamo_videos"
 
         # Optimization defaults
@@ -113,7 +115,6 @@ class TestDiffusionConfig:
             default_height=720,
             default_width=1280,
             default_num_frames=120,
-            model_type="wan_t2v",
             enable_teacache=True,
             dit_tp_size=2,
         )
@@ -121,7 +122,6 @@ class TestDiffusionConfig:
         assert config.default_height == 720
         assert config.default_width == 1280
         assert config.default_num_frames == 120
-        assert config.model_type == "wan_t2v"
         assert config.enable_teacache is True
         assert config.dit_tp_size == 2
 
@@ -129,7 +129,6 @@ class TestDiffusionConfig:
         """Test that __str__ includes key fields."""
         config = DiffusionConfig(
             model_path="test/model",
-            model_type="wan_t2v",
             default_height=480,
         )
 
@@ -137,79 +136,97 @@ class TestDiffusionConfig:
 
         assert "DiffusionConfig(" in str_repr
         assert "model_path=test/model" in str_repr
-        assert "model_type=wan_t2v" in str_repr
         assert "default_height=480" in str_repr
         assert "dit_tp_size=" in str_repr
 
 
 # =============================================================================
-# Part 3: DiffusionEngine Registry Tests (classmethods only, no visual_gen)
+# Part 3: DiffusionEngine Auto-Detection Tests (no visual_gen needed)
 # =============================================================================
 
 
-class TestDiffusionEngineRegistry:
-    """Tests for DiffusionEngine class methods (no instantiation needed)."""
+class TestDetectPipelineInfo:
+    """Tests for DiffusionEngine.detect_pipeline_info() auto-detection."""
 
-    def test_pipeline_registry_has_wan_t2v(self):
-        """Test that wan_t2v entry exists with correct structure."""
-        assert "wan_t2v" in DiffusionEngine.PIPELINE_REGISTRY
+    def _make_model_dir(self, tmp_path: Path, model_index: dict) -> str:
+        """Create a temp model directory with model_index.json."""
+        model_dir = tmp_path / "test_model"
+        model_dir.mkdir()
+        with open(model_dir / "model_index.json", "w") as f:
+            json.dump(model_index, f)
+        return str(model_dir)
 
-        entry = DiffusionEngine.PIPELINE_REGISTRY["wan_t2v"]
-        assert (
-            len(entry) == 4
-        )  # (module_path, class_name, modalities, config_overrides)
-        module_path, class_name, modalities, config_overrides = entry
+    def test_detect_wan_pipeline_single_transformer(self, tmp_path):
+        """Test WanPipeline with single transformer -> ditWanPipeline."""
+        model_path = self._make_model_dir(tmp_path, {
+            "_class_name": "WanPipeline",
+            "_diffusers_version": "0.32.2",
+            "scheduler": ["diffusers", "UniPCMultistepScheduler"],
+            "text_encoder": ["transformers", "UMT5EncoderModel"],
+            "tokenizer": ["transformers", "AutoTokenizer"],
+            "transformer": ["diffusers", "WanTransformer3DModel"],
+            "vae": ["diffusers", "AutoencoderKLWan"],
+        })
 
-        assert "visual_gen" in module_path
-        assert "Pipeline" in class_name or "pipeline" in class_name.lower()
-        assert "video_diffusion" in modalities
-        assert isinstance(config_overrides, dict)
-        assert "torch_compile_models" in config_overrides
+        info = DiffusionEngine.detect_pipeline_info(model_path)
 
-    def test_pipeline_registry_has_wan22_t2v(self):
-        """Test that wan2.2_t2v entry exists with dual transformer config."""
-        assert "wan2.2_t2v" in DiffusionEngine.PIPELINE_REGISTRY
+        assert info.module_path == "visual_gen.pipelines.wan_pipeline"
+        assert info.class_name == "ditWanPipeline"
+        assert "video_diffusion" in info.modalities
+        assert info.config_overrides["torch_compile_models"] == "transformer"
 
-        entry = DiffusionEngine.PIPELINE_REGISTRY["wan2.2_t2v"]
-        _, _, _, config_overrides = entry
+    def test_detect_wan_pipeline_dual_transformer(self, tmp_path):
+        """Test WanPipeline with dual transformer -> Wan 2.2 config."""
+        model_path = self._make_model_dir(tmp_path, {
+            "_class_name": "WanPipeline",
+            "_diffusers_version": "0.32.2",
+            "transformer": ["diffusers", "WanTransformer3DModel"],
+            "transformer_2": ["diffusers", "WanTransformer3DModel"],
+            "vae": ["diffusers", "AutoencoderKLWan"],
+        })
 
-        # Wan 2.2 requires dual transformer compilation
-        assert config_overrides["torch_compile_models"] == "transformer,transformer_2"
+        info = DiffusionEngine.detect_pipeline_info(model_path)
 
-    def test_get_allowed_model_types_video(self):
-        """Test video_diffusion modality returns wan model types."""
-        allowed = DiffusionEngine.get_allowed_model_types("video_diffusion")
-        assert "wan_t2v" in allowed
-        assert "wan2.2_t2v" in allowed
+        assert info.class_name == "ditWanPipeline"
+        # Dual transformer detected from model_index.json keys
+        assert info.config_overrides["torch_compile_models"] == "transformer,transformer_2"
 
-    def test_get_allowed_model_types_unknown(self):
-        """Test unknown modality returns empty list."""
-        allowed = DiffusionEngine.get_allowed_model_types("nonexistent_modality")
-        assert allowed == []
+    def test_detect_unknown_class_raises_valueerror(self, tmp_path):
+        """Test that unknown _class_name raises ValueError with helpful message."""
+        model_path = self._make_model_dir(tmp_path, {
+            "_class_name": "SomeUnknownPipeline",
+        })
 
-    def test_validate_model_type_valid(self):
-        """Test that valid model_type + modality combination passes."""
-        # Should not raise
-        DiffusionEngine.validate_model_type("video_diffusion", "wan_t2v")
-
-    def test_validate_model_type_invalid(self):
-        """Test that invalid model_type raises ValueError with helpful message."""
         with pytest.raises(ValueError) as exc_info:
-            DiffusionEngine.validate_model_type("video_diffusion", "flux")
+            DiffusionEngine.detect_pipeline_info(model_path)
 
         error_msg = str(exc_info.value)
-        assert "Invalid --model-type 'flux'" in error_msg
-        assert "video_diffusion" in error_msg
-        assert "Allowed values:" in error_msg
-        assert "wan_t2v" in error_msg
+        assert "Unsupported diffusion pipeline 'SomeUnknownPipeline'" in error_msg
+        assert "Supported pipelines:" in error_msg
+        assert "WanPipeline" in error_msg
 
-    def test_is_valid_model_type_true(self):
-        """Test wan_t2v is a valid model type."""
-        assert DiffusionEngine.is_valid_model_type("wan_t2v") is True
+    def test_detect_missing_model_index_raises_error(self, tmp_path):
+        """Test that missing model_index.json for local path raises appropriate error."""
+        # Create empty dir with no model_index.json and a non-HF path
+        empty_dir = tmp_path / "empty_model"
+        empty_dir.mkdir()
 
-    def test_is_valid_model_type_false(self):
-        """Test nonexistent model type returns False."""
-        assert DiffusionEngine.is_valid_model_type("nonexistent") is False
+        # Local path without model_index.json will try HF Hub download
+        # which should fail for a local path that doesn't exist on HF
+        with pytest.raises(Exception):
+            DiffusionEngine.detect_pipeline_info(str(empty_dir))
+
+    def test_pipeline_registry_has_wan_pipeline(self):
+        """Test that WanPipeline entry exists with correct structure."""
+        assert "WanPipeline" in DiffusionEngine.PIPELINE_REGISTRY
+
+        entry = DiffusionEngine.PIPELINE_REGISTRY["WanPipeline"]
+        assert len(entry) == 3  # (module_path, class_name, modalities)
+        module_path, class_name, modalities = entry
+
+        assert "visual_gen" in module_path
+        assert class_name == "ditWanPipeline"
+        assert "video_diffusion" in modalities
 
 
 class TestDiffusionEngineDevice:

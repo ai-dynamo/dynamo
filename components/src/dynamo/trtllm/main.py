@@ -175,19 +175,6 @@ async def init(
     modality = Modality(config.modality)
 
     if Modality.is_diffusion(modality):
-        # Validate --model-type is provided and valid for diffusion modalities
-        from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
-
-        if not config.model_type:
-            allowed = DiffusionEngine.get_allowed_model_types(modality.value)
-            raise ValueError(
-                f"--model-type is required for --modality {modality.value}.\n"
-                f"Allowed values: {', '.join(allowed)}\n"
-                f"\nUsage: python -m dynamo.trtllm --modality {modality.value} "
-                f"--model-type {allowed[0] if allowed else '<model>'} --model-path ..."
-            )
-        DiffusionEngine.validate_model_type(modality.value, config.model_type)
-
         if modality == Modality.VIDEO_DIFFUSION:
             await init_video_diffusion_worker(runtime, config, shutdown_event)
             return
