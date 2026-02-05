@@ -14,6 +14,29 @@ class SupportedModels:
     """Supported multimodal model identifiers"""
 
     QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
+    QWEN_3_VL_8B = "Qwen/Qwen3-VL-8B-Instruct"
+
+
+# List of all Qwen VL model variants for easy extension
+QWEN_VL_MODELS = [
+    SupportedModels.QWEN_2_5_VL_7B,
+    SupportedModels.QWEN_3_VL_8B,
+]
+
+
+def is_qwen_vl_model(model_name: str) -> bool:
+    """
+    Check if a model is any Qwen VL variant.
+
+    Args:
+        model_name: The model name to check
+
+    Returns:
+        True if the model is a Qwen VL variant, False otherwise
+    """
+    return any(
+        is_model_supported(model_name, qwen_model) for qwen_model in QWEN_VL_MODELS
+    )
 
 
 def normalize_model_name(model_name: str) -> str:
@@ -152,7 +175,7 @@ def encode_image_embeddings(
     """
     with torch.no_grad():
         # Route through the correct encoder based on model
-        if is_model_supported(model_name, SupportedModels.QWEN_2_5_VL_7B):
+        if is_qwen_vl_model(model_name):
             embeddings = get_qwen_image_features(vision_encoder, image_embeds)
 
         else:

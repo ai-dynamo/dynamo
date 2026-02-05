@@ -75,15 +75,16 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             .image_token
         )
 
-        # For Qwen2.5-VL, the image token might be multiple tokens
+        # For Qwen VL models (Qwen2.5-VL, Qwen3-VL, etc.), the image token is a composite
+        # of multiple special tokens: <|vision_start|><|image_pad|><|vision_end|>
         if image_token_str == "<|vision_start|><|image_pad|><|vision_end|>":
-            # These are likely the individual special tokens for Qwen2.5-VL
+            # Extract the image_pad token ID which is used for token expansion
             image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
 
-            # Use the image_pad token as the main image token
+            # Use the image_pad token as the main image token for expansion
             self.image_token_id = image_pad_id
         else:
-            # Fallback for other models
+            # Fallback for other models (e.g., LLaVA-style)
             self.image_token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
 
         self.min_workers = 1
