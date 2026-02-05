@@ -334,6 +334,8 @@ def parse_args():
         parser.error(
             "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
         )
+    if flags.migration_limit < 0 or flags.migration_limit > 4294967295:
+        parser.error("--migration-limit must be between 0 and 4294967295 (0=disabled)")
 
     return flags
 
@@ -354,6 +356,10 @@ async def async_main():
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
     os.environ["DYN_EVENT_PLANE"] = flags.event_plane
+    logger.info(
+        f"Request migration {'enabled' if flags.migration_limit > 0 else 'disabled'} "
+        f"(limit: {flags.migration_limit})"
+    )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
