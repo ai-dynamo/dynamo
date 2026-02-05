@@ -20,23 +20,6 @@ from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
 
-def _get_workspace_dir() -> str:
-    """Get workspace directory without depending on dynamo.common package.
-
-    This allows tests to run without requiring dynamo package to be installed.
-    """
-    # Start from this file's location and walk up to find workspace root
-    current = os.path.dirname(os.path.abspath(__file__))
-    while current != os.path.dirname(current):  # Stop at filesystem root
-        # Workspace root has pyproject.toml
-        if os.path.exists(os.path.join(current, "pyproject.toml")):
-            return current
-        current = os.path.dirname(current)
-
-    # Fallback: assume workspace is 3 levels up from tests/utils/
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
 @dataclass
 class ResourceSnapshot:
     """Single resource usage snapshot for a pod."""
@@ -2675,44 +2658,3 @@ fi
 
         except Exception as e:
             self._logger.warning(f"Error cleaning up orphaned jobs: {e}")
-
-
-async def main():
-    LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
-    DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
-
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format=LOG_FORMAT,
-        datefmt=DATE_FORMAT,  # ISO 8601 UTC format
-    )
-
-    # Get workspace directory
-    workspace_dir = _get_workspace_dir()
-
-    deployment_spec = DeploymentSpec(
-        os.path.join(workspace_dir, "examples/backends/vllm/deploy/agg.yaml")
-    )
-
-    deployment_spec.disable_grove()
-
-    print(deployment_spec._deployment_spec)
-
-    deployment_spec.name = "foo"
-
-    deployment_spec.set_image("nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1")
-
-    # Configure logging
-    deployment_spec.set_logging(enable_jsonl=True, log_level="debug")
-
-    print(f"Logging config: {deployment_spec.get_logging_config()}")
-
-    async with ManagedDeployment(
-        namespace="test", log_dir=".", deployment_spec=deployment_spec
-    ):
-        time.sleep(60)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
