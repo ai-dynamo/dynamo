@@ -18,6 +18,7 @@ use super::metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
+use crate::storage::{InMemoryResponseStorage, ResponseStorage};
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
@@ -39,6 +40,8 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    /// Response storage for stateful Responses API
+    response_storage: Arc<dyn ResponseStorage>,
 }
 
 #[derive(Default, Debug)]
@@ -83,6 +86,21 @@ impl State {
         store: kv::Manager,
         cancel_token: CancellationToken,
     ) -> Self {
+        Self::with_response_storage(
+            manager,
+            store,
+            cancel_token,
+            Arc::new(InMemoryResponseStorage::new()),
+        )
+    }
+
+    /// Create state with a custom response storage backend
+    pub fn with_response_storage(
+        manager: Arc<ModelManager>,
+        store: kv::Manager,
+        cancel_token: CancellationToken,
+        response_storage: Arc<dyn ResponseStorage>,
+    ) -> Self {
         // Initialize discovery backed by KV store
         // Create a cancellation token for the discovery's watch streams
         let discovery_client = {
@@ -103,6 +121,7 @@ impl State {
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            response_storage,
         }
     }
 
@@ -135,6 +154,11 @@ impl State {
     /// Get the cancellation token
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
+    }
+
+    /// Get the response storage for stateful Responses API
+    pub fn response_storage(&self) -> &Arc<dyn ResponseStorage> {
+        &self.response_storage
     }
 
     // TODO
