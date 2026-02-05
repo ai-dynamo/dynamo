@@ -3,4 +3,9 @@
 
 # Skip collection of tests in this directory - they require dependencies
 # not available in the main dynamo test environment.
-collect_ignore = ["test_synthesizer.py", "test_sampler.py"]
+collect_ignore = [
+    "test_synthesizer.py",
+    "test_sampler.py",
+    "test_roundtrip_hashes.py",
+    "mock_server.py",  # Not a test, just a utility
+]

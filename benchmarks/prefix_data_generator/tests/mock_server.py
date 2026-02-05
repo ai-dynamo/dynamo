@@ -169,9 +169,11 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"content": "x"}
-                        if i > 0
-                        else {"role": "assistant", "content": ""},
+                        "delta": (
+                            {"content": "x"}
+                            if i > 0
+                            else {"role": "assistant", "content": ""}
+                        ),
                         "finish_reason": None,
                     }
                 ],
