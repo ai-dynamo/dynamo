@@ -93,6 +93,7 @@ def get_aiperf_cmd(
         artifact_dir,
         "--dataset-sampling-strategy",
         "shuffle",
+        "--no-gpu-telemetry",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",

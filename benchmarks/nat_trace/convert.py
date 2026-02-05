@@ -18,9 +18,10 @@ import os
 import re
 from collections import defaultdict
 
+from tqdm import tqdm
+
 from aiperf.common.tokenizer import Tokenizer
 from aiperf.dataset.synthesis.rolling_hasher import texts_to_hashes
-from tqdm import tqdm
 
 
 def parse_args():
@@ -63,6 +64,12 @@ def parse_args():
         type=int,
         default=0,
         help="Skip the first N requests (default: 0)",
+    )
+    parser.add_argument(
+        "--delay",
+        type=int,
+        default=500,
+        help="Delay in ms to add between LLM calls within a session (simulates tool call timing). If not specified, no delay field is added.",
     )
     return parser.parse_args()
 
@@ -200,6 +207,7 @@ def convert_to_mooncake(
     block_size: int,
     skip_requests: int = 0,
     num_requests: int | None = None,
+    delay: int | None = None,
 ) -> list[dict]:
     """
     Convert NAT requests to mooncake format.
@@ -210,6 +218,7 @@ def convert_to_mooncake(
         block_size: Block size for hash generation
         skip_requests: Number of requests to skip
         num_requests: Maximum number of requests to process
+        delay: Delay in ms to add between LLM calls within a session
 
     Returns:
         List of mooncake-format dicts
@@ -270,6 +279,7 @@ def convert_to_mooncake(
 
     # Phase 3: Build mooncake entries
     mooncake_data = []
+    seen_sessions = set()
     for (session_id, prompt_tokens, completion_tokens, _), hash_ids in zip(
         all_entries, all_hash_ids, strict=True
     ):
@@ -279,6 +289,12 @@ def convert_to_mooncake(
             "output_length": completion_tokens,
             "hash_ids": hash_ids,
         }
+        # Add delay for all but the first entry in each session
+        if delay is not None:
+            if session_id in seen_sessions:
+                mooncake_entry["delay"] = delay
+            else:
+                seen_sessions.add(session_id)
         mooncake_data.append(mooncake_entry)
 
     return mooncake_data
@@ -386,6 +402,7 @@ def main():
         args.block_size,
         skip_requests=args.skip_requests,
         num_requests=args.num_requests,
+        delay=args.delay,
     )
 
     # Print statistics
