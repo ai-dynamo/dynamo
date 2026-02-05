@@ -27,20 +27,20 @@ python_gc_objects_collected_total{generation="0"} 123.0
 # HELP process_cpu_seconds_total Total user and system CPU time spent in seconds
 # TYPE process_cpu_seconds_total counter
 process_cpu_seconds_total 45.6
-# HELP request_latency_seconds Request latency in seconds
-# TYPE request_latency_seconds histogram
-request_latency_seconds_bucket{le="0.1"} 10.0
-request_latency_seconds_count 25.0
-# HELP num_requests_running Number of requests currently running
-# TYPE num_requests_running gauge
-num_requests_running 3.0
-# HELP tokens_per_second Tokens generated per second
-# TYPE tokens_per_second gauge
-tokens_per_second 245.7
+# HELP trtllm_request_latency_seconds Request latency in seconds
+# TYPE trtllm_request_latency_seconds histogram
+trtllm_request_latency_seconds_bucket{le="0.1"} 10.0
+trtllm_request_latency_seconds_count 25.0
+# HELP trtllm_num_requests_running Number of requests currently running
+# TYPE trtllm_num_requests_running gauge
+trtllm_num_requests_running 3.0
+# HELP trtllm_tokens_per_second Tokens generated per second
+# TYPE trtllm_tokens_per_second gauge
+trtllm_tokens_per_second 245.7
 """
 
     def test_trtllm_use_case(self):
-        """Test TensorRT-LLM use case: exclude python_/process_ and add trtllm_ prefix."""
+        """Test TensorRT-LLM use case: filter to include only trtllm_* metrics (after traffic)."""
         registry = Mock()
 
         with patch(
@@ -49,15 +49,14 @@ tokens_per_second 245.7
         ):
             result = get_prometheus_expfmt(
                 registry,
-                exclude_prefixes=["python_", "process_"],
-                add_prefix="trtllm_",
+                metric_prefix_filters=["trtllm_"],
             )
 
-        # Should not contain excluded metrics
+        # Should not contain excluded metrics (filtered out by metric_prefix_filters)
         assert "python_gc_objects_collected_total" not in result
         assert "process_cpu_seconds_total" not in result
 
-        # All remaining metrics should have trtllm_ prefix
+        # All remaining metrics should have trtllm_ prefix (already present from TRT-LLM engine)
         assert "trtllm_request_latency_seconds" in result
         assert "trtllm_num_requests_running" in result
         assert "trtllm_tokens_per_second" in result
@@ -98,7 +97,7 @@ tokens_per_second 245.7
         ):
             result = get_prometheus_expfmt(
                 registry,
-                exclude_prefixes=["python_", "process_", "request_", "num_", "tokens_"],
+                exclude_prefixes=["python_", "process_", "trtllm_"],
             )
 
         # Should return empty string with newline or just newline
@@ -124,7 +123,7 @@ trtllm_time_to_first_token_seconds_count 5.0
             result = get_prometheus_expfmt(
                 registry,
                 exclude_prefixes=["python_", "process_"],
-                add_prefix="trtllm_",
+                metric_prefix_filters=["trtllm_"],
             )
 
         # Should not double-add prefix
