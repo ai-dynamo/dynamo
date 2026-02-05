@@ -402,7 +402,7 @@ async fn select_engine(
 
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine = dynamo_llm::mocker::engine::make_mocker_engine(
+            let engine = dynamo_llm::mocker::make_mocker_engine(
                 distributed_runtime.inner,
                 endpoint,
                 mocker_args,

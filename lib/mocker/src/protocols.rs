@@ -8,9 +8,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::mocker::perf_model::PerfModel;
+use crate::perf_model::PerfModel;
+use dynamo_kv_router::protocols::KvCacheEvent;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash, Token};
+
+/// Trait for publishing KV cache events.
+/// This abstracts the runtime dependency so mocker components can remain generic.
+pub trait KvCacheEventSink: Send + Sync {
+    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()>;
+}
 
 pub type NumBlocks = usize;
 

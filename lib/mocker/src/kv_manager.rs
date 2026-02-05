@@ -33,16 +33,14 @@
 //! the more idiomatic built-in Arc reference counter. This can be considered a shadow / mirror
 //! implementation of the main block manager.
 
-use crate::kv_router::protocols::{
+use crate::evictor::LRUEvictor;
+use crate::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
+use crate::sequence::ActiveSequence;
+use derive_getters::Getters;
+use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
-use crate::kv_router::publisher::KvEventPublisher;
-use crate::mocker::evictor::LRUEvictor;
-use crate::mocker::protocols::{MoveBlock, PrefillCost};
-use crate::mocker::sequence::ActiveSequence;
-use derive_getters::Getters;
-use dynamo_runtime::component::Component;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 use std::collections::HashMap;
@@ -60,7 +58,7 @@ pub struct KvManager {
 
     inactive_blocks: LRUEvictor<UniqueBlock>,
 
-    kv_event_publisher: Option<Arc<KvEventPublisher>>,
+    kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
 
     #[getter(copy)]
     dp_rank: u32,
@@ -70,41 +68,36 @@ pub struct KvManager {
 
 impl KvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
-        Self::new_with_publisher(max_capacity, block_size, None, 0, false)
+        Self::new_with_event_sink(max_capacity, block_size, None, 0)
     }
 
-    pub fn new_with_publisher(
+    pub fn new_with_event_sink(
         max_capacity: usize,
         block_size: usize,
-        component: Option<Component>,
+        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
         dp_rank: u32,
-        enable_local_indexer: bool,
     ) -> Self {
         let active_blocks = HashMap::new();
         let inactive_blocks = LRUEvictor::default();
 
-        let kv_event_publisher = component.map(|comp| {
+        if kv_event_sink.is_some() {
             tracing::info!(
-                "Initializing KV event publisher for DP rank {dp_rank} with block_size {block_size}, enable_local_indexer={enable_local_indexer}"
+                "KvManager initialized with event sink for DP rank {dp_rank} with block_size {block_size}"
             );
-            Arc::new(
-                KvEventPublisher::new_with_local_indexer(comp, block_size as u32, None, enable_local_indexer, dp_rank)
-                    .expect("Failed to create KV event publisher"),
-            )
-        });
+        }
 
         KvManager {
             max_capacity,
             block_size,
             active_blocks,
             inactive_blocks,
-            kv_event_publisher,
+            kv_event_sink,
             dp_rank,
             next_event_id: 0,
         }
     }
 
-    /// Converts stored/removed blocks into KvCacheEventData and publishes if publisher is available
+    /// Converts stored/removed blocks into KvCacheEventData and publishes if sink is available
     fn publish_kv_event(
         &mut self,
         full_blocks: Vec<SequenceHash>,
@@ -116,7 +109,7 @@ impl KvManager {
             return;
         }
 
-        let Some(ref publisher) = self.kv_event_publisher else {
+        let Some(ref sink) = self.kv_event_sink else {
             return;
         };
 
@@ -158,7 +151,7 @@ impl KvManager {
             dp_rank: self.dp_rank,
         };
 
-        if let Err(e) = publisher.publish(event) {
+        if let Err(e) = sink.publish(event) {
             tracing::warn!("Failed to publish KV event: {e}");
         }
     }
@@ -207,7 +200,7 @@ impl KvManager {
 
                     // Now insert the new block in active blocks with reference count 1
                     self.active_blocks.insert(hash.clone(), 1);
-                    if self.kv_event_publisher.is_some()
+                    if self.kv_event_sink.is_some()
                         && let UniqueBlock::FullBlock(stored_full_block) = hash
                     {
                         blocks_stored.push(*stored_full_block);
@@ -230,7 +223,7 @@ impl KvManager {
                     self.active_blocks.remove(hash).unwrap();
 
                     // Track blocks for batch sending
-                    if self.kv_event_publisher.is_some()
+                    if self.kv_event_sink.is_some()
                         && let UniqueBlock::FullBlock(destroyed_full_block) = hash
                     {
                         blocks_destroyed.push(*destroyed_full_block);
