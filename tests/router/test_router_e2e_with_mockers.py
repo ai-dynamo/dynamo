@@ -743,6 +743,7 @@ def test_router_decisions(
             request,
             test_dp_rank=True,
             use_kv_events=use_kv_events,
+            durable_kv_events=durable_kv_events,
         )
 
     finally:
