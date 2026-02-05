@@ -118,4 +118,33 @@ impl ResponseStorage for ResponseStorageManager {
         storage.remove(&key);
         Ok(())
     }
+
+    async fn list_responses(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<StoredResponse>, StorageError> {
+        let storage = self.storage.read().await;
+        let prefix = format!("{tenant_id}:{session_id}:responses:");
+
+        let mut responses: Vec<StoredResponse> = storage
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(_, v)| v.clone())
+            .collect();
+
+        // Sort by creation time, then by response_id for stable ordering
+        responses.sort_by(|a, b| {
+            a.created_at.cmp(&b.created_at)
+                .then_with(|| a.response_id.cmp(&b.response_id))
+        });
+
+        // Apply limit
+        if let Some(limit) = limit {
+            responses.truncate(limit);
+        }
+
+        Ok(responses)
+    }
 }
