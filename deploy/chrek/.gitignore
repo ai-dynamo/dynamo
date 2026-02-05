@@ -1,0 +1,33 @@
+# Binaries
+bin/
+*.exe
+
+# Reference source repos (clone separately if needed)
+containerd/
+runc/
+
+# Build artifacts
+*.o
+*.a
+*.so
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+coverage.out
+*.prof
+
+# Temporary files
+*.tmp
+*.tar
+/tmp/

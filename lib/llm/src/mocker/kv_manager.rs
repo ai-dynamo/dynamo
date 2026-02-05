@@ -45,7 +45,7 @@ use derive_getters::Getters;
 use dynamo_runtime::component::Component;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Getters)]
@@ -59,8 +59,6 @@ pub struct KvManager {
     active_blocks: HashMap<UniqueBlock, usize>,
 
     inactive_blocks: LRUEvictor<UniqueBlock>,
-
-    all_blocks: HashSet<UniqueBlock>,
 
     kv_event_publisher: Option<Arc<KvEventPublisher>>,
 
@@ -84,7 +82,6 @@ impl KvManager {
     ) -> Self {
         let active_blocks = HashMap::new();
         let inactive_blocks = LRUEvictor::default();
-        let all_blocks = HashSet::new();
 
         let kv_event_publisher = component.map(|comp| {
             tracing::info!(
@@ -101,7 +98,6 @@ impl KvManager {
             block_size,
             active_blocks,
             inactive_blocks,
-            all_blocks,
             kv_event_publisher,
             dp_rank,
             next_event_id: 0,
@@ -204,7 +200,6 @@ impl KvManager {
                             "Evicting block from inactive pool: {evicted:?}, dp_rank={}",
                             self.dp_rank
                         );
-                        self.all_blocks.remove(&evicted);
                         if let UniqueBlock::FullBlock(evicted_full_block) = evicted {
                             self.publish_kv_event(vec![evicted_full_block], &[], None, false);
                         }
@@ -212,7 +207,6 @@ impl KvManager {
 
                     // Now insert the new block in active blocks with reference count 1
                     self.active_blocks.insert(hash.clone(), 1);
-                    self.all_blocks.insert(hash.clone());
                     if self.kv_event_publisher.is_some()
                         && let UniqueBlock::FullBlock(stored_full_block) = hash
                     {
@@ -234,8 +228,6 @@ impl KvManager {
                 // Process blocks in order (already reversed by caller if needed)
                 for hash in hashes.iter() {
                     self.active_blocks.remove(hash).unwrap();
-                    // Remove from all_blocks when destroyed
-                    assert!(self.all_blocks.remove(hash));
 
                     // Track blocks for batch sending
                     if self.kv_event_publisher.is_some()
@@ -289,9 +281,6 @@ impl KvManager {
 
                 self.active_blocks
                     .insert(hash_block.clone(), hash_ref_count + 1);
-
-                assert!(self.all_blocks.remove(&uuid_block));
-                self.all_blocks.insert(hash_block);
             }
         }
 
@@ -299,12 +288,13 @@ impl KvManager {
         true
     }
 
-    /// Get the count of blocks in the input list that aren't in all_blocks
+    /// Get the count of blocks that aren't in active or inactive pools
     pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
-            // .filter(|&block| !self.active_blocks.contains_key(block))
-            .filter(|&block| !self.all_blocks.contains(block))
+            .filter(|&block| {
+                !self.active_blocks.contains_key(block) && !self.inactive_blocks.contains(block)
+            })
             .count()
     }
 
@@ -349,9 +339,22 @@ impl KvManager {
     /// Check if a sequence can be scheduled and calculate cost if possible
     pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
         let seq_blocks = sequence.unique_blocks();
-        let new_blocks = self.probe_new_blocks(seq_blocks);
-        let overlap_blocks = seq_blocks.len() - new_blocks;
-        let new_tokens = sequence.num_input_tokens() - overlap_blocks * self.block_size;
+
+        // Find the longest prefix that exists in cache
+        // We must stop at the first cache miss since KV states are computed sequentially
+        let mut overlap_blocks = 0;
+        for block in seq_blocks {
+            if !self.active_blocks.contains_key(block) && !self.inactive_blocks.contains(block) {
+                // First cache miss - can't use anything after this point
+                break;
+            }
+            overlap_blocks += 1;
+        }
+
+        let new_blocks = seq_blocks.len() - overlap_blocks;
+        // Clamp cached_tokens to handle partial blocks (last block may have < block_size tokens)
+        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
+        let new_tokens = sequence.num_input_tokens() - cached_tokens;
 
         PrefillCost {
             new_blocks,

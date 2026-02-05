@@ -15,7 +15,8 @@ use axum::http::Response;
 use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
-use crate::discovery::ModelManager;
+use super::metrics::register_worker_timing_metrics;
+use crate::discovery::{ModelManager, register_worker_load_metrics};
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
@@ -46,6 +47,7 @@ struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
+    images_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
 }
 
@@ -55,6 +57,7 @@ impl StateFlags {
             EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
@@ -69,6 +72,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Embedding => self
                 .embeddings_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Images => self
+                .images_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
@@ -100,6 +106,7 @@ impl State {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
+                images_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
@@ -386,6 +393,18 @@ impl HttpServiceConfigBuilder {
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
 
+        // Register worker load metrics (active_decode_blocks, active_prefill_tokens per worker)
+        // These are updated by KvWorkerMonitor when receiving ActiveLoad events
+        if let Err(e) = register_worker_load_metrics(&registry) {
+            tracing::warn!("Failed to register worker load metrics: {}", e);
+        }
+
+        // Register worker timing metrics (last_ttft, last_itl per worker)
+        // These are updated by ResponseMetricCollector when observing TTFT/ITL
+        if let Err(e) = register_worker_timing_metrics(&registry) {
+            tracing::warn!("Failed to register worker timing metrics: {}", e);
+        }
+
         // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
         // Setup custom backend metrics if configured
         let custom_backend_registry =
@@ -509,6 +528,7 @@ impl HttpServiceConfigBuilder {
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -519,6 +539,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         for endpoint_type in EndpointType::all() {
