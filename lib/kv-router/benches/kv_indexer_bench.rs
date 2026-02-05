@@ -13,7 +13,7 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dynamo_kv_router::{
-    bench_utils::{LatencyStats, SequenceData, generate_sequences, median},
+    bench_utils::{LatencyStats, SequenceData, generate_sequences},
     indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded},
     protocols::{LocalBlockHash, RouterEvent},
 };
