@@ -185,10 +185,10 @@ flowchart LR
 
 ### Part 1: ZMQ Subscriber (Dynamo Bindings)
 
-If your engine already publishes to ZMQ, use `ZmqKvEventPublisher` to subscribe and forward to NATS:
+If your engine already publishes to ZMQ, use `KvEventPublisher` with a `ZmqKvEventPublisherConfig` to subscribe and forward to NATS:
 
 ```python
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import KvEventPublisher, ZmqKvEventPublisherConfig
 
 # Configure the ZMQ subscriber
 config = ZmqKvEventPublisherConfig(
@@ -200,9 +200,9 @@ config = ZmqKvEventPublisherConfig(
 )
 
 # Create publisher - it automatically subscribes to ZMQ and forwards to NATS
-kv_publisher = ZmqKvEventPublisher(
+kv_publisher = KvEventPublisher(
     component=component,
-    config=config,
+    zmq_config=config,
 )
 ```
 

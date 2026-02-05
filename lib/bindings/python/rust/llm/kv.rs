@@ -148,34 +148,6 @@ impl ZmqKvEventPublisherConfig {
     }
 }
 
-#[pyclass]
-pub(crate) struct ZmqKvEventPublisher {
-    inner: llm_rs::kv_router::publisher::KvEventPublisher,
-}
-
-#[pymethods]
-impl ZmqKvEventPublisher {
-    #[new]
-    fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component.inner,
-            config.kv_block_size as u32,
-            Some(KvEventSourceConfig::Zmq {
-                endpoint: config.zmq_endpoint,
-                topic: config.zmq_topic,
-            }),
-            config.enable_local_indexer,
-            config.dp_rank,
-        )
-        .map_err(to_pyerr)?;
-        Ok(Self { inner })
-    }
-
-    fn shutdown(&mut self) {
-        self.inner.shutdown()
-    }
-}
-
 /// A ZMQ-based key-value cache event listener that operates independently
 /// of the dynamo runtime or event plane infrastructure.
 #[pyclass]
@@ -260,26 +232,42 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0, enable_local_indexer=false))]
+    #[pyo3(signature = (component, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_config=None))]
     fn new(
         component: Component,
         worker_id: WorkerId,
         kv_block_size: usize,
         dp_rank: DpRank,
         enable_local_indexer: bool,
+        zmq_config: Option<ZmqKvEventPublisherConfig>,
     ) -> PyResult<Self> {
+        // worker_id is not used; connection_id is inferred from the component.
+        let _ = worker_id;
+
+        // When zmq_config is provided, use its fields for kv_block_size/dp_rank/enable_local_indexer
+        let (kv_block_size, dp_rank, enable_local_indexer, source_config) =
+            if let Some(ref cfg) = zmq_config {
+                (
+                    cfg.kv_block_size,
+                    cfg.dp_rank,
+                    cfg.enable_local_indexer,
+                    Some(KvEventSourceConfig::Zmq {
+                        endpoint: cfg.zmq_endpoint.clone(),
+                        topic: cfg.zmq_topic.clone(),
+                    }),
+                )
+            } else {
+                (kv_block_size, dp_rank, enable_local_indexer, None)
+            };
+
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
-        // Note: worker_id parameter matches the Python stub (_core.pyi) signature but is not used.
-        // The actual worker_id is inferred from component's connection_id in the Rust implementation.
-        let _ = worker_id;
-
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
             component.inner,
             kv_block_size as u32,
-            None,
+            source_config,
             enable_local_indexer,
             dp_rank,
         )
@@ -369,6 +357,10 @@ impl KvEventPublisher {
 
             inner.publish(event).map_err(to_pyerr)
         })
+    }
+
+    fn shutdown(&self) {
+        self.inner.shutdown()
     }
 }
 

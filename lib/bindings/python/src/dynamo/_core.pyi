@@ -665,17 +665,30 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
+        self,
+        component: Component,
+        worker_id: int = 0,
+        kv_block_size: int = 0,
+        dp_rank: int = 0,
+        enable_local_indexer: bool = False,
+        zmq_config: Optional[ZmqKvEventPublisherConfig] = None,
     ) -> None:
         """
-        Create a `KvEventPublisher` object
+        Create a `KvEventPublisher` object.
+
+        When zmq_config is provided, the publisher subscribes to a ZMQ socket for
+        incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
+        The zmq_config fields override kv_block_size, dp_rank, and enable_local_indexer.
+
+        When zmq_config is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
             component: The component to publish events for
-            worker_id: The worker ID
-            kv_block_size: The KV block size (must be > 0)
-            dp_rank: The data parallel rank (defaults to 0)
-            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
+            worker_id: The worker ID (unused, inferred from component)
+            kv_block_size: The KV block size (must be > 0; ignored if zmq_config is set)
+            dp_rank: The data parallel rank (defaults to 0; ignored if zmq_config is set)
+            enable_local_indexer: Enable worker-local KV indexer (ignored if zmq_config is set)
+            zmq_config: Optional ZMQ configuration for relay mode
         """
 
     def publish_stored(
@@ -711,6 +724,12 @@ class KvEventPublisher:
         """
         ...
 
+    def shutdown(self) -> None:
+        """
+        Shuts down the event publisher, stopping any background tasks.
+        """
+        ...
+
 class ZmqKvEventPublisherConfig:
     def __init__(
         self,
@@ -722,7 +741,7 @@ class ZmqKvEventPublisherConfig:
         dp_rank: int = 0
     ) -> None:
         """
-        Configuration for the ZmqKvEventPublisher.
+        ZMQ configuration for KvEventPublisher relay mode.
 
         :param worker_id: The worker ID.
         :param kv_block_size: The block size for the key-value store.
@@ -730,22 +749,6 @@ class ZmqKvEventPublisherConfig:
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
         :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
         :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
-        """
-        ...
-
-class ZmqKvEventPublisher:
-    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
-        """
-        Initializes a new ZmqKvEventPublisher instance.
-
-        :param component: The component to be used.
-        :param config: Configuration for the event publisher.
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """
-        Shuts down the event publisher, stopping any background tasks.
         """
         ...
 

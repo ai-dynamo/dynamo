@@ -40,10 +40,10 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
 )
@@ -484,8 +484,8 @@ async def init(
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",  # Empty topic = all topics
                 )
-                consolidator_publisher = ZmqKvEventPublisher(
-                    component, consolidator_config
+                consolidator_publisher = KvEventPublisher(
+                    component, zmq_config=consolidator_config
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "

@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
+    KvEventPublisher,
     WorkerMetricsPublisher,
-    ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
 )
 from dynamo.runtime import Component, Endpoint
@@ -88,7 +88,7 @@ class DynamoSglangPublisher:
         self.dp_rank = 0
 
         self._running = True
-        self.kv_publishers: List[ZmqKvEventPublisher] = []
+        self.kv_publishers: List[KvEventPublisher] = []
 
         # ZMQ setup for receiving scheduler metrics (leader node only)
         # Non-leader nodes don't receive scheduler metrics via this socket - they only
@@ -169,7 +169,7 @@ class DynamoSglangPublisher:
         logging.info("Sending dummy metrics to initialize")
         self.metrics_publisher.publish(self.dp_rank, 0)
 
-    def init_kv_event_publish(self) -> List[ZmqKvEventPublisher]:
+    def init_kv_event_publish(self) -> List[KvEventPublisher]:
         """Initialize KV event publisher(s) if configured.
 
         For DP attention mode, creates one subscriber per LOCAL DP rank port.
@@ -184,7 +184,7 @@ class DynamoSglangPublisher:
         - NATS handles cross-node event distribution
 
         Returns:
-            List of ZmqKvEventPublisher instances if kv_events_config is set,
+            List of KvEventPublisher instances if kv_events_config is set,
             empty list otherwise.
         """
         if self.server_args.kv_events_config:
@@ -239,8 +239,8 @@ class DynamoSglangPublisher:
                     f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} "
                     f"(connecting to {zmq_ep})"
                 )
-                publisher = ZmqKvEventPublisher(
-                    component=self.component, config=zmq_config
+                publisher = KvEventPublisher(
+                    component=self.component, zmq_config=zmq_config
                 )
                 self.kv_publishers.append(publisher)
 
