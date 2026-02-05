@@ -19,8 +19,6 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
-# LogStreamManager removed - using PVC-based log collection only
-
 
 def _get_workspace_dir() -> str:
     """Get workspace directory without depending on dynamo.common package.
