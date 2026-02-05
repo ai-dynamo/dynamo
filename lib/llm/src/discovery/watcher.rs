@@ -613,20 +613,6 @@ impl ModelWatcher {
 
             self.manager
                 .add_embeddings_model(card.name(), checksum, embedding_engine)?;
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
-            // Case 5: Text + Images (e.g., vLLM-Omni diffusion, text-to-image)
-            // Backend handles tokenization internally for multi-stage pipelines
-            // Supports both chat and completions endpoints for text prompts
-            let push_router = PushRouter::<
-                NvCreateChatCompletionRequest,
-                Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
-            )
-            .await?;
-            let engine = Arc::new(push_router);
-            self.manager
-                .add_chat_completions_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
             // Case 6: Tensor + TensorBased (non-LLM)
             // No KV cache concepts - not an LLM model
