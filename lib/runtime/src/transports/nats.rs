@@ -506,7 +506,8 @@ impl NatsQueue {
 
             let client = client_options.connect().await?;
 
-            // messages older than a hour in the stream will be automatically purged
+            // messages older than max_age in the stream will be automatically purged
+            // default: 1 hour; override via DYN_NATS_STREAM_MAX_AGE (seconds)
             let max_age = std::env::var(env_nats::stream::DYN_NATS_STREAM_MAX_AGE)
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())

@@ -239,6 +239,15 @@ NATS is used for:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NATS_SERVER` | NATS server URL | `nats://localhost:4222` |
+| `DYN_NATS_STREAM_MAX_AGE` | Max message retention for JetStream streams (seconds) | `3600` (1 hour) |
+
+#### Stream Retention
+
+The stream holds KV cache events that new or restarting routers use to rebuild state. Lowering `DYN_NATS_STREAM_MAX_AGE` reduces NATS memory usage but means routers that start before a snapshot exists will miss events older than the retention window. Safe to lower if snapshots are frequent (`router_snapshot_threshold` set low).
+
+```bash
+export DYN_NATS_STREAM_MAX_AGE=300  # 5 minutes, in seconds
+```
 
 ### Disabling NATS
 
