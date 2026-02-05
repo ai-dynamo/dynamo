@@ -49,7 +49,7 @@ Coordination and messaging support:
 
 ### Service Discovery
 - **On Kubernetes** (default): Uses native K8s resources (DynamoWorkerMetadata CRD, EndpointSlices). No etcd required.
-- **On bare metal**: Uses etcd for service discovery and endpoint registration.
+- **On bare metal**: Uses etcd or filesystem for service discovery and endpoint registration.
 
 ### Request Plane
 - **TCP** (default): Direct TCP connections between Frontend and Workers for request/response transport.
@@ -68,11 +68,10 @@ Coordination and messaging support:
 - The `PrefillRouter` sits between the Frontend and workers, orchestrating disaggregated serving
 - Selects prefill workers using KV-aware routing (cache overlap scores + load) or simple load balancing
 - Injects transfer metadata into decode requests for KV cache coordination
-- For SGLang: Can run prefill as a background task, allowing decode to begin before prefill completes
 
 ### NIXL (NVIDIA Interchange Library):
 - Enables high-speed GPU-to-GPU data transfers using NVLink, InfiniBand/UCX, or PCIe
-- Transfer metadata exchanged via `disaggregated_params` in prefill response (not stored in ETCD)
+- Transfer metadata exchanged via `disaggregated_params` in prefill response
 - Backend-specific coordination: SGLang uses bootstrap connections, vLLM uses block IDs, TRTLLM uses opaque state
 
 ### Disaggregated KV Cache:
