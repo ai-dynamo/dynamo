@@ -9,10 +9,12 @@ pub mod events;
 // pub mod executor;
 pub mod manager;
 pub mod pools;
+pub mod registry;
 
 // Re-export for public use
+pub use registry::BlockRegistry;
 pub use blocks::{
-    BlockError, BlockMetadata, BlockRegistry, CompleteBlock, ImmutableBlock, MutableBlock,
+    BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock,
     WeakBlock,
 };
 
@@ -29,5 +31,3 @@ pub enum LogicalLayoutHandle {
     G4,
 }
 
-#[cfg(test)]
-pub(crate) mod tests;

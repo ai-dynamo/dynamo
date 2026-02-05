@@ -10,7 +10,8 @@
 
 use std::sync::Arc;
 
-use super::{Block, BlockMetadata, BlockRegistry, Registered, RegisteredBlock, SequenceHash};
+use super::{Block, BlockMetadata, Registered, RegisteredBlock, SequenceHash};
+use crate::v2::logical::registry::BlockRegistry;
 
 /// Type alias for registered block return function
 type RegisteredReturnFn<T> = Arc<dyn Fn(Arc<Block<T, Registered>>) + Send + Sync>;

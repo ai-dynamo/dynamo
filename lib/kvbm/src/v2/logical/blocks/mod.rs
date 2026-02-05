@@ -14,7 +14,6 @@ mod complete;
 mod immutable;
 mod mutable;
 mod registered;
-pub mod registry;
 
 pub use complete::CompleteBlock;
 pub use immutable::{ImmutableBlock, WeakBlock};
@@ -22,8 +21,10 @@ pub use mutable::MutableBlock;
 
 pub(crate) mod state;
 pub(crate) use registered::{DuplicateBlock, PrimaryBlock};
-pub(crate) use registry::BlockRegistrationHandle;
-pub use registry::BlockRegistry;
+
+// Re-export from the new registry module location for backward compatibility
+pub use super::registry::BlockRegistry;
+pub(crate) use super::registry::BlockRegistrationHandle;
 
 pub trait BlockMetadata: Clone + Send + Sync + 'static {}
 impl<T: Clone + Send + Sync + 'static> BlockMetadata for T {}

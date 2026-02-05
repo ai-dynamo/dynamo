@@ -20,7 +20,7 @@ use super::manager::EventsManager;
 use super::protocol::{KvCacheEvent, KvCacheEvents, KvbmCacheEvents};
 use super::publisher::KvbmCacheEventsPublisher;
 use crate::v2::distributed::pubsub::Publisher;
-use crate::v2::logical::blocks::BlockRegistry;
+use crate::v2::logical::registry::BlockRegistry;
 use crate::{KvbmSequenceHashProvider, SequenceHash};
 use dynamo_tokens::TokenBlockSequence;
 

@@ -18,7 +18,7 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use super::policy::EventEmissionPolicy;
 use super::protocol::{EventReleaseHandle, KvCacheEvent};
-use crate::v2::logical::blocks::BlockRegistrationHandle;
+use crate::v2::logical::registry::BlockRegistrationHandle;
 
 /// Settings for constructing an [`EventsManager`].
 ///
@@ -199,7 +199,7 @@ impl EventsManager {
 mod tests {
     use super::super::policy::PowerOfTwoPolicy;
     use super::*;
-    use crate::v2::logical::blocks::BlockRegistry;
+    use crate::v2::logical::registry::BlockRegistry;
     use crate::{KvbmSequenceHashProvider, SequenceHash};
     use dynamo_tokens::TokenBlockSequence;
     use futures::StreamExt;

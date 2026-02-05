@@ -8,8 +8,8 @@
 
 use crate::KvbmSequenceHashProvider;
 
-use super::registry::BlockRegistrationHandle;
 use super::{Block, BlockError, BlockId, BlockMetadata};
+use crate::v2::logical::registry::BlockRegistrationHandle;
 
 use super::{SequenceHash, TokenBlock};
 use std::marker::PhantomData;
@@ -24,6 +24,11 @@ pub struct Reset;
 #[derive(Debug)]
 pub struct Complete {
     token_block: TokenBlock,
+}
+
+#[derive(Debug)]
+pub struct Staged {
+    sequence_hash: SequenceHash,
 }
 
 #[derive(Debug)]
