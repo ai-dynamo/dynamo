@@ -59,7 +59,7 @@ Quickstart
    :caption: User Guides
 
    Tool Calling <agents/tool-calling.md>
-   Multimodality Support <multimodal/index.md>
+   Multimodality Support <features/multimodal/README.md>
    Finding Best Initial Configs <performance/aiconfigurator.md>
    Benchmarking <benchmarks/benchmarking.md>
    Tuning Disaggregated Performance <performance/tuning.md>

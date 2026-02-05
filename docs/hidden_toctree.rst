@@ -90,6 +90,11 @@
 
    mocker/mocker.md
 
+   multimodal/index.md
+   multimodal/vllm.md
+   multimodal/sglang.md
+   multimodal/trtllm.md
+
    frontends/kserve.md
    _sections/frontends.rst
 

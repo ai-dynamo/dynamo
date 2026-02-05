@@ -95,8 +95,13 @@ redirects = {
     "backends/sglang/multimodal_epd": "../../multimodal/sglang.html",
     "backends/sglang/multimodal_sglang_guide": "../../multimodal/sglang.html",
     "multimodal/multimodal_intro": "index.html",
-    # Speculative decoding consolidation (PR speculative-migration)
+    # Speculative decoding consolidation
     "backends/vllm/speculative_decoding": "../../features/speculative_decoding/speculative_decoding_vllm.html",
+    # Multimodal migration to features/multimodal/
+    "multimodal/index": "../features/multimodal/README.html",
+    "multimodal/vllm": "../features/multimodal/vllm.html",
+    "multimodal/sglang": "../features/multimodal/sglang.html",
+    "multimodal/trtllm": "../features/multimodal/trtllm.html",
 }
 
 # Custom extensions
