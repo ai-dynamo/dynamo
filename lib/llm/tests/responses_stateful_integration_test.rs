@@ -616,3 +616,200 @@ async fn test_realistic_multi_turn_with_headers() {
     assert_eq!(retrieved_2.tenant_id, tenant_id);
     assert_eq!(retrieved_2.session_id, session_id);
 }
+
+// ============================================================================
+// GET /v1/responses/{id} Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_get_response_success() {
+    let storage = ResponseStorageManager::new();
+    
+    // Store a response
+    let response_data = json!({
+        "id": "resp_get_test",
+        "model": "test-model",
+        "output": [{"type": "message", "content": "Hello!"}]
+    });
+    
+    let response_id = storage
+        .store_response("tenant_get", "session_get", Some("resp_get_test"), response_data.clone(), None)
+        .await
+        .unwrap();
+    
+    // Retrieve it
+    let retrieved = storage
+        .get_response("tenant_get", "session_get", &response_id)
+        .await
+        .unwrap();
+    
+    assert_eq!(retrieved.response_id, "resp_get_test");
+    assert_eq!(retrieved.response, response_data);
+}
+
+#[tokio::test]
+async fn test_get_response_not_found() {
+    let storage = ResponseStorageManager::new();
+    
+    let result = storage
+        .get_response("tenant_notfound", "session_notfound", "nonexistent_id")
+        .await;
+    
+    assert!(matches!(result, Err(StorageError::NotFound)));
+}
+
+#[tokio::test]
+async fn test_get_response_wrong_tenant() {
+    let storage = ResponseStorageManager::new();
+    
+    // Store for tenant_a
+    let response_id = storage
+        .store_response("tenant_a", "session_1", None, json!({"secret": "data"}), None)
+        .await
+        .unwrap();
+    
+    // Try to get with tenant_b - should fail
+    let result = storage
+        .get_response("tenant_b", "session_1", &response_id)
+        .await;
+    
+    assert!(matches!(result, Err(StorageError::NotFound)));
+}
+
+// ============================================================================
+// DELETE /v1/responses/{id} Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_delete_response_success() {
+    let storage = ResponseStorageManager::new();
+    
+    // Store a response
+    let response_id = storage
+        .store_response("tenant_del", "session_del", None, json!({"data": "to_delete"}), None)
+        .await
+        .unwrap();
+    
+    // Verify it exists
+    let exists = storage.get_response("tenant_del", "session_del", &response_id).await;
+    assert!(exists.is_ok());
+    
+    // Delete it
+    let delete_result = storage
+        .delete_response("tenant_del", "session_del", &response_id)
+        .await;
+    assert!(delete_result.is_ok());
+    
+    // Verify it's gone
+    let after_delete = storage
+        .get_response("tenant_del", "session_del", &response_id)
+        .await;
+    assert!(matches!(after_delete, Err(StorageError::NotFound)));
+}
+
+#[tokio::test]
+async fn test_delete_response_not_found() {
+    let storage = ResponseStorageManager::new();
+    
+    let result = storage
+        .delete_response("tenant_del", "session_del", "nonexistent_id")
+        .await;
+    
+    assert!(matches!(result, Err(StorageError::NotFound)));
+}
+
+#[tokio::test]
+async fn test_delete_response_wrong_session() {
+    let storage = ResponseStorageManager::new();
+    
+    // Store for session_1
+    let response_id = storage
+        .store_response("tenant_a", "session_1", None, json!({"data": "protected"}), None)
+        .await
+        .unwrap();
+    
+    // Try to delete from session_2 - should fail
+    let result = storage
+        .delete_response("tenant_a", "session_2", &response_id)
+        .await;
+    
+    assert!(matches!(result, Err(StorageError::NotFound)));
+    
+    // Original should still exist
+    let still_exists = storage.get_response("tenant_a", "session_1", &response_id).await;
+    assert!(still_exists.is_ok());
+}
+
+// ============================================================================
+// Session Cloning Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_clone_session_full() {
+    let storage = ResponseStorageManager::new();
+    
+    // Create original session with 3 responses
+    for i in 1..=3 {
+        storage
+            .store_response(
+                "tenant_clone",
+                "original_session",
+                Some(&format!("resp_{}", i)),
+                json!({"turn": i, "content": format!("Message {}", i)}),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    
+    // Clone to new session
+    let cloned_count = storage
+        .clone_session("tenant_clone", "original_session", "cloned_session", None)
+        .await
+        .unwrap();
+    
+    assert_eq!(cloned_count, 3);
+    
+    // Verify cloned session has all responses
+    let cloned_responses = storage
+        .list_responses("tenant_clone", "cloned_session", None)
+        .await
+        .unwrap();
+    
+    assert_eq!(cloned_responses.len(), 3);
+}
+
+#[tokio::test]
+async fn test_clone_session_rewind() {
+    let storage = ResponseStorageManager::new();
+    
+    // Create original session with 5 responses
+    for i in 1..=5 {
+        storage
+            .store_response(
+                "tenant_rewind",
+                "original_session",
+                Some(&format!("resp_{}", i)),
+                json!({"turn": i}),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    
+    // Clone only up to resp_3 (rewind point)
+    let cloned_count = storage
+        .clone_session("tenant_rewind", "original_session", "rewound_session", Some("resp_3"))
+        .await
+        .unwrap();
+    
+    assert_eq!(cloned_count, 3);
+    
+    // Verify rewound session only has 3 responses
+    let rewound_responses = storage
+        .list_responses("tenant_rewind", "rewound_session", None)
+        .await
+        .unwrap();
+    
+    assert_eq!(rewound_responses.len(), 3);
+}
