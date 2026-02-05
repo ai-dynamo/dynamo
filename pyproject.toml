@@ -165,7 +165,6 @@ addopts = [
     "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_handlers/*",
     "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
-    "--ignore=benchmarks/prefix_data_generator/tests",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
