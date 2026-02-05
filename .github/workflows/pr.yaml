@@ -177,6 +177,7 @@ jobs:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
+      target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
@@ -194,6 +195,7 @@ jobs:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
+      target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
@@ -211,11 +213,12 @@ jobs:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
+      target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trt-llm-{0}', github.sha) || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
     secrets: inherit
 

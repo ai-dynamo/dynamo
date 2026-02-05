@@ -10,6 +10,10 @@ on:
         description: 'Framework name (vllm, sglang, trtllm)'
         required: true
         type: string
+      target:
+        description: 'Target stage for Docker rendering'
+        required: true
+        type: string
       platform:
         description: 'Platform to build (amd64 or arm64)'
         required: true
@@ -187,7 +191,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
           framework: ${{ inputs.framework }}
-          target: runtime
+          target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
           ci_token: ${{ secrets.CI_TOKEN }}
