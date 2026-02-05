@@ -156,6 +156,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
             )
 
             # Run generation in thread pool (blocking operation)
+            # TODO(nv-yna): Add cancellation support. This requires:
+            # 1. visual_gen to expose a cancellation hook in the denoising loop
+            # 2. Passing a cancellation token/event to engine.generate()
+            # 3. Checking context.cancelled() and propagating to the pipeline
             frames = await asyncio.to_thread(
                 self.engine.generate,
                 prompt=req.prompt,
