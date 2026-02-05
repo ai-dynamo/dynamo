@@ -15,13 +15,13 @@ pub enum NamespaceFilter {
     Global,
     /// Accept only workers whose namespace exactly matches the given string
     Exact(String),
-    /// Accept workers whose namespace starts with the given prefix (multi-pool mode)
+    /// Accept workers whose namespace starts with the given prefix (multi-set mode)
     Prefix(String),
 }
 
 impl NamespaceFilter {
     /// Create a NamespaceFilter from optional namespace and namespace_prefix.
-    /// - If namespace_prefix is Some, use Prefix mode (multi-pool discovery)
+    /// - If namespace_prefix is Some, use Prefix mode (multi-set discovery)
     /// - If namespace is Some and not global, use Exact mode (single namespace)
     /// - Otherwise, use Global mode (discover all)
     pub fn from_options(namespace: Option<&str>, namespace_prefix: Option<&str>) -> Self {
@@ -52,7 +52,7 @@ impl NamespaceFilter {
         matches!(self, NamespaceFilter::Global)
     }
 
-    /// Returns true if this is prefix mode (multi-pool).
+    /// Returns true if this is prefix mode (multi-set).
     pub fn is_prefix(&self) -> bool {
         matches!(self, NamespaceFilter::Prefix(_))
     }

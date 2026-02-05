@@ -80,7 +80,7 @@ pub struct ModelManager {
     worker_monitors: DashMap<String, KvWorkerMonitor>,
     runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
 
-    /// Multi-pool managers per model name for prefix-mode routing.
+    /// Multi-set managers per model name for prefix-mode routing.
     worker_set_managers: DashMap<String, Arc<WorkerSetManager>>,
 }
 
@@ -403,20 +403,20 @@ impl ModelManager {
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
 
-        // Check if we have a WorkerSetManager for this model (multi-pool mode)
-        let pool_manager = model_name.and_then(|name| self.get_worker_set_manager(name));
+        // Check if we have a WorkerSetManager for this model (multi-set mode)
+        let set_manager = model_name.and_then(|name| self.get_worker_set_manager(name));
 
-        let chooser = if let Some(pool_manager) = pool_manager {
+        let chooser = if let Some(set_manager) = set_manager {
             tracing::info!(
                 model_name = model_name,
-                set_count = pool_manager.set_count(),
-                total_workers = pool_manager.total_instances(),
+                set_count = set_manager.set_count(),
+                total_workers = set_manager.total_instances(),
                 "Creating KvRouter with multi-set support"
             );
-            KvRouter::new_with_pool_manager(
+            KvRouter::new_with_set_manager(
                 endpoint.clone(),
                 client,
-                pool_manager,
+                set_manager,
                 workers_with_configs,
                 kv_cache_block_size,
                 Some(selector),

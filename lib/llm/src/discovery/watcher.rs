@@ -170,8 +170,8 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    // In multi-pool (prefix) mode, skip global checksum validation.
-                    // Different pools (namespaces) can have different MDC checksums.
+                    // In multi-set (prefix) mode, skip global checksum validation.
+                    // Different worker sets (namespaces) can have different MDC checksums.
                     // In exact or global mode, enforce that all workers have matching checksums.
                     if !namespace_filter.is_prefix() {
                         let can_add =
@@ -198,7 +198,7 @@ impl ModelWatcher {
                             model_name = card.name(),
                             namespace = mcid.namespace,
                             mdcsum = card.mdcsum(),
-                            "Multi-pool mode: accepting worker with potentially different MDC"
+                            "Multi-set mode: accepting worker with potentially different MDC"
                         );
                     }
 
@@ -280,7 +280,7 @@ impl ModelWatcher {
         };
         let model_name = card.name().to_string();
 
-        // In prefix mode, remove worker from multi-pool manager
+        // In prefix mode, remove worker from multi-set manager
         if namespace_filter.is_prefix() {
             self.remove_from_worker_set(mcid, &model_name);
         }
@@ -703,9 +703,9 @@ impl ModelWatcher {
         Ok(())
     }
 
-    /// Add a worker to the multi-pool manager (prefix mode only).
+    /// Add a worker to the multi-set manager (prefix mode only).
     ///
-    /// Extracts worker_id from instance_id and adds to the appropriate pool.
+    /// Extracts worker_id from instance_id and adds to the appropriate worker set.
     async fn add_to_worker_set(
         &self,
         mcid: &ModelCardInstanceId,
@@ -744,7 +744,7 @@ impl ModelWatcher {
         Ok(())
     }
 
-    /// Remove a worker from the multi-pool manager (prefix mode only).
+    /// Remove a worker from the multi-set manager (prefix mode only).
     fn remove_from_worker_set(&self, mcid: &ModelCardInstanceId, model_name: &str) {
         if !self.namespace_filter.is_prefix() {
             return;
@@ -763,8 +763,8 @@ impl ModelWatcher {
             namespace = mcid.namespace,
             worker_id,
             total_workers = set_manager.total_instances(),
-            pool_count = set_manager.pool_count(),
-            "Removed worker from multi-pool manager"
+            set_count = set_manager.set_count(),
+            "Removed worker from multi-set manager"
         );
     }
 

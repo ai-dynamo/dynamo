@@ -30,7 +30,7 @@ pub use dynamo_kv_router::approx;
 pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
-pub mod pool_scheduler;
+pub mod set_scheduler;
 pub mod prefill_router;
 pub mod publisher;
 pub mod recorder;
@@ -48,7 +48,7 @@ use crate::{
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
-        pool_scheduler::PoolAwareScheduler,
+        set_scheduler::SetAwareScheduler,
         protocols::{
             DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
             TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
@@ -325,9 +325,9 @@ pub struct KvRouter {
     // How about a Box<dyn KvIndexerInterface>
     scheduler: KvScheduler,
 
-    /// Pool-aware scheduler for multi-pool (prefix) mode.
-    /// When Some, find_best_match uses two-level selection (pool → worker).
-    pool_scheduler: Option<PoolAwareScheduler>,
+    /// Set-aware scheduler for multi-set (prefix) mode.
+    /// When Some, find_best_match uses two-level selection (set → worker).
+    set_scheduler: Option<SetAwareScheduler>,
 
     block_size: u32,
 
@@ -487,7 +487,7 @@ impl KvRouter {
         Ok(Self {
             indexer,
             scheduler,
-            pool_scheduler: None,
+            set_scheduler: None,
             block_size,
             kv_router_config,
             cancellation_token,
@@ -496,16 +496,16 @@ impl KvRouter {
         })
     }
 
-    /// Create a new KvRouter with multi-pool support.
+    /// Create a new KvRouter with multi-set support.
     ///
-    /// This constructor is used in prefix mode where multiple worker pools exist.
-    /// The pool_manager provides weighted pool selection, and the router uses
-    /// two-level selection: first pick a pool, then pick a worker within that pool.
+    /// This constructor is used in prefix mode where multiple worker sets exist.
+    /// The set_manager provides weighted set selection, and the router uses
+    /// two-level selection: first pick a worker set, then pick a worker within that set.
     #[allow(clippy::too_many_arguments)]
-    pub async fn new_with_pool_manager(
+    pub async fn new_with_set_manager(
         endpoint: Endpoint,
         client: Client,
-        pool_manager: Arc<WorkerSetManager>,
+        set_manager: Arc<WorkerSetManager>,
         workers_with_configs: Arc<RuntimeConfigs>,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
@@ -555,10 +555,10 @@ impl KvRouter {
         )
         .await?;
 
-        // Create pool-aware scheduler for pool selection and metrics.
+        // Create set-aware scheduler for worker set selection and metrics.
         // The actual worker selection uses the KvScheduler above, so we pass None for selector.
-        let pool_scheduler = Some(PoolAwareScheduler::new(
-            Some(pool_manager),
+        let set_scheduler = Some(SetAwareScheduler::new(
+            Some(set_manager),
             block_size,
             kv_router_config,
             None,
@@ -569,7 +569,7 @@ impl KvRouter {
             component.clone(),
             workers_with_configs.subscribe(),
         );
-        tracing::info!("Worker query client initialized for multi-pool mode");
+        tracing::info!("Worker query client initialized for multi-set mode");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
         if kv_router_config.use_kv_events
@@ -582,7 +582,7 @@ impl KvRouter {
                 .all(|b| b);
 
             tracing::info!(
-                "Found {} worker(s), starting KV event subscriber (multi-pool mode)",
+                "Found {} worker(s), starting KV event subscriber (multi-set mode)",
                 workers_with_configs.num_workers()
             );
 
@@ -646,11 +646,11 @@ impl KvRouter {
             }
         }
 
-        tracing::info!("KV Routing initialized (multi-pool mode)");
+        tracing::info!("KV Routing initialized (multi-set mode)");
         Ok(Self {
             indexer,
             scheduler,
-            pool_scheduler,
+            set_scheduler,
             block_size,
             kv_router_config,
             cancellation_token,
@@ -664,18 +664,18 @@ impl KvRouter {
         &self.client
     }
 
-    /// Check if this router is in multi-pool mode.
-    pub fn is_multi_pool(&self) -> bool {
-        self.pool_scheduler
+    /// Check if this router is in multi-set mode.
+    pub fn is_multi_set(&self) -> bool {
+        self.set_scheduler
             .as_ref()
-            .is_some_and(|ps| ps.is_multi_pool())
+            .is_some_and(|ss| ss.is_multi_set())
     }
 
-    /// Get pool weights for metrics/debugging (multi-pool mode only).
+    /// Get worker set weights for metrics/debugging (multi-set mode only).
     pub fn set_weights(&self) -> HashMap<String, usize> {
-        self.pool_scheduler
+        self.set_scheduler
             .as_ref()
-            .map(|ps| ps.set_weights())
+            .map(|ss| ss.set_weights())
             .unwrap_or_default()
     }
 
