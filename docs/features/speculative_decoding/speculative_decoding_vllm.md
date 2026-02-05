@@ -51,7 +51,7 @@ docker compose -f deploy/docker-compose.yml up -d
 The **Meta-Llama-3.1-8B-Instruct** model is gated. Request access on Hugging Face:
 [Meta-Llama-3.1-8B-Instruct repository](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
 
-Approval usually takes around **5 minutes**.
+Approval time varies depending on Hugging Face review traffic.
 
 Once approved, set your access token inside the container:
 
@@ -91,7 +91,10 @@ curl http://localhost:8000/v1/chat/completions \
   "id": "cmpl-3e87ea5c-010e-4dd2-bcc4-3298ebd845a8",
   "choices": [
     {
-      "text": "In cherry blossom's gentle breeze ... A delicate balance of life and death, as petals fade, and new life breathes.",
+      "message": {
+        "role": "assistant",
+        "content": "In cherry blossom's gentle breeze ... A delicate balance of life and death, as petals fade, and new life breathes."
+      },
       "index": 0,
       "finish_reason": "stop"
     }
