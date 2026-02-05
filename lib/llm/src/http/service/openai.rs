@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::Request,
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -19,7 +19,7 @@ use axum::{
         IntoResponse, Response,
         sse::{KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::{
@@ -54,7 +54,7 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::http::middleware::session::{extract_session_middleware, RequestSession};
-use crate::storage::{ResponseStorage, ResponseStorageManager};
+use crate::storage::{ResponseStorage, ResponseStorageManager, StorageError};
 use crate::types::Annotated;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
@@ -1593,6 +1593,87 @@ pub fn list_models_router(
     (vec![doc_for_openai], router)
 }
 
+
+/// Handle GET /v1/responses/{id} - retrieve a stored response
+async fn handler_get_response(
+    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Extension(session): Extension<RequestSession>,
+    Path(response_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    let storage = ResponseStorageManager::new();
+    
+    match storage.get_response(&session.tenant_id, &session.session_id, &response_id).await {
+        Ok(stored) => {
+            tracing::info!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                "Retrieved stored response"
+            );
+            Ok(Json(stored.response).into_response())
+        }
+        Err(StorageError::NotFound) => {
+            tracing::debug!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                "Response not found"
+            );
+            Err(StatusCode::NOT_FOUND)
+        }
+        Err(e) => {
+            tracing::error!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                error = %e,
+                "Failed to retrieve response"
+            );
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Handle DELETE /v1/responses/{id} - delete a stored response
+async fn handler_delete_response(
+    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Extension(session): Extension<RequestSession>,
+    Path(response_id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let storage = ResponseStorageManager::new();
+    
+    match storage.delete_response(&session.tenant_id, &session.session_id, &response_id).await {
+        Ok(()) => {
+            tracing::info!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                "Deleted stored response"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(StorageError::NotFound) => {
+            tracing::debug!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                "Response not found for deletion"
+            );
+            Err(StatusCode::NOT_FOUND)
+        }
+        Err(e) => {
+            tracing::error!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                error = %e,
+                "Failed to delete response"
+            );
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
 /// If not path is provided, the default path is `/v1/responses`
 pub fn responses_router(
@@ -1602,8 +1683,11 @@ pub fn responses_router(
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let path_with_id = format!("{}/:id", &path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .route(&path_with_id, get(handler_get_response))
+        .route(&path_with_id, delete(handler_delete_response))
         .layer(middleware::from_fn(extract_session_middleware))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state((state, template));
