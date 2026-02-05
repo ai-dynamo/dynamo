@@ -77,6 +77,9 @@ Key features include:
    :hidden:
 
    Overview <self>
+   Planner README <README>
+   Planner Guide <planner_guide>
+   Planner Examples <planner_examples>
    SLA Planner Quick Start <sla_planner_quickstart>
    SLA-Driven Profiling <../benchmarks/sla_driven_profiling.md>
    SLA-based Planner <sla_planner.md>

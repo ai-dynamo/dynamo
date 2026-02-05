@@ -88,3 +88,4 @@ Quickstart
    Distributed Runtime <design_docs/distributed_runtime.md>
    Request Plane <design_docs/request_plane.md>
    Event Plane <design_docs/event_plane.md>
+   Planner Design <design_docs/planner_design.md>
