@@ -1,6 +1,6 @@
 //! Response storage manager
 //!
-//! Provides a simple manager wrapper around ResponseStorage implementations.
+//! Provides a simple in-memory implementation of ResponseStorage.
 
 use super::{ResponseStorage, StorageError, StoredResponse};
 use std::collections::HashMap;
@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-/// Simple in-memory storage manager (for initial implementation)
+/// Simple in-memory response storage implementation
 ///
 /// Users can later replace this with Redis, Postgres, etc.
-pub struct ResponseStorageManager {
+pub struct InMemoryResponseStorage {
     storage: Arc<RwLock<HashMap<String, StoredResponse>>>,
 }
 
-impl ResponseStorageManager {
+impl InMemoryResponseStorage {
     pub fn new() -> Self {
         Self {
             storage: Arc::new(RwLock::new(HashMap::new())),
@@ -28,7 +28,7 @@ impl ResponseStorageManager {
 }
 
 #[async_trait::async_trait]
-impl ResponseStorage for ResponseStorageManager {
+impl ResponseStorage for InMemoryResponseStorage {
     async fn store_response(
         &self,
         tenant_id: &str,
@@ -124,6 +124,7 @@ impl ResponseStorage for ResponseStorageManager {
         tenant_id: &str,
         session_id: &str,
         limit: Option<usize>,
+        after: Option<&str>,
     ) -> Result<Vec<StoredResponse>, StorageError> {
         let storage = self.storage.read().await;
         let prefix = format!("{tenant_id}:{session_id}:responses:");
@@ -136,9 +137,20 @@ impl ResponseStorage for ResponseStorageManager {
 
         // Sort by creation time, then by response_id for stable ordering
         responses.sort_by(|a, b| {
-            a.created_at.cmp(&b.created_at)
+            a.created_at
+                .cmp(&b.created_at)
                 .then_with(|| a.response_id.cmp(&b.response_id))
         });
+
+        // Apply cursor: skip all responses up to and including the cursor
+        if let Some(cursor_id) = after {
+            // Find the cursor response to get its position
+            if let Some(cursor_pos) = responses.iter().position(|r| r.response_id == cursor_id) {
+                // Skip all responses up to and including the cursor
+                responses = responses.into_iter().skip(cursor_pos + 1).collect();
+            }
+            // If cursor not found, return all responses (cursor may have been deleted)
+        }
 
         // Apply limit
         if let Some(limit) = limit {

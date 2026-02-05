@@ -148,35 +148,38 @@ pub trait ResponseStorage: Send + Sync {
     /// * `tenant_id` - Tenant identifier
     /// * `session_id` - Session identifier
     /// * `limit` - Maximum number of responses to return
+    /// * `after` - Cursor: response_id to start after (for pagination)
     ///
     /// # Returns
-    /// List of responses in the session, ordered by creation time
+    /// List of responses in the session, ordered by creation time.
+    /// When `after` is provided, only responses after the cursor are returned.
     async fn list_responses(
         &self,
         tenant_id: &str,
         session_id: &str,
         limit: Option<usize>,
+        after: Option<&str>,
     ) -> Result<Vec<StoredResponse>, StorageError> {
         // Default implementation returns empty list
         // Implementations can override for better functionality
-        let _ = (tenant_id, session_id, limit);
+        let _ = (tenant_id, session_id, limit, after);
         Ok(Vec::new())
     }
 
-    /// Clone a session by copying all responses up to a specific point
-    /// 
+    /// Fork a session by copying all responses up to a specific point
+    ///
     /// This enables "branching" conversations - starting a new session
     /// from a checkpoint in an existing one (rewinding).
     ///
     /// # Arguments
     /// * `tenant_id` - Tenant identifier (must be same for source and target)
-    /// * `source_session_id` - Source session to clone from
-    /// * `target_session_id` - New session to clone into
-    /// * `up_to_response_id` - Optional: only clone responses up to this ID (rewind point)
+    /// * `source_session_id` - Source session to fork from
+    /// * `target_session_id` - New session to fork into
+    /// * `up_to_response_id` - Optional: only copy responses up to this ID (rewind point)
     ///
     /// # Returns
-    /// Number of responses cloned
-    async fn clone_session(
+    /// Number of responses copied
+    async fn fork_session(
         &self,
         tenant_id: &str,
         source_session_id: &str,
@@ -184,7 +187,7 @@ pub trait ResponseStorage: Send + Sync {
         up_to_response_id: Option<&str>,
     ) -> Result<usize, StorageError> {
         // Default implementation - override for efficiency in production backends
-        let responses = self.list_responses(tenant_id, source_session_id, None).await?;
+        let responses = self.list_responses(tenant_id, source_session_id, None, None).await?;
         
         let mut cloned = 0;
         for response in responses {
@@ -221,145 +224,7 @@ pub trait ResponseStorage: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-
-    /// In-memory storage implementation for testing
-    struct InMemoryResponseStorage {
-        storage: Arc<RwLock<HashMap<String, StoredResponse>>>,
-    }
-
-    impl InMemoryResponseStorage {
-        fn new() -> Self {
-            Self {
-                storage: Arc::new(RwLock::new(HashMap::new())),
-            }
-        }
-
-        fn make_key(tenant_id: &str, session_id: &str, response_id: &str) -> String {
-            format!("{tenant_id}:{session_id}:responses:{response_id}")
-        }
-    }
-
-    #[async_trait]
-    impl ResponseStorage for InMemoryResponseStorage {
-        async fn store_response(
-            &self,
-            tenant_id: &str,
-            session_id: &str,
-            response_id: Option<&str>,
-            response: serde_json::Value,
-            ttl: Option<Duration>,
-        ) -> Result<String, StorageError> {
-            let response_id = response_id
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let key = Self::make_key(tenant_id, session_id, &response_id);
-
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            let expires_at = ttl.map(|d| now + d.as_secs());
-
-            let stored = StoredResponse {
-                response_id: response_id.clone(),
-                tenant_id: tenant_id.to_string(),
-                session_id: session_id.to_string(),
-                response,
-                created_at: now,
-                expires_at,
-            };
-
-            self.storage.write().await.insert(key, stored);
-
-            Ok(response_id)
-        }
-
-        async fn get_response(
-            &self,
-            tenant_id: &str,
-            session_id: &str,
-            response_id: &str,
-        ) -> Result<StoredResponse, StorageError> {
-            let key = Self::make_key(tenant_id, session_id, response_id);
-
-            let storage = self.storage.read().await;
-            let stored = storage.get(&key).ok_or(StorageError::NotFound)?;
-
-            // Check expiration
-            if let Some(expires_at) = stored.expires_at {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                if now > expires_at {
-                    return Err(StorageError::NotFound);
-                }
-            }
-
-            // Validate tenant and session
-            if stored.tenant_id != tenant_id {
-                return Err(StorageError::TenantMismatch);
-            }
-            if stored.session_id != session_id {
-                return Err(StorageError::SessionMismatch);
-            }
-
-            Ok(stored.clone())
-        }
-
-        async fn delete_response(
-            &self,
-            tenant_id: &str,
-            session_id: &str,
-            response_id: &str,
-        ) -> Result<(), StorageError> {
-            let key = Self::make_key(tenant_id, session_id, response_id);
-
-            let mut storage = self.storage.write().await;
-            let stored = storage.get(&key).ok_or(StorageError::NotFound)?;
-
-            // Validate tenant and session before deletion
-            if stored.tenant_id != tenant_id {
-                return Err(StorageError::TenantMismatch);
-            }
-            if stored.session_id != session_id {
-                return Err(StorageError::SessionMismatch);
-            }
-
-            storage.remove(&key);
-            Ok(())
-        }
-
-        async fn list_responses(
-            &self,
-            tenant_id: &str,
-            session_id: &str,
-            limit: Option<usize>,
-        ) -> Result<Vec<StoredResponse>, StorageError> {
-            let storage = self.storage.read().await;
-            let prefix = format!("{tenant_id}:{session_id}:responses:");
-
-            let mut responses: Vec<StoredResponse> = storage
-                .iter()
-                .filter(|(k, _)| k.starts_with(&prefix))
-                .map(|(_, v)| v.clone())
-                .collect();
-
-            // Sort by creation time
-            responses.sort_by_key(|r| r.created_at);
-
-            // Apply limit
-            if let Some(limit) = limit {
-                responses.truncate(limit);
-            }
-
-            Ok(responses)
-        }
-    }
+    use crate::storage::InMemoryResponseStorage;
 
     #[tokio::test]
     async fn test_store_and_retrieve() {
@@ -494,7 +359,7 @@ mod tests {
             .unwrap();
 
         let responses = storage
-            .list_responses("tenant_a", "session_1", None)
+            .list_responses("tenant_a", "session_1", None, None)
             .await
             .unwrap();
 
@@ -519,9 +384,75 @@ mod tests {
         }
 
         let responses = storage
-            .list_responses("tenant_a", "session_1", Some(3))
+            .list_responses("tenant_a", "session_1", Some(3), None)
             .await
             .unwrap();
 
         assert_eq!(responses.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_responses_with_cursor() {
+        let storage = InMemoryResponseStorage::new();
+
+        // Store 10 responses with known IDs
+        for i in 1..=10 {
+            storage
+                .store_response(
+                    "tenant_a",
+                    "session_1",
+                    Some(&format!("resp_{:02}", i)),
+                    serde_json::json!({"turn": i}),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Fetch first page (limit=3)
+        let page1 = storage
+            .list_responses("tenant_a", "session_1", Some(3), None)
+            .await
+            .unwrap();
+
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page1[0].response_id, "resp_01");
+        assert_eq!(page1[2].response_id, "resp_03");
+
+        // Fetch second page using cursor (after resp_03)
+        let page2 = storage
+            .list_responses("tenant_a", "session_1", Some(3), Some("resp_03"))
+            .await
+            .unwrap();
+
+        assert_eq!(page2.len(), 3);
+        assert_eq!(page2[0].response_id, "resp_04");
+        assert_eq!(page2[2].response_id, "resp_06");
+
+        // Fetch third page
+        let page3 = storage
+            .list_responses("tenant_a", "session_1", Some(3), Some("resp_06"))
+            .await
+            .unwrap();
+
+        assert_eq!(page3.len(), 3);
+        assert_eq!(page3[0].response_id, "resp_07");
+        assert_eq!(page3[2].response_id, "resp_09");
+
+        // Fetch fourth page (only 1 remaining)
+        let page4 = storage
+            .list_responses("tenant_a", "session_1", Some(3), Some("resp_09"))
+            .await
+            .unwrap();
+
+        assert_eq!(page4.len(), 1);
+        assert_eq!(page4[0].response_id, "resp_10");
+
+        // Fetch with cursor at end (should be empty)
+        let page5 = storage
+            .list_responses("tenant_a", "session_1", Some(3), Some("resp_10"))
+            .await
+            .unwrap();
+
+        assert_eq!(page5.len(), 0);
     }}
