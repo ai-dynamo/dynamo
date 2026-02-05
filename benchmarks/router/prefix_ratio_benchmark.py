@@ -5,31 +5,27 @@
 
 import argparse
 import json
-import logging
 import os
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import matplotlib
 
 matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
-
-# Setup logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
+from common import (
+    add_common_args,
+    get_common_aiperf_flags,
+    resolve_tokenizer,
+    setup_logger,
 )
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
+
+logger = setup_logger(__name__)
 
 
 def get_aiperf_cmd(
     model,
-    tokenizer,  # Add tokenizer parameter
+    tokenizer,
     prefix_ratio,
     isl,
     osl,
@@ -51,18 +47,13 @@ def get_aiperf_cmd(
         nvext_dict["expected_output_tokens"] = osl
     nvext_json = json.dumps({"nvext": nvext_dict})
 
-    return [
+    cmd = [
         "aiperf",
         "profile",
         "--model",
         model,
         "--tokenizer",
-        tokenizer,  # Use the tokenizer parameter instead of model
-        "--endpoint-type",
-        "chat",
-        "--endpoint",
-        "v1/chat/completions",
-        "--streaming",
+        tokenizer,
         "--url",
         url,
         "--synthetic-input-tokens-mean",
@@ -73,8 +64,6 @@ def get_aiperf_cmd(
         str(osl),
         "--output-tokens-stddev",
         str(round(osl / 4)),
-        "--extra-inputs",
-        "ignore_eos:true",
         "--extra-inputs",
         nvext_json,
         "--concurrency",
@@ -93,11 +82,9 @@ def get_aiperf_cmd(
         artifact_dir,
         "--dataset-sampling-strategy",
         "shuffle",
-        "-H",
-        "Authorization: Bearer NOT USED",
-        "-H",
-        "Accept: text/event-stream",
     ]
+    cmd.extend(get_common_aiperf_flags())
+    return cmd
 
 
 def get_aiperf_result(artifact_dir: str) -> dict:
@@ -117,9 +104,9 @@ def get_aiperf_result(artifact_dir: str) -> dict:
         return json.load(f)
 
 
-def run_benchmark_single_url(
+def run_benchmark(
     model,
-    tokenizer,  # Add tokenizer parameter
+    tokenizer,
     prefix_ratio,
     isl,
     osl,
@@ -127,14 +114,21 @@ def run_benchmark_single_url(
     concurrency,
     seed,
     num_prefix_prompts,
-    artifact_dir,
+    output_dir,
     url,
     use_expected_osl=False,
 ) -> Optional[Dict]:
-    """Run aiperf benchmark for a single URL"""
+    """Run aiperf benchmark for a specific prefix ratio"""
+    logger.info(
+        f"Running benchmark with prefix_ratio={prefix_ratio}, seed={seed}, url={url}"
+    )
+
+    artifact_dir = f"{output_dir}/prefix_ratio_{prefix_ratio}_seed_{seed}"
+    os.makedirs(artifact_dir, exist_ok=True)
+
     aiperf_cmd = get_aiperf_cmd(
         model,
-        tokenizer,  # Pass tokenizer parameter
+        tokenizer,
         prefix_ratio,
         isl,
         osl,
@@ -147,184 +141,24 @@ def run_benchmark_single_url(
         use_expected_osl,
     )
 
-    logger.info(f"Running command for URL {url}: {' '.join(aiperf_cmd)}")
+    logger.info(f"Command: {' '.join(aiperf_cmd)}")
 
     try:
-        # Run aiperf and let it output directly to terminal
         subprocess.run(aiperf_cmd, check=True)
-
-        logger.info(f"AIPerf profiling completed successfully for URL {url}")
-
-        aiperf_result = get_aiperf_result(artifact_dir)
-        return aiperf_result
-
+        logger.info("AIPerf profiling completed successfully")
+        return get_aiperf_result(artifact_dir)
     except subprocess.CalledProcessError as e:
-        logger.error(f"AIPerf failed for URL {url} with error code: {e.returncode}")
+        logger.error(f"AIPerf failed with error code: {e.returncode}")
         return None
-
-
-def aggregate_results(results: List[Optional[Dict]]) -> Optional[Dict]:
-    """Aggregate results from multiple URLs"""
-    if not results:
-        return None
-
-    valid_results = [r for r in results if r is not None]
-    if not valid_results:
-        return None
-
-    # For TTFT percentiles, average across URLs
-    ttft_p25_values = [r["time_to_first_token"]["p25"] for r in valid_results]
-    ttft_p50_values = [r["time_to_first_token"]["p50"] for r in valid_results]
-    ttft_p75_values = [r["time_to_first_token"]["p75"] for r in valid_results]
-
-    # For ITL percentiles, average across URLs
-    itl_p25_values = [r["inter_token_latency"]["p25"] for r in valid_results]
-    itl_p50_values = [r["inter_token_latency"]["p50"] for r in valid_results]
-    itl_p75_values = [r["inter_token_latency"]["p75"] for r in valid_results]
-
-    aggregated = {
-        "time_to_first_token": {
-            "p25": sum(ttft_p25_values) / len(ttft_p25_values),
-            "p50": sum(ttft_p50_values) / len(ttft_p50_values),
-            "p75": sum(ttft_p75_values) / len(ttft_p75_values),
-        },
-        "inter_token_latency": {
-            "p25": sum(itl_p25_values) / len(itl_p25_values),
-            "p50": sum(itl_p50_values) / len(itl_p50_values),
-            "p75": sum(itl_p75_values) / len(itl_p75_values),
-        },
-    }
-
-    return aggregated
-
-
-def run_benchmark(
-    model,
-    tokenizer,  # Add tokenizer parameter
-    prefix_ratio,
-    isl,
-    osl,
-    requests,
-    concurrency,
-    seed,
-    num_prefix_prompts,
-    output_dir,
-    urls,
-    use_expected_osl=False,
-) -> Optional[Dict]:
-    """Run aiperf benchmark for a specific prefix ratio"""
-    logger.info(
-        f"Running benchmark with prefix_ratio={prefix_ratio}, seed={seed}, URLs={urls}"
-    )
-
-    # If single URL, maintain existing behavior
-    if isinstance(urls, str):
-        urls = [urls]
-
-    if len(urls) == 1:
-        artifact_dir = f"{output_dir}/prefix_ratio_{prefix_ratio}_seed_{seed}"
-        os.makedirs(artifact_dir, exist_ok=True)
-
-        return run_benchmark_single_url(
-            model,
-            tokenizer,  # Pass tokenizer parameter
-            prefix_ratio,
-            isl,
-            osl,
-            requests,
-            concurrency,
-            seed,
-            num_prefix_prompts,
-            artifact_dir,
-            urls[0],
-            use_expected_osl,
-        )
-
-    # Multiple URLs: split requests and concurrency
-    num_urls = len(urls)
-    base_requests_per_url = requests // num_urls
-    remainder_requests = requests % num_urls
-    base_concurrency_per_url = max(1, concurrency // num_urls)
-
-    # Launch parallel processes
-    processes = []
-    artifact_dirs = []
-
-    for i, url in enumerate(urls):
-        # Distribute remainder requests to first few URLs
-        url_requests = base_requests_per_url + (1 if i < remainder_requests else 0)
-
-        artifact_dir = f"{output_dir}/prefix_ratio_{prefix_ratio}_seed_{seed}_url_{i}"
-        os.makedirs(artifact_dir, exist_ok=True)
-        artifact_dirs.append(artifact_dir)
-
-        aiperf_cmd = get_aiperf_cmd(
-            model,
-            tokenizer,  # Pass tokenizer parameter
-            prefix_ratio,
-            isl,
-            osl,
-            url_requests,
-            base_concurrency_per_url,
-            seed,
-            num_prefix_prompts,
-            artifact_dir,
-            url,
-            use_expected_osl,
-        )
-
-        logger.info(f"Launching process for URL {url}: {' '.join(aiperf_cmd)}")
-
-        # Run process without capturing output - let it stream to terminal
-        process = subprocess.Popen(aiperf_cmd)
-        processes.append((process, url, artifact_dir))
-
-    # Wait for all processes to complete and collect results
-    results: List[Optional[Dict]] = []
-    for process, url, artifact_dir in processes:
-        return_code = process.wait()
-
-        if return_code == 0:
-            logger.info(f"AIPerf completed successfully for URL {url}")
-
-            try:
-                aiperf_result = get_aiperf_result(artifact_dir)
-                results.append(aiperf_result)
-            except Exception as e:
-                logger.error(f"Failed to get results for URL {url}: {e}")
-                results.append(None)
-        else:
-            logger.error(f"AIPerf failed for URL {url} with error code: {return_code}")
-            results.append(None)
-
-    # Aggregate results
-    return aggregate_results(results)
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Benchmark prefix ratios and plot results"
     )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Model name",
-    )
-    parser.add_argument(
-        "--tokenizer",
-        type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Tokenizer name (defaults to model)",
-    )
-    parser.add_argument(
-        "--url",
-        type=str,
-        nargs="+",  # Accept multiple URLs
-        default=["http://localhost:8000"],
-        # default=["http://localhost:8090", "http://localhost:8090"],
-        help="Server URL(s). Can specify multiple URLs for parallel benchmarking",
-    )
+
+    add_common_args(parser)
+
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -336,7 +170,6 @@ def main():
     parser.add_argument("--osl", type=int, default=200, help="Output sequence length")
     parser.add_argument("--requests", type=int, default=200, help="Number of requests")
     parser.add_argument("--concurrency", type=int, default=20, help="Concurrency level")
-    parser.add_argument("--seed", type=int, default=0, help="Initial random seed")
     parser.add_argument(
         "--prefix-ratios",
         type=float,
@@ -344,13 +177,9 @@ def main():
         default=[0.1, 0.3, 0.5, 0.7, 0.9],
         help="List of prefix ratios to test",
     )
-    parser.add_argument(
-        "--use-expected-osl",
-        action="store_true",
-        help="Pass expected_output_tokens to nvext for router tracking",
-    )
 
     args = parser.parse_args()
+    resolve_tokenizer(args)
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -379,7 +208,7 @@ def main():
             current_seed,
             args.num_prefix_prompts,
             args.output_dir,
-            args.url,  # Now passing list of URLs
+            args.url,
             args.use_expected_osl,
         )
 
