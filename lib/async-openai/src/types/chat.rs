@@ -375,7 +375,7 @@ pub enum ChatCompletionRequestToolMessageContent {
     Array(Vec<ChatCompletionRequestToolMessageContentPart>),
 }
 
-// ===== Response Content Part Types =====
+// Omni Specific Multimodal Content Types
 // These types are used for assistant message responses that contain multimodal content
 
 /// Response content part for text in assistant messages
