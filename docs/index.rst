@@ -59,6 +59,7 @@ Quickstart
    :caption: User Guides
 
    KV Cache Offloading <kvbm/kvbm_guide.md>
+   KV Aware Routing <router/router_guide.md>
    Tool Calling <agents/tool-calling.md>
    Multimodality Support <multimodal/index.md>
    Finding Best Initial Configs <performance/aiconfigurator.md>

@@ -53,7 +53,7 @@ To address the growing demands of distributed inference serving, NVIDIA introduc
 The following diagram outlines Dynamo's high-level architecture. To enable large-scale distributed and disaggregated inference serving, Dynamo includes five key features:
 
 - [Dynamo Disaggregated Serving](disagg_serving.md)
-- [Dynamo Smart Router](../router/kv_cache_routing.md)
+- [Dynamo Smart Router](../router/README.md)
 - [Dynamo KV Cache Block Manager](../kvbm/kvbm_intro.rst)
 - [Planner](../planner/planner_intro.rst)
 - [NVIDIA Inference Transfer Library (NIXL)](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)

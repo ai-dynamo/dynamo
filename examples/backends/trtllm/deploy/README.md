@@ -266,7 +266,7 @@ Configure the `model` name and `host` based on your deployment.
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/README.md)
 - **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/multinode-examples.md)
 - **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/llama4_plus_eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)

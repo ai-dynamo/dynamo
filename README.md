@@ -52,7 +52,7 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 |---|:----:|:----------:|:--:|
 | **Best For** | High-throughput serving | Maximum performance | Broadest feature coverage |
 | [**Disaggregated Serving**](docs/design_docs/disagg_serving.md) | ✅ | ✅ | ✅ |
-| [**KV-Aware Routing**](docs/router/kv_cache_routing.md) | ✅ | ✅ | ✅ |
+| [**KV-Aware Routing**](docs/router/README.md) | ✅ | ✅ | ✅ |
 | [**SLA-Based Planner**](docs/planner/sla_planner.md) | ✅ | ✅ | ✅ |
 | [**KVBM**](docs/kvbm/README.md) | 🚧 | ✅ | ✅ |
 | [**Multimodal**](docs/multimodal/index.md) | ✅ | ✅ | ✅ |
@@ -388,7 +388,7 @@ See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LL
 
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/router/kv_cache_routing.md
+[kv-routing]: docs/router/README.md
 [planner]: docs/planner/sla_planner.md
 [kvbm]: docs/kvbm/README.md
 [mm]: examples/multimodal/

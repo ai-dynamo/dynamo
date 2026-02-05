@@ -54,7 +54,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|--------------|-------|
 | [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
+| [**KV-Aware Routing**](../../router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | Planned |
 | [**KVBM**](../../../docs/kvbm/README.md) | ✅ | |
@@ -113,7 +113,7 @@ apt-get update && apt-get -y install git git-lfs
 > [!IMPORTANT]
 > Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
-For detailed information about the architecture and how KV-aware routing works, see the [KV Cache Routing documentation](../../router/kv_cache_routing.md).
+For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../router/router_guide.md).
 
 ### Aggregated
 ```bash

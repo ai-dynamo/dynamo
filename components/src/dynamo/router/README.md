@@ -3,7 +3,7 @@
 
 # Standalone Router
 
-A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see the [KV Cache Routing documentation](/docs/router/kv_cache_routing.md).
+A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see the [Router Guide](/docs/router/router_guide.md).
 
 ## Overview
 
@@ -29,7 +29,7 @@ python -m dynamo.router \
 - `--endpoint`: Full endpoint path for workers in the format `namespace.component.endpoint` (e.g., `dynamo.prefill.generate`)
 
 **Router Configuration:**
-For detailed descriptions of all KV router configuration options including `--block-size`, `--kv-overlap-score-weight`, `--router-temperature`, `--no-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, and `--no-track-active-blocks`, see the [KV Cache Routing documentation](/docs/router/kv_cache_routing.md).
+For detailed descriptions of all KV router configuration options including `--block-size`, `--kv-overlap-score-weight`, `--router-temperature`, `--no-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, and `--no-track-active-blocks`, see the [Router Guide](/docs/router/router_guide.md).
 
 ## Architecture
 
@@ -43,7 +43,7 @@ Clients query the `find_best_worker` endpoint to determine which worker should p
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
 > [!Note]
-> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See the [KV Cache Routing documentation](../../../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for the default setup.
+> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See the [Router Guide](/docs/router/router_guide.md#disaggregated-serving) for the default setup.
 >
 > Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 
@@ -103,6 +103,7 @@ See [`components/src/dynamo/vllm/handlers.py`](../vllm/handlers.py) for a refere
 
 ## See Also
 
-- [KV Cache Routing Architecture](/docs/router/kv_cache_routing.md) - Detailed explanation of KV-aware routing
+- [Router Guide](/docs/router/router_guide.md) - Configuration and tuning for KV-aware routing
+- [Router Design](/docs/design_docs/router_design.md) - Architecture details and event transport modes
 - [Frontend Router](../frontend/README.md) - Main HTTP frontend with integrated routing
 - [Router Benchmarking](/benchmarks/router/README.md) - Performance testing and tuning

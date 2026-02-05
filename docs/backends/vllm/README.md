@@ -37,7 +37,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|------|-------|
 | [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
+| [**KV-Aware Routing**](../../router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
 | [**KVBM**](../../../docs/kvbm/README.md) | ✅ |  |
@@ -177,7 +177,7 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [KV Cache Routing](../../../docs/router/kv_cache_routing.md) on deterministic event IDs.
+See the high-level notes in [Router Design](../../design_docs/router_design.md#deterministic-event-ids) on deterministic event IDs.
 
 ## Request Migration
 

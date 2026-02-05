@@ -282,3 +282,9 @@ Each event in the payload is a dictionary with `type` field (`BlockStored`, `Blo
 2. **Block size must match** your engine's actual `kv_block_size`
 
 3. **`parent_hash` is required** for all blocks except the first in a sequence - it links blocks to enable prefix matching
+
+## See Also
+
+- **[Router README](../router/README.md)**: Quick start guide for the KV Router
+- **[Router Guide](../router/router_guide.md)**: Configuration, tuning, and production setup
+- **[Router Design](../design_docs/router_design.md)**: Architecture details and event transport modes

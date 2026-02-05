@@ -119,7 +119,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 <!-- Design Docs -->
 [disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/router/kv_cache_routing.md
+[kv-routing]: docs/router/README.md
 [planner]: docs/planner/planner_intro.rst
 [kvbm]: docs/kvbm/kvbm_intro.rst
 [migration]: docs/fault_tolerance/request_migration.md
