@@ -20,12 +20,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use std::time::Duration;
-#[cfg(feature = "bench")]
-use std::time::Instant;
 
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
@@ -33,7 +30,7 @@ use crate::protocols::{
 };
 
 use crate::compute_block_hash_for_seq;
-use crate::indexer::{KvIndexerInterface, KvRouterError, MatchRequest};
+use crate::indexer::{KvIndexerInterface, KvRouterError};
 
 /// Entry for the innermost level of the index.
 ///
@@ -103,49 +100,6 @@ impl SeqEntry {
             Self::Multi(map) => map.get(&seq_hash),
         }
     }
-
-    /// Check if this entry has only one seq_hash (lazy optimization applies).
-    #[cfg(test)]
-    fn is_single(&self) -> bool {
-        match self {
-            Self::Single(_, _) => true,
-            Self::Multi(map) => map.len() == 1,
-        }
-    }
-
-    /// Get the number of distinct seq_hash entries.
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        match self {
-            Self::Single(_, _) => 1,
-            Self::Multi(map) => map.len(),
-        }
-    }
-
-    /// Check if a seq_hash exists in this entry.
-    #[cfg(test)]
-    fn contains(&self, seq_hash: ExternalSequenceBlockHash) -> bool {
-        match self {
-            Self::Single(existing_hash, _) => *existing_hash == seq_hash,
-            Self::Multi(map) => map.contains_key(&seq_hash),
-        }
-    }
-
-    /// Iterate over all worker sets (for testing/debugging).
-    #[cfg(test)]
-    fn iter_workers(&self) -> impl Iterator<Item = &HashSet<WorkerWithDpRank>> {
-        let single_iter = match self {
-            Self::Single(_, workers) => Some(workers),
-            Self::Multi(_) => None,
-        };
-        let multi_iter = match self {
-            Self::Multi(map) => Some(map.values()),
-            Self::Single(_, _) => None,
-        };
-        single_iter
-            .into_iter()
-            .chain(multi_iter.into_iter().flatten())
-    }
 }
 
 type LevelIndex = DashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>;
@@ -163,10 +117,10 @@ pub struct PositionalIndexer {
 
     /// Channels to send events to worker threads.
     worker_event_channels: Arc<Vec<flume::Sender<RouterEvent>>>,
-    worker_request_channel: flume::Sender<MatchRequest>,
 
     num_workers: usize,
     kv_block_size: u32,
+    jump_size: usize,
 
     /// Cancellation token to signal worker threads to shut down.
     cancel_token: CancellationToken,
@@ -193,13 +147,10 @@ impl PositionalIndexer {
         let mut thread_handles = Vec::new();
         let cancel_token = CancellationToken::new();
 
-        let (worker_request_channel_tx, worker_request_channel_rx) = unbounded::<MatchRequest>();
-
         for _ in 0..num_workers {
             let (event_sender, event_receiver) = unbounded::<RouterEvent>();
             worker_event_senders.push(event_sender);
 
-            let worker_request_channel_rx = worker_request_channel_rx.clone();
             let index = Arc::clone(&index);
             let worker_blocks = Arc::clone(&worker_blocks);
             let cancel_token = cancel_token.clone();
@@ -223,17 +174,6 @@ impl PositionalIndexer {
                                         tracing::warn!("Failed to apply event: {:?}", e);
                                     }
                                 }
-
-                                Ok(request) = worker_request_channel_rx.recv_async() => {
-                                    let scores = PositionalIndexer::jump_search_matches(
-                                        &index,
-                                        &worker_blocks,
-                                        &request.sequence,
-                                        jump_size,
-                                        request.early_exit,
-                                    );
-                                    let _ = request.resp.send(scores);
-                                }
                             }
                         }
                     });
@@ -247,9 +187,9 @@ impl PositionalIndexer {
             worker_assignments: Arc::new(DashMap::new()),
             worker_assignment_count: AtomicUsize::new(0),
             worker_event_channels: Arc::new(worker_event_senders),
-            worker_request_channel: worker_request_channel_tx,
             num_workers,
             kv_block_size,
+            jump_size,
             cancel_token,
             thread_handles: Mutex::new(thread_handles),
         }
@@ -268,9 +208,10 @@ impl PositionalIndexer {
                 }
             }
 
-            if all_empty && self.worker_request_channel.is_empty() {
+            if all_empty {
                 break;
             }
+
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -282,26 +223,11 @@ impl KvIndexerInterface for PositionalIndexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let req = MatchRequest {
-            sequence,
-            early_exit: false,
-            resp: resp_tx,
-            #[cfg(feature = "bench")]
-            created_at: Instant::now(),
-        };
 
-        if let Err(e) = self.worker_request_channel.send(req) {
-            tracing::error!(
-                "Failed to send match request: {:?}; the indexer maybe offline",
-                e
-            );
-            return Err(KvRouterError::IndexerOffline);
-        }
-
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+        Ok(
+            self.jump_search_matches(&sequence, false)
+        )
+        
     }
 
     async fn find_matches_for_request(
@@ -320,7 +246,9 @@ impl KvIndexerInterface for PositionalIndexer {
             let idx = self
                 .worker_assignment_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            idx % self.num_workers
+            let assigned_worker = idx % self.num_workers;
+            tracing::debug!("Worker {} assigned to thread {}", worker_id, assigned_worker);
+            assigned_worker
         });
 
         // Send event to the assigned worker thread
@@ -602,13 +530,13 @@ impl PositionalIndexer {
     /// Always computes and verifies the seq_hash to ensure correctness when
     /// the query may have diverged from stored sequences at earlier positions.
     fn get_workers_lazy(
-        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        &self,
         position: usize,
         local_hash: LocalBlockHash,
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
         sequence: &[LocalBlockHash],
     ) -> Option<HashSet<WorkerWithDpRank>> {
-        let pos_map = index.get(&position)?;
+        let pos_map = self.index.get(&position)?;
         let entry = pos_map.get(&local_hash)?;
 
         // Always compute and verify seq_hash to handle divergent queries correctly.
@@ -624,7 +552,7 @@ impl PositionalIndexer {
     /// Returns the highest position where workers remain active (or lo-1 if none match at lo).
     #[allow(clippy::too_many_arguments)]
     fn linear_scan_drain(
-        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        &self,
         sequence: &[LocalBlockHash],
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
         active: &mut HashSet<WorkerWithDpRank>,
@@ -641,7 +569,7 @@ impl PositionalIndexer {
             }
 
             let workers_at_pos =
-                Self::get_workers_lazy(index, pos, sequence[pos], seq_hashes, sequence);
+                self.get_workers_lazy(pos, sequence[pos], seq_hashes, sequence);
 
             let still_active: HashSet<WorkerWithDpRank> = match &workers_at_pos {
                 Some(workers) => active.intersection(workers).cloned().collect(),
@@ -694,10 +622,8 @@ impl PositionalIndexer {
     /// * `jump_size` - Number of positions to jump at a time
     /// * `early_exit` - If true, stop after finding any match
     fn jump_search_matches(
-        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        &self,
         local_hashes: &[LocalBlockHash],
-        jump_size: usize,
         early_exit: bool,
     ) -> OverlapScores {
         let mut scores = OverlapScores::new();
@@ -711,7 +637,7 @@ impl PositionalIndexer {
 
         // Check first position to initialize active set
         let Some(initial_workers) =
-            Self::get_workers_lazy(index, 0, local_hashes[0], &mut seq_hashes, local_hashes)
+            self.get_workers_lazy(0, local_hashes[0], &mut seq_hashes, local_hashes)
         else {
             return scores;
         };
@@ -732,7 +658,7 @@ impl PositionalIndexer {
             }
             // Populate tree_sizes
             for worker in scores.scores.keys() {
-                if let Some(worker_map) = worker_blocks.get(worker) {
+                if let Some(worker_map) = self.worker_blocks.get(worker) {
                     scores.tree_sizes.insert(*worker, worker_map.len());
                 }
             }
@@ -744,11 +670,10 @@ impl PositionalIndexer {
 
         // Jump through positions
         while current_pos < len - 1 && !active.is_empty() {
-            let next_pos = (current_pos + jump_size).min(len - 1);
+            let next_pos = (current_pos + self.jump_size).min(len - 1);
 
             // Check workers at jump destination
-            let workers_at_next = Self::get_workers_lazy(
-                index,
+            let workers_at_next = self.get_workers_lazy(
                 next_pos,
                 local_hashes[next_pos],
                 &mut seq_hashes,
@@ -770,8 +695,7 @@ impl PositionalIndexer {
             } else if still_active_at_next.is_empty() {
                 // No active workers match at jump destination
                 // Scan the range to find where each worker drained
-                Self::linear_scan_drain(
-                    index,
+                self.linear_scan_drain(
                     local_hashes,
                     &mut seq_hashes,
                     &mut active,
@@ -784,8 +708,7 @@ impl PositionalIndexer {
             } else {
                 // Partial match - some workers drained in between
                 // Scan the range to find exact drain points
-                Self::linear_scan_drain(
-                    index,
+                self.linear_scan_drain(
                     local_hashes,
                     &mut seq_hashes,
                     &mut active,
@@ -807,7 +730,7 @@ impl PositionalIndexer {
 
         // Populate tree_sizes from worker_blocks
         for worker in scores.scores.keys() {
-            if let Some(worker_map) = worker_blocks.get(worker) {
+            if let Some(worker_map) = self.worker_blocks.get(worker) {
                 scores.tree_sizes.insert(*worker, worker_map.len());
             }
         }
