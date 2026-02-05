@@ -30,6 +30,7 @@ pub struct WorkerInfo {
 /// Traffic between sets is distributed proportionally to worker counts.
 ///
 /// Each WorkerSet owns a Client that watches its specific namespace for instances.
+#[derive(Debug)]
 pub struct WorkerSet {
     /// Full dynamo namespace (e.g., "default-myapp-abc12345")
     namespace: String,
@@ -93,7 +94,7 @@ impl WorkerSet {
 
     /// Get instance IDs from the client (actual available workers).
     pub fn instance_ids(&self) -> Arc<Vec<u64>> {
-        self.client.instance_ids_avail()
+        Arc::clone(&self.client.instance_ids_avail())
     }
 
     /// Add a worker to this set.

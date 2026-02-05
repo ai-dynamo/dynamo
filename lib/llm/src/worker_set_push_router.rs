@@ -102,7 +102,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     }
 }
 
-impl AsyncEngineStream<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+impl AsyncEngineStream<ManyOut<Annotated<LLMEngineOutput>>>
     for WorkerSetPushRouter
 {
 }

@@ -273,9 +273,7 @@ where
         .await?;
 
     // Check if we have a WorkerSetManager for this model (multi-set mode)
-    let worker_set_manager = card.name().and_then(|name| {
-        model_manager.get_worker_set_manager(name)
-    });
+    let worker_set_manager = model_manager.get_worker_set_manager(card.name());
 
     let service_backend = match router_mode {
         RouterMode::Random | RouterMode::RoundRobin => {

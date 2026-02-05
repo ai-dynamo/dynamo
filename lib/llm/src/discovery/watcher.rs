@@ -728,7 +728,7 @@ impl ModelWatcher {
                 worker_id,
                 card.mdcsum(),
                 None,
-                self.drt.clone(),
+                Arc::new(self.drt.clone()),
             )
             .await?;
 
