@@ -303,14 +303,10 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
         // Determine content format based on what we accumulated
         let content = if !delta.content_parts.is_empty() {
             // Multimodal response with content parts
-            Some(ChatCompletionMessageContent::Parts(
-                delta.content_parts,
-            ))
+            Some(ChatCompletionMessageContent::Parts(delta.content_parts))
         } else if !delta.text.is_empty() {
             // Text-only response (backward compatible)
-            Some(ChatCompletionMessageContent::Text(
-                delta.text,
-            ))
+            Some(ChatCompletionMessageContent::Text(delta.text))
         } else {
             None
         };
@@ -635,7 +631,9 @@ mod tests {
         assert_eq!(choice.index, 0);
         assert_eq!(
             choice.message.content.as_ref(),
-            Some(&ChatCompletionMessageContent::Text("Hello world".to_string()))
+            Some(&ChatCompletionMessageContent::Text(
+                "Hello world".to_string()
+            ))
         );
         assert_eq!(
             choice.finish_reason,

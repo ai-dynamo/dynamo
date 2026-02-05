@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_async_openai::types::ChatCompletionMessageContent;
 use dynamo_llm::protocols::{
     ContentProvider, DataStream,
     codec::{Message, SseCodecError, create_message_stream},
@@ -11,7 +12,6 @@ use dynamo_llm::protocols::{
     },
 };
 use futures::StreamExt;
-use dynamo_async_openai::types::ChatCompletionMessageContent;
 
 fn get_text(content: &ChatCompletionMessageContent) -> &str {
     match content {

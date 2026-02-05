@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta, ChatCompletionMessageContent, Role};
+use dynamo_async_openai::types::{
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
+};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -324,7 +326,8 @@ mod tests {
             "Should contain Mistral reasoning content"
         );
         assert!(
-            get_text(normal_content).contains("Let me think") || get_text(normal_content).contains("Here's my answer"),
+            get_text(normal_content).contains("Let me think")
+                || get_text(normal_content).contains("Here's my answer"),
             "Should contain normal content"
         );
     }

@@ -254,9 +254,11 @@ mod tests {
                 .expect("Expected content in result");
 
             assert_eq!(
-                extract_text(content), expected,
+                extract_text(content),
+                expected,
                 "Content mismatch: expected '{}', got '{}'",
-                expected, extract_text(content)
+                expected,
+                extract_text(content)
             );
         }
 
@@ -310,7 +312,11 @@ mod tests {
             {
                 assert!(
                     choice.delta.content.is_none()
-                        || choice.delta.content.as_ref().is_none_or(|c| match c { dynamo_async_openai::types::ChatCompletionMessageContent::Text(t) => t.is_empty(), _ => false }),
+                        || choice.delta.content.as_ref().is_none_or(|c| match c {
+                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(t) =>
+                                t.is_empty(),
+                            _ => false,
+                        }),
                     "Expected no content but got: {:?}",
                     choice.delta.content
                 );
@@ -1685,7 +1691,8 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            extract_text(content), "Hello, world!",
+            extract_text(content),
+            "Hello, world!",
             "Content chunk should have 'Hello, world!'"
         );
 
@@ -1873,7 +1880,10 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
-                .map(|content| test_utils::extract_text(content).contains("Need to use function get_current_weather."))
+                .map(|content| {
+                    test_utils::extract_text(content)
+                        .contains("Need to use function get_current_weather.")
+                })
                 .unwrap_or(false)
         });
         assert!(has_analysis_text, "Should contain extracted analysis text");
@@ -2197,7 +2207,8 @@ mod tests {
                     .and_then(|c| c.delta.content.as_ref())
             })
             .filter(|content| {
-                test_utils::extract_text(content).contains("<tool_call>") || test_utils::extract_text(content).contains("should not jail")
+                test_utils::extract_text(content).contains("<tool_call>")
+                    || test_utils::extract_text(content).contains("should not jail")
             })
             .collect();
 
@@ -2215,7 +2226,10 @@ mod tests {
                     .and_then(|d| d.choices.first())
                     .and_then(|c| c.delta.content.as_ref())
             })
-            .find(|content| test_utils::extract_text(content).contains("[[START]]") && test_utils::extract_text(content).contains("jailed content"));
+            .find(|content| {
+                test_utils::extract_text(content).contains("[[START]]")
+                    && test_utils::extract_text(content).contains("jailed content")
+            });
 
         assert!(
             jailed_chunk.is_some(),
@@ -2333,10 +2347,10 @@ mod tests {
 mod parallel_jail_tests {
     use super::tests::test_utils;
     use super::*;
+    use dynamo_async_openai::types::ChatCompletionMessageContent;
     use futures::StreamExt;
     use futures::stream;
     use serde_json::json;
-    use dynamo_async_openai::types::ChatCompletionMessageContent;
 
     /// Helper function to create a mock response chunk with multiple choices
     fn create_multi_choice_response_chunk(
@@ -2603,10 +2617,9 @@ mod parallel_jail_tests {
         let normal_text_before = results.iter().find(|r| {
             r.data.as_ref().is_some_and(|d| {
                 d.choices.iter().any(|c| {
-                    c.delta
-                        .content
-                        .as_ref()
-                        .is_some_and(|content| test_utils::extract_text(content).contains("I'll check the weather"))
+                    c.delta.content.as_ref().is_some_and(|content| {
+                        test_utils::extract_text(content).contains("I'll check the weather")
+                    })
                 })
             })
         });
@@ -2633,10 +2646,9 @@ mod parallel_jail_tests {
         let normal_text_after = results.iter().find(|r| {
             r.data.as_ref().is_some_and(|d| {
                 d.choices.iter().any(|c| {
-                    c.delta
-                        .content
-                        .as_ref()
-                        .is_some_and(|content| test_utils::extract_text(content).contains("Let me get that information"))
+                    c.delta.content.as_ref().is_some_and(|content| {
+                        test_utils::extract_text(content).contains("Let me get that information")
+                    })
                 })
             })
         });

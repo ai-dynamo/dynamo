@@ -112,7 +112,9 @@ fn create_choice_stream(
         index,
         delta: ChatCompletionStreamResponseDelta {
             role,
-            content: Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(content.to_string())),
+            content: Some(
+                dynamo_async_openai::types::ChatCompletionMessageContent::Text(content.to_string()),
+            ),
             tool_calls,
             function_call: None,
             refusal: None,
