@@ -61,10 +61,13 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
     python -m dynamo.frontend &
 
-    # run processor
+    # run processor (CPU-only to avoid competing for GPU memory with workers)
+    CUDA_VISIBLE_DEVICES="" \
     python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME &
 
     # Prefill worker handles prompt processing and image encoding
+    # Uses all 8 GPUs for tensor-parallel
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
     VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
     python -m dynamo.vllm \
         --enable-multimodal \
@@ -75,6 +78,8 @@ if [[ $HEAD_NODE -eq 1 ]]; then
         "${EXTRA_ARGS[@]}" &
 else
     # run decode worker on non-head node
+    # Uses all 8 GPUs for tensor-parallel
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
     VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
     python -m dynamo.vllm \
         --enable-multimodal \
