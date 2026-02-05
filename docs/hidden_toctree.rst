@@ -71,6 +71,9 @@
 
    design_docs/distributed_runtime.md
    design_docs/dynamo_flow.md
+   design_docs/stateful_responses_plan.md
+   design_docs/stateful_responses_custom_providers.md
+   design_docs/stateful_responses_trace_replay.md
 
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
