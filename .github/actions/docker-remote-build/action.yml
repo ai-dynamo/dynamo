@@ -156,7 +156,7 @@ runs:
         docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
-          --platform linux/${{ inputs.platform }}
+          --platform linux/${{ inputs.platform }} \
           -f ./container/rendered.Dockerfile \
           $CACHE_ARGS \
           $EXTRA_ARGS \
