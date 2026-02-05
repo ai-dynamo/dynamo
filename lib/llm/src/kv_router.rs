@@ -672,10 +672,10 @@ impl KvRouter {
     }
 
     /// Get pool weights for metrics/debugging (multi-pool mode only).
-    pub fn pool_weights(&self) -> HashMap<String, usize> {
+    pub fn set_weights(&self) -> HashMap<String, usize> {
         self.pool_scheduler
             .as_ref()
-            .map(|ps| ps.pool_weights())
+            .map(|ps| ps.set_weights())
             .unwrap_or_default()
     }
 

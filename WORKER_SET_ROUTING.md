@@ -80,11 +80,12 @@ PushRouter.generate_with_fault_detection() needs instance details (transport, ad
 - [x] Add `find_set_for_instance(instance_id) -> Option<Arc<WorkerSet>>`
 - [x] Pass DistributedRuntime to manager for Client creation
 
-### Phase 4: PushRouter Integration ✓
-- [ ] Replace `client: Client` with `worker_set_manager: Arc<WorkerSetManager>`
-- [ ] Update `select_next_worker()` to use set selection
-- [ ] Update `generate_with_fault_detection()` to find set for instance
-- [ ] Update `from_client()` constructors to accept WorkerSetManager
+### Phase 4: PushRouter Integration ✅
+**Approach:** Create WorkerSetPushRouter wrapper (similar to KvPushRouter)
+- [x] Create `WorkerSetPushRouter` in llm crate
+- [x] Wraps base PushRouter + WorkerSetManager
+- [x] Implements AsyncEngine: selects set → selects worker → calls PushRouter.direct()
+- [x] Update build_routed_pipeline() to use WorkerSetPushRouter in prefix mode
 
 ### Phase 5: Watcher Integration ✓
 - [ ] Pass DistributedRuntime to `add_worker()` calls
@@ -102,7 +103,7 @@ PushRouter.generate_with_fault_detection() needs instance details (transport, ad
 
 ## Implementation Status
 
-**Current Phase:** Phase 4 - PushRouter Integration
+**Current Phase:** Complete - Ready for Testing
 
 **Blockers:** None
 

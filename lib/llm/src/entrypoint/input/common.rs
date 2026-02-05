@@ -23,6 +23,7 @@ use crate::{
             OpenAIChatCompletionsStreamingEngine,
         },
     },
+    worker_set_push_router::WorkerSetPushRouter,
 };
 
 use anyhow::Context as _;
@@ -271,11 +272,34 @@ where
         )
         .await?;
 
+    // Check if we have a WorkerSetManager for this model (multi-set mode)
+    let worker_set_manager = card.name().and_then(|name| {
+        model_manager.get_worker_set_manager(name)
+    });
+
     let service_backend = match router_mode {
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-            // Non-KV routing: use PushRouter directly.
+        RouterMode::Random | RouterMode::RoundRobin => {
+            // Non-KV routing: use PushRouter directly (or WorkerSetPushRouter for multi-set mode).
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
+            if let Some(set_manager) = worker_set_manager {
+                tracing::info!(
+                    model_name = card.name(),
+                    set_count = set_manager.set_count(),
+                    mode = ?router_mode,
+                    "Using WorkerSetPushRouter for multi-set routing"
+                );
+                let worker_set_router = WorkerSetPushRouter::new(
+                    router,
+                    set_manager,
+                    router_mode,
+                );
+                ServiceBackend::from_engine(Arc::new(worker_set_router))
+            } else {
+                ServiceBackend::from_engine(Arc::new(router))
+            }
+        }
+        RouterMode::Direct(_) => {
             ServiceBackend::from_engine(Arc::new(router))
         }
         RouterMode::KV => {

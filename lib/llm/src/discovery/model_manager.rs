@@ -409,9 +409,9 @@ impl ModelManager {
         let chooser = if let Some(pool_manager) = pool_manager {
             tracing::info!(
                 model_name = model_name,
-                pool_count = pool_manager.pool_count(),
+                set_count = pool_manager.set_count(),
                 total_workers = pool_manager.total_instances(),
-                "Creating KvRouter with multi-pool support"
+                "Creating KvRouter with multi-set support"
             );
             KvRouter::new_with_pool_manager(
                 endpoint.clone(),

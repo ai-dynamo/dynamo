@@ -67,7 +67,7 @@ impl PoolAwareScheduler {
     ///
     /// Returns None if no pools have workers.
     pub fn select_pool(&self) -> Option<Arc<WorkerSet>> {
-        self.pool_manager.as_ref()?.select_pool_weighted()
+        self.pool_manager.as_ref()?.select_weighted()
     }
 
     /// Get the total number of workers across all pools.
@@ -79,10 +79,10 @@ impl PoolAwareScheduler {
     }
 
     /// Get pool weights for metrics/debugging.
-    pub fn pool_weights(&self) -> HashMap<String, usize> {
+    pub fn set_weights(&self) -> HashMap<String, usize> {
         self.pool_manager
             .as_ref()
-            .map(|pm| pm.pool_weights())
+            .map(|pm| pm.set_weights())
             .unwrap_or_default()
     }
 
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(scheduler.total_workers(), 3);
 
         // Pool weights should be correct
-        let weights = scheduler.pool_weights();
+        let weights = scheduler.set_weights();
         assert_eq!(weights.get("prefix-a"), Some(&2));
         assert_eq!(weights.get("prefix-b"), Some(&1));
 
