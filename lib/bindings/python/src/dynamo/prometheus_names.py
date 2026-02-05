@@ -149,6 +149,15 @@ class labels:
     NAMESPACE = "dynamo_namespace"
     # Label for endpoint identification
     ENDPOINT = "dynamo_endpoint"
+    # Label for model name/path (OpenAI API standard, injected by Dynamo)
+    # This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
+    # Ensures compatibility with OpenAI-compatible tooling.
+    MODEL = "model"
+    # Label for model name/path (alternative/native engine label, injected by Dynamo)
+    # Some engines natively use model_name, so we inject both model and model_name
+    # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
+    # When a metric already has a label, injection does not overwrite it (original is preserved).
+    MODEL_NAME = "model_name"
 
 
 class name_prefix:

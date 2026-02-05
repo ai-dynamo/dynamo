@@ -36,6 +36,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
@@ -420,13 +421,16 @@ async def init(
                 )
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
-                # Register callback to expose TRT-LLM metrics via Dynamo endpoint
-                # Filter out python_/process_ metrics and add trtllm_ prefix to remaining metrics
+                # Register TRT-LLM metrics (filter python_/process_, add trtllm_ prefix)
+                # Auto-label injection (USE_AUTO_LABELS=True): hierarchy labels are added automatically
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
                     exclude_prefixes=["python_", "process_"],
-                    add_prefix="trtllm_",
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name="generate",  # TRT-LLM uses "generate" endpoint
+                    model_name=model_name_for_metrics,
                 )
                 logging.info("TensorRT-LLM Prometheus metrics registered")
             except Exception as e:
@@ -478,7 +482,16 @@ async def init(
             )
             # Use model_path as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model_path
-            metrics_labels = [("model", model_name_for_metrics)]
+            metrics_labels = [
+                (
+                    prometheus_names.labels.MODEL,
+                    model_name_for_metrics,
+                ),  # OpenAI standard
+                (
+                    prometheus_names.labels.MODEL_NAME,
+                    model_name_for_metrics,
+                ),  # Native engine compatibility
+            ]
 
             # Create worker-side publisher for consolidated events if consolidator is enabled
             # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id

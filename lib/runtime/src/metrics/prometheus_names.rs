@@ -71,6 +71,12 @@ pub mod name_prefix {
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
+///
+/// These labels are auto-injected into metrics by the hierarchy system:
+/// - Rust: lib/runtime/src/metrics.rs create_metric() function (lines 227-266) controlled by USE_AUTO_LABELS
+/// - Python: components/src/dynamo/common/utils/prometheus.py register_engine_metrics_callback() controlled by USE_AUTO_LABELS
+///
+/// Python codegen: These constants are exported to lib/bindings/python/src/dynamo/prometheus_names.py
 pub mod labels {
     /// Label for component identification
     pub const COMPONENT: &str = "dynamo_component";
@@ -80,6 +86,17 @@ pub mod labels {
 
     /// Label for endpoint identification
     pub const ENDPOINT: &str = "dynamo_endpoint";
+
+    /// Label for model name/path (OpenAI API standard, injected by Dynamo)
+    /// This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
+    /// Ensures compatibility with OpenAI-compatible tooling.
+    pub const MODEL: &str = "model";
+
+    /// Label for model name/path (alternative/native engine label, injected by Dynamo)
+    /// Some engines natively use model_name, so we inject both model and model_name
+    /// to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
+    /// When a metric already has a label, injection does not overwrite it (original is preserved).
+    pub const MODEL_NAME: &str = "model_name";
 }
 
 /// Frontend service metrics (LLM HTTP service)

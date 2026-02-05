@@ -49,8 +49,7 @@ tokens_per_second 245.7
         ):
             result = get_prometheus_expfmt(
                 registry,
-                exclude_prefixes=["python_", "process_"],
-                add_prefix="trtllm_",
+                metric_prefix_filters=["trtllm_"],
             )
 
         # Should not contain excluded metrics
@@ -124,7 +123,7 @@ trtllm_time_to_first_token_seconds_count 5.0
             result = get_prometheus_expfmt(
                 registry,
                 exclude_prefixes=["python_", "process_"],
-                add_prefix="trtllm_",
+                metric_prefix_filters=["trtllm_"],
             )
 
         # Should not double-add prefix

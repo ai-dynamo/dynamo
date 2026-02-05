@@ -15,6 +15,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
@@ -296,6 +297,11 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
     Solution: Try adding MultiProcessCollector to REGISTRY. If that fails, use
     separate registry for multiprocess collection and register callbacks to both
     registries to ensure all metrics (vllm, lmcache, dynamo_component) are collected.
+
+    Auto-label injection (USE_AUTO_LABELS=True in prometheus.py):
+        Hierarchy labels (dynamo_namespace, dynamo_component, dynamo_endpoint) are automatically
+        injected into engine metrics to align Python metrics with Rust auto-labels.
+        Additional labels can be provided via inject_labels parameter.
     """
     if config.engine_args.disable_log_stats is False:
         if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
@@ -308,6 +314,10 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
                     metric_prefix_filters=["vllm:", "lmcache:"],
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name=config.endpoint,
+                    model_name=config.model,
                 )
             except ValueError as e:
                 # Conflict: metrics already in REGISTRY, MultiProcessCollector tries to add same metrics from .db files
@@ -324,12 +334,20 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
                     metric_prefix_filters=["vllm:", "dynamo_component:"],
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name=config.endpoint,
+                    model_name=config.model,
                 )
                 # Multiproc registry has .db file metrics (lmcache, possibly vllm duplicates)
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=multiproc_registry,
                     metric_prefix_filters=["vllm:", "lmcache:"],
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name=config.endpoint,
+                    model_name=config.model,
                 )
         else:
             # No multiprocess mode
@@ -337,6 +355,10 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                 endpoint=generate_endpoint,
                 registry=REGISTRY,
                 metric_prefix_filters=["vllm:", "lmcache:"],
+                namespace_name=config.namespace,
+                component_name=config.component,
+                endpoint_name=config.endpoint,
+                model_name=config.model,
             )
 
 
@@ -678,12 +700,24 @@ async def init_prefill(
                 handler.generate,
                 graceful_shutdown=True,
                 # In practice config.served_model_name is always set, but mypy needs the "or" here.
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
-                metrics_labels=[("model", config.served_model_name)],
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, config.served_model_name),
+                    (prometheus_names.labels.MODEL_NAME, config.served_model_name),
+                ],
             ),
         )
         logger.debug("serve_endpoint completed for prefill worker")
@@ -716,7 +750,13 @@ async def init(
     factory = StatLoggerFactory(
         component,
         config.engine_args.data_parallel_rank or 0,
-        metrics_labels=[("model", config.served_model_name or config.model)],
+        metrics_labels=[
+            (prometheus_names.labels.MODEL, config.served_model_name or config.model),
+            (
+                prometheus_names.labels.MODEL_NAME,
+                config.served_model_name or config.model,
+            ),
+        ],
     )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
@@ -828,24 +868,69 @@ async def init(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=config.migration_limit <= 0,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
             ),
             load_lora_endpoint.serve_endpoint(
                 handler.load_lora,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
             ),
             unload_lora_endpoint.serve_endpoint(
                 handler.unload_lora,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
             ),
             list_loras_endpoint.serve_endpoint(
                 handler.list_loras,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
             ),
         )
         logger.debug("serve_endpoint completed for decode worker")
@@ -931,7 +1016,11 @@ async def init_multimodal_processor(
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
+                handler.generate,
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, config.model),
+                    (prometheus_names.labels.MODEL_NAME, config.model),
+                ],
             ),
         )
     except Exception as e:
@@ -971,7 +1060,11 @@ async def init_multimodal_encode_worker(
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
+                handler.generate,
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, config.model),
+                    (prometheus_names.labels.MODEL_NAME, config.model),
+                ],
             ),
         )
     except Exception as e:
@@ -1034,7 +1127,11 @@ async def init_vllm_native_encoder(
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
+                handler.generate,
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, config.model),
+                    (prometheus_names.labels.MODEL_NAME, config.model),
+                ],
             ),
         )
     except Exception as e:
@@ -1106,7 +1203,11 @@ async def init_ec_processor(
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
+                handler.generate,
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, config.model),
+                    (prometheus_names.labels.MODEL_NAME, config.model),
+                ],
             ),
         )
     except Exception as e:
@@ -1212,7 +1313,10 @@ async def init_multimodal_worker(
     if kv_publisher:
         handler.kv_publisher = kv_publisher
 
-    metrics_labels = [("model", config.model)]
+    metrics_labels = [
+        (prometheus_names.labels.MODEL, config.model),
+        (prometheus_names.labels.MODEL_NAME, config.model),
+    ]
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -1294,7 +1398,16 @@ async def init_omni(
         await generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", config.served_model_name or config.model)],
+            metrics_labels=[
+                (
+                    prometheus_names.labels.MODEL,
+                    config.served_model_name or config.model,
+                ),
+                (
+                    prometheus_names.labels.MODEL_NAME,
+                    config.served_model_name or config.model,
+                ),
+            ],
             health_check_payload=health_check_payload,
         )
     except Exception as e:

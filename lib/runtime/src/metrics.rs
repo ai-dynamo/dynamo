@@ -224,6 +224,10 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
+    // Auto-label injection: Automatically add dynamo_namespace, dynamo_component, dynamo_endpoint labels
+    // based on the hierarchy. Label constants defined in prometheus_names.rs labels module.
+    //
+    // Python counterpart: components/src/dynamo/common/utils/prometheus.py USE_AUTO_LABELS and register_engine_metrics_callback()
     if USE_AUTO_LABELS {
         // Validate that user-provided labels don't conflict with auto-generated labels
         for (key, _) in labels {
@@ -236,6 +240,7 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
         }
 
         // Add auto-generated labels with sanitized values
+        // Hierarchy: [drt, namespace, component, endpoint]
         if hierarchy_names.len() > 1 {
             let namespace = &hierarchy_names[1];
             if !namespace.is_empty() {
