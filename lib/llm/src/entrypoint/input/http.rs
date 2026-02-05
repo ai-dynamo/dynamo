@@ -51,15 +51,6 @@ pub async fn run(
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    // Pass the custom backend metrics endpoint as-is (already in namespace.component.endpoint format)
-    http_service_builder = http_service_builder.with_custom_backend_config(
-        local_model
-            .custom_backend_metrics_endpoint()
-            .map(|s| s.to_string()),
-        local_model.custom_backend_metrics_polling_interval(),
-    );
-
     let http_service = match engine_config {
         EngineConfig::Dynamic {
             ref model,
@@ -145,45 +136,9 @@ pub async fn run(
             .collect::<Vec<String>>()
     );
 
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    // Start custom backend metrics polling if configured
-    let polling_task =
-        if let (Some(namespace_component_endpoint), Some(polling_interval), Some(registry)) = (
-            http_service
-                .custom_backend_namespace_component_endpoint
-                .as_ref(),
-            http_service.custom_backend_metrics_polling_interval,
-            http_service.custom_backend_registry.as_ref(),
-        ) {
-            tracing::info!(
-                namespace_component_endpoint=%namespace_component_endpoint,
-                polling_interval_secs=polling_interval,
-                "Starting custom backend metrics polling task"
-            );
-            // Spawn the polling task and keep the JoinHandle alive so it can be aborted during
-            // shutdown. While graceful shutdown is not strictly necessary for this non-critical
-            // metrics polling, explicitly aborting it prevents the task from running during the
-            // shutdown phase.
-            Some(
-                crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
-                    distributed_runtime.clone(),
-                    namespace_component_endpoint.clone(),
-                    polling_interval,
-                    registry.clone(),
-                ),
-            )
-        } else {
-            None
-        };
-
     http_service
         .run(distributed_runtime.primary_token())
         .await?;
-
-    // Abort the polling task if it was started
-    if let Some(task) = polling_task {
-        task.abort();
-    }
 
     distributed_runtime.shutdown(); // Cancel primary token
     Ok(())

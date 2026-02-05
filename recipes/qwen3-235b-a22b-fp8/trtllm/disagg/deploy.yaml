@@ -13,10 +13,6 @@ data:
     moe_expert_parallel_size: 1
     enable_attention_dp: false
     enable_chunked_prefill: false
-    build_config:
-      max_batch_size: 2
-      max_num_tokens: 8192
-      max_seq_len: 8192
     kv_cache_config:
       enable_block_reuse: true
       free_gpu_memory_fraction: 0.7
@@ -42,10 +38,6 @@ data:
     moe_tensor_parallel_size: 1
     enable_attention_dp: false
     enable_chunked_prefill: false
-    build_config:
-      max_batch_size: 512
-      max_num_tokens: 1024
-      max_seq_len: 8192
     kv_cache_config:
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.95
@@ -127,9 +119,11 @@ spec:
               python3 -m dynamo.trtllm \
                 --model-path "${MODEL_PATH}" \
                 --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+                --max-batch-size 2 \
+                --max-num-tokens 8192 \
+                --max-seq-len 8192 \
                 --extra-engine-args "${ENGINE_ARGS}" \
-                --disaggregation-mode prefill \
-                --disaggregation-strategy prefill_first
+                --disaggregation-mode prefill
           volumeMounts:
             - name: prefill-config
               mountPath: /engine_configs
@@ -180,9 +174,11 @@ spec:
               python3 -m dynamo.trtllm \
                 --model-path "${MODEL_PATH}" \
                 --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+                --max-batch-size 512 \
+                --max-num-tokens 1024 \
+                --max-seq-len 8192 \
                 --extra-engine-args "${ENGINE_ARGS}" \
-                --disaggregation-mode decode \
-                --disaggregation-strategy prefill_first
+                --disaggregation-mode decode
           volumeMounts:
             - name: decode-config
               mountPath: /engine_configs

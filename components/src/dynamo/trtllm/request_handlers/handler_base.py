@@ -68,6 +68,7 @@ class RequestHandlerConfig:
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
+    encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
 
 
 class HandlerBase:

@@ -72,6 +72,26 @@ pub struct LLMMetricAnnotation {
     pub output_tokens: usize,
     pub chunk_tokens: usize,
     pub cached_tokens: Option<usize>,
+    /// Prefill worker ID (for TTFT attribution in disaggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+    /// Prefill worker DP rank
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
+    /// Prefill worker type ("prefill" or "decode") for Prometheus metric labeling.
+    /// Stored at routing time to avoid expensive MDC lookup when updating TTFT metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_type: Option<String>,
+    /// Decode worker ID (for ITL attribution in disaggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+    /// Decode worker DP rank
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_dp_rank: Option<u32>,
+    /// Decode worker type ("prefill" or "decode") for Prometheus metric labeling.
+    /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_type: Option<String>,
 }
 
 impl LLMMetricAnnotation {
@@ -113,6 +133,7 @@ pub struct OpenAIPreprocessor {
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
     model_info: Arc<dyn ModelInfo>,
+    lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
@@ -136,13 +157,18 @@ impl OpenAIPreprocessor {
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
-        let Some(model_info) = mdc.model_info else {
+        let lora_name = mdc.lora_name.clone();
+        let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+
+        if let Some(ref lora_name) = lora_name {
+            tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
+        }
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
@@ -158,6 +184,7 @@ impl OpenAIPreprocessor {
             tokenizer,
             model_info,
             mdcsum,
+            lora_name,
             runtime_config,
             tool_call_parser,
             #[cfg(feature = "media-nixl")]
@@ -237,6 +264,8 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
+        let lora_name = self.lora_name.clone();
+
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
@@ -247,8 +276,15 @@ impl OpenAIPreprocessor {
                 dp_rank: None, // dp_rank is set later in the pipeline
                 enable_local_updates: nvext.enable_local_updates,
                 expected_output_tokens: nvext.expected_output_tokens,
+                lora_name,
             };
             builder.routing(Some(routing));
+        } else if lora_name.is_some() {
+            // Ensure LoRA-aware routing still gets hints even when nvext is absent.
+            builder.routing(Some(RoutingHints {
+                lora_name,
+                ..Default::default()
+            }));
         }
 
         Ok(builder)
@@ -641,12 +677,32 @@ impl OpenAIPreprocessor {
                             .map_err(|e| e.to_string())
                     });
 
-                    // Create LLM metrics annotation
+                    // Create LLM metrics annotation with prefill/decode worker info from tracker.
+                    // Worker types are stored at routing time to avoid expensive MDC lookup.
+                    let tracker = inner.response_generator.tracker();
+                    let prefill_worker_id = tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                    let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                    let prefill_worker_type = tracker
+                        .as_ref()
+                        .and_then(|t| t.prefill_worker_type())
+                        .map(String::from);
+                    let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                    let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                    let decode_worker_type = tracker
+                        .as_ref()
+                        .and_then(|t| t.decode_worker_type())
+                        .map(String::from);
                     let llm_metrics = LLMMetricAnnotation {
                         input_tokens: isl,
                         output_tokens: current_osl,
                         chunk_tokens,
                         cached_tokens: None,
+                        prefill_worker_id,
+                        prefill_dp_rank,
+                        prefill_worker_type,
+                        decode_worker_id,
+                        decode_dp_rank,
+                        decode_worker_type,
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -679,6 +735,20 @@ impl OpenAIPreprocessor {
 
                         let usage_chunk = inner.response_generator.create_usage_chunk();
                         let usage = inner.response_generator.get_usage();
+                        let tracker = inner.response_generator.tracker();
+                        let prefill_worker_id =
+                            tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                        let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                        let prefill_worker_type = tracker
+                            .as_ref()
+                            .and_then(|t| t.prefill_worker_type())
+                            .map(String::from);
+                        let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                        let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                        let decode_worker_type = tracker
+                            .as_ref()
+                            .and_then(|t| t.decode_worker_type())
+                            .map(String::from);
                         let llm_metrics = LLMMetricAnnotation {
                             input_tokens: usage.prompt_tokens as usize,
                             output_tokens: usage.completion_tokens as usize,
@@ -687,6 +757,12 @@ impl OpenAIPreprocessor {
                                 .prompt_tokens_details
                                 .as_ref()
                                 .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                            prefill_worker_id,
+                            prefill_dp_rank,
+                            prefill_worker_type,
+                            decode_worker_id,
+                            decode_dp_rank,
+                            decode_worker_type,
                         };
 
                         // Create annotation string
@@ -723,6 +799,7 @@ impl OpenAIPreprocessor {
                 }
             }
         })
+        .fuse()
     }
 
     /// Transform engine embedding output stream to OpenAI embedding response stream
@@ -889,6 +966,7 @@ impl OpenAIPreprocessor {
                 None
             }
         })
+        .fuse()
     }
 }
 

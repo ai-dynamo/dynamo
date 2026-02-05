@@ -82,7 +82,7 @@ Note the IP address of this node - you'll need it for worker configuration.
 
 ### 2. Software Requirements
 
-Install Dynamo with [SGLang](https://docs.sglang.ai/) support:
+Install Dynamo with [SGLang](https://docs.sglang.io/) support:
 
 ```bash
 pip install ai-dynamo[sglang]
