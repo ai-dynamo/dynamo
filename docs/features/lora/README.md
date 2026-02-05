@@ -13,7 +13,7 @@ LoRA (Low-Rank Adaptation) enables efficient fine-tuning and serving of speciali
 | Backend | Status | Notes |
 |---------|--------|-------|
 | vLLM | ✅ | Full support including KV-aware routing |
-| SGLang | 🚧 | Experimental |
+| SGLang | 🚧 | In progress |
 | TensorRT-LLM | ❌ | Not yet supported |
 
 See the [Feature Matrix](../../reference/feature-matrix.md) for full compatibility details.
