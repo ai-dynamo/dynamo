@@ -60,6 +60,7 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
+  - 'opensearch_upload/**'
 
 ci: &ci
   - '.github/workflows/**'

@@ -1,0 +1,153 @@
+# Example GitHub Actions Workflow Integration
+#
+# This shows how to integrate error classification into your CI workflows.
+# Add the error classification step to workflows that may fail and produce errors.
+
+name: Example CI Test Suite
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Add environment variables at the workflow or job level
+env:
+  # Enable error classification
+  ENABLE_ERROR_CLASSIFICATION: 'true'
+
+  # API credentials (from secrets)
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
+  OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
+  OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+  OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # Install dependencies (including error classification requirements)
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r opensearch_upload/requirements.txt
+
+      # Run tests (may fail)
+      - name: Run tests
+        id: run_tests
+        continue-on-error: true  # Allow workflow to continue on test failure
+        run: |
+          pytest tests/ -v --junitxml=test-results/junit.xml
+
+      # Build Docker images (may fail)
+      - name: Build Docker images
+        id: build_images
+        continue-on-error: true
+        run: |
+          docker build -t myimage:latest . 2>&1 | tee build-logs/docker.log
+
+      # ================================
+      # ERROR CLASSIFICATION (ON FAILURE)
+      # ================================
+      # This step only runs if previous steps failed
+      # Classifies critical errors and uploads to OpenSearch
+      - name: Classify Critical Errors on Failure
+        if: failure() && env.ENABLE_ERROR_CLASSIFICATION == 'true'
+        run: |
+          python3 .github/workflows/classify_errors_on_failure.py
+
+      # Upload test results as artifacts (for debugging)
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: test-results/
+
+      # Upload build logs as artifacts
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-logs
+          path: build-logs/
+
+      # Fail the job if tests or build failed
+      - name: Check test results
+        if: steps.run_tests.outcome == 'failure' || steps.build_images.outcome == 'failure'
+        run: exit 1
+
+
+# ================================
+# ALTERNATIVE: Multiple Jobs
+# ================================
+# If you have multiple test jobs, add classification to each
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run unit tests
+        continue-on-error: true
+        run: pytest tests/unit/ --junitxml=test-results/unit.xml
+
+      - name: Classify Errors on Failure
+        if: failure() && env.ENABLE_ERROR_CLASSIFICATION == 'true'
+        run: python3 .github/workflows/classify_errors_on_failure.py
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run integration tests
+        continue-on-error: true
+        run: pytest tests/integration/ --junitxml=test-results/integration.xml
+
+      - name: Classify Errors on Failure
+        if: failure() && env.ENABLE_ERROR_CLASSIFICATION == 'true'
+        run: python3 .github/workflows/classify_errors_on_failure.py
+
+
+# ================================
+# CONFIGURATION OPTIONS
+# ================================
+# You can customize behavior with additional environment variables:
+
+# env:
+#   # Which errors to classify in real-time
+#   CLASSIFY_REALTIME_THRESHOLD: 'infrastructure'  # infrastructure|all|none
+#
+#   # Model selection (default: claude-sonnet-4-5-20250929)
+#   ANTHROPIC_MODEL: 'claude-sonnet-4-5-20250929'
+#
+#   # Rate limiting (requests per minute)
+#   MAX_RPM: '50'
+#
+#   # How long to reuse cached classifications (hours)
+#   CLASSIFICATION_CACHE_TTL_HOURS: '168'
+#
+#   # Minimum confidence to reuse cached classification
+#   MIN_CONFIDENCE_FOR_REUSE: '0.8'
+
+
+# ================================
+# BEST PRACTICES
+# ================================
+# 1. Start with ENABLE_ERROR_CLASSIFICATION='false' to test without classification
+# 2. Use continue-on-error: true to ensure classification runs even after failures
+# 3. Set CLASSIFY_REALTIME_THRESHOLD='infrastructure' to avoid classifying every test failure
+# 4. Upload test results and logs as artifacts for debugging
+# 5. Monitor API costs in the first week
