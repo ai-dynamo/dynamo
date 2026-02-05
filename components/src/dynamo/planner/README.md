@@ -21,4 +21,3 @@ SLA-driven autoscaling controller for Dynamo inference graphs.
 
 - **User docs**: [docs/planner/](/docs/planner/) (deployment, configuration, examples)
 - **Design docs**: [docs/design_docs/planner_design.md](/docs/design_docs/planner_design.md) (architecture, algorithms)
-- **Agent guide**: [AGENTS.md](./AGENTS.md) (AI agent development guidance)

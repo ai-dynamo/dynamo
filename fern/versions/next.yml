@@ -138,6 +138,10 @@ navigation:
         contents:
           - page: Overview
             path: ../pages/planner/planner-intro.md
+          - page: Planner Guide
+            path: ../pages/planner/planner-guide.md
+          - page: Planner Examples
+            path: ../pages/planner/planner-examples.md
           - page: SLA Planner Quick Start
             path: ../pages/planner/sla-planner-quickstart.md
           - page: SLA-Driven Profiling
@@ -182,6 +186,8 @@ navigation:
         path: ../pages/guides/request-plane.md
       - page: Event Plane
         path: ../pages/design-docs/event-plane.md
+      - page: Planner Design
+        path: ../pages/design-docs/planner-design.md
 
   # ==================== Additional Resources ====================
   # Hidden section - these pages are accessible via direct URL but not shown in navigation
