@@ -58,6 +58,8 @@ pub struct SchedulerQueue {
     slots: Arc<ActiveSequencesMultiWorker>,
     workers_with_configs: Arc<RuntimeConfigs>,
     ready_notify: Arc<Notify>,
+    /// Cached threshold fraction; None means queueing is disabled.
+    threshold_frac: Option<f64>,
 }
 
 impl SchedulerQueue {
@@ -66,12 +68,17 @@ impl SchedulerQueue {
         workers_with_configs: Arc<RuntimeConfigs>,
         ready_notify: Arc<Notify>,
     ) -> Self {
+        let threshold_frac = queue_threshold_frac();
+        if let Some(frac) = threshold_frac {
+            tracing::info!("Router queue enabled with threshold fraction {frac}");
+        }
         Self {
             pending: Mutex::new(VecDeque::new()),
             ready: Mutex::new(VecDeque::new()),
             slots,
             workers_with_configs,
             ready_notify,
+            threshold_frac,
         }
     }
 
@@ -79,7 +86,7 @@ impl SchedulerQueue {
     /// If queueing is disabled (env var not set), fast-track to ready.
     /// Otherwise, check busy condition and place in ready or pending.
     pub async fn enqueue(&self, request: SchedulingRequest) {
-        let Some(threshold) = queue_threshold_frac() else {
+        let Some(threshold) = self.threshold_frac else {
             self.ready.lock().await.push_back(request);
             return;
         };
@@ -105,7 +112,7 @@ impl SchedulerQueue {
     /// Called on prefill_complete/free. Re-checks pending requests and moves eligible to ready.
     /// Notifies scheduler loop if any requests were moved.
     pub async fn update(&self) {
-        let Some(threshold) = queue_threshold_frac() else {
+        let Some(threshold) = self.threshold_frac else {
             return;
         };
 
