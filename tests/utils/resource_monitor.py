@@ -50,7 +50,7 @@ class ResourceMonitorConfig:
     interval_seconds: float = 10.0
     include_gpu: bool = True
     write_to_pvc: bool = True
-    pvc_output_path: str = "/tmp/service_logs/resource_metrics.jsonl"
+    pvc_base_dir: str = "/tmp/service_logs/service_logs"  # Same as service logs
 
 
 class ResourceMonitor:
@@ -154,13 +154,9 @@ class ResourceMonitor:
             try:
                 snapshots = await self.get_all_resource_usage()
 
-                # Flatten and store snapshots
+                # Store snapshots in history (PVC writing happens in get_pod_resource_usage)
                 for service_snapshots in snapshots.values():
                     self._history.extend(service_snapshots)
-
-                    # Write to PVC if enabled
-                    if self._config.write_to_pvc and service_snapshots:
-                        await self._write_metrics_to_pvc(service_snapshots)
 
             except asyncio.CancelledError:
                 raise
@@ -186,6 +182,49 @@ class ResourceMonitor:
             asyncio.create_task(asyncio.to_thread(pod.exec, command)),
             timeout=timeout,
         )
+
+    async def _get_container_timestamp(self, pod: "Pod") -> str:
+        """Read container start timestamp written by wrapper script.
+
+        The wrapper script writes the timestamp to /tmp/.{pod_name}.start_time
+        This ensures exact match with service log filenames.
+        """
+        try:
+            result = await self._exec_in_pod(
+                pod, ["cat", f"/tmp/.{pod.name}.start_time"], timeout=5.0
+            )
+            return result.stdout.decode().strip()
+        except Exception:
+            # Fallback if timestamp file doesn't exist (shouldn't happen normally)
+            return str(int(time.time()))
+
+    async def _write_snapshot_to_pod(
+        self, pod: "Pod", snapshot: ResourceSnapshot, service_name: str
+    ):
+        """Write a single snapshot to the pod's resource usage file.
+
+        Writes immediately to the same pod where metrics were collected.
+        File: {pvc_base_dir}/{service}/{pod_name}_{timestamp}.resource_usage.jsonl
+        """
+        try:
+            # Read timestamp from file written by wrapper script
+            timestamp = await self._get_container_timestamp(pod)
+
+            service_dir = f"{self._config.pvc_base_dir}/{service_name.lower()}"
+            output_file = f"{service_dir}/{pod.name}_{timestamp}.resource_usage.jsonl"
+            json_line = json.dumps(asdict(snapshot))
+            escaped_json = json_line.replace("'", "'\\''")
+            await self._exec_in_pod(
+                pod,
+                [
+                    "sh",
+                    "-c",
+                    f"mkdir -p {service_dir} && echo '{escaped_json}' >> {output_file}",
+                ],
+                timeout=5.0,
+            )
+        except Exception as e:
+            self._logger.debug(f"Failed to write resource snapshot to {pod.name}: {e}")
 
     def _parse_meminfo(self, meminfo_output: str) -> dict:
         """Parse /proc/meminfo output.
@@ -343,7 +382,7 @@ class ResourceMonitor:
                     # nvidia-smi not available, that's okay
                     pass
 
-            return ResourceSnapshot(
+            snapshot = ResourceSnapshot(
                 timestamp=time.time(),
                 pod_name=pod.name,
                 service_name=service_name,
@@ -353,6 +392,12 @@ class ResourceMonitor:
                 cpu_usage_percent=cpu_usage,
                 gpu_metrics=gpu_metrics,
             )
+
+            # Write to PVC immediately if enabled (to the SAME pod)
+            if self._config.write_to_pvc:
+                await self._write_snapshot_to_pod(pod, snapshot, service_name)
+
+            return snapshot
 
         except Exception as e:
             self._logger.warning(f"Failed to get resource usage for {pod.name}: {e}")
@@ -389,38 +434,3 @@ class ResourceMonitor:
                     self._logger.warning(f"Failed to get resources for {pod.name}: {e}")
 
         return results
-
-    async def _write_metrics_to_pvc(self, snapshots: List[ResourceSnapshot]):
-        """Write metrics to PVC via exec into a pod.
-
-        Args:
-            snapshots: List of snapshots to write as JSONL
-        """
-        # Find any running pod to write metrics
-        service_pods = self._deployment.get_pods()
-        for service_name, pods in service_pods.items():
-            for pod in pods:
-                if pod.status.phase != "Running":
-                    continue
-                try:
-                    for snapshot in snapshots:
-                        json_line = json.dumps(asdict(snapshot))
-                        # Escape single quotes for shell safety
-                        escaped_json = json_line.replace("'", "'\\''")
-                        await self._exec_in_pod(
-                            pod,
-                            [
-                                "sh",
-                                "-c",
-                                f"echo '{escaped_json}' >> {self._config.pvc_output_path}",
-                            ],
-                            timeout=5.0,
-                        )
-                    return  # Successfully wrote to one pod
-                except Exception as e:
-                    self._logger.debug(
-                        f"Failed to write metrics via {pod.name}: {e}, trying next pod"
-                    )
-                    continue
-
-        self._logger.warning("No available pod to write resource metrics to PVC")

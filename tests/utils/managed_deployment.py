@@ -275,10 +275,13 @@ class ServiceSpec:
         service_log_dir = f"{log_dir}/service_logs/{service_subdir}"
 
         # Create simplified wrapper script (no header)
+        # Capture timestamp once and write to /tmp for ResourceMonitor to read
         wrapper_script = f"""#!/bin/bash
 set -e
+TIMESTAMP=$(date +%s)
+echo $TIMESTAMP > /tmp/.${{POD_NAME}}.start_time
 mkdir -p {service_log_dir}
-LOG_FILE="{service_log_dir}/${{POD_NAME}}_$(date +%s).log"
+LOG_FILE="{service_log_dir}/${{POD_NAME}}_${{TIMESTAMP}}.log"
 exec {full_command} > >(tee -a "$LOG_FILE") 2>&1"""
 
         # Set the wrapped command
