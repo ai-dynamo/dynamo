@@ -7,7 +7,7 @@ use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
 use anyhow::Context as _;
-use dynamo_async_openai::types::FinishReason;
+use dynamo_async_openai::types::{ChatCompletionMessageContent, FinishReason};
 use dynamo_runtime::{DistributedRuntime, pipeline::Context, runtime::CancellationToken};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -242,12 +242,12 @@ async fn evaluate(
                 let chat_comp = choice.as_ref().unwrap();
                 if let Some(c) = &chat_comp.delta.content {
                     match c {
-                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => {
+                        ChatCompletionMessageContent::Text(text) => {
                             output += text;
                         }
-                        dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => {
+                        ChatCompletionMessageContent::Parts(_) => {
                             // Multimodal content - skip for now in batch processing
-                            // TODO: Handle multimodal content in batch mode
+                            // (ayushag) TODO: Handle multimodal content in batch mode
                         }
                     }
                 }

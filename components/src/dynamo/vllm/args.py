@@ -265,7 +265,7 @@ def parse_args() -> Config:
         "--stage-configs-path",
         type=str,
         default=None,
-        help="Path to vLLM-Omni stage configuration YAML file. Required for --omni.",
+        help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
     )
     parser.add_argument(
         "--store-kv",
