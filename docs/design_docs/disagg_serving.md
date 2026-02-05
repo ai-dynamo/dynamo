@@ -10,7 +10,7 @@ The prefill and decode phases of LLM requests have different computation charact
 
 Disaggregated execution of a request has three main steps:
 1. Prefill engine computes prefill phase and generates KV cache
-2. Prefill engine transfers the KV cache to decode engine, and
+2. Prefill engine transfers the KV cache to decode engine
 3. Decode engine computes decode phase.
 
 The disaggregation design in Dynamo features a flexible framework that delivers strong performance across various conditions.
@@ -39,7 +39,7 @@ sequenceDiagram
     Prefill-->>Router: disaggregated_params
     Router->>Router: Select decode worker
     Router->>Decode: Decode request + transfer metadata
-    Decode->>Prefill: KV transfer (NIXL)
+    Decode<<->>Prefill: KV transfer (NIXL)
     Decode->>Decode: Generate tokens
     Decode-->>Frontend: Stream tokens
     Frontend-->>Client: Response
@@ -66,12 +66,10 @@ The transfer metadata format varies by backend:
 
 ## Runtime-Reconfigurable xPyD
 
-Dynamo's disaggregation design supports runtime-reconfigurable xPyD (x prefill workers, y decode workers). Workers can be added and removed at runtime without system-level synchronization:
+Dynamo's disaggregation design supports runtime-reconfigurable xPyD (x prefill workers, y decode workers). Workers can be added and removed at runtime:
 
-- **Add decode worker**: Worker registers with the discovery service and publishes its `RuntimeConfig` (including KV capacity).
-- **Remove decode worker**: Worker drains active requests and deregisters from discovery.
-- **Add prefill worker**: Worker registers with discovery and publishes its endpoint information (e.g., `DisaggregatedEndpoint` for SGLang).
-- **Remove prefill worker**: Worker drains active requests and deregisters from discovery.
+- **Add worker**: Worker registers with the discovery service and publishes its `RuntimeConfig` (including KV capacity).
+- **Remove worker**: Worker drains active requests and deregisters from discovery.
 
 The router automatically discovers new workers via the discovery service and incorporates them into routing decisions.
 
