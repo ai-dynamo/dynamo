@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Single-stage LLM configuration for text-to-text generation
+# This is a minimal config for testing vLLM-Omni with standard LLM models
+
+stage_args:
+  - stage_id: 0
+    # stage_type defaults to "llm" when not specified
+    runtime:
+      devices: "0"  # Single GPU
+      max_batch_size: 32
+    engine_args:
+      # Model stage identifier (required by vLLM-Omni)
+      # For Qwen2.5-Omni: thinker (comprehension), talker (enhanced gen), code2wav (audio)
+      # For single-stage text generation, use "thinker"
+      model_stage: thinker
+      model_arch: Qwen2_5OmniForConditionalGeneration
+      worker_cls: vllm_omni.worker.gpu_ar_worker.GPUARWorker
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      # Engine configuration
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      trust_remote_code: true
+      enforce_eager: true  # Required by vLLM-Omni currently
+      gpu_memory_utilization: 0.8
+      enable_prefix_caching: false
+      max_num_batched_tokens: 32768
+      engine_output_type: latent
+      # Enable distributed backend for TP>1
+      distributed_executor_backend: "mp"
+    is_comprehension: true  # Thinker stage is the comprehension/text generation stage
+    final_output: true
+    final_output_type: text
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 2048
+      repetition_penalty: 1.1
+      seed: 42
+      detokenize: false  # Token-based processing for Dynamo

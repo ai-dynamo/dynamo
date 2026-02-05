@@ -1,0 +1,128 @@
+name: 'Bootstrap Buildkit'
+description: 'Bootstrap buildkit builders using remote workers or Kubernetes driver'
+
+# This action supports two buildkit driver modes:
+#
+# 1. Remote Driver (when buildkit_worker_addresses is provided)
+#    Uses pre-provisioned remote buildkit workers specified via buildkit_worker_addresses.
+#    This is the preferred mode for faster, more reliable builds.
+#
+# 2. Kubernetes Driver (fallback, when buildkit_worker_addresses is empty)
+#    Dynamically creates buildkit pods in Kubernetes. Use this as a fallback when
+#    remote buildkit workers are unavailable or unreachable. The Kubernetes driver
+#    is slower due to pod startup time but provides on-demand build capacity.
+#
+# Options:
+#   - skip_bootstrap: Set to 'true' to only create the builder without bootstrapping.
+#     Useful for cleanup jobs that need to remove the builder but not bootstrap it.
+
+inputs:
+  builder_name:
+    description: 'Name for the buildx builder'
+    required: true
+  buildkit_worker_addresses:
+    description: 'Comma-separated list of remote buildkit worker addresses. If empty, falls back to Kubernetes driver.'
+    required: false
+    default: ''
+
+
+  # Kubernetes driver inputs (used when remote_builder is false)
+  ephemeral_storage:
+    description: 'Ephemeral storage request for Kubernetes driver'
+    required: false
+    default: '400Gi'
+  namespace:
+    description: 'Kubernetes namespace for buildkit pods'
+    required: false
+    default: 'buildkit'
+  replicas:
+    description: 'Number of buildkit replicas'
+    required: false
+    default: '1'
+  requests_cpu:
+    description: 'CPU requests for buildkit pods'
+    required: false
+    default: '12'
+  requests_memory:
+    description: 'Memory requests for buildkit pods'
+    required: false
+    default: '26Gi'
+  limits_memory:
+    description: 'Memory limits for buildkit pods'
+    required: false
+    default: '29Gi'
+  tolerations:
+    description: 'Tolerations for buildkit pods'
+    required: false
+    default: "key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"
+  skip_bootstrap:
+    description: 'Skip the bootstrap step (only create the builder)'
+    required: false
+    default: 'false'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Define remote buildkit builders
+      if: inputs.buildkit_worker_addresses != ''
+      shell: bash
+      run: |
+        ADDRS="${{ inputs.buildkit_worker_addresses }}"
+        IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
+        FIRST=true
+        for addr in "${ADDR_LIST[@]}"; do
+          if $FIRST; then
+            docker buildx create --use --name ${{ inputs.builder_name }} --driver remote "$addr"
+            FIRST=false
+          else
+            docker buildx create --append --name ${{ inputs.builder_name }} --driver remote "$addr"
+          fi
+        done
+
+    - name: Create Kubernetes builder for both platforms
+      if: inputs.buildkit_worker_addresses == ''
+      shell: bash
+      run: |
+        if docker buildx inspect ${{ inputs.builder_name }} > /dev/null 2>&1; then
+            # If exit code is 0 (success), print the message
+            echo "✅ Builder '${{ inputs.builder_name }}' already exists. Skipping creation."
+        else
+          echo "K8s Builder '${{ inputs.builder_name }}' does not exist. Creating it."
+          docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
+          '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+          '--driver-opt=namespace=${{ inputs.namespace }}' \
+          '--driver-opt=loadbalance=sticky' \
+          '--driver-opt=replicas=${{ inputs.replicas }}' \
+          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+          '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=dynamo-builder-fallback"' \
+          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+
+          docker buildx create --append --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/arm64 \
+          '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+          '--driver-opt=namespace=${{ inputs.namespace }}' \
+          '--driver-opt=loadbalance=sticky' \
+          '--driver-opt=replicas=${{ inputs.replicas }}' \
+          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+          '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=dynamo-builder-fallback"' \
+          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+        fi
+        sleep 3 # Give the builders some time to be ready
+
+        if [[ "${{ inputs.skip_bootstrap }}" != "true" ]]; then
+          echo "::warning::Build is using fallback pod. Please alert the ops team."
+          echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY
+          echo "This build is running on a **fallback pod**. Please alert the ops team." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+
+
+    - name: Bootstrap buildkit
+      if: inputs.skip_bootstrap != 'true'
+      shell: bash
+      run: |
+        echo "Bootstrapping buildkit..."
+        docker buildx inspect ${{ inputs.builder_name }}  --bootstrap

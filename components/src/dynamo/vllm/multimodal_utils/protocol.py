@@ -175,7 +175,11 @@ class MultiModalGroup(BaseModel):
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
+    # Decode-only worker can have None for multimodal_inputs
+    multimodal_inputs: Optional[List[MultiModalGroup]] = Field(default_factory=list)
+    # Add these fields for Qwen VL (mRoPE) decode-only worker
+    image_grid_thw: Optional[List[List[int]]] = None
+    embeddings_shape: Optional[List[int]] = None
 
 
 class VLLMNativeEncoderRequest(BaseModel):
