@@ -310,20 +310,75 @@ Found 0 errors and 1 warning in 0.001 seconds.
 
 ---
 
-## Remaining Tasks
+## Phase 7: Commit Migration ✅
 
-### Phase 7: Cleanup and Commit (TODO)
+**Completed:** 2026-02-04
 
-- [ ] Remove `docs.sphinx.backup/` after PR merge
-- [ ] Commit changes
-- [ ] Create PR
+### Commit Details
 
-### CI/CD Notes (Separate PR Recommended)
+```
+Commit: 0dcef4efe
+Message: docs: migrate documentation from Sphinx to Fern
+Files changed: 349
+```
 
-The following files still reference Sphinx and should be updated in a separate PR:
-- `.github/workflows/generate-docs.yml` - Uses Sphinx build commands
-- `container/Dockerfile.docs` - Uses Sphinx dependencies
-- `pyproject.toml` - May have Sphinx dependencies in docs extras
+---
+
+## Phase 8: Remove Sphinx CI/CD Infrastructure ✅
+
+**Completed:** 2026-02-04
+
+### Files Removed/Updated
+
+| File | Action | Details |
+|------|--------|---------|
+| `container/Dockerfile.docs` | **Deleted** | Sphinx docs container no longer needed |
+| `.github/workflows/generate-docs.yml` | **Replaced** | Old 612-line Sphinx workflow → new ~90-line Fern validation workflow |
+| `pyproject.toml` | **Updated** | Removed Sphinx dependencies from `[dependency-groups] docs` and deleted `[tool.sphinx]` section |
+
+### New CI Workflow
+
+The new `.github/workflows/generate-docs.yml` runs `fern check` for validation on:
+- Pull requests touching `docs/**`, `fern/**`, or the workflow itself
+- Pushes to `main` touching the same paths
+
+Fern docs are published via Fern's GitHub integration (not this workflow).
+
+### Commit Details
+
+```
+Commit: 5c2e8ea45
+Message: chore: remove Sphinx CI/CD infrastructure
+Files changed: 3
+```
+
+---
+
+## Phase 9: Create Pull Request ✅
+
+**Completed:** 2026-02-04
+
+### Pull Request
+
+- **URL:** https://github.com/Jont828/dynamo/pull/2
+- **Title:** docs: migrate documentation from Sphinx to Fern
+- **Branch:** `fern-folder-migration`
+- **Commits:** 2
+  1. `0dcef4efe` - docs: migrate documentation from Sphinx to Fern
+  2. `5c2e8ea45` - chore: remove Sphinx CI/CD infrastructure
+
+---
+
+## Post-Merge Cleanup (TODO)
+
+After PR is merged:
+
+- [ ] Delete `docs.sphinx.backup/` folder
+  ```bash
+  rm -rf docs.sphinx.backup/
+  ```
+
+The git tag `sphinx-docs-backup-20260204` will be preserved indefinitely for historical reference
 
 ---
 
