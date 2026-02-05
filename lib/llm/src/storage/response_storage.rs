@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Response storage trait and implementations
 //!
 //! Provides pluggable storage for stateful responses with session scoping.
@@ -187,8 +190,10 @@ pub trait ResponseStorage: Send + Sync {
         up_to_response_id: Option<&str>,
     ) -> Result<usize, StorageError> {
         // Default implementation - override for efficiency in production backends
-        let responses = self.list_responses(tenant_id, source_session_id, None, None).await?;
-        
+        let responses = self
+            .list_responses(tenant_id, source_session_id, None, None)
+            .await?;
+
         let mut cloned = 0;
         for response in responses {
             // Stop at rewind point if specified
@@ -201,22 +206,24 @@ pub trait ResponseStorage: Send + Sync {
                         Some(&response.response_id),
                         response.response.clone(),
                         None,
-                    ).await?;
+                    )
+                    .await?;
                     cloned += 1;
                     break;
                 }
             }
-            
+
             self.store_response(
                 tenant_id,
                 target_session_id,
                 Some(&response.response_id),
                 response.response.clone(),
                 None,
-            ).await?;
+            )
+            .await?;
             cloned += 1;
         }
-        
+
         Ok(cloned)
     }
 }
@@ -318,7 +325,12 @@ mod tests {
 
         // Store with 10-second TTL
         let response_id = storage
-            .store_response("tenant_a", "session_1", None, response_data, Some(Duration::from_secs(10)),
+            .store_response(
+                "tenant_a",
+                "session_1",
+                None,
+                response_data,
+                Some(Duration::from_secs(10)),
             )
             .await
             .unwrap();
@@ -354,7 +366,13 @@ mod tests {
 
         // Store response in different session
         storage
-            .store_response("tenant_a", "session_2", None, serde_json::json!({"other": 1}), None)
+            .store_response(
+                "tenant_a",
+                "session_2",
+                None,
+                serde_json::json!({"other": 1}),
+                None,
+            )
             .await
             .unwrap();
 

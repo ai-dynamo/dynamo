@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Redis storage backend for stateful responses
 //!
 //! Provides a production-ready storage implementation using Redis for
@@ -43,15 +46,14 @@ impl RedisResponseStorage {
     /// Returns error if connection pool cannot be created
     pub async fn new(redis_url: &str) -> Result<Self, StorageError> {
         let cfg = Config::from_url(redis_url);
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1))
-            .map_err(|e| StorageError::BackendError(format!("Failed to create Redis pool: {}", e)))?;
+        let pool = cfg.create_pool(Some(Runtime::Tokio1)).map_err(|e| {
+            StorageError::BackendError(format!("Failed to create Redis pool: {}", e))
+        })?;
 
         // Test connection
-        let mut conn = pool
-            .get()
-            .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to connect to Redis: {}", e)))?;
+        let mut conn = pool.get().await.map_err(|e| {
+            StorageError::BackendError(format!("Failed to connect to Redis: {}", e))
+        })?;
 
         // Ping to verify connection
         redis::cmd("PING")
@@ -120,21 +122,24 @@ impl ResponseStorage for RedisResponseStorage {
         let response_key = Self::response_key(tenant_id, session_id, &response_id);
         let index_key = Self::index_key(tenant_id, session_id);
 
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to get connection: {}", e)))?;
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::BackendError(format!("Failed to get connection: {}", e))
+            })?;
 
         // Store the response data with optional TTL
         if let Some(ttl) = ttl {
             conn.set_ex::<_, _, ()>(&response_key, &json_data, ttl.as_secs())
                 .await
-                .map_err(|e| StorageError::BackendError(format!("Failed to store response: {}", e)))?;
+                .map_err(|e| {
+                    StorageError::BackendError(format!("Failed to store response: {}", e))
+                })?;
         } else {
             conn.set::<_, _, ()>(&response_key, &json_data)
                 .await
-                .map_err(|e| StorageError::BackendError(format!("Failed to store response: {}", e)))?;
+                .map_err(|e| {
+                    StorageError::BackendError(format!("Failed to store response: {}", e))
+                })?;
         }
 
         // Add response ID to the session index
@@ -145,16 +150,15 @@ impl ResponseStorage for RedisResponseStorage {
         // Keep index TTL aligned with response TTLs
         if let Some(ttl) = ttl {
             // Only set expire if it would extend the current TTL
-            let current_ttl: i64 = conn
-                .ttl(&index_key)
-                .await
-                .unwrap_or(-1);
+            let current_ttl: i64 = conn.ttl(&index_key).await.unwrap_or(-1);
 
             let new_ttl = ttl.as_secs() as i64;
             if current_ttl < 0 || new_ttl > current_ttl {
                 conn.expire::<_, ()>(&index_key, new_ttl)
                     .await
-                    .map_err(|e| StorageError::BackendError(format!("Failed to set index TTL: {}", e)))?;
+                    .map_err(|e| {
+                        StorageError::BackendError(format!("Failed to set index TTL: {}", e))
+                    })?;
             }
         } else {
             // Remove any existing TTL so non-expiring responses remain listable
@@ -162,7 +166,9 @@ impl ResponseStorage for RedisResponseStorage {
                 .arg(&index_key)
                 .query_async::<i32>(&mut conn)
                 .await
-                .map_err(|e| StorageError::BackendError(format!("Failed to persist index: {}", e)))?;
+                .map_err(|e| {
+                    StorageError::BackendError(format!("Failed to persist index: {}", e))
+                })?;
         }
 
         Ok(response_id)
@@ -176,11 +182,10 @@ impl ResponseStorage for RedisResponseStorage {
     ) -> Result<StoredResponse, StorageError> {
         let response_key = Self::response_key(tenant_id, session_id, response_id);
 
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to get connection: {}", e)))?;
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::BackendError(format!("Failed to get connection: {}", e))
+            })?;
 
         let json_data: Option<String> = conn
             .get(&response_key)
@@ -189,8 +194,9 @@ impl ResponseStorage for RedisResponseStorage {
 
         let json_data = json_data.ok_or(StorageError::NotFound)?;
 
-        let stored: StoredResponse = serde_json::from_str(&json_data)
-            .map_err(|e| StorageError::SerializationError(format!("Failed to deserialize: {}", e)))?;
+        let stored: StoredResponse = serde_json::from_str(&json_data).map_err(|e| {
+            StorageError::SerializationError(format!("Failed to deserialize: {}", e))
+        })?;
 
         // Check expiration (Redis handles this, but double-check for safety)
         if let Some(expires_at) = stored.expires_at {
@@ -222,16 +228,17 @@ impl ResponseStorage for RedisResponseStorage {
         response_id: &str,
     ) -> Result<(), StorageError> {
         // First verify the response exists and belongs to this tenant/session
-        let _ = self.get_response(tenant_id, session_id, response_id).await?;
+        let _ = self
+            .get_response(tenant_id, session_id, response_id)
+            .await?;
 
         let response_key = Self::response_key(tenant_id, session_id, response_id);
         let index_key = Self::index_key(tenant_id, session_id);
 
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to get connection: {}", e)))?;
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::BackendError(format!("Failed to get connection: {}", e))
+            })?;
 
         // Delete the response data
         conn.del::<_, ()>(&response_key)
@@ -241,7 +248,9 @@ impl ResponseStorage for RedisResponseStorage {
         // Remove from index
         conn.srem::<_, _, ()>(&index_key, response_id)
             .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to remove from index: {}", e)))?;
+            .map_err(|e| {
+                StorageError::BackendError(format!("Failed to remove from index: {}", e))
+            })?;
 
         Ok(())
     }
@@ -255,17 +264,15 @@ impl ResponseStorage for RedisResponseStorage {
     ) -> Result<Vec<StoredResponse>, StorageError> {
         let index_key = Self::index_key(tenant_id, session_id);
 
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to get connection: {}", e)))?;
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::BackendError(format!("Failed to get connection: {}", e))
+            })?;
 
         // Get all response IDs from the index
-        let response_ids: Vec<String> = conn
-            .smembers(&index_key)
-            .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to get response IDs: {}", e)))?;
+        let response_ids: Vec<String> = conn.smembers(&index_key).await.map_err(|e| {
+            StorageError::BackendError(format!("Failed to get response IDs: {}", e))
+        })?;
 
         if response_ids.is_empty() {
             return Ok(Vec::new());
@@ -335,7 +342,9 @@ impl ResponseStorage for RedisResponseStorage {
         up_to_response_id: Option<&str>,
     ) -> Result<usize, StorageError> {
         // Get all responses from source session
-        let responses = self.list_responses(tenant_id, source_session_id, None, None).await?;
+        let responses = self
+            .list_responses(tenant_id, source_session_id, None, None)
+            .await?;
 
         let mut cloned = 0;
         for response in responses {
