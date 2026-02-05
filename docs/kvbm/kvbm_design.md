@@ -87,6 +87,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ![Internal architecture and key modules in the Dynamo KVBM](../images/kvbm-internal-arch.png)
 
+
 *Internal architecture and key modules in the Dynamo KVBM*
 
 ### KvBlockManager as Orchestration Layer
