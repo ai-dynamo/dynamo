@@ -153,21 +153,27 @@ impl MockVllmEngine {
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
             // Create a KvEventPublisher for THIS dp_rank if component is provided
-            let kv_event_sink: Option<Arc<dyn KvCacheEventSink>> = component.as_ref().and_then(|comp| {
-                match KvEventPublisher::new_with_local_indexer(
-                    comp.clone(),
-                    args.block_size as u32,
-                    None,
-                    args.enable_local_indexer,
-                    dp_rank,
-                ) {
-                    Ok(publisher) => Some(Arc::new(KvEventSinkAdapter(publisher)) as Arc<dyn KvCacheEventSink>),
-                    Err(e) => {
-                        tracing::error!("Failed to create KV event publisher for dp_rank {dp_rank}: {e}");
-                        None
-                    }
-                }
-            });
+            let kv_event_sink: Option<Arc<dyn KvCacheEventSink>> =
+                component
+                    .as_ref()
+                    .and_then(|comp| {
+                        match KvEventPublisher::new_with_local_indexer(
+                            comp.clone(),
+                            args.block_size as u32,
+                            None,
+                            args.enable_local_indexer,
+                            dp_rank,
+                        ) {
+                            Ok(publisher) => Some(Arc::new(KvEventSinkAdapter(publisher))
+                                as Arc<dyn KvCacheEventSink>),
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to create KV event publisher for dp_rank {dp_rank}: {e}"
+                                );
+                                None
+                            }
+                        }
+                    });
 
             let scheduler = Scheduler::new(
                 args.clone(),
