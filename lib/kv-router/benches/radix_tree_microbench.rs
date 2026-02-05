@@ -18,7 +18,6 @@ use dynamo_kv_router::{
     RadixTree, RouterEvent,
     bench_utils::{LatencyStats, SequenceData, generate_sequences},
     compute_block_hash_for_seq,
-    flat_hashmap::FlatHashMap,
     nested_map::NestedMap,
     protocols::LocalBlockHash,
 };

@@ -9,7 +9,6 @@
 pub mod approx;
 #[cfg(feature = "bench")]
 pub mod bench_utils;
-pub mod flat_hashmap;
 pub mod indexer;
 pub mod nested_map;
 pub mod protocols;
