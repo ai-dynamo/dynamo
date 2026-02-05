@@ -1,5 +1,8 @@
 # KServe gRPC frontend
 
+> **Note**: This content has moved to [Frontend Guide](../components/frontend/frontend_guide.md).
+> This file will be removed in a future release.
+
 ## Motivation
 
 [KServe v2 API](https://github.com/kserve/kserve/tree/master/docs/predict-api/v2) is one of the industry standard protocol for machine learning model inference. Triton inference server is one of the inference solutions that comply with KServe v2 API and it has gained a lot of adoption. To quickly enable Triton users to explore with Dynamo benefits, Dynamo provides a KServe gRPC frontend.
