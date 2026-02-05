@@ -559,7 +559,14 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
     // Build dynamic column headers
     let mut header = format!("{:<30}", "Metric");
     for result in results {
-        header.push_str(&format!(" {:>15}", result.indexer_name.split_whitespace().next().unwrap_or(&result.indexer_name)));
+        header.push_str(&format!(
+            " {:>15}",
+            result
+                .indexer_name
+                .split_whitespace()
+                .next()
+                .unwrap_or(&result.indexer_name)
+        ));
     }
     println!("{}", header);
     println!("{}", "-".repeat(30 + results.len() * 16));
@@ -567,7 +574,10 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
     // Construction time
     let mut row = format!("{:<30}", "Construction time (ms)");
     for result in results {
-        row.push_str(&format!(" {:>15.2}", result.construction_time.as_secs_f64() * 1000.0));
+        row.push_str(&format!(
+            " {:>15.2}",
+            result.construction_time.as_secs_f64() * 1000.0
+        ));
     }
     println!("{}", row);
 
@@ -630,7 +640,14 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
     println!();
     let mut header = format!("{:<30}", "Throughput (ops/sec)");
     for result in results {
-        header.push_str(&format!(" {:>15}", result.indexer_name.split_whitespace().next().unwrap_or(&result.indexer_name)));
+        header.push_str(&format!(
+            " {:>15}",
+            result
+                .indexer_name
+                .split_whitespace()
+                .next()
+                .unwrap_or(&result.indexer_name)
+        ));
     }
     println!("{}", header);
     println!("{}", "-".repeat(30 + results.len() * 16));
@@ -723,11 +740,8 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
 
     // Benchmark nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
-        let mut indexer = PositionalIndexer::new(
-            args.num_shards,
-            args.common.block_size,
-            args.jump_size,
-        );
+        let mut indexer =
+            PositionalIndexer::new(args.num_shards, args.common.block_size, args.jump_size);
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
         results.push(result);
         indexer.shutdown();
@@ -1063,7 +1077,11 @@ fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
     // Build dynamic column headers
     let mut header = format!("{:<35}", "Metric");
     for result in results {
-        let short_name = result.indexer_name.split_whitespace().next().unwrap_or(&result.indexer_name);
+        let short_name = result
+            .indexer_name
+            .split_whitespace()
+            .next()
+            .unwrap_or(&result.indexer_name);
         header.push_str(&format!(" {:>18}", short_name));
     }
     println!("{}", header);
@@ -1072,14 +1090,20 @@ fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
     // Construction time
     let mut row = format!("{:<35}", "Construction time (ms)");
     for result in results {
-        row.push_str(&format!(" {:>18.2}", result.construction_time.as_secs_f64() * 1000.0));
+        row.push_str(&format!(
+            " {:>18.2}",
+            result.construction_time.as_secs_f64() * 1000.0
+        ));
     }
     println!("{}", row);
 
     // Baseline service time
     let mut row = format!("{:<35}", "Baseline service time (us)");
     for result in results {
-        row.push_str(&format!(" {:>18.2}", result.baseline_service_time.as_nanos() as f64 / 1000.0));
+        row.push_str(&format!(
+            " {:>18.2}",
+            result.baseline_service_time.as_nanos() as f64 / 1000.0
+        ));
     }
     println!("{}", row);
 
@@ -1164,7 +1188,10 @@ async fn run_stress_mode(args: StressArgs) {
         eprintln!("Error: arrival_rate must be > 0.0");
         std::process::exit(1);
     }
-    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::Nested | IndexerType::All) && args.num_shards == 0
+    if matches!(
+        args.indexer_type,
+        IndexerType::Sharded | IndexerType::Nested | IndexerType::All
+    ) && args.num_shards == 0
     {
         eprintln!("Error: num_shards must be > 0 when using Sharded, Nested, or All indexer type");
         std::process::exit(1);
@@ -1308,11 +1335,8 @@ async fn run_stress_mode(args: StressArgs) {
 
     // Test nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
-        let indexer = PositionalIndexer::new(
-            args.num_shards,
-            args.common.block_size,
-            args.jump_size,
-        );
+        let indexer =
+            PositionalIndexer::new(args.num_shards, args.common.block_size, args.jump_size);
 
         println!(
             "\n  Applying {} store events to PositionalIndexer...",
