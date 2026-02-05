@@ -128,8 +128,8 @@ impl ModelType {
         }
         // Images models support both chat and completions endpoints
         if self.contains(Self::Images) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Images);
             endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
-            endpoint_types.push(crate::endpoint_type::EndpointType::Completion);
         }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
