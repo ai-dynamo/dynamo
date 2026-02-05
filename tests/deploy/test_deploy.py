@@ -20,6 +20,11 @@ from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 
 logger = logging.getLogger(__name__)
 
+# Test prompt designed to validate model capabilities:
+# - Long enough to test context handling (multiple sentences, ~150 words)
+# - Descriptive content requiring multi-sentence responses
+# - Consistent across test runs for reproducibility
+# This prompt is maintained from the original shell-based deployment tests.
 TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
 lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
 beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
@@ -30,7 +35,9 @@ and across perilous mountain ranges. Describe your first steps into the ruins of
 DEFAULT_MAX_TOKENS = 30
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
-MIN_RESPONSE_CONTENT_LENGTH = 10
+# Minimum response content length to validate that the model is generating meaningful output.
+# This matches the validation threshold from the original shell-based deployment tests.
+MIN_RESPONSE_CONTENT_LENGTH = 100
 
 
 def validate_chat_response(
