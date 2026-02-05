@@ -62,21 +62,19 @@ class MockHttpEngine:
         response_text = "This is a mock response."
         for i, char in enumerate(response_text):
             finish_reason = "stop" if i == len(response_text) - 1 else None
-            yield json.dumps(
-                {
-                    "id": f"chatcmpl-{context.id()}",
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": self.model_name,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": char},
-                            "finish_reason": finish_reason,
-                        }
-                    ],
-                }
-            )
+            yield {
+                "id": f"chatcmpl-{context.id()}",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": self.model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": char},
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            }
             await asyncio.sleep(0.01)
 
 

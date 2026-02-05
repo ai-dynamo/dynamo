@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -36,7 +35,7 @@ class TemplateVerificationHandler:
 
         # Return tokenized response for frontend to detokenize
         response_tokens = self.tokenizer.encode(response_text, add_special_tokens=False)
-        yield json.dumps({"token_ids": response_tokens})
+        yield {"token_ids": response_tokens}
 
 
 @dynamo_worker()

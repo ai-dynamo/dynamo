@@ -21,7 +21,6 @@
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 
@@ -77,7 +76,7 @@ class RequestHandler:
             else:
                 next_total_toks = len(res["output_ids"])
                 out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
-            yield json.dumps(out)
+            yield out
             num_output_tokens_so_far = next_total_toks
 
 

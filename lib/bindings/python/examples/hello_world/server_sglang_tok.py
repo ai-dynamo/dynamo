@@ -22,7 +22,6 @@
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 import time
@@ -90,7 +89,7 @@ class RequestHandler:
                 "model": request["model"],
                 "object": "chat.completion",
             }
-            yield json.dumps(response)
+            yield response
             count = next_count
 
 

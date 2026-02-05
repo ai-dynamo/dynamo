@@ -8,6 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
 use pyo3_async_runtimes::TaskLocals;
+use pythonize::{depythonize, pythonize};
 pub use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -135,6 +136,9 @@ enum ResponseProcessingError {
 
     #[error("deserialize error: {0}")]
     DeserializeError(String),
+
+    #[error("gil offload error: {0}")]
+    OffloadError(String),
 }
 
 #[async_trait::async_trait]
@@ -165,12 +169,6 @@ where
         let ctx_python = ctx.clone();
         let has_context = self.has_context;
 
-        // OPTIMIZATION: Serialize request to JSON BEFORE acquiring GIL
-        // This allows the serialization to run in parallel across all requests.
-        // Only the brief json.loads() call in Python requires the GIL.
-        let request_json = serde_json::to_string(&request)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize request to JSON: {}", e))?;
-
         // Acquiring the GIL is similar to acquiring a standard lock/mutex
         // Performing this in an tokio async task could block the thread for an undefined amount of time
         // To avoid this, we spawn a blocking task to acquire the GIL and perform the operations needed
@@ -183,9 +181,7 @@ where
         // cost. The Python GIL is the gift that keeps on giving -- performance hits...
         let stream = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| {
-                // Parse JSON string in Python - faster than pythonize traversing Rust structs
-                let json_module = py.import("json")?;
-                let py_request = json_module.call_method1("loads", (&request_json,))?;
+                let py_request = pythonize(py, &request)?;
 
                 // Create context with trace information
                 let py_ctx = Py::new(py, Context::new(ctx_python.clone(), current_trace_context))?;
@@ -263,6 +259,13 @@ where
                                 );
                                 msg
                             }
+                            ResponseProcessingError::OffloadError(e) => {
+                                let msg = format!(
+                                    "critical error: failed to offload the python async generator to a new thread: {}",
+                                    e
+                                );
+                                msg
+                            }
                         };
 
                         Annotated::from_error(msg)
@@ -305,6 +308,7 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     let item = item.map_err(|e| {
+        println!();
         let mut is_py_generator_exit = false;
         Python::with_gil(|py| {
             e.display(py);
@@ -316,23 +320,14 @@ where
             ResponseProcessingError::PythonException(e.to_string())
         }
     })?;
-
-    // OPTIMIZATION: Python must yield JSON strings (via json.dumps)
-    // This allows deserialization WITHOUT holding the GIL, enabling true parallelism.
-    //
-    // GIL is only held for ~10μs (string extraction) vs ~300μs (depythonize)
-    // serde_json runs without GIL - parallel across all requests!
-    let json_str: String = Python::with_gil(|py| {
-        item.extract::<String>(py)
+    let response = tokio::task::spawn_blocking(move || {
+        Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))
     })
-    .map_err(|e| ResponseProcessingError::DeserializeError(
-        format!("Expected JSON string from Python generator, got non-string type: {}. Use json.dumps() in your generator.", e)
-    ))?;
+    .await
+    .map_err(|e| ResponseProcessingError::OffloadError(e.to_string()))?
+    .map_err(|e| ResponseProcessingError::DeserializeError(e.to_string()))?;
 
-    // Deserialize WITHOUT GIL
-    let response = serde_json::from_str::<Resp>(&json_str).map_err(|e| {
-        ResponseProcessingError::DeserializeError(format!("JSON deserialization failed: {}", e))
-    })?;
+    let response = Annotated::from_data(response);
 
-    Ok(Annotated::from_data(response))
+    Ok(response)
 }

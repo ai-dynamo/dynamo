@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import json
 import logging
 from typing import Any, AsyncGenerator, Dict
 
@@ -90,10 +89,10 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         # Process stream output (token-based or text-based)
         if self.skip_tokenizer_init:
             async for out in self._process_token_stream(async_gen, context):
-                yield json.dumps(out)
+                yield out
         else:
             async for out in self._process_text_stream(async_gen, context):
-                yield json.dumps(out)
+                yield out
 
     def cleanup(self) -> None:
         super().cleanup()

@@ -451,7 +451,7 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
                 "bootstrap_room": bootstrap_room,
             }
 
-            yield json.dumps(bootstrap_info)
+            yield bootstrap_info
 
             # Process prefill generation
             await self._process_prefill_generation(disagg_request, bootstrap_room)

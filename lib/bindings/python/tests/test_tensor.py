@@ -3,7 +3,6 @@
 
 # Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
 
-import json
 import os
 
 import pytest
@@ -77,9 +76,9 @@ async def generate(request, context):
                     }
                 ],
             }
-            yield json.dumps(chunk)
+            yield chunk
     else:
-        yield json.dumps({"model": request["model"], "tensors": [output_text]})
+        yield {"model": request["model"], "tensors": [output_text]}
 
 
 if __name__ == "__main__":

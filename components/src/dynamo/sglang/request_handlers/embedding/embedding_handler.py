@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 import logging
 from typing import Optional
 
@@ -55,7 +54,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
 
         # Transform the response to OpenAI format
         response = self._transform_response(result, embedding_request.model)
-        yield json.dumps(response)
+        yield response
 
     def _transform_response(self, ret, model_name):
         """Transform SGLang response to OpenAI embedding format"""
