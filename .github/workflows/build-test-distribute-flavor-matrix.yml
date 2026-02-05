@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Framework Matrix Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework name (vllm, sglang, trtllm)'
+        required: true
+        type: string
+      platforms:
+        description: 'Platforms to build (JSON array, e.g., ["amd64", "arm64"])'
+        required: true
+        type: string
+      cuda_versions:
+        description: 'CUDA versions to build (JSON array, e.g., ["12.9", "13.0"])'
+        required: true
+        type: string
+      run_tests:
+        description: 'Whether to run pytest'
+        required: false
+        type: boolean
+        default: true
+      copy_to_acr:
+        description: 'Whether to copy images to ACR'
+        required: false
+        type: boolean
+        default: true
+      builder_name:
+        description: 'Buildkit builder name'
+        required: true
+        type: string
+      extra_tags:
+        description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
+        required: false
+        type: string
+        default: ''
+      build_image:
+        description: 'Whether to build image'
+        required: false
+        type: boolean
+        default: true
+      no_cache:
+        description: 'Disable Docker build cache'
+        required: false
+        type: boolean
+        default: false
+      push_image:
+        description: 'Push image to registry'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      CI_TOKEN:
+        required: false
+      SCCACHE_S3_BUCKET:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      HF_TOKEN:
+        required: false
+
+jobs:
+  pipeline:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(inputs.platforms) }}
+        cuda_version: ${{ fromJson(inputs.cuda_versions) }}
+    name: ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform }}
+    uses: ./.github/workflows/build-test-distribute-flavor.yml
+    with:
+      framework: ${{ inputs.framework }}
+      platform: ${{ matrix.platform }}
+      cuda_version: ${{ matrix.cuda_version }}
+      extra_tags: ${{ inputs.extra_tags }}
+      no_cache: ${{ inputs.no_cache }}
+      builder_name: ${{ inputs.builder_name }}
+      build_image: ${{ inputs.build_image }}
+      run_tests: ${{ inputs.run_tests && !(inputs.framework == 'trtllm' && matrix.platform == 'arm64') }} # trtllm tests on arm64 are not supported
+      copy_to_acr: ${{ inputs.copy_to_acr && matrix.platform == 'amd64' }} # no reason to copy ARM images to ACR
+      push_image: ${{ inputs.push_image }}
+    secrets: inherit

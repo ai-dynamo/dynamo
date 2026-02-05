@@ -14,8 +14,8 @@ inputs:
     required: false
     default: 'linux/amd64'
   image_tag:
-    description: 'Custom image tag (optional, defaults to framework:latest)'
-    required: false
+    description: 'Custom image tag'
+    required: true
   ci_token:
     description: 'CI Token'
     required: false
@@ -49,7 +49,29 @@ inputs:
   dynamo_base_image:
     description: 'Pre-built Dynamo base image to use instead of building from scratch'
     required: false
-
+  no_cache:
+    description: 'Disable Docker build cache'
+    required: false
+  extra_tags:
+    description: 'Additional image tags (newline-separated list of full image:tag references)'
+    required: false
+    default: ''
+  push_image:
+    description: 'Push the image to the registry'
+    required: false
+    default: 'false'
+  no_load:
+    description: 'Do not load the image into docker (useful for validation-only builds)'
+    required: false
+    default: 'true'
+  use_sccache:
+    description: 'Use SCCache for caching'
+    required: false
+    default: 'false'
+  ci:
+    description: 'CI mode: for frontend target, uses existing buildx builder and pushes EPP image to ECR'
+    required: false
+    default: 'false'
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -58,18 +80,6 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
-      with:
-        driver: docker-container
-        # Enable BuildKit for enhanced metadata
-        buildkitd-flags: --debug
-        version: v0.14.1
-    - name: Cleanup
-      if: always()
-      shell: bash
-      run: |
-        docker system prune -af
     - name: Build image
       id: build
       shell: bash
@@ -87,12 +97,9 @@ runs:
         CUDA_VERSION: ${{ inputs.cuda_version }}
       run: |
         set -x
-        # Determine image tag
-        if [ -n "${{ inputs.image_tag }}" ]; then
-          IMAGE_TAG="${{ inputs.image_tag }}"
-        else
-          IMAGE_TAG="${{ inputs.framework }}:latest"
-        fi
+
+        IMAGE_TAG="${{ inputs.image_tag }}"
+
 
         CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
 
@@ -126,6 +133,12 @@ runs:
 
         echo "$EXTRA_ARGS"
         # Collect optional overrides provided by the workflow
+
+        if [[ "${{ inputs.ci }}" == "true" ]]; then
+          # CI mode for frontend: use existing buildx builder, push EPP to registry
+          EXTRA_ARGS+=" --ci"
+        fi
+
         if [ -n "${{ inputs.base_image_tag }}" ]; then
           EXTRA_ARGS+="--base-image-tag ${{ inputs.base_image_tag }} "
         fi
@@ -141,16 +154,38 @@ runs:
         if [ -n "${{ inputs.enable_kvbm }}" ]; then
           EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
         fi
+        if [ "${{ inputs.no_cache }}" == "true" ]; then
+          EXTRA_ARGS+=" --no-cache"
+        fi
+        if [ "${{ inputs.use_sccache }}" == "true" ]; then
+          EXTRA_ARGS+=" --build-arg CARGO_BUILD_JOBS=4 --use-sccache"
+        fi
+        if [ "${{ inputs.push_image }}" == "true" ]; then
+          EXTRA_ARGS+=" --push --no-load"
+        elif [ "${{ inputs.no_load }}" == "true" ]; then
+          EXTRA_ARGS+=" --no-load"
+        fi
+
+        # Add extra tags (each as a separate --tag argument)
+        EXTRA_TAGS="${{ inputs.extra_tags }}"
+        if [ -n "$EXTRA_TAGS" ]; then
+          while IFS= read -r EXTRA_TAG; do
+            if [ -n "$EXTRA_TAG" ]; then
+              EXTRA_ARGS+=" --tag ${EXTRA_TAG}"
+            fi
+          done <<< "$EXTRA_TAGS"
+        fi
 
         # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
+          --no-tag-latest \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
-          --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
+          --sccache-region "$AWS_DEFAULT_REGION" \
+          $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
@@ -160,27 +195,6 @@ runs:
         # Exit with the build's exit code
         exit ${BUILD_EXIT_CODE}
 
-    - name: Run Sanity Check on Runtime Image
-      if: inputs.target == 'runtime'
-      shell: bash
-      run: |
-        IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
-        echo "Running sanity check on image: $IMAGE_TAG"
-
-        # Run the sanity check script inside the container
-        # The script is located in /workspace/deploy/sanity_check.py in runtime containers
-        export WORKSPACE=/workspace
-
-        set +e
-        docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
-        SANITY_CHECK_EXIT_CODE=$?
-        set -e
-        if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-          echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-          exit ${SANITY_CHECK_EXIT_CODE}
-        else
-          echo "✅ Sanity check passed"
-        fi
 
     - name: Capture Build Metrics
       id: metrics
@@ -261,7 +275,8 @@ runs:
         chmod +x .github/scripts/parse_buildkit_output.py
 
         # Check for build logs and build stage arguments dynamically
-        BUILD_LOG="build-logs/single-stage-build.log"
+        # Use the BUILD_LOG_FILE set during the build step
+        BUILD_LOG="${{ env.BUILD_LOG_FILE }}"
 
         # Path to container metadata created in previous step
         CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
@@ -316,9 +331,10 @@ runs:
 
     # Upload comprehensive build metrics as artifact
     - name: Upload Comprehensive Build Metrics
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
         name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
+
