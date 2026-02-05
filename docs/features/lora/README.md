@@ -77,14 +77,12 @@ The LoRA system consists of:
 **1. Start Dynamo with LoRA support:**
 
 ```bash
-# Enable LoRA in the worker
-export DYN_LORA_ENABLED=true
-
 # Start vLLM worker with LoRA flags
-dynamo-run in=http out=vllm \
-  --model Qwen/Qwen3-0.6B \
-  --enable-lora \
-  --max-lora-rank 64
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager \
+    --connector none \
+    --enable-lora \
+    --max-lora-rank 64
 ```
 
 **2. Load a LoRA adapter:**
@@ -156,7 +154,7 @@ curl -X POST http://localhost:8081/v1/loras \
 | `--max-lora-rank` | Maximum LoRA rank (must be >= your LoRA's rank) |
 | `--max-loras` | Maximum number of LoRAs to load simultaneously |
 
-## API Reference
+## Backend API Reference
 
 ### Load LoRA
 
