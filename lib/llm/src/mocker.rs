@@ -102,37 +102,26 @@ impl MockVllmEngine {
             tracing::info!(port = port, "Bootstrap server started for prefill worker");
         }
 
-        // Create KV event sink only if prefix caching is enabled and not a decode worker
-        let kv_event_sink: Option<Arc<dyn KvCacheEventSink>> =
-            if self.engine_args.enable_prefix_caching
-                && self.engine_args.worker_type != WorkerType::Decode
-            {
-                tracing::info!(
-                    "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
-                    self.engine_args.block_size,
-                    self.engine_args.enable_local_indexer
-                );
-                match KvEventPublisher::new_with_local_indexer(
-                    component.clone(),
-                    self.engine_args.block_size as u32,
-                    None,
-                    self.engine_args.enable_local_indexer,
-                    0, // dp_rank 0 for the publisher itself; actual dp_rank is set per-scheduler
-                ) {
-                    Ok(publisher) => Some(Arc::new(KvEventSinkAdapter(publisher))),
-                    Err(e) => {
-                        tracing::error!("Failed to create KV event publisher: {e}");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+        // Determine if we need KV event publishers (prefix caching enabled and not decode worker)
+        let needs_kv_publisher = self.engine_args.enable_prefix_caching
+            && self.engine_args.worker_type != WorkerType::Decode;
+
+        if needs_kv_publisher {
+            tracing::info!(
+                "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
+                self.engine_args.block_size,
+                self.engine_args.enable_local_indexer
+            );
+        }
 
         let schedulers = self.start_schedulers(
             self.engine_args.clone(),
             self.active_requests.clone(),
-            kv_event_sink,
+            if needs_kv_publisher {
+                Some(component.clone())
+            } else {
+                None
+            },
             cancel_token.clone(),
         );
 
@@ -152,7 +141,7 @@ impl MockVllmEngine {
         &self,
         args: MockEngineArgs,
         active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
-        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        component: Option<Component>,
         cancel_token: CancellationToken,
     ) -> Vec<Scheduler> {
         let mut schedulers = Vec::<Scheduler>::new();
@@ -163,11 +152,28 @@ impl MockVllmEngine {
             // Create a shared output channel that this scheduler will use
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
+            // Create a KvEventPublisher for THIS dp_rank if component is provided
+            let kv_event_sink: Option<Arc<dyn KvCacheEventSink>> = component.as_ref().and_then(|comp| {
+                match KvEventPublisher::new_with_local_indexer(
+                    comp.clone(),
+                    args.block_size as u32,
+                    None,
+                    args.enable_local_indexer,
+                    dp_rank,
+                ) {
+                    Ok(publisher) => Some(Arc::new(KvEventSinkAdapter(publisher)) as Arc<dyn KvCacheEventSink>),
+                    Err(e) => {
+                        tracing::error!("Failed to create KV event publisher for dp_rank {dp_rank}: {e}");
+                        None
+                    }
+                }
+            });
+
             let scheduler = Scheduler::new(
                 args.clone(),
                 dp_rank,
                 Some(output_tx),
-                kv_event_sink.clone(),
+                kv_event_sink,
                 Some(cancel_token.clone()),
             );
 
