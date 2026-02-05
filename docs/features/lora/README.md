@@ -23,7 +23,7 @@ See the [Feature Matrix](../../reference/feature-matrix.md) for full compatibili
 Dynamo's LoRA implementation provides:
 
 - **Dynamic loading**: Load and unload LoRA adapters at runtime without restarting workers
-- **Multiple sources**: Load from local filesystem (`file://`) or S3-compatible storage (`s3://`)
+- **Multiple sources**: Load from local filesystem (`file://`), S3-compatible storage (`s3://`), or Hugging Face Hub (`hf://`)
 - **Automatic caching**: Downloaded adapters are cached locally to avoid repeated downloads
 - **Discovery integration**: Loaded LoRAs are automatically registered and discoverable via `/v1/models`
 - **KV-aware routing**: Route requests to workers with the appropriate LoRA loaded
@@ -31,7 +31,7 @@ Dynamo's LoRA implementation provides:
 
 ### Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        LoRA Architecture                         │
 ├─────────────────────────────────────────────────────────────────┤
@@ -162,7 +162,7 @@ curl -X POST http://localhost:8081/v1/loras \
 
 Load a LoRA adapter from a source URI.
 
-```
+```text
 POST /v1/loras
 ```
 
@@ -190,7 +190,7 @@ POST /v1/loras
 
 List all loaded LoRA adapters.
 
-```
+```text
 GET /v1/loras
 ```
 
@@ -210,7 +210,7 @@ GET /v1/loras
 
 Unload a LoRA adapter from the worker.
 
-```
+```text
 DELETE /v1/loras/{lora_name}
 ```
 
