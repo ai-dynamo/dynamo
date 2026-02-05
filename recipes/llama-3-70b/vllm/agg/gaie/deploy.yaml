@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:0.8.0
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:decomp-1
       eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:
@@ -44,8 +44,10 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:decomp-1
           workingDir: /workspace/examples/backends/vllm
+          args:
+            - --direct-route
       envs:
         - name: HF_HOME
           value: /opt/models
@@ -74,7 +76,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:decomp-1
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
