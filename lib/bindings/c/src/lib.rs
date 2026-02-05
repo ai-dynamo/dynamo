@@ -975,15 +975,17 @@ pub unsafe extern "C" fn route_request(
     // Query workers using internal methods
     let result = handles.runtime.secondary().block_on(async {
         // Query prefill worker if disaggregated
+        // Note: update_states=false because add_request() is called separately for bookkeeping
         let prefill_worker_id = if is_disaggregated {
-            handles.query_prefill_worker(tokens, true, None).await?.0
+            handles.query_prefill_worker(tokens, false, None).await?.0
         } else {
             0
         };
 
         // Query decode worker
+        // Note: update_states=false because add_request() is called separately for bookkeeping
         let (decode_worker, overlap_blocks) = handles
-            .query_decode_worker(tokens, true, is_disaggregated)
+            .query_decode_worker(tokens, false, is_disaggregated)
             .await?;
 
         tracing::info!(
