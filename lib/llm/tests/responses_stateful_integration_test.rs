@@ -21,7 +21,7 @@ use dynamo_llm::{
     http::middleware::session::{RequestSession, extract_session_middleware},
     storage::{
         InMemoryResponseStorage, InMemorySessionLock, LockError, ResponseStorage, SessionLock,
-        StorageError, parse_trace_content, parse_trace_file, replay_trace,
+        StorageError, parse_trace_content, replay_trace,
     },
 };
 use serde_json::json;
@@ -379,13 +379,13 @@ async fn test_concurrent_sessions_same_tenant() {
             });
 
             let response_id = storage
-                .store_response(&tenant_id, &session_id, None, response_data.clone(), None)
+                .store_response(tenant_id, &session_id, None, response_data.clone(), None)
                 .await
                 .unwrap();
 
             // Verify retrieval
             let retrieved = storage
-                .get_response(&tenant_id, &session_id, &response_id)
+                .get_response(tenant_id, &session_id, &response_id)
                 .await
                 .unwrap();
 
