@@ -19,7 +19,7 @@ import re
 from collections import defaultdict
 
 from aiperf.common.tokenizer import Tokenizer
-from aiperf.dataset.synthesis.rolling_hasher import texts_to_hashes
+from aiperf.dataset.synthesis.rolling_hasher import RollingHasher
 from tqdm import tqdm
 
 
@@ -49,8 +49,8 @@ def parse_args():
     parser.add_argument(
         "--block-size",
         type=int,
-        default=128,
-        help="Block size for hash generation (default: 128)",
+        default=64,
+        help="Block size for hash generation (default: 64)",
     )
     parser.add_argument(
         "--num-requests",
@@ -63,6 +63,12 @@ def parse_args():
         type=int,
         default=0,
         help="Skip the first N requests (default: 0)",
+    )
+    parser.add_argument(
+        "--delay",
+        type=int,
+        default=500,
+        help="Delay in ms to add between LLM calls within a session (simulates tool call timing). If not specified, no delay field is added.",
     )
     return parser.parse_args()
 
@@ -173,6 +179,39 @@ def extract_llm_calls(request: dict) -> list[dict]:
     return llm_calls
 
 
+def texts_to_hashes_and_lengths(
+    tokenizer: Tokenizer,
+    texts: list[str],
+    block_size: int,
+) -> tuple[list[list[int]], list[int]]:
+    """
+    Convert texts to hash IDs and token lengths.
+
+    Returns:
+        Tuple of (hash_ids_list, token_lengths) where:
+        - hash_ids_list: List of hash ID sequences, one per input text
+        - token_lengths: List of token counts, one per input text
+    """
+    hasher = RollingHasher(block_size=block_size)
+    hash_results: list[list[int]] = []
+    length_results: list[int] = []
+
+    for text in texts:
+        tokens = tokenizer.encode(text)
+        length_results.append(len(tokens))
+
+        blocks: list[list[int]] = [
+            tokens[i : i + block_size] for i in range(0, len(tokens), block_size)
+        ]
+        if blocks:
+            hashes = hasher.hash_token_blocks(blocks)
+            hash_results.append(hashes)
+        else:
+            hash_results.append([])
+
+    return hash_results, length_results
+
+
 def chat_inputs_to_text(chat_inputs: list) -> str:
     """
     Convert chat_inputs array to a single text string for hashing.
@@ -200,6 +239,7 @@ def convert_to_mooncake(
     block_size: int,
     skip_requests: int = 0,
     num_requests: int | None = None,
+    delay: int | None = None,
 ) -> list[dict]:
     """
     Convert NAT requests to mooncake format.
@@ -210,6 +250,7 @@ def convert_to_mooncake(
         block_size: Block size for hash generation
         skip_requests: Number of requests to skip
         num_requests: Maximum number of requests to process
+        delay: Delay in ms to add between LLM calls within a session
 
     Returns:
         List of mooncake-format dicts
@@ -222,7 +263,7 @@ def convert_to_mooncake(
     print(f"Processing {len(requests)} requests...")
 
     # Phase 1: Collect all texts and metadata
-    all_entries = []  # List of (session_id, prompt_tokens, completion_tokens, text)
+    all_entries = []  # List of (session_id, completion_tokens, text)
 
     for req in tqdm(requests, desc="Extracting LLM calls"):
         request_number = req.get("request_number", 0)
@@ -235,10 +276,6 @@ def convert_to_mooncake(
             continue
 
         for call in llm_calls:
-            # Skip calls with zero tokens (might be incomplete)
-            if call["prompt_tokens"] == 0:
-                continue
-
             # Convert chat_inputs to text for hashing
             text = chat_inputs_to_text(call["chat_inputs"])
 
@@ -251,7 +288,6 @@ def convert_to_mooncake(
             all_entries.append(
                 (
                     session_id,
-                    call["prompt_tokens"],
                     call["completion_tokens"],
                     text,
                 )
@@ -261,24 +297,33 @@ def convert_to_mooncake(
         print("No valid LLM calls found")
         return []
 
-    # Phase 2: Batch hash all texts at once (single hasher instance)
-    all_texts = [entry[3] for entry in all_entries]
-    print(f"Hashing {len(all_texts)} texts...")
+    # Phase 2: Tokenize texts to get hash IDs and token lengths
+    all_texts = [entry[2] for entry in all_entries]
+    print(f"Tokenizing and hashing {len(all_texts)} texts...")
 
     tokenizer = Tokenizer.from_pretrained(tokenizer_name)
-    all_hash_ids = texts_to_hashes(tokenizer, all_texts, block_size)
+    all_hash_ids, all_input_lengths = texts_to_hashes_and_lengths(
+        tokenizer, all_texts, block_size
+    )
 
     # Phase 3: Build mooncake entries
     mooncake_data = []
-    for (session_id, prompt_tokens, completion_tokens, _), hash_ids in zip(
-        all_entries, all_hash_ids, strict=True
+    seen_sessions = set()
+    for (session_id, completion_tokens, _), hash_ids, input_length in zip(
+        all_entries, all_hash_ids, all_input_lengths, strict=True
     ):
         mooncake_entry = {
             "session_id": session_id,
-            "input_length": prompt_tokens,
+            "input_length": input_length,
             "output_length": completion_tokens,
             "hash_ids": hash_ids,
         }
+        # Add delay for all but the first entry in each session
+        if delay is not None:
+            if session_id in seen_sessions:
+                mooncake_entry["delay"] = delay
+            else:
+                seen_sessions.add(session_id)
         mooncake_data.append(mooncake_entry)
 
     return mooncake_data
@@ -386,6 +431,7 @@ def main():
         args.block_size,
         skip_requests=args.skip_requests,
         num_requests=args.num_requests,
+        delay=args.delay,
     )
 
     # Print statistics
