@@ -136,6 +136,8 @@ class GMSMemorySaverImpl:
             self._pause_weights()
         if tag is None or not self._is_weights_tag(tag):
             self._torch_impl.pause(tag=tag)
+            # Ensure KV cache unmap operations complete before returning.
+            torch.cuda.synchronize()
 
     def resume(self, tag: Optional[str] = None) -> None:
         if self._disabled:
@@ -144,6 +146,9 @@ class GMSMemorySaverImpl:
             self._resume_weights()
         if tag is None or not self._is_weights_tag(tag):
             self._torch_impl.resume(tag=tag)
+            # Ensure KV cache mappings are complete before returning.
+            # Without this sync, inference may start before mappings are ready.
+            torch.cuda.synchronize()
 
     def _pause_weights(self) -> None:
         if self._allocator is None:
@@ -152,6 +157,10 @@ class GMSMemorySaverImpl:
             return
         logger.info("[GMS] Unmapping weights (VA-stable)")
         self._allocator.unmap()
+        # Ensure all CUDA VMM unmap operations complete before returning.
+        # Without this sync, resume() may race with pending unmaps, causing OOM
+        # when it tries to allocate new memory while old memory is still mapped.
+        torch.cuda.synchronize()
 
     def _resume_weights(self) -> None:
         if self._allocator is None:

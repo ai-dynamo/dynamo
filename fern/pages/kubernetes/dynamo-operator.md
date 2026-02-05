@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Working with Dynamo Kubernetes Operator"
 ---
+
+# Working with Dynamo Kubernetes Operator
 
 ## Overview
 
@@ -132,7 +133,33 @@ The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validat
 
 For complete documentation on webhooks, certificate management, and troubleshooting, see:
 
-**📖 [Webhooks Guide](webhooks.md)**
+**[Webhooks Guide](webhooks.md)**
+
+## Observability
+
+The Dynamo Operator provides comprehensive observability through Prometheus metrics and Grafana dashboards. This allows you to monitor:
+
+- **Controller Performance**: Reconciliation loop duration, success rates, and error rates by resource type
+- **Webhook Activity**: Validation performance, admission rates, and denial patterns
+- **Resource Inventory**: Current count of managed resources by state and namespace
+- **Operational Health**: Success rates and health indicators for controllers and webhooks
+
+### Metrics Collection
+
+Metrics are automatically exposed on the operator's `/metrics` endpoint (port 8443 by default) and collected by Prometheus via a ServiceMonitor. The ServiceMonitor is automatically created when you install the operator via Helm (controlled by `metricsService.enabled`, which defaults to `true`).
+
+### Grafana Dashboard
+
+A pre-built Grafana dashboard is available for visualizing operator metrics. The dashboard includes:
+
+- **Reconciliation Metrics**: Rate, duration (P95), and errors by resource type
+- **Webhook Metrics**: Request rate, duration (P95), and denials by resource type and operation
+- **Resource Inventory**: Count of DynamoGraphDeployments by state and namespace
+- **Operational Health**: Success rate gauges for controllers and webhooks
+
+For complete setup instructions and metrics reference, see:
+
+**[Operator Metrics Guide](observability/operator-metrics.md)**
 
 ## Installation
 
