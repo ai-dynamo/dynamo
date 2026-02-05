@@ -23,7 +23,9 @@ SHELL ["/bin/bash", "-c"]
 # This stage only installs generic developer tools that are available from Ubuntu repos, so CUDA repos are unnecessary.
 #
 # We also add a small retry/backoff to make transient apt metadata issues less disruptive.
-RUN set -eux; \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    set -eux; \
     if [ -d /etc/apt/sources.list.d ]; then \
         mkdir -p /tmp/apt-disabled; \
         for f in /etc/apt/sources.list.d/*.list; do \
@@ -107,7 +109,9 @@ RUN set -eux; \
 
 # Install awk separately with fault tolerance.
 # awk is a virtual package with multiple implementations (gawk, mawk, original-awk).
-RUN (apt-get update && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    (apt-get update && \
      (apt-get install -y --no-install-recommends gawk || \
       apt-get install -y --no-install-recommends mawk || \
       apt-get install -y --no-install-recommends original-awk || \
@@ -116,8 +120,9 @@ RUN (apt-get update && \
     (command -v awk >/dev/null 2>&1 && echo "awk available: $(command -v awk)" || echo "awk not available")
 
 # Add NVIDIA devtools repository and install development tools (nsight-systems).
-RUN wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" | \
-        gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" | \        gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
     echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH} /" | \
         tee /etc/apt/sources.list.d/nvidia-devtools.list && \
     apt-get update && \
@@ -297,13 +302,14 @@ RUN git lfs install
 ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
-    UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 uv pip install \
+    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt \
-        cupy-cuda13x && \
+        --requirement /tmp/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
     fi
@@ -316,8 +322,10 @@ COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
 RUN chmod g+w ${WORKSPACE_DIR}
 
 # Install benchmarks package (includes prefix_data_generator, tabulate, etc.)
-RUN cd ${WORKSPACE_DIR}/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    cd ${WORKSPACE_DIR}/benchmarks && \
+    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install .
 
 # Install maturin and create editable install entry points.
 #
@@ -326,11 +334,15 @@ RUN cd ${WORKSPACE_DIR}/benchmarks && \
 #   /opt/dynamo/venv/bin and put that venv on PATH, so `uv` is expected to be available here in normal builds.
 # - The `command -v uv` guard is defensive: on SGLang, `uv` needs to "disappear" from PATH and we fall back to
 #   `python3 -m pip` so the editable install can still proceed (instead of failing mid-layer with a confusing error).
-RUN if [ -f pyproject.toml ]; then \
+# Cache uv downloads; uv handles its own locking for this cache.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 PIP_CACHE_DIR=/root/.cache/pip && \
+    if [ -f pyproject.toml ]; then \
         if command -v uv >/dev/null 2>&1; then \
-            uv pip install --no-cache maturin[patchelf] && uv pip install --no-deps -e . ; \
+            uv pip install maturin[patchelf] && uv pip install --no-deps -e . ; \
         else \
-            python3 -m pip install --no-cache-dir maturin[patchelf] && python3 -m pip install --no-deps -e . ; \
+            python3 -m pip install maturin[patchelf] && python3 -m pip install --no-deps -e . ; \
         fi; \
     else \
         echo "ERROR: pyproject.toml not found in ${WORKSPACE_DIR}; expected to build from the Dynamo repo root." >&2; \
@@ -338,6 +350,7 @@ RUN if [ -f pyproject.toml ]; then \
     fi && \
     chmod -R g+w /root/.cache /home/dynamo/.cache 2>/dev/null || true
 
+# Set commit SHA for tests (passed via docker build as --build-arg)
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 

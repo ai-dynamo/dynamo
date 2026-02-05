@@ -161,7 +161,7 @@ jobs:
           echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
           echo "framework: ${{ inputs.framework }}"
           echo "target: runtime"
-          echo "platform: linux/${{ inputs.platform }}"
+          echo "platform: ${{ inputs.platform }}"
           echo "cuda_version: ${{ inputs.cuda_version }}"
           echo "no_cache: ${{ inputs.no_cache }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
@@ -175,7 +175,7 @@ jobs:
           image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
           framework: ${{ inputs.framework }}
           target: runtime
-          platform: linux/${{ inputs.platform }}
+          platform: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}

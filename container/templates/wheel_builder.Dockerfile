@@ -106,7 +106,10 @@ ENV CUDA_PATH=/usr/local/cuda \
 # Create virtual environment for building wheels
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
-RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
+# Cache uv downloads; uv handles its own locking for this cache.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
@@ -305,6 +308,8 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
@@ -320,10 +325,14 @@ COPY launch/ /opt/dynamo/launch/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build dynamo wheels
+# Build dynamo wheels. The caches do not need the "shared" lock because Cargo has its own locking mechanism.
 ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \

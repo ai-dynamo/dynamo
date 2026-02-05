@@ -197,8 +197,9 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-RUN uv pip install \
-      --no-cache \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
@@ -208,7 +209,7 @@ RUN uv pip install \
             echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
             exit 1; \
         fi; \
-        uv pip install --no-cache "$GMS_WHEEL"; \
+        uv pip install "$GMS_WHEEL"; \
     fi && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
@@ -216,7 +217,7 @@ RUN uv pip install \
             echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
             exit 1; \
         fi; \
-        uv pip install --no-cache "$KVBM_WHEEL"; \
+        uv pip install "$KVBM_WHEEL"; \
     fi && \
     cd /workspace/benchmarks && \
     UV_GIT_LFS=1 uv pip install --no-cache . && \
@@ -226,7 +227,9 @@ RUN uv pip install \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \

@@ -23,7 +23,9 @@ COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 ARG PYTHON_VERSION
 
-RUN apt-get update -y \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
@@ -46,6 +48,7 @@ RUN ln -sf /usr/lib/aarch64-linux-gnu/libmlx5.so.1 /usr/lib/aarch64-linux-gnu/li
 
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
+    export UV_CACHE_DIR=/root/.cache/uv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
 # Activate virtual environment
@@ -69,6 +72,7 @@ ENV CUDA_HOME=/usr/local/cuda
 # Install VLLM and related dependencies
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
     /tmp/install_vllm.sh \

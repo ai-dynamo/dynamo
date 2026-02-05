@@ -17,7 +17,7 @@ dynamo:
   etcd_version: v3.5.21
 
   nixl_ref: 0.9.0
-  nixl_ucx_ref: v1.19.0
+  nixl_ucx_ref: v1.20.0
   nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
   nixl_libfabric_ref: v2.3.0

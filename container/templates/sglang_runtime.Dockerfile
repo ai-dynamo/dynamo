@@ -30,7 +30,9 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-RUN apt-get update && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # required for verification of GPG keys
         gnupg2 \
@@ -58,7 +60,9 @@ ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 # Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
-    pip install --no-cache-dir --break-system-packages \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
@@ -74,14 +78,16 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
 
 # Install common and test dependencies as root
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
-    pip install --no-cache-dir --break-system-packages \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
         --requirement /mnt/local_src/container/deps/requirements.test.txt \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
-    pip install --break-system-packages --no-cache . && \
+    pip install --break-system-packages . && \
     #TODO: Temporary change until upstream sglang runtime image is updated
-    pip install --no-cache-dir --break-system-packages "urllib3>=2.6.3" && \
+    pip install --break-system-packages "urllib3>=2.6.3" && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks && \
     # Install NVIDIA packages based on CUDA version
@@ -89,13 +95,13 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
     if [ "$CUDA_MAJOR" = "12" ]; then \
         # Install NVIDIA packages that are needed for DeepEP to work properly
         # This is done in the upstream runtime image too, but these packages are overridden in earlier commands
-        pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+        pip install --break-system-packages --force-reinstall --no-deps \
             nvidia-nccl-cu12==2.28.3 \
             nvidia-cudnn-cu12==9.16.0.29 \
             nvidia-cutlass-dsl==4.3.5; \
     elif [ "$CUDA_MAJOR" = "13" ]; then \
         # CUDA 13: Install CuDNN for PyTorch 2.9.1 compatibility
-        pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+        pip install --break-system-packages --force-reinstall --no-deps \
             nvidia-nccl-cu13==2.28.3 \
             nvidia-cublas==13.1.0.3 \
             nvidia-cutlass-dsl==4.3.1 \

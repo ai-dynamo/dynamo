@@ -28,7 +28,9 @@ COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 # Install minimal dependencies needed for TensorRT-LLM installation
 ARG PYTHON_VERSION
-RUN apt-get update && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python${PYTHON_VERSION}-dev \
         python3-pip \
@@ -41,6 +43,7 @@ RUN apt-get update && \
 
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
+    export UV_CACHE_DIR=/root/.cache/uv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
@@ -97,7 +100,10 @@ COPY --from=trtllm_wheel / /trtllm_wheel/
 {%- endif -%}
 COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
 
-RUN uv pip install --no-cache "cuda-python==13.0.2"
+# Cache uv downloads; uv handles its own locking for this cache.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install "cuda-python==13.0.2"
 
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
@@ -108,11 +114,18 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     rm -f /usr/share/keyrings/cuda-archive-keyring.gpg && \
     rm -f /etc/apt/trusted.gpg.d/cuda*.gpg
 
-RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
+        # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
+        curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh" && \
+        # Modify the script to use virtual environment pip instead of system pip3
+        sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
+        bash /tmp/install_tensorrt.sh && \
         # Install from local wheel directory in build context
         WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
-            uv pip install --no-cache "$WHEEL_FILE" triton==3.5.1; \
+            uv pip install "$WHEEL_FILE" triton==3.5.1; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
@@ -120,7 +133,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
     elif [ -n "$(find /trtllm_wheel_image -name "*.whl" | head -n 1)" ]; then \
         # Install from wheel embedded in the TRTLLM release image
         WHEEL_FILE="$(find /trtllm_wheel_image -name "*.whl" | head -n 1)"; \
-        uv pip install --no-cache "$WHEEL_FILE" triton==3.5.1; \
+        uv pip install "$WHEEL_FILE" triton==3.5.1; \
     else \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc6.post2 has issues installing from pypi with uv, installing from direct wheel link works best
@@ -129,9 +142,9 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
             PYTHON_TAG="cp$(echo ${PYTHON_VERSION} | tr -d '.')"; \
             DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${ARCH_ALT}.whl"; \
-            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.1; \
+            uv pip install --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.1; \
         else \
-            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.1; \
+            uv pip install --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.1; \
         fi; \
     fi && \
     # Run TensorRT installer that ships with the TRTLLM wheel

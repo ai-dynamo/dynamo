@@ -47,7 +47,9 @@ COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/whe
 # Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
 # This is needed to create venv and install dynamo packages
 ARG PYTHON_VERSION
-RUN apt-get update && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv && \
@@ -62,15 +64,21 @@ ENV HOME=/home/dynamo
 # Create and activate virtual environment
 # Use login shell to pick up umask 002 from /etc/profile.d/00-umask.sh for group-writable files
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-RUN uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
+# Cache uv downloads; uv handles its own locking for the cache.
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Install dynamo wheels (runtime packages only, no test dependencies)
+# uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN uv pip install \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \

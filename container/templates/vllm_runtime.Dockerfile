@@ -71,7 +71,9 @@ ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 # Install Python, build-essential and python3-dev as apt dependencies
-RUN apt-get update && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
     CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&\
     CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1) && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -179,7 +181,9 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-RUN uv pip install \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
@@ -200,15 +204,17 @@ RUN uv pip install \
         uv pip install "$KVBM_WHEEL"; \
     fi && \
     cd /workspace/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache . && \
+    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
 
-# Install common and test dependencies
+# Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
