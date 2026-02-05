@@ -222,8 +222,10 @@ class DeletePod(Event):
         for service_name, pods in service_pod_dict.items():
             for pod in pods:
                 ctx.logger.info(f"Deleting pod {pod.name} (service: {service_name})")
-                ctx.deployment.get_pod_manifest_logs_metrics(
-                    service_name, pod, ".before_delete"
+                ctx.deployment._get_pod_manifest(pod, service_name, ".before_delete")
+                ctx.deployment._get_pod_logs(pod, service_name, ".before_delete")
+                await ctx.deployment._get_pod_metrics(
+                    pod, service_name, ".before_delete"
                 )
                 pod.delete(force=self.force)
 
@@ -361,3 +363,35 @@ class WaitForLogPattern(Event):
     @property
     def description(self) -> str:
         return f"Wait for '{self.pattern}' in {self.service} logs"
+
+
+@dataclass
+class TerminateProcess(Event):
+    """Terminate a process by name in service pods."""
+
+    services: list[str]
+    process_name: str  # e.g., "dynamo.runtime", "python", etc.
+    signal: str = "SIGKILL"
+    name: str = ""
+    results: dict[str, Any] | None = field(default=None, init=False)
+
+    async def execute(self, ctx: "ScenarioContext") -> None:
+        ctx.logger.info(
+            f"Terminating process '{self.process_name}' in services: {self.services}"
+        )
+        service_pod_dict = ctx.deployment.get_pods(self.services)
+        for service_name, pods in service_pod_dict.items():
+            for pod in pods:
+                processes = ctx.deployment.get_processes(pod)
+                for proc in processes:
+                    if self.process_name in proc.command:
+                        ctx.logger.info(
+                            f"Killing process {proc.pid} ({proc.command[:50]}...) "
+                            f"with {self.signal}"
+                        )
+                        proc.kill(signal=self.signal)
+                        break
+
+    @property
+    def description(self) -> str:
+        return f"Terminate '{self.process_name}' in {', '.join(self.services)}"

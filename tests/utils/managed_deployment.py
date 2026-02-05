@@ -1145,15 +1145,20 @@ class ManagedDeployment:
 
         return result
 
-    def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
+    def _get_pod_manifest(self, pod: Pod, service_name: str, suffix=""):
+        """Save pod manifest (YAML). Sync - no pod exec needed."""
         directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
-
         try:
             with open(os.path.join(directory, f"{pod.name}{suffix}.yaml"), "w") as f:
                 f.write(pod.to_yaml())
         except Exception as e:
             self._logger.error(e)
+
+    def _get_pod_logs(self, pod: Pod, service_name: str, suffix=""):
+        """Save pod logs (current + previous). Sync - uses K8s logs API."""
+        directory = os.path.join(self.log_dir, service_name)
+        os.makedirs(directory, exist_ok=True)
         try:
             with open(os.path.join(directory, f"{pod.name}{suffix}.log"), "w") as f:
                 f.write("\n".join(pod.logs()))
@@ -1168,64 +1173,55 @@ class ManagedDeployment:
         except Exception as e:
             self._logger.debug(e)
 
-        self._get_pod_metrics(pod, service_name, suffix)
-
-    def _get_service_logs(self, service_name=None, suffix=""):
-        service_names = None
-        if service_name:
-            service_names = [service_name]
-
+    async def _get_service_logs(self, service_name=None, suffix=""):
+        """Collect manifest, logs, and metrics for all pods."""
+        service_names = [service_name] if service_name else None
         service_pods = self.get_pods(service_names)
 
         for service, pods in service_pods.items():
             for pod in pods:
-                self.get_pod_manifest_logs_metrics(service, pod, suffix)
+                self._get_pod_manifest(pod, service, suffix)
+                self._get_pod_logs(pod, service, suffix)
+                await self._get_pod_metrics(pod, service, suffix)
 
-    def _get_pod_metrics(
+    async def _get_pod_metrics(
         self, pod: Pod, service_name: str, suffix="", use_services_dir: bool = False
     ):
-        # When using PVC-based collection, save to services/{service_lowercase}/
-        # to match the PVC log extraction path
+        """Fetch HTTP metrics. Async - needs exec for timestamp."""
         if use_services_dir:
             directory = os.path.join(self.log_dir, "services", service_name.lower())
         else:
             directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
-        port = None
-        if service_name == self.frontend_service_name:
-            port = self.deployment_spec.port
-        else:
-            port = self.deployment_spec.system_port
+
+        port = (
+            self.deployment_spec.port
+            if service_name == self.frontend_service_name
+            else self.deployment_spec.system_port
+        )
 
         pf = self.port_forward(pod, port)
-
         if not pf:
             self._logger.error(f"Unable to get metrics for {service_name}")
             return
 
         content = None
-
         try:
-            url = f"http://localhost:{pf.local_port}/metrics"
-
-            response = requests.get(url, timeout=30)
-            content = None
-            try:
-                content = response.text
-            except ValueError:
-                pass
-
+            response = requests.get(
+                f"http://localhost:{pf.local_port}/metrics", timeout=30
+            )
+            content = response.text
         except Exception as e:
             self._logger.error(str(e))
 
         if content:
-            with open(
-                os.path.join(directory, f"{pod.name}.metrics{suffix}.log"), "w"
-            ) as f:
+            timestamp = await self._get_container_timestamp(pod)
+            filename = f"{pod.name}_{timestamp}.metrics{suffix}.log"
+            with open(os.path.join(directory, filename), "w") as f:
                 f.write(content)
 
-    def _collect_service_metrics(self, use_services_dir: bool = True):
-        """Collect metrics from all services.
+    async def _collect_service_metrics(self, use_services_dir: bool = True):
+        """Collect only HTTP metrics from all services.
 
         Args:
             use_services_dir: If True, save to services/{service}/ directory
@@ -1237,7 +1233,7 @@ class ManagedDeployment:
         for service, pods in service_pods.items():
             for pod in pods:
                 try:
-                    self._get_pod_metrics(
+                    await self._get_pod_metrics(
                         pod, service, use_services_dir=use_services_dir
                     )
                 except Exception as e:
@@ -1266,6 +1262,21 @@ class ManagedDeployment:
             asyncio.create_task(asyncio.to_thread(pod.exec, command)),
             timeout=timeout,
         )
+
+    async def _get_container_timestamp(self, pod: Pod) -> str:
+        """Read container start timestamp written by wrapper script.
+
+        The wrapper script writes the timestamp to /tmp/.{pod_name}.start_time
+        This ensures exact match with service log filenames.
+        """
+        try:
+            result = await self._exec_in_pod(
+                pod, ["cat", f"/tmp/.{pod.name}.start_time"], timeout=5.0
+            )
+            return result.stdout.decode().strip()
+        except Exception:
+            # Fallback if timestamp file doesn't exist
+            return str(int(time.time()))
 
     async def _delete_deployment(self):
         """
@@ -1406,11 +1417,11 @@ class ManagedDeployment:
         try:
             # Collect logs via K8s API only if PVC-based collection is not enabled
             if not self.enable_volume_log_collection:
-                self._get_service_logs()
+                await self._get_service_logs()
             else:
                 # When using PVC-based collection, still collect metrics
                 # (metrics are fetched via HTTP, not from PVC)
-                self._collect_service_metrics(use_services_dir=True)
+                await self._collect_service_metrics(use_services_dir=True)
 
             # Stop port forwards
             self._logger.info(
@@ -2028,12 +2039,16 @@ fi
             },
         }
 
+        batch_api = client.BatchV1Api()
+        job_created = False
+        verification_error = None
+
         try:
             # Create the verification job
-            batch_api = client.BatchV1Api()
             await batch_api.create_namespaced_job(
                 namespace=self.namespace, body=job_spec
             )
+            job_created = True
             self._logger.info(f"Created PVC verification job: {job_name}")
 
             # Wait for job to complete (pod started = PVC bound)
@@ -2050,21 +2065,14 @@ fi
                             f"PVC {pvc_name} verified - bound successfully"
                         )
                         self._log_collection_pvc_verified = True
-                        # Cleanup job
-                        await batch_api.delete_namespaced_job(
-                            name=job_name,
-                            namespace=self.namespace,
-                            body=client.V1DeleteOptions(
-                                propagation_policy="Background"
-                            ),
-                        )
                         return
 
                     # Check if job failed
                     if job.status.failed and job.status.failed > 0:
-                        raise RuntimeError(
+                        verification_error = RuntimeError(
                             "PVC verification job failed - storage class may not support RWX"
                         )
+                        break
 
                     # Check pod status for more details
                     pods = await self._core_api.list_namespaced_pod(
@@ -2102,26 +2110,48 @@ fi
                         self._logger.warning(f"Error checking verification job: {e}")
 
                 await asyncio.sleep(2)
-
-            # Timeout - cleanup and fail
-            try:
-                await batch_api.delete_namespaced_job(
-                    name=job_name,
-                    namespace=self.namespace,
-                    body=client.V1DeleteOptions(propagation_policy="Background"),
+            else:
+                # Timeout reached
+                verification_error = RuntimeError(
+                    f"PVC '{pvc_name}' failed to bind within {timeout}s.\n"
+                    f"Storage class '{storage_class}' does not support ReadWriteMany (RWX) access mode.\n"
+                    f"Multi-pod log collection requires RWX. Please use a different storage class."
                 )
-            except Exception:
-                pass
-
-            raise RuntimeError(
-                f"PVC '{pvc_name}' failed to bind within {timeout}s.\n"
-                f"Storage class '{storage_class}' does not support ReadWriteMany (RWX) access mode.\n"
-                f"Multi-pod log collection requires RWX. Please use a different storage class."
-            )
 
         except exceptions.ApiException as e:
             self._logger.error(f"Failed to create PVC verification job: {e}")
             raise
+
+        finally:
+            # Always cleanup the verification job and its pods
+            if job_created:
+                try:
+                    self._logger.info(f"Cleaning up PVC verification job: {job_name}")
+                    # Use Foreground propagation to ensure pods are deleted too
+                    await batch_api.delete_namespaced_job(
+                        name=job_name,
+                        namespace=self.namespace,
+                        body=client.V1DeleteOptions(propagation_policy="Foreground"),
+                    )
+                    # Wait briefly for cleanup to complete
+                    for _ in range(10):
+                        try:
+                            await batch_api.read_namespaced_job(
+                                name=job_name, namespace=self.namespace
+                            )
+                            await asyncio.sleep(1)
+                        except exceptions.ApiException as e:
+                            if e.status == 404:
+                                break
+                    self._logger.info(f"PVC verification job {job_name} cleaned up")
+                except Exception as cleanup_error:
+                    self._logger.warning(
+                        f"Failed to cleanup verification job {job_name}: {cleanup_error}"
+                    )
+
+        # Raise any verification error after cleanup
+        if verification_error:
+            raise verification_error
 
     async def _cleanup_log_collection_pvc(self):
         """
