@@ -60,6 +60,7 @@ Quickstart
 
    Tool Calling <agents/tool-calling.md>
    Multimodality Support <features/multimodal/README.md>
+   LoRA Adapters <features/lora/README.md>
    Finding Best Initial Configs <performance/aiconfigurator.md>
    Benchmarking <benchmarks/benchmarking.md>
    Tuning Disaggregated Performance <performance/tuning.md>
