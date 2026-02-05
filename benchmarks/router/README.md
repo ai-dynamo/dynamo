@@ -41,7 +41,8 @@ This will start both etcd and NATS with the required configurations in the backg
 - **`ping.sh`** - Simple test script to verify the setup is working
 - **`prefix_ratio_benchmark.py`** - Main benchmarking script that sweeps prefix ratios
 - **`real_data_benchmark.py`** - Benchmarking script that uses real mooncake-style trace data
-- **`plot_prefix_ratio_comparison.py`** - Generates comparison plots from benchmark results
+- **`agent_benchmark.py`** - Concurrency-based benchmarking for multi-turn conversation traces
+- **`mock_server.py`** - Simple mock server to receive and log requests from aiperf
 
 ## Usage Instructions
 
