@@ -435,7 +435,12 @@ impl ModelWatcher {
             // handle Chat or Completions requests, so handle whatever the model supports.
 
             let endpoint = component.endpoint(&mcid.endpoint);
-            let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
+            // Only create the KV router when there is no engine_factory. When an
+            // engine_factory is provided (e.g. --processor vllm), the factory
+            // creates its own KvPushRouter with its own event subscription.
+            let kv_chooser = if self.engine_factory.is_none()
+                && self.router_config.router_mode == RouterMode::KV
+            {
                 Some(
                     self.manager
                         .kv_chooser_for(
@@ -518,8 +523,9 @@ impl ModelWatcher {
                 tracing::info!("Chat completions is ready");
             }
 
-            // Add completions engine only if the model supports completions
-            if card.model_type.supports_completions() {
+            // Add completions engine only if the model supports completions.
+            // Skip when engine_factory is provided, only chat completions are supported there.
+            if self.engine_factory.is_none() && card.model_type.supports_completions() {
                 let formatter = PromptFormatter::no_op();
                 let PromptFormatter::OAI(formatter) = formatter;
                 let preprocessor = OpenAIPreprocessor::new_with_parts(
