@@ -69,16 +69,16 @@ PushRouter.generate_with_fault_detection() needs instance details (transport, ad
 - [x] Rename classes: `MultiPoolManager` → `WorkerSetManager`, `WorkerPool` → `WorkerSet`
 - [x] Update all imports and references
 
-### Phase 2: WorkerSet with Client ✓
-- [ ] Add `client: Client` field to WorkerSet
-- [ ] Add `new()` async method to create Client for the set's namespace
-- [ ] Add `instance_ids()`, `select_random()`, `select_round_robin()` methods
-- [ ] Remove workers DashMap (derive from client.instances() instead)
+### Phase 2: WorkerSet with Client ✅
+- [x] Add `client: Client` field to WorkerSet
+- [x] Add `new()` async method to create Client for the set's namespace
+- [x] Add `instance_ids()`, `select_random()`, `select_round_robin()` methods
+- [x] Worker count now derived from client.instance_ids() (live data)
 
-### Phase 3: WorkerSetManager Updates ✓
-- [ ] Update `add_worker()` to create WorkerSets with Clients
-- [ ] Add `find_set_for_instance(instance_id) -> Option<Arc<WorkerSet>>`
-- [ ] Pass DistributedRuntime to manager for Client creation
+### Phase 3: WorkerSetManager Updates ✅
+- [x] Update `add_worker()` to create WorkerSets with Clients (now async)
+- [x] Add `find_set_for_instance(instance_id) -> Option<Arc<WorkerSet>>`
+- [x] Pass DistributedRuntime to manager for Client creation
 
 ### Phase 4: PushRouter Integration ✓
 - [ ] Replace `client: Client` with `worker_set_manager: Arc<WorkerSetManager>`
@@ -102,7 +102,7 @@ PushRouter.generate_with_fault_detection() needs instance details (transport, ad
 
 ## Implementation Status
 
-**Current Phase:** Phase 2 - WorkerSet with Client
+**Current Phase:** Phase 4 - PushRouter Integration
 
 **Blockers:** None
 

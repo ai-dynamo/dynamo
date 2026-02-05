@@ -202,9 +202,16 @@ impl ModelWatcher {
                         );
                     }
 
-                    // In prefix mode, add worker to multi-pool manager
+                    // In prefix mode, add worker to worker set manager
                     if namespace_filter.is_prefix() {
-                        self.add_to_worker_set(&mcid, &card);
+                        if let Err(e) = self.add_to_worker_set(&mcid, &card).await {
+                            tracing::error!(
+                                model_name = card.name(),
+                                namespace = mcid.namespace,
+                                error = %e,
+                                "Failed to add worker to worker set manager"
+                            );
+                        }
                     }
 
                     match self.handle_put(&mcid, &mut card).await {
@@ -699,9 +706,13 @@ impl ModelWatcher {
     /// Add a worker to the multi-pool manager (prefix mode only).
     ///
     /// Extracts worker_id from instance_id and adds to the appropriate pool.
-    fn add_to_worker_set(&self, mcid: &ModelCardInstanceId, card: &ModelDeploymentCard) {
+    async fn add_to_worker_set(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
         let Some(prefix) = self.namespace_filter.prefix() else {
-            return;
+            return Ok(());
         };
 
         let set_manager = self
@@ -711,16 +722,26 @@ impl ModelWatcher {
         // instance_id is the worker_id
         let worker_id = mcid.instance_id;
 
-        set_manager.add_worker(&mcid.namespace, worker_id, card.mdcsum(), None);
+        set_manager
+            .add_worker(
+                &mcid.namespace,
+                worker_id,
+                card.mdcsum(),
+                None,
+                self.drt.clone(),
+            )
+            .await?;
 
         tracing::debug!(
             model_name = card.name(),
             namespace = mcid.namespace,
             worker_id,
             total_workers = set_manager.total_instances(),
-            pool_count = set_manager.pool_count(),
-            "Added worker to multi-pool manager"
+            set_count = set_manager.set_count(),
+            "Added worker to worker set manager"
         );
+
+        Ok(())
     }
 
     /// Remove a worker from the multi-pool manager (prefix mode only).
