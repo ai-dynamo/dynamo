@@ -70,6 +70,7 @@ For implementing tiered storage you can take advantage of the different storage 
 | [Azure Files](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-files#use-a-persistent-volume-for-storage) | Medium | Shared small/medium models |
 | [Azure Blob (via Fuse or init)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-blob#create-a-pvc-using-built-in-storage-class) | Low–Medium | Cold model storage, bootstrap downloads |
 
+Note: Azure Managed Lustre and Local CSI (ephemeral disk) are not installed by default in AKS and require additional setup before use. Azure Disk, Azure Files, and Azure Blob CSI drivers are available out of the box. See the [AKS CSI storage options documentation](https://learn.microsoft.com/azure/aks/csi-storage-drivers) for more details.
 
 In the cache.yaml in the different [recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes), you can set the storageClassName to a predefined storage option that are available in your AKS cluster:
 
@@ -149,20 +150,27 @@ When deploying Dynamo on AKS with GPU-enabled [Spot VM](https://azure.microsoft.
 
 Because of these taints, workloads (including the Dynamo CRD controller, Platform components, and any GPU workloads) must include corresponding tolerations in their Helm charts. Without these tolerations, Kubernetes will not schedule pods onto the Spot VM node pools, and GPU resources will remain unused.
 
-Inorder to ensure the Dynamo platform pods -controller manager, etcd, nats and Dynamo platform jobs - dynamo-operator-webhook-ca-inject, dynamo-operator-webhook-cert-gen are scheduled correctly, add the below toleration to:
-- dynamo/deploy/helm/charts/platform/values.yaml
-- dynamo/deploy/helm/charts/platform/components/operator/templates/webhook-ca-inject-job.yaml
-- dynamo/deploy/helm/charts/platform/components/operator/templates/webhook-cert-gen-job.yaml 
+To schedule Dynamo platform components and jobs onto these nodes, use the provided dynamo/examples/deployments/AKS/values-aks-spot.yaml, which includes all required tolerations for:
+- Dynamo operator controller manager
+- Webhook CA inject and cert generation jobs
+- etcd
+- NATS
+- MPI SSH key generation job
+- Other core Dynamo platform pods
 
-```bash 
- 
-tolerations:
-          - key: "kubernetes.azure.com/scalesetpriority"
-            operator: "Equal"
-            value: "spot"
-            effect: "NoSchedule"
+Use the following commands to install or upgrade Dynamo using the AKS Spot values file:
+```bash
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace dynamo-system \
+  --create-namespace \
+  -f ./values-aks-spot.yaml
 ```
-
+or
+```bash
+helm upgrade dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace dynamo-system \
+  -f ./values-aks-spot.yaml
+```
 
 ## Clean Up Resources
 
