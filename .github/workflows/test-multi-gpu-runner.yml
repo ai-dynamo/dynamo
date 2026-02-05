@@ -20,7 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - prod-tester-amd-gpu-8-v1
           - prod-tester-amd-gpu-4-v1
           - prod-tester-amd-gpu-v1
     steps:
