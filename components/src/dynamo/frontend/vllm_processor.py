@@ -25,7 +25,7 @@ from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.tool_parsers import ToolParser, ToolParserManager
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
@@ -44,10 +44,27 @@ logger = logging.getLogger(__name__)
 
 
 _MASK_64_BITS = (1 << 64) - 1
+_FINISH_REASON_MAP: dict[str, FinishReason] = {
+    "eos": FinishReason.STOP,
+    "stop": FinishReason.STOP,
+    "length": FinishReason.LENGTH,
+    "error": FinishReason.ERROR,
+    "cancelled": FinishReason.ABORT,
+    "content_filter": FinishReason.ERROR,
+}
 
 
 def random_uuid() -> str:
     return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"  # 16 hex chars
+
+
+def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
+    if raw_reason is None:
+        return None
+    mapped = _FINISH_REASON_MAP.get(raw_reason)
+    if mapped is None:
+        logger.warning("Unknown finish_reason from router: %s", raw_reason)
+    return mapped
 
 
 class VllmProcessor:
@@ -81,11 +98,26 @@ class VllmProcessor:
 
         # ** VllmProcessor.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
 
+        template_kwargs: dict[str, Any] = {}
+        if request.get("chat_template") is not None:
+            template_kwargs["chat_template"] = request["chat_template"]
+        if request.get("chat_template_kwargs") is not None:
+            template_kwargs["chat_template_kwargs"] = request["chat_template_kwargs"]
+
+        def apply_chat_template(**kwargs: Any) -> list[int]:
+            all_kwargs = {**kwargs, **template_kwargs}
+            try:
+                return self.tokenizer.apply_chat_template(**all_kwargs)
+            except TypeError:
+                if template_kwargs:
+                    return self.tokenizer.apply_chat_template(**kwargs)
+                raise
+
         # There seem to be two incompatible versions of apply_chat_template, depending on the model
         try:
             # tokenizer is a subclass of PreTrainedTokenizerBase (part of `transformers` library, not vllm)
             # This is not the type the source code declares.
-            tokens = self.tokenizer.apply_chat_template(
+            tokens = apply_chat_template(
                 conversation=request["messages"],
                 tools=request.get("tools", None),
                 tokenize=True,
@@ -100,7 +132,7 @@ class VllmProcessor:
             filtered_messages = [
                 {k: v for k, v in d.items() if k != "name"} for d in request["messages"]
             ]
-            tokens = self.tokenizer.apply_chat_template(
+            tokens = apply_chat_template(
                 messages=filtered_messages,
                 tools=request.get("tools", None),
                 tokenize=True,
@@ -127,16 +159,74 @@ class VllmProcessor:
         for k, v in self.input_processor.generation_config_fields.items():
             if hasattr(sampling_params, k):
                 setattr(sampling_params, k, v)
+
+        tool_parser: ToolParser | None = None
+        tool_request: ChatCompletionRequest | None = None
+        request_for_sampling: ChatCompletionRequest | dict[str, Any] = request
+        if self.tool_parser_class and request.get("tools"):
+            candidate_request = ChatCompletionRequest(**request)
+            if getattr(candidate_request, "tool_choice", "none") != "none":
+                tool_parser = self.tool_parser_class(self.tokenizer)
+                tool_request = tool_parser.adjust_request(candidate_request)
+                request_for_sampling = tool_request
+
+        def get_request_value(key: str) -> Any:
+            if isinstance(request_for_sampling, dict):
+                return request_for_sampling.get(key)
+            return getattr(request_for_sampling, key, None)
+
         # User request
-        for k, v in request.items():
-            if hasattr(sampling_params, k):
+        sampling_fields = {
+            "n",
+            "presence_penalty",
+            "frequency_penalty",
+            "repetition_penalty",
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "seed",
+            "stop",
+            "stop_token_ids",
+            "ignore_eos",
+            "min_tokens",
+            "prompt_logprobs",
+            "skip_special_tokens",
+            "spaces_between_special_tokens",
+            "truncate_prompt_tokens",
+            "include_stop_str_in_output",
+            "logit_bias",
+            "allowed_token_ids",
+            "bad_words",
+            "structured_outputs",
+        }
+        for k in sampling_fields:
+            v = get_request_value(k)
+            if v is not None:
                 setattr(sampling_params, k, v)
+        logprobs = get_request_value("logprobs")
+        top_logprobs = get_request_value("top_logprobs")
+        if logprobs is True:
+            sampling_params.logprobs = top_logprobs or 1
+        elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
+            sampling_params.logprobs = logprobs
+        elif top_logprobs not in (None, 0):
+            sampling_params.logprobs = top_logprobs
 
         request_id = random_uuid()
         # This calls update_from_generation_config and update_from_tokenizer on SamplingParams
+        prompt_inputs = TokensPrompt(prompt_token_ids=tokens)
+        if request.get("cache_salt") is not None:
+            prompt_inputs["cache_salt"] = request["cache_salt"]
+        if request.get("mm_processor_kwargs") is not None:
+            prompt_inputs["mm_processor_kwargs"] = request["mm_processor_kwargs"]
+        if request.get("multi_modal_data") is not None:
+            prompt_inputs["multi_modal_data"] = request["multi_modal_data"]
+        if request.get("multi_modal_uuids") is not None:
+            prompt_inputs["multi_modal_uuids"] = request["multi_modal_uuids"]
         vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
-            TokensPrompt(prompt_token_ids=tokens),
+            prompt_inputs,
             sampling_params,
             # arrival_time: float | None = None,
             # lora_request: LoRARequest | None = None,
@@ -151,9 +241,7 @@ class VllmProcessor:
 
         # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
 
-        prompt = (
-            request["messages"][0].get("content") if request.get("messages") else None
-        )
+        prompt = None
         self.output_processor.add_request(
             vllm_preproc,
             prompt,
@@ -217,10 +305,6 @@ class VllmProcessor:
             # Round robin or random, depending on cmd line flag
             dynamo_stream = await self.router.generate(dynamo_preproc)
 
-        # tool parser is stateful, each request needs a fresh one
-        tool_parser = (
-            self.tool_parser_class(self.tokenizer) if self.tool_parser_class else None
-        )
         reasoning_parser = (
             self.reasoning_parser_class(
                 self.tokenizer,
@@ -233,206 +317,239 @@ class VllmProcessor:
         previous_text = ""
         previous_token_ids: list[int] = []
         reasoning_is_done = False
-        in_progress_tool_call: DeltaToolCall | None = None
+        in_progress_tool_calls: dict[int, DeltaToolCall] = {}
+
+        def merge_tool_call(
+            existing: DeltaToolCall | None, incoming: DeltaToolCall
+        ) -> DeltaToolCall:
+            if existing is None:
+                if incoming.function and incoming.function.arguments is None:
+                    incoming.function.arguments = ""
+                return incoming
+            if incoming.id and not existing.id:
+                existing.id = incoming.id
+            if incoming.type and not existing.type:
+                existing.type = incoming.type
+            if incoming.function:
+                if existing.function is None:
+                    existing.function = incoming.function
+                    if existing.function.arguments is None:
+                        existing.function.arguments = ""
+                else:
+                    if incoming.function.name and not existing.function.name:
+                        existing.function.name = incoming.function.name
+                    if incoming.function.arguments:
+                        if existing.function.arguments is None:
+                            existing.function.arguments = ""
+                        existing.function.arguments += incoming.function.arguments
+            return existing
 
         # dynamo_response: Annotated
-        async for dynamo_response in dynamo_stream:
-            # dynamo_response looks like this for regular router:
-            # Stream got: Annotated(data={'token_ids': [7281]}, event=None, comment=[], id=None)
-            # For KV router is is only the inner map: {'token_ids': [7281]}
+        try:
+            async for dynamo_response in dynamo_stream:
+                # dynamo_response looks like this for regular router:
+                # Stream got: Annotated(data={'token_ids': [7281]}, event=None, comment=[], id=None)
+                # For KV router is is only the inner map: {'token_ids': [7281]}
 
-            if self.is_kv_router:
-                engine_response = dynamo_response
-            else:
-                engine_response = dynamo_response.data()
+                if self.is_kv_router:
+                    engine_response = dynamo_response
+                else:
+                    engine_response = dynamo_response.data()
 
-            # engine_response:
-            # Normal: {'token_ids': [151658]}
-            # Last: {'token_ids': [151645], 'finish_reason': 'stop', 'completion_usage': {'prompt_tokens': 190, 'completion_tokens': 168, 'total_tokens': 358, 'prompt_tokens_details': {'cached_tokens': 176}}}
+                # engine_response:
+                # Normal: {'token_ids': [151658]}
+                # Last: {'token_ids': [151645], 'finish_reason': 'stop', 'completion_usage': {'prompt_tokens': 190, 'completion_tokens': 168, 'total_tokens': 358, 'prompt_tokens_details': {'cached_tokens': 176}}}
 
-            if engine_response is None or "token_ids" not in engine_response:
-                yield {
-                    "finish_reason": "error: No outputs from vLLM engine",
-                    "token_ids": [],
-                }
-                break
+                if engine_response is None or "token_ids" not in engine_response:
+                    yield {
+                        "finish_reason": "error: No outputs from vLLM engine",
+                        "token_ids": [],
+                    }
+                    break
 
-            finish_reason = engine_response.get("finish_reason")
+                raw_finish_reason = engine_response.get("finish_reason")
+                finish_reason = map_finish_reason(raw_finish_reason)
+                stop_reason = engine_response.get("stop_reason")
 
-            vllm_response = EngineCoreOutput(
-                request_id=request_id,
-                new_token_ids=engine_response["token_ids"],
-                finish_reason=finish_reason,
-                # new_logprobs=new_logprobs,
-                # new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                # pooling_output=pooler_output,
-                # stop_reason=request.stop_reason,
-                # events=request.take_events(),
-                # kv_transfer_params=kv_transfer_params,
-                # trace_headers=request.trace_headers,
-                # num_cached_tokens=request.num_cached_tokens,
-                # num_nans_in_logits=request.num_nans_in_logits,
-            )
+                vllm_response = EngineCoreOutput(
+                    request_id=request_id,
+                    new_token_ids=engine_response["token_ids"],
+                    finish_reason=finish_reason,
+                    stop_reason=stop_reason,
+                    # new_logprobs=new_logprobs,
+                    # new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                    # pooling_output=pooler_output,
+                    # events=request.take_events(),
+                    # kv_transfer_params=kv_transfer_params,
+                    # trace_headers=request.trace_headers,
+                    # num_cached_tokens=request.num_cached_tokens,
+                    # num_nans_in_logits=request.num_nans_in_logits,
+                )
 
-            # Let vllm handle all post-processing
-            vllm_out: OutputProcessorOutput = self.output_processor.process_outputs(
-                [vllm_response]
-            )
+                # Let vllm handle all post-processing
+                vllm_out: OutputProcessorOutput = self.output_processor.process_outputs(
+                    [vllm_response]
+                )
+                if vllm_out.reqs_to_abort:
+                    # Router has no abort API; we cannot propagate aborts.
+                    pass
 
-            # vllm
-            # RequestOutput: OutputProcessorOutput(request_outputs=[RequestOutput(request_id=9dbe240d8de78db3, prompt='What is the capital of Tuvalu?', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], encoder_prompt=None, encoder_prompt_token_ids=None, prompt_logprobs=None, outputs=[CompletionOutput(index=0, text=' The', token_ids=[576], cumulative_logprob=None, logprobs=None, finish_reason=None, stop_reason=None)], finished=False, metrics=RequestStateStats(num_generation_tokens=0, arrival_time=1769118902.2172132, queued_ts=0.0, scheduled_ts=0.0, first_token_ts=0.0, last_token_ts=0.0, first_token_latency=0.0, is_corrupted=False), lora_request=None, num_cached_tokens=0, multi_modal_placeholders={})], reqs_to_abort=[])
+                # vllm
+                # RequestOutput: OutputProcessorOutput(request_outputs=[RequestOutput(request_id=9dbe240d8de78db3, prompt='What is the capital of Tuvalu?', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], encoder_prompt=None, encoder_prompt_token_ids=None, prompt_logprobs=None, outputs=[CompletionOutput(index=0, text=' The', token_ids=[576], cumulative_logprob=None, logprobs=None, finish_reason=None, stop_reason=None)], finished=False, metrics=RequestStateStats(num_generation_tokens=0, arrival_time=1769118902.2172132, queued_ts=0.0, scheduled_ts=0.0, first_token_ts=0.0, last_token_ts=0.0, first_token_latency=0.0, is_corrupted=False), lora_request=None, num_cached_tokens=0, multi_modal_placeholders={})], reqs_to_abort=[])
 
-            # Vec<ChatChoiceStream>
-            choices = []
-            if not vllm_out.request_outputs:
-                continue
-            for output in vllm_out.request_outputs[0].outputs:
-                delta_text = output.text
-                delta_token_ids = output.token_ids
+                # Vec<ChatChoiceStream>
+                choices = []
+                if not vllm_out.request_outputs:
+                    continue
+                for output in vllm_out.request_outputs[0].outputs:
+                    delta_text = output.text
+                    delta_token_ids = output.token_ids
 
-                current_text = previous_text + delta_text
-                current_token_ids = previous_token_ids + delta_token_ids
+                    current_text = previous_text + delta_text
+                    current_token_ids = previous_token_ids + delta_token_ids
 
-                # Default if no reasoning or tool parsers
-                delta_message = DeltaMessage(content=delta_text)
+                    # Default if no reasoning or tool parsers
+                    delta_message = DeltaMessage(content=delta_text)
 
-                if not reasoning_is_done and reasoning_parser:
-                    # Reasoning comes first in the response
-                    delta_message: DeltaMessage | None = (
-                        reasoning_parser.extract_reasoning_streaming(
-                            previous_text,
-                            current_text,
-                            delta_text,
-                            previous_token_ids,
-                            current_token_ids,
-                            delta_token_ids,
-                        )
-                    )
-
-                if tool_parser:
-                    # Maybe we don't have a reasoning parser, or there was no reasoning to parse
-                    no_prev_reasoning = (
-                        delta_message
-                        and delta_message.content
-                        and not delta_message.reasoning_content
-                    )
-
-                    if reasoning_is_done or no_prev_reasoning:
+                    if not reasoning_is_done and reasoning_parser:
+                        # Reasoning comes first in the response
                         delta_message: DeltaMessage | None = (
-                            tool_parser.extract_tool_calls_streaming(
-                                previous_text=previous_text,
-                                current_text=current_text,
-                                delta_text=delta_text,
-                                previous_token_ids=previous_token_ids,
-                                current_token_ids=current_token_ids,
-                                delta_token_ids=delta_token_ids,
-                                request=ChatCompletionRequest(**request),
+                            reasoning_parser.extract_reasoning_streaming(
+                                previous_text,
+                                current_text,
+                                delta_text,
+                                previous_token_ids,
+                                current_token_ids,
+                                delta_token_ids,
                             )
                         )
 
-                if (
-                    not reasoning_is_done
-                    and reasoning_parser
-                    and reasoning_parser.is_reasoning_end(delta_token_ids)
-                ):
-                    reasoning_is_done = True
-                    previous_text = ""
-                    previous_token_ids = []
-                    current_text = ""
-                    current_token_ids = []
-
-                if delta_message is None:
-                    # tokens being held back, might be tool call marker
-                    pass
-
-                elif delta_message.tool_calls and delta_message.tool_calls[0].function:
-                    # delta_message.tool_calls = DeltaToolCall objects to stream
-                    if in_progress_tool_call is None:
-                        in_progress_tool_call = delta_message.tool_calls[0]
-                        if not in_progress_tool_call.function.arguments:
-                            # Ensure + works later
-                            in_progress_tool_call.function.arguments = ""
-                    else:
-                        delta_arg = delta_message.tool_calls[0]
-                        in_progress_tool_call.function.arguments += (
-                            delta_arg.function.arguments or ""
+                    should_parse_tools = (
+                        tool_parser is not None and tool_request is not None
+                    )
+                    if should_parse_tools:
+                        # Maybe we don't have a reasoning parser, or there was no reasoning to parse
+                        no_prev_reasoning = (
+                            delta_message
+                            and delta_message.content
+                            and not delta_message.reasoning_content
                         )
 
-                elif delta_message.tool_calls:
-                    # tool_calls exists but function is missing
-                    logger.warning(
-                        f"Unknown tool call type in: {delta_message.tool_calls[0]}. Only type 'function' supported."
-                    )
+                        if reasoning_is_done or no_prev_reasoning:
+                            delta_message: DeltaMessage | None = (
+                                tool_parser.extract_tool_calls_streaming(
+                                    previous_text=previous_text,
+                                    current_text=current_text,
+                                    delta_text=delta_text,
+                                    previous_token_ids=previous_token_ids,
+                                    current_token_ids=current_token_ids,
+                                    delta_token_ids=delta_token_ids,
+                                    request=tool_request,
+                                )
+                            )
 
-                elif delta_message.content or delta_message.reasoning_content:
-                    # Stream content to user
-                    # ChatCompletionStreamResponseDelta
-                    delta = {"role": "assistant"}
-                    if delta_message.content:
-                        delta["content"] = delta_message.content
-                    if delta_message.reasoning_content:
-                        delta["reasoning_content"] = delta_message.reasoning_content
+                    if (
+                        not reasoning_is_done
+                        and reasoning_parser
+                        and reasoning_parser.is_reasoning_end_streaming(
+                            current_token_ids, delta_token_ids
+                        )
+                    ):
+                        reasoning_is_done = True
+                        previous_text = ""
+                        previous_token_ids = []
+                        current_text = ""
+                        current_token_ids = []
 
-                    if in_progress_tool_call:
-                        delta["tool_calls"] = [
-                            in_progress_tool_call.model_dump(exclude_none=True)
-                        ]
-                        in_progress_tool_call = None
-                    choices.append(
-                        {
-                            "index": output.index,
-                            "delta": delta,
-                            "finish_reason": output.finish_reason,
-                            "logprobs": output.logprobs,
-                        }
-                    )
+                    if delta_message is None:
+                        # tokens being held back, might be tool call marker
+                        pass
 
-                elif in_progress_tool_call:
-                    # Empty content of any kind. Send any outstanding tool calls.
-                    choices.append(
-                        {
-                            "index": output.index,
-                            # ChatCompletionStreamResponseDelta
-                            "delta": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    in_progress_tool_call.model_dump(exclude_none=True)
-                                ],
-                            },
-                            "finish_reason": output.finish_reason,
-                            "logprobs": output.logprobs,
-                        }
-                    )
-                    in_progress_tool_call = None
-                elif output.finish_reason:
-                    # Last response often has no content, but we need the finish reason
-                    choices.append(
-                        {
-                            "index": output.index,
-                            "delta": {},
-                            "finish_reason": output.finish_reason,
-                            "logprobs": output.logprobs,
-                        }
-                    )
+                    elif delta_message.tool_calls:
+                        # delta_message.tool_calls = DeltaToolCall objects to stream
+                        for tool_delta in delta_message.tool_calls:
+                            existing = in_progress_tool_calls.get(tool_delta.index)
+                            merged = merge_tool_call(existing, tool_delta)
+                            in_progress_tool_calls[tool_delta.index] = merged
 
-                previous_text = current_text
-                previous_token_ids = current_token_ids
+                    elif delta_message.content or delta_message.reasoning_content:
+                        # Stream content to user
+                        # ChatCompletionStreamResponseDelta
+                        delta = {"role": "assistant"}
+                        if delta_message.content:
+                            delta["content"] = delta_message.content
+                        if delta_message.reasoning_content:
+                            delta["reasoning_content"] = delta_message.reasoning_content
 
-            if choices:
-                # dynamo_out: NvCreateChatCompletionStreamResponse
-                dynamo_out = {
-                    "id": request_id,
-                    "choices": choices,
-                    "created": int(time.time()),
-                    "model": request["model"],
-                    "object": "chat.completion.chunk",
-                }
-                if usage := engine_response.get("completion_usage"):
-                    # The engine only includes this on the last response
-                    dynamo_out["usage"] = usage
+                        if in_progress_tool_calls:
+                            delta["tool_calls"] = [
+                                tool_call.model_dump(exclude_none=True)
+                                for _, tool_call in sorted(
+                                    in_progress_tool_calls.items()
+                                )
+                            ]
+                            in_progress_tool_calls.clear()
+                        choices.append(
+                            {
+                                "index": output.index,
+                                "delta": delta,
+                                "finish_reason": output.finish_reason,
+                                "logprobs": output.logprobs,
+                            }
+                        )
 
-                # Rust handles HTTP / Server Sent Events back to user
-                yield dynamo_out
+                    elif in_progress_tool_calls:
+                        # Empty content of any kind. Send any outstanding tool calls.
+                        choices.append(
+                            {
+                                "index": output.index,
+                                # ChatCompletionStreamResponseDelta
+                                "delta": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        tool_call.model_dump(exclude_none=True)
+                                        for _, tool_call in sorted(
+                                            in_progress_tool_calls.items()
+                                        )
+                                    ],
+                                },
+                                "finish_reason": output.finish_reason,
+                                "logprobs": output.logprobs,
+                            }
+                        )
+                        in_progress_tool_calls.clear()
+                    elif output.finish_reason:
+                        # Last response often has no content, but we need the finish reason
+                        choices.append(
+                            {
+                                "index": output.index,
+                                "delta": {},
+                                "finish_reason": output.finish_reason,
+                                "logprobs": output.logprobs,
+                            }
+                        )
+
+                    previous_text = current_text
+                    previous_token_ids = current_token_ids
+
+                if choices:
+                    # dynamo_out: NvCreateChatCompletionStreamResponse
+                    dynamo_out = {
+                        "id": request_id,
+                        "choices": choices,
+                        "created": int(time.time()),
+                        "model": request["model"],
+                        "object": "chat.completion.chunk",
+                    }
+                    if usage := engine_response.get("completion_usage"):
+                        # The engine only includes this on the last response
+                        dynamo_out["usage"] = usage
+
+                    # Rust handles HTTP / Server Sent Events back to user
+                    yield dynamo_out
+        finally:
+            if request_id in self.output_processor.request_states:
+                self.output_processor.abort_requests([request_id], internal=True)
 
 
 class EngineFactory:
