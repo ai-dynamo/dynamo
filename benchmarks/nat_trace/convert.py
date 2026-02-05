@@ -18,10 +18,9 @@ import os
 import re
 from collections import defaultdict
 
-from tqdm import tqdm
-
 from aiperf.common.tokenizer import Tokenizer
 from aiperf.dataset.synthesis.rolling_hasher import RollingHasher
+from tqdm import tqdm
 
 
 def parse_args():
