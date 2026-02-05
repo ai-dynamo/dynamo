@@ -511,6 +511,7 @@ impl KvRouter {
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
         router_id: u64,
+        worker_type: &'static str,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
@@ -552,6 +553,7 @@ impl KvRouter {
             selector,
             kv_router_config.router_replica_sync,
             router_id,
+            worker_type,
         )
         .await?;
 
@@ -568,6 +570,7 @@ impl KvRouter {
         let worker_query_client = worker_query::WorkerQueryClient::new(
             component.clone(),
             workers_with_configs.subscribe(),
+            None,
         );
         tracing::info!("Worker query client initialized for multi-set mode");
 
@@ -607,11 +610,11 @@ impl KvRouter {
                 start_kv_router_background_event_plane(
                     component.clone(),
                     kv_indexer.event_sender(),
-                    kv_indexer.remove_worker_sender(),
                     cancellation_token.clone(),
                     worker_query::WorkerQueryClient::new(
                         component.clone(),
                         workers_with_configs.subscribe(),
+                        Some(kv_indexer.remove_worker_sender()),
                     ),
                     transport_kind,
                 )
