@@ -122,6 +122,7 @@ class TensorRTLLMEngine:
             "moe_cluster_parallel_size",
             "moe_tensor_parallel_size",
             "moe_expert_parallel_size",
+            "enable_attention_dp",  # AutoDeploy doesn't support attention DP (only pytorch backend does)
             "cp_config",
         ]
         for field_name in unsupported_fields:
