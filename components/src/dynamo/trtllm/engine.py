@@ -92,8 +92,6 @@ class TensorRTLLMEngine:
 
     def get_attention_dp_size(self) -> int:
         """Return attention_dp_size (tensor_parallel_size if attention DP enabled, else 1).
-
-        This mirrors vLLM's pattern of extracting data_parallel_size from engine config.
         When attention DP is enabled, each attention DP rank becomes a separate routing target.
         """
         if not self._llm:
