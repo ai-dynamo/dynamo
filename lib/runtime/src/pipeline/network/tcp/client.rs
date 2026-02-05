@@ -427,7 +427,7 @@ mod tests {
     }
 
     /// Test that handle_writer forwards messages from the channel to the framed writer
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_writer_forwards_messages() {
         let WriterHarness {
             server,
@@ -461,7 +461,7 @@ mod tests {
     }
 
     /// Test that handle_writer sends sentinel on normal channel closure
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_writer_sends_sentinel_on_normal_closure() {
         let WriterHarness {
             mut server,
@@ -499,7 +499,7 @@ mod tests {
     }
 
     /// Test that handle_writer does NOT send sentinel when context is killed
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_writer_no_sentinel_on_context_killed() {
         let WriterHarness {
             mut server,
@@ -537,7 +537,7 @@ mod tests {
     }
 
     /// Test that handle_writer does NOT send sentinel when context is stopped
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_writer_no_sentinel_on_context_stopped() {
         let WriterHarness {
             mut server,
@@ -575,7 +575,7 @@ mod tests {
     }
 
     /// Test that handle_writer handles multiple messages correctly
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_writer_multiple_messages() {
         let WriterHarness {
             server,
@@ -612,7 +612,7 @@ mod tests {
     }
 
     /// Test that alive_rx is dropped after handle_writer completes
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_writer_drops_alive_rx() {
         let WriterHarness {
             framed_writer,
@@ -636,7 +636,7 @@ mod tests {
     }
 
     /// Test handle_writer with header-only messages (control messages)
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_writer_header_only_messages() {
         let WriterHarness {
             server,
@@ -669,7 +669,7 @@ mod tests {
     }
 
     /// Test handle_writer with mixed header and data messages
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_writer_mixed_messages() {
         let WriterHarness {
             server,
@@ -756,7 +756,7 @@ mod tests {
     }
 
     /// Test that handle_reader handles Stop control message by calling context.stop()
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_reader_stop_control_message() {
         let ReaderHarness {
             mut framed_server,
@@ -793,7 +793,7 @@ mod tests {
     }
 
     /// Test that handle_reader handles Kill control message by calling context.kill()
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_reader_kill_control_message() {
         let ReaderHarness {
             mut framed_server,
@@ -830,7 +830,7 @@ mod tests {
     }
 
     /// Test that handle_reader exits when alive channel is closed
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_reader_exits_on_alive_channel_closed() {
         let ReaderHarness {
             framed_reader,
@@ -857,7 +857,7 @@ mod tests {
     }
 
     /// Test that handle_reader exits when TCP stream is closed
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_reader_exits_on_stream_closed() {
         let ReaderHarness {
             mut framed_server,
@@ -884,7 +884,7 @@ mod tests {
     }
 
     /// Test that handle_reader handles multiple control messages in sequence
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_reader_multiple_control_messages() {
         let ReaderHarness {
             mut framed_server,
@@ -925,7 +925,7 @@ mod tests {
     }
 
     /// Test handle_reader with Stop followed by Kill
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_handle_reader_stop_then_kill() {
         let ReaderHarness {
             mut framed_server,

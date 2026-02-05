@@ -114,7 +114,7 @@ impl From<i32> for NonResettableInt {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_indexed_pool_sorting() {
     // Create an indexed pool with unsorted elements
     let initial_elements = vec![

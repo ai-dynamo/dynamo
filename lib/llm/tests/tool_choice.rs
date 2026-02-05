@@ -126,7 +126,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_named_tool_choice_parses_json() {
     let mut request = create_test_request();
     let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
@@ -172,7 +172,7 @@ async fn test_named_tool_choice_parses_json() {
     );
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_required_tool_choice_parses_json_array() {
     let mut request = create_test_request();
     let tool_choice = Some(ChatCompletionToolChoiceOption::Required);
@@ -235,7 +235,7 @@ async fn test_required_tool_choice_parses_json_array() {
     );
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_tool_choice_parse_failure_returns_as_content() {
     let mut request = create_test_request();
     let tool_choice = Some(ChatCompletionToolChoiceOption::Required);
@@ -256,7 +256,7 @@ async fn test_tool_choice_parse_failure_returns_as_content() {
     assert!(delta.tool_calls.is_none());
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_streaming_named_tool_buffers_until_finish() {
     let mut request = create_test_request();
     let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
@@ -327,7 +327,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
     );
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_streaming_required_tool_parallel() {
     let mut request = create_test_request();
     let tool_choice = Some(ChatCompletionToolChoiceOption::Required);

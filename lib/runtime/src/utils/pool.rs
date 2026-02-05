@@ -398,7 +398,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_acquire_release() {
         let initial_elements = vec![
             PoolValue::Direct(1),
@@ -459,7 +459,7 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_shared_items() {
         let initial_elements = vec![
             PoolValue::Direct(1),
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(*item, 0); // Value should be on_return
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_boxed_values() {
         let initial_elements = vec![
             PoolValue::Boxed(Box::new(1)),
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(*item, 0);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_pool_item_creation() {
         let pool = Pool::new(vec![PoolValue::Direct(1)]);
 

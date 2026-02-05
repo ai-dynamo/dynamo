@@ -533,19 +533,25 @@ impl OpenAIPreprocessor {
 
         let all_token_ids = match &request.inner.input {
             dynamo_async_openai::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
-                vec![encoding.token_ids().to_vec()]
+                dynamo_runtime::current_runtime()
+                    .expect("Failed to get current runtime")
+                    .scope_compute(|_| {
+                        let encoding = self.tokenizer.encode(s)?;
+                        anyhow::Ok(vec![encoding.token_ids().to_vec()])
+                    })
+                    .await?
             }
             dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
-                let encodings = tokio::task::spawn_blocking({
-                    let tokenizer = self.tokenizer.clone();
-                    let strs = input_strs.clone();
-                    move || {
-                        tokenizer.encode_batch(&strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())
-                    }
-                })
-                .await??;
+                let encodings = dynamo_runtime::current_runtime()
+                    .expect("Failed to get current runtime")
+                    .scope_compute(|_| {
+                        self.tokenizer.encode_batch(
+                            &input_strs.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        )
+                    })
+                    .await?;
+
                 let token_arrays: Vec<Vec<u32>> = encodings
                     .into_iter()
                     .map(|encoding| encoding.token_ids().to_vec())
@@ -1179,7 +1185,10 @@ impl
             HashMap::new()
         } else {
             // Normal path: tokenize the prompt
-            self.gather_tokens(&request, &mut builder, None)?
+            dynamo_runtime::current_runtime()
+                .expect("Failed to get current runtime")
+                .scope_adaptive(|_| self.gather_tokens(&request, &mut builder, None))
+                .await?
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)

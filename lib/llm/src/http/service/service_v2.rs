@@ -577,7 +577,7 @@ mod tests {
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[serial]
     async fn test_liveness_endpoint_reflects_cancellation() {
         // 1. Setup service & token

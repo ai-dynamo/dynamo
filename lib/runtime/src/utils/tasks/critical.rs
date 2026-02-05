@@ -217,7 +217,7 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_successful_task_completion() {
         // Test: A critical task that completes successfully without any issues
         // Verifies:
@@ -246,7 +246,7 @@ mod tests {
         assert!(!parent_token.is_cancelled());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_task_failure_cancels_parent_token() {
         // Test: A critical task that returns an error (critical failure)
         // Verifies:
@@ -282,7 +282,7 @@ mod tests {
         assert!(parent_token.is_cancelled());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_task_panic_is_caught_and_reported() {
         // Test: A critical task that panics during execution
         // Verifies:
@@ -317,7 +317,7 @@ mod tests {
         assert!(parent_token.is_cancelled());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_graceful_shutdown_via_cancellation_token() {
         // Test: A long-running task that responds to graceful shutdown signals
         // Verifies:
@@ -365,7 +365,7 @@ mod tests {
         assert!(!parent_token.is_cancelled());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_critical_tasks_one_failure() {
         // Test: Multiple critical tasks sharing a parent token, one fails
         // Verifies:
@@ -422,7 +422,7 @@ mod tests {
         assert!(!task1_completed.load(Ordering::SeqCst)); // Should not have completed normally
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_status_checking_methods() {
         // Test: Non-blocking status checking methods on the handle
         // Verifies:
@@ -462,7 +462,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_task_with_select_pattern() {
         // Test: Task using tokio::select! for cancellation-aware operations
         // Verifies:
@@ -502,7 +502,7 @@ mod tests {
         assert!(!work_completed.load(Ordering::SeqCst)); // Should not have completed the work
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_timeout_behavior() {
         // Test: External timeout vs task failure distinction
         // Verifies:
@@ -532,7 +532,7 @@ mod tests {
         // (it's still running in the background, but we timed out waiting for it)
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_panic_triggers_immediate_parent_cancellation() {
         // Test: Verify that panics trigger parent cancellation immediately via monitor task
         // Verifies:
@@ -563,7 +563,7 @@ mod tests {
         assert!(handle.join().await.is_err());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_error_triggers_immediate_parent_cancellation() {
         // Test: Verify that regular errors also trigger parent cancellation immediately
         // Verifies:
@@ -594,7 +594,7 @@ mod tests {
         assert!(handle.join().await.is_err());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[should_panic]
     async fn test_task_detach() {
         // Dropping without detaching should panic

@@ -234,7 +234,7 @@ mod tests {
     use crate::storage::kv::{Bucket as _, Key, MemoryStore, Store as _};
     use std::collections::HashSet;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_entries_full_path() {
         let m = MemoryStore::new();
         let bucket = m.get_or_create_bucket("bucket1", None).await.unwrap();

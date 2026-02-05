@@ -372,7 +372,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_infer_failure(
         #[with(TestPort::InferFailure as u16)] service_with_engines: (
             KserveService,
@@ -489,7 +489,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_infer_success(
         #[with(TestPort::InferSuccess as u16)] service_with_engines: (
             KserveService,
@@ -577,7 +577,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_infer_cancellation(
         #[with(TestPort::InferCancellation as u16)] service_with_engines: (
             KserveService,
@@ -626,7 +626,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_stream_infer_success(
         #[with(TestPort::StreamInferSuccess as u16)] service_with_engines: (
             KserveService,
@@ -835,7 +835,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_stream_infer_failure(
         #[with(TestPort::StreamInferFailure as u16)] service_with_engines: (
             KserveService,
@@ -901,7 +901,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_stream_infer_cancellation(
         #[with(TestPort::StreamInferCancellation as u16)] service_with_engines: (
             KserveService,
@@ -961,7 +961,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_model_info(
         #[with(TestPort::ModelInfo as u16)] service_with_engines: (
             KserveService,
@@ -1147,7 +1147,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tensor_infer_dtypes(
         #[with(TestPort::TensorModelTypes as u16)] service_with_engines: (
             KserveService,
@@ -1216,7 +1216,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_triton_model_config(
         #[with(TestPort::TritonModelConfig as u16)] service_with_engines: (
             KserveService,
@@ -1403,7 +1403,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tensor_infer(
         #[with(TestPort::TensorModel as u16)] service_with_engines: (
             KserveService,
@@ -1844,7 +1844,7 @@ pub mod kserve_test {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_kserve_grpc_metrics_endpoint() {
         let grpc_port = get_random_port().await;
         let http_metrics_port = get_random_port().await;
@@ -1975,7 +1975,7 @@ pub mod kserve_test {
     }
 
     #[rstest]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_live_ready() {
         let grpc_port = TestPort::LiveReady as u16;
         let service = KserveService::builder().port(grpc_port).build().unwrap();

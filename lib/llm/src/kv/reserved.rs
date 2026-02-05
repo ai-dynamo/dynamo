@@ -153,7 +153,7 @@ mod tests {
     use super::reuse::tests::{create_blocks, create_token_sequence};
     use super::reuse::AvailableBlocks;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reserved_blocks() {
         let available_blocks = AvailableBlocks::new().await;
         let mut reserved_blocks = ReservedBlocks::new(2);

@@ -1450,7 +1450,7 @@ mod tests {
         assert!(is_greedy);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_real_sse_stream_analysis() {
         // Read the real SSE data with logprobs
         let data = std::fs::read_to_string(

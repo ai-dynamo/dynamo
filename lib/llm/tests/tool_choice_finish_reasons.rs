@@ -88,7 +88,7 @@ async fn apply_jail_transformation(
     output_stream.next().await.unwrap().data.unwrap()
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_named_tool_choice_preserves_length_finish_reason() {
     let mut request = create_test_request();
     let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
@@ -226,7 +226,7 @@ fn test_named_tool_choice_normal_stop_becomes_stop() {
     );
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_required_tool_choice_normal_stop_becomes_tool_calls() {
     let mut request = create_test_request();
     let tool_choice = Some(ChatCompletionToolChoiceOption::Required);

@@ -1054,7 +1054,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_offload_invalid_blocks() -> Result<()> {
         let (offload_manager, device_pool, _, _) = build_pools(4, Some(4), None, None)?;
 
@@ -1072,7 +1072,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[rstest]
     #[case(LayoutType::FullyContiguous)]
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
@@ -1127,7 +1127,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_offload_device_to_disk_bypass_cpu() -> Result<()> {
         let (offload_manager, device_pool, host_pool, disk_pool) = build_pools_with_layout(
             4,
@@ -1192,7 +1192,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_no_host_blocks_available() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 
@@ -1240,7 +1240,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[rstest]
     #[case(LayoutType::FullyContiguous)]
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
@@ -1308,7 +1308,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[rstest]
     #[case(LayoutType::FullyContiguous)]
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
@@ -1389,7 +1389,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_onboard_err_handling() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 
@@ -1418,7 +1418,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_offload_onboard_no_host_blocks() -> Result<()> {
         let (offload_manager, device_pool, _, _) = build_pools(4, None, None, None)?;
 
@@ -1437,7 +1437,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[rstest]
     #[case(LayoutType::FullyContiguous)]
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
@@ -1484,7 +1484,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[rstest]
     #[case(LayoutType::FullyContiguous)]
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
@@ -1535,7 +1535,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[rstest]
     #[case(LayoutType::FullyContiguous)]
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
@@ -1596,7 +1596,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_transfer_batcher() -> Result<()> {
         let (offload_manager, device_pool, _, disk_pool) = build_pools(
             2 * MAX_TRANSFER_BATCH_SIZE + 1,
@@ -1642,7 +1642,7 @@ mod tests {
         use super::*;
 
         /// Test disk storage with proper GDS alignment requirements
-        #[tokio::test]
+        #[loom_rs::test]
         #[rstest]
         #[case(LayoutType::FullyContiguous)]
         #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
@@ -1700,7 +1700,7 @@ mod tests {
 
         /// Test layout compatibility across different storage types
         #[ignore] // Disabled - requires complex mixed-layout pool implementation
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_cross_layout_compatibility_verification() -> Result<()> {
             // Test FullyContiguous host with LayerSeparate device - common scenario
             let (offload_manager, _, host_pool, disk_pool) = build_pools_mixed_layouts(
@@ -1753,7 +1753,7 @@ mod tests {
         }
 
         /// Test GDS file registration and unlinking behavior
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_gds_file_lifecycle() -> Result<()> {
             use std::fs;
             use std::path::Path;
@@ -1822,7 +1822,7 @@ mod tests {
         }
 
         /// Debug test to understand disk pool creation failure
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_debug_disk_pool_creation() -> Result<()> {
             use dynamo_runtime::logging::init as init_logging;
             init_logging();
@@ -1857,7 +1857,7 @@ mod tests {
         }
 
         /// Test error handling for GDS-incompatible operations
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_gds_error_handling() -> Result<()> {
             // Test with very small alignment that might cause GDS issues
             let result = build_pools_with_layout(
@@ -1893,7 +1893,7 @@ mod tests {
 
         /// Test disk operations under memory pressure (constrained host buffer scenario)
         #[ignore] // Disabled - helper functions have memory access issues in test environment
-        #[tokio::test]
+        #[loom_rs::test]
         async fn test_constrained_host_buffer_disk_operations() -> Result<()> {
             // Simulate constrained host buffer by using minimal host blocks
             let (offload_manager, _, host_pool, disk_pool) = build_pools_with_layout(
@@ -2207,7 +2207,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_onboard_unsupported_block_type() -> Result<()> {
         let (offload_manager, device_pool, _, _) = build_pools(1, None, None, None)?;
 
@@ -2233,7 +2233,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_offload_transfer_metadata() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 
@@ -2268,7 +2268,7 @@ mod tests {
     }
 
     /// Test that metadata (priority) transfers correctly through the full G1→G2→G3 chain.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_offload_transfer_metadata_to_disk() -> Result<()> {
         let (offload_manager, device_pool, host_pool, disk_pool) =
             build_pools(4, Some(4), Some(4), None)?;
@@ -2323,7 +2323,7 @@ mod tests {
     }
 
     /// Test that metadata (priority) transfers correctly when onboarding from G2→G1.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_onboard_transfer_metadata_from_host() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 
@@ -2366,7 +2366,7 @@ mod tests {
     }
 
     /// Test that metadata is preserved through a full G1→G2→G1 cycle.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_offload_onboard_preserves_metadata() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 
@@ -2424,7 +2424,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_onboard_duplicate() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 
@@ -2467,7 +2467,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_transfer_big_blocks() -> Result<()> {
         // Try a block size of 32 MB.
         let inner_dim = 2_usize.pow(20) * 32 / NUM_LAYERS / BLOCK_SIZE;
@@ -2521,7 +2521,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_offload_evict_order() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 
@@ -2578,7 +2578,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_onboard_evict_order() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 

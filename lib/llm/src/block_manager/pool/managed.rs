@@ -605,7 +605,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_block_pool_state() {
         let layout = setup_layout(None).unwrap();
         let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
@@ -643,7 +643,7 @@ mod tests {
         assert!(block.add_token(5).is_err());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_block_pool() {
         let layout = setup_layout(None).unwrap();
         let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
@@ -799,7 +799,7 @@ mod tests {
     }
 
     /// A test that ensures that we only ever evict leaves from the inactive pool.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_block_pool_evict_leaves() -> anyhow::Result<()> {
         let pool = make_simple_pool(4).await?;
 
@@ -841,7 +841,7 @@ mod tests {
 
     /// When a block has two children, we need to ensure that we evict both children before
     /// adding the parent to the leaf set.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_block_pool_parent_child() -> anyhow::Result<()> {
         let pool = make_simple_pool(3).await?;
 
@@ -904,7 +904,7 @@ mod tests {
 
     /// Matching an entire sequence (moving it to the active pool), and returning it
     /// should not affect the parent-child relationships of the blocks.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_block_pool_match_return() -> anyhow::Result<()> {
         let pool = make_simple_pool(4).await?;
 
@@ -944,7 +944,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_block_pool_touch() -> anyhow::Result<()> {
         let pool = make_simple_pool(4).await?;
 

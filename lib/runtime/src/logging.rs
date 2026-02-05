@@ -1448,7 +1448,7 @@ pub mod tests {
         Ok(result)
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_json_log_capture() -> Result<()> {
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
@@ -1736,7 +1736,7 @@ pub mod tests {
 
     /// Subprocess test that performs the actual span event validation.
     /// This is called by test_span_events in a separate process with controlled env vars.
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_span_events_subprocess() -> Result<()> {
         // Skip if not running as subprocess (env vars not set)
         if std::env::var("DYN_LOGGING_SPAN_EVENTS").is_err() {

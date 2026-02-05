@@ -641,7 +641,7 @@ mod tests {
     #[case::case_6(false, true, true)]
     #[case::case_7(true, false, true)]
     #[case::case_8(true, true, true)]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_scheduler_token_generation_patterns(
         #[case] use_shared_tokens: bool,
         #[case] enable_prefix_caching: bool,
@@ -768,7 +768,7 @@ mod tests {
         assert_scheduler_idle(&metrics);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_cache_hit_rate_with_identical_requests() {
         let block_size: usize = 64;
         let max_output_tokens: usize = 10;
@@ -852,7 +852,7 @@ mod tests {
         println!("Test passed! Received {received_tokens} tokens");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_receiver_drop_cleans_up_resources() {
         let block_size: usize = 64;
         let input_tokens = 256;

@@ -41,6 +41,8 @@ rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
+loom-rs = { git = "https://github.com/ryanolson/loom-rs", branch = "ryan/api-updates" }
+
 
 [[bench]]
 name = "radix_tree_microbench"

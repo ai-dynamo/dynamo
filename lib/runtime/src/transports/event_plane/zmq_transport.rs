@@ -501,7 +501,7 @@ mod tests {
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use tokio::time::{Duration, timeout};
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_zmq_pubsub_basic() {
         let port = 25555;
         let endpoint = format!("tcp://127.0.0.1:{}", port);
@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(decoded.topic, topic);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_zmq_multiple_messages() {
         let port = 25556;
         let endpoint = format!("tcp://127.0.0.1:{}", port);

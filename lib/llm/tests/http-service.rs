@@ -262,7 +262,7 @@ fn inc_counter(
 }
 
 #[allow(deprecated)]
-#[tokio::test]
+#[loom_rs::test]
 async fn test_http_service() {
     let port = get_random_port().await;
     let service = HttpService::builder()
@@ -624,7 +624,7 @@ fn generic_byot_client(port: u16) -> GenericBYOTClient {
     GenericBYOTClient::new(config)
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_pure_openai_client() {
     let (service, _counter, _failure, port) = service_with_engines().await;
     let pure_openai_client = pure_openai_client(port);
@@ -736,7 +736,7 @@ async fn test_pure_openai_client() {
     task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_nv_custom_client() {
     let (service, _counter, _failure, port) = service_with_engines().await;
     let nv_custom_client = nv_custom_client(port);
@@ -875,7 +875,7 @@ async fn test_nv_custom_client() {
     task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_generic_byot_client() {
     let (service, _counter, _failure, port) = service_with_engines().await;
     let generic_byot_client = generic_byot_client(port);
@@ -970,7 +970,7 @@ async fn test_generic_byot_client() {
     task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_client_disconnect_cancellation_unary() {
     let port = get_random_port().await;
     let service = HttpService::builder()
@@ -1060,7 +1060,7 @@ async fn test_client_disconnect_cancellation_unary() {
     task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_client_disconnect_cancellation_streaming() {
     dynamo_runtime::logging::init();
 
@@ -1162,7 +1162,7 @@ async fn test_client_disconnect_cancellation_streaming() {
     task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_request_id_annotation() {
     // TODO(ryan): make better fixtures, this is too much to test sometime so simple
     dynamo_runtime::logging::init();

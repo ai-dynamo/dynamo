@@ -61,7 +61,7 @@ impl
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_metrics_prefix_default() {
     // Test default prefix when no env var is set
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
@@ -100,7 +100,7 @@ async fn test_metrics_prefix_default() {
     .await;
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_metrics_prefix_custom() {
     // Test custom prefix override via environment variable
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, Some("custom_prefix"))], async {
@@ -135,7 +135,7 @@ async fn test_metrics_prefix_custom() {
     .await;
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_metrics_prefix_sanitized() {
     // Test that invalid prefix characters are sanitized
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, Some("nv-llm/http service"))], async {
@@ -185,7 +185,7 @@ async fn wait_for_metrics_ready(port: u16) {
     }
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_metrics_with_mock_model() {
     // Test metrics collection with a mock model serving requests
     // Ensure we use the default prefix
@@ -301,7 +301,7 @@ mod integration_tests {
     use dynamo_runtime::discovery::DiscoveryQuery;
     use std::sync::Arc;
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore = "Requires etcd and distributed runtime"]
     async fn test_metrics_with_mdc_registration() {
         // Integration test for metrics collection with full MDC registration (like real model servers)

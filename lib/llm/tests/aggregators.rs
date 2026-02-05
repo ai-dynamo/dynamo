@@ -20,7 +20,7 @@ fn create_stream(root_path: &str, file_name: &str) -> DataStream<Result<Message,
     create_message_stream(&data)
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_openai_chat_stream() {
     let data = std::fs::read_to_string("tests/data/replays/meta/llama-3.1-8b-instruct/chat_completions/chat-completion.streaming.1").unwrap();
 
@@ -48,7 +48,7 @@ async fn test_openai_chat_stream() {
     );
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_openai_chat_edge_case_multi_line_data() {
     let stream = create_stream(CHAT_ROOT_PATH, "edge_cases/valid-multi-line-data");
     let result = NvCreateChatCompletionResponse::from_sse_stream(
@@ -71,7 +71,7 @@ async fn test_openai_chat_edge_case_multi_line_data() {
     );
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_openai_chat_edge_case_comments_per_response() {
     let stream = create_stream(CHAT_ROOT_PATH, "edge_cases/valid-comments_per_response");
     let result = NvCreateChatCompletionResponse::from_sse_stream(
@@ -94,7 +94,7 @@ async fn test_openai_chat_edge_case_comments_per_response() {
     );
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_openai_chat_edge_case_invalid_deserialize_error() {
     let stream = create_stream(CHAT_ROOT_PATH, "edge_cases/invalid-deserialize_error");
     let result = NvCreateChatCompletionResponse::from_sse_stream(
@@ -111,7 +111,7 @@ async fn test_openai_chat_edge_case_invalid_deserialize_error() {
 // Completions (/v1/completions)
 // =============================
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_openai_cmpl_stream() {
     let stream = create_stream(CMPL_ROOT_PATH, "completion.streaming.1").take(16);
     let result =

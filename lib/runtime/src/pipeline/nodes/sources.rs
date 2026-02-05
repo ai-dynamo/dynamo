@@ -194,7 +194,7 @@ pub struct SegmentSource<In: PipelineIO, Out: PipelineIO> {
 // mod tests {
 //     use super::*;
 
-//     #[tokio::test]
+//     #[loom_rs::test]
 //     async fn test_pipeline_source_no_edge() {
 //         let source = Frontend::<(), ()>::new();
 //         let stream = source.generate(().into()).await;

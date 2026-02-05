@@ -525,7 +525,7 @@ mod tests {
 
     use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _};
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_entries_full_path() {
         let t = tempfile::tempdir().unwrap();
 

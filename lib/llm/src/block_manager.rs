@@ -328,7 +328,7 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reference_block_manager_inherited_async_runtime() {
         dynamo_runtime::logging::init();
         let _block_manager = create_reference_block_manager().await;
@@ -342,7 +342,7 @@ mod tests {
     // https://github.com/ai-dynamo/nixl/blob/main/src/bindings/rust/src/tests.rs
     // TODO: This test doesn't work because NIXL doesn't support partial metadata in the rust bindings.
     #[ignore]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_reference_block_managers() {
         dynamo_runtime::logging::init();
 
@@ -410,7 +410,7 @@ mod tests {
         // transfer_request.execute().unwrap();
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_offload() -> Result<()> {
         dynamo_runtime::logging::init();
 

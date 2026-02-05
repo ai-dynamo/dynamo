@@ -107,7 +107,7 @@ fn make_backend_engine() -> ServiceEngine<SingleIn<String>, ManyOut<Annotated<St
     ))
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_service_source_sink() {
     let source = ServiceFrontend::<SingleIn<String>, ManyOut<Annotated<String>>>::new();
     let sink = ServiceBackend::from_engine(make_backend_engine());
@@ -173,7 +173,7 @@ fn make_service()
     Ok(service)
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_service_source_node_sink() {
     let service = make_service().unwrap();
 
@@ -195,7 +195,7 @@ async fn test_service_source_node_sink() {
 // Node 1:
 // [segment_source] ---- [preprocessor] ---> [backend]
 // [segment_source] <----------------------- [backend]
-#[tokio::test]
+#[loom_rs::test]
 #[ignore = "Blocked by AsyncEngineStream trait missing Sync supertrait"]
 #[expect(unused_variables)]
 async fn test_disaggregated_service() {
@@ -285,7 +285,7 @@ fn make_service_with_operator()
     Ok(service)
 }
 
-#[tokio::test]
+#[loom_rs::test]
 async fn test_service_source_node_sink_with_operator() {
     let service = make_service_with_operator().unwrap();
 

@@ -2351,7 +2351,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_check_for_backend_error_with_error_event() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
@@ -2375,7 +2375,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_check_for_backend_error_with_json_error_and_code() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
@@ -2402,7 +2402,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_check_for_backend_error_with_normal_event() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_async_openai::types::CreateChatCompletionStreamResponse;
@@ -2440,7 +2440,7 @@ mod tests {
         assert_eq!(first_event.id, Some("msg-1".to_string()));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_check_for_backend_error_with_empty_stream() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream::{self, StreamExt};
@@ -2459,7 +2459,7 @@ mod tests {
         assert!(first.is_none());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_check_for_backend_error_with_comment_but_no_event_type() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;

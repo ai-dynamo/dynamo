@@ -645,7 +645,7 @@ mod tests {
         assert!(client.is_healthy());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_connection_health_check() {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
@@ -709,7 +709,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_concurrent_requests_single_connection() {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
@@ -812,7 +812,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_connection_pool_reuse() {
         use crate::pipeline::network::codec::TcpResponseMessage;
 
@@ -907,7 +907,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_unhealthy_connection_filtered() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

@@ -442,7 +442,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_empty_stream() {
         // Create an empty stream
         let stream: DataStream<Annotated<NvCreateChatCompletionStreamResponse>> =
@@ -465,7 +465,7 @@ mod tests {
         assert!(response.service_tier.is_none());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_single_delta() {
         // Create a sample delta
         let annotated_delta = create_test_delta(
@@ -502,7 +502,7 @@ mod tests {
         assert!(response.service_tier.is_none());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_deltas_same_choice() {
         // Create multiple deltas with the same choice index
         // One will have a MessageRole and no FinishReason,
@@ -566,7 +566,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_preserves_intermediate_whitespace_chunks() {
         // This validates behavior before/after removing trim_end():
         // If a whitespace-only chunk (" ") arrives between tokens, it must be preserved.
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[allow(deprecated)]
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_choices() {
         // Create a delta with multiple choices
         // ALLOW: function_call is deprecated
@@ -703,7 +703,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tool_calling_finish_reason_override_from_stop() {
         // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
         let tool_call_json =
@@ -746,7 +746,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tool_calling_finish_reason_override_from_length() {
         // Test that when tool calls are present but finish reason is Length, it gets overridden to ToolCalls
         let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
@@ -788,7 +788,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tool_calling_finish_reason_override_from_none() {
         // Test that when tool calls are present but finish reason is None, it gets set to ToolCalls
         let tool_call_json = r#"{"name": "calculate", "arguments": {"expression": "2+2"}}"#;
@@ -830,7 +830,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_no_tool_calling_preserves_original_finish_reason() {
         // Test that when no tool calls are present, the original finish reason is preserved
         let annotated_delta = create_test_delta(
@@ -868,7 +868,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_empty_tool_calls_preserves_original_finish_reason() {
         // Test that when tool calls array is empty, the original finish reason is preserved
         // Create a delta with empty tool calls by modifying the create_test_delta output
@@ -912,7 +912,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tool_calling_output() {
         // Simulate a delta with a tool call in the content
         let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
@@ -976,7 +976,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tool_calling_finish_reason_override_from_stop_alternative() {
         // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
         let tool_call_json =

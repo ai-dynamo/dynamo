@@ -152,7 +152,7 @@ mod tests {
         Annotated::from_data(response)
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_empty_stream() {
         let stream = stream::empty();
         let result = DeltaAggregator::apply(Box::pin(stream)).await;
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(response.inner.model, "embedding");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_single_embedding() {
         let embedding = dynamo_async_openai::types::Embedding {
             index: 0,
@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(response.inner.usage.total_tokens, 10);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_embeddings() {
         let embedding1 = dynamo_async_openai::types::Embedding {
             index: 0,
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(response.inner.usage.total_tokens, 12); // sum of 5 and 7
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_error_in_stream() {
         let error_annotated =
             Annotated::<NvCreateEmbeddingResponse>::from_error("Test error".to_string());

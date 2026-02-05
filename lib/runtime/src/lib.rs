@@ -21,7 +21,6 @@ pub mod config;
 pub use config::RuntimeConfig;
 
 pub mod component;
-pub mod compute;
 pub mod discovery;
 pub mod engine;
 pub mod engine_routes;
@@ -49,6 +48,7 @@ pub mod worker;
 
 pub use distributed::{DistributedRuntime, distributed_test_utils};
 pub use futures::stream;
+pub use loom_rs::{ComputeHint, current_runtime};
 pub use metrics::MetricsRegistry;
 pub use runtime::Runtime;
 pub use system_health::{HealthCheckTarget, SystemHealth};

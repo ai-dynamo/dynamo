@@ -134,7 +134,7 @@ pub struct PrefillOffload {
 //     use super::*;
 //     use dynamo_runtime::logging::init;
 
-//     #[tokio::test]
+//     #[loom_rs::test]
 //     async fn test() {
 //         init();
 

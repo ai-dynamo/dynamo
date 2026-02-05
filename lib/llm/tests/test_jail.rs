@@ -369,7 +369,7 @@ mod tests {
     use serde_json::json;
     use test_utils::*;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_with_start_end_sequences() {
         // Create chunks with jail start/end markers
         let chunks = vec![
@@ -426,7 +426,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_with_tool_calls() {
         // Create chunks representing a tool call
         let chunks = vec![
@@ -463,7 +463,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_dual_entry_paths() {
         // Test that BOTH sequence AND tool call detection can trigger jail
         let chunks = vec![
@@ -507,7 +507,7 @@ mod tests {
         assert!(jailed.contains("<jail><TOOLCALL>Jailed content</jail>"));
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_early_exit() {
         // Tests detection of complete tool call with unjail in same chunk as the end marker
         // Input: "<TOOLCALL>" + "[{\"name\": \"test\", " + "\"arguments\": {}}]" + "</TOOLCALL>More text"
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(reconstructed, "More text");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_no_jailing() {
         // Input chunks:
         // [0] "Hello "
@@ -598,7 +598,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_hermes_parser() {
         // Tests Hermes format tool call parsing with <tool_call> markers
         // Input: "I'll help you with that. " + "<tool_call>{\"name\": \"search_web\", \"arguments\": {\"query\": \"weather today\"}}</tool_call>" + " Let me search for that."
@@ -646,7 +646,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_mistral_parser() {
         // Tests Mistral format tool call parsing with [{ pattern
         // Input: "Sure, I can help. " + "[{\"name\": \"calculate\", \"arguments\": {\"expression\": \"2+2\"}}]" + " The calculation is done."
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(reconstructed, "Sure, I can help.  The calculation is done.");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_mistral_parser_with_tool_calls_marker() {
         // Tests Mistral format tool call parsing with explicit [TOOL_CALLS] marker
         // Input: "Let me check that for you. " + "[TOOL_CALLS][{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"UTC\"}}]" + " Here's the time."
@@ -732,7 +732,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_phi4_parser() {
         // Tests Phi4 format tool call parsing with functools[ pattern
         // Input: "I'll analyze this data. " + "functools[{\"name\": \"analyze_data\", \"arguments\": {\"dataset\": \"sales_data\"}}]" + " Analysis complete."
@@ -777,7 +777,7 @@ mod tests {
         assert_eq!(reconstructed, "I'll analyze this data.  Analysis complete.");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_llama3_json_parser() {
         // Tests Llama3 JSON format tool call parsing with <|python_tag|> pattern
         // Input: "Let me run some code. " + "<|python_tag|>{\"name\": \"execute_code\", \"arguments\": {\"code\": \"print('Hello')\"}}" + " Done executing."
@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(reconstructed, "Let me run some code.  Done executing.");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_false_positive_json() {
         // Tests that JSON-like content doesn't trigger false positive tool call detection
         // Input: "I can explain JSON format. " + "Here's an example: { \"key\": \"value\" }" + " is a simple JSON object. " + "Hope that helps!"
@@ -860,7 +860,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_malformed_tool_call() {
         // Tests graceful handling of malformed JSON within tool call markers
         // Input: "Let me call a function. " + "<TOOLCALL>[{\"name\": \"broken_func\", \"arguments\": {\"param\": incomplete</TOOLCALL>" + " Function call attempt finished."
@@ -905,7 +905,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_partial_tool_call() {
         // Tests handling of incomplete tool call when stream ends abruptly
         // Input: "Starting function call. " + "<TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {" (no end marker)
@@ -949,7 +949,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_empty_stream() {
         // Input chunks: []
         //
@@ -981,7 +981,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_multiple_tool_calls() {
         // Input chunks: 9 chunks for 2 tool calls with content between
         //
@@ -1044,7 +1044,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_tool_call_across_many_chunks() {
         // Tests extreme fragmentation: tool call split across 65 individual character chunks
         // Input: "I'll process your request. " + "<TOOLCALL>[{"name": "process_data", "arguments": {}}]</TOOLCALL>" + " Processing complete!"
@@ -1149,7 +1149,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_preserves_metadata() {
         // Test metadata preservation through jail processing
         let test_id = Some("correlation-id-123".to_string());
@@ -1241,7 +1241,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_preserves_metadata_on_stream_end() {
         // Test metadata preservation when stream ends while jailed
         let test_id = Some("end-correlation-456".to_string());
@@ -1307,7 +1307,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_metadata_edge_cases() {
         // Test edge cases: empty metadata, partial metadata, etc.
         let chunks = vec![
@@ -1361,7 +1361,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_trailing_content_same_chunk() {
         // Input chunks:
         // [0] "I'll help you. "
@@ -1411,7 +1411,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_early_exit_with_trailing() {
         // Tests early exit when complete tool call is detected in chunk that also contains trailing content
         // Input: "Starting task: " + "<tool_call>{\"name\": \"complete_task\", \"arguments\": {}}" + "</tool_call> Task completed successfully."
@@ -1452,7 +1452,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_choices_independent_jailing() {
         // Test that different choices can jail and unjail independently
         // This test will FAIL with the current HashMap-based implementation
@@ -1544,7 +1544,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_deterministic_choice_ordering() {
         // Test that choices are processed in deterministic order (0, 1, 2...)
         // This test will FAIL with the current HashMap implementation
@@ -1638,7 +1638,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_usage_chunk_preserved() {
         // Create one chunk with choices (content) and one chunk with only usage/no choices.
         let content_chunk = create_mock_response_chunk("Hello, world!".to_string(), 0);
@@ -1687,7 +1687,7 @@ mod tests {
         assert_eq!(usage.total_tokens, 14);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_choices_usage_aggregation() {
         // Test that usage is correctly aggregated across multiple choices
         // This test demonstrates how usage should work with n>1
@@ -1717,7 +1717,7 @@ mod tests {
         assert!(!results.is_empty(), "Should have some results");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_partial_matching_false_positive_prevention() {
         // Input chunks:
         // [0] "n "
@@ -1771,7 +1771,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_partial_matching_suffix_detection() {
         // Input chunks:
         // [0] "text<TO"
@@ -1824,7 +1824,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_harmony_parser() {
         // Harmony format with analysis text and a tool call encoded in special tags
         let chunks = vec![
@@ -1877,7 +1877,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_deepseek_v3_1() {
         // DeepSeek v3.1 format with two tool calls encoded in special tags
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
@@ -1920,7 +1920,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_deepseek_v3_1_chunk() {
         // DeepSeek v3.1 format with two tool calls encoded in special tags
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
@@ -1994,7 +1994,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_qwen3_coder_parser() {
         // Input:
         // "I'll call a function. "
@@ -2043,7 +2043,7 @@ mod tests {
         assert_eq!(reconstructed, "I'll call a function.  Done.");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_qwen3_coder_multiple_params() {
         use dynamo_parsers::tool_calling::ToolDefinition;
 
@@ -2092,7 +2092,7 @@ mod tests {
         test_utils::assert_content(&results[2], " Searching now.");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_xml_parser_config_tokens_auto_population() {
         // Tests that parser config tokens are auto-populated when using `.tool_call_parser()`.
         // This verifies the jail system reads `tool_call_start_token` and `tool_call_end_token`
@@ -2135,7 +2135,7 @@ mod tests {
         assert_eq!(reconstructed, "Before tool call.  After tool call.");
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_xml_manual_sequences_prevent_auto_population() {
         // Tests that manually setting jail sequences prevents auto-population.
         // This verifies the builder respects manual configuration over auto-population.
@@ -2243,7 +2243,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_jailed_stream_mistral_false_positive_curly() {
         // Curly brace in normal text should not trigger tool call detection for mistral
         let chunks = vec![
@@ -2271,7 +2271,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     #[ignore]
     // TODO: This needs to be fixed in parser library. P1 priority.
     async fn test_jailed_stream_mistral_false_positive_then_tool_calls_marker() {
@@ -2454,7 +2454,7 @@ mod parallel_jail_tests {
     // 1. PARALLEL TOOL CALLS IN SINGLE CHUNK
     // =============================================================================
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_tool_calls_single_chunk_nemotron() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2490,7 +2490,7 @@ mod parallel_jail_tests {
         validate_parallel_streaming_tool_calls(&results, &expected_calls);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_tool_calls_single_chunk_mistral() {
         let jail = JailedStream::builder().tool_call_parser("mistral").build();
 
@@ -2524,7 +2524,7 @@ mod parallel_jail_tests {
     // 2. PARALLEL TOOL CALLS ACROSS MULTIPLE CHUNKS (STREAMING)
     // =============================================================================
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_tool_calls_streaming_chunks() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2562,7 +2562,7 @@ mod parallel_jail_tests {
         validate_parallel_streaming_tool_calls(&results, &expected_calls);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_tool_calls_with_normal_text_before_and_after() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2636,7 +2636,7 @@ mod parallel_jail_tests {
     // 3. MULTIPLE CHOICES WITH PARALLEL TOOL CALLS
     // =============================================================================
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_choices_with_parallel_tool_calls() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2678,7 +2678,7 @@ mod parallel_jail_tests {
     // 4. MIXED TOOL TYPES IN PARALLEL CALLS
     // =============================================================================
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_mixed_tool_types_streaming() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2719,7 +2719,7 @@ mod parallel_jail_tests {
     // 5. LARGE SCALE PARALLEL CALLS (5+ TOOLS)
     // =============================================================================
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_large_scale_parallel_tool_calls() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2765,7 +2765,7 @@ mod parallel_jail_tests {
     // 6. COMPLEX NESTED ARGUMENTS IN PARALLEL CALLS
     // =============================================================================
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_complex_nested_arguments() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2871,7 +2871,7 @@ mod parallel_jail_tests {
     // 7. ERROR HANDLING AND EDGE CASES
     // =============================================================================
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_partial_malformed_calls() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2913,7 +2913,7 @@ mod parallel_jail_tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_streaming_interrupted() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")
@@ -2957,7 +2957,7 @@ mod parallel_jail_tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_parallel_empty_tool_calls_array() {
         let jail = JailedStream::builder()
             .tool_call_parser("nemotron_deci")

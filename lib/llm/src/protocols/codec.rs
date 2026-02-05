@@ -303,7 +303,7 @@ mod tests {
         message: String,
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_all_fields() {
         let sample_data = r#"id: 123
 event: test
@@ -328,7 +328,7 @@ data: {"message": "Hello World"}
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_only_data() {
         let sample_data = r#"data: {"message": "Just some data"}
 
@@ -347,7 +347,7 @@ data: {"message": "Hello World"}
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_only_comment() {
         let sample_data = r#": This is a comment
 
@@ -368,7 +368,7 @@ data: {"message": "Hello World"}
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_multiple_comments() {
         let sample_data = r#": First comment
 : Second comment
@@ -393,7 +393,7 @@ data: {"message": "Hello World"}
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_partial_fields() {
         let sample_data = r#"id: 456
 data: {"message": "Partial data"}
@@ -413,7 +413,7 @@ data: {"message": "Partial data"}
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_invalid_json_data() {
         let sample_data = r#"data: {"message": "Invalid JSON
 
@@ -435,7 +435,7 @@ data: {"message": "Partial data"}
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_missing_data_field() {
         let sample_data = r#"id: 789
 event: test_event
@@ -454,7 +454,7 @@ event: test_event
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_empty_data_field() {
         let sample_data = r#"data:
 
@@ -474,7 +474,7 @@ event: test_event
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_multiple_data_lines() {
         let sample_data = r#"data: {"message": "Line1"}
 data: {"message": "Line2"}
@@ -497,7 +497,7 @@ data: {"message": "Line2"}
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_message_with_unrecognized_field() {
         let sample_data = r#"unknown: value
 data: {"message": "Hello"}
@@ -627,7 +627,7 @@ data: [DONE]
 
 "#;
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_openai_chat_stream() {
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 

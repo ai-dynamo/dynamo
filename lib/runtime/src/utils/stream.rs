@@ -76,7 +76,7 @@ mod tests {
         result
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_deadline_exceeded() {
         // The sum of the sleep times should exceed the deadline
         let sleep_times_ms = vec![100, 100, 200, 50];
@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(result, vec![100, 100]);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_complete_before_deadline() {
         // The sum of the sleep times should be less than the deadline
         let sleep_times_ms = vec![100, 50, 50];

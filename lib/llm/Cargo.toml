@@ -203,6 +203,8 @@ insta = { version = "1.41", features = [
   "redactions",
   "filters",
 ] }
+loom-rs = { git = "https://github.com/ryanolson/loom-rs", branch = "ryan/api-updates" }
+
 
 lazy_static = "1.4"
 mockito = "1.7.0"
@@ -218,4 +220,3 @@ tonic-build = { version = "0.13.1" }
 name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
-

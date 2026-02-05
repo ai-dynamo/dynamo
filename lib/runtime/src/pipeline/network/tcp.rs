@@ -94,7 +94,7 @@ mod tests {
         foo: String,
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tcp_stream_client_server() {
         println!("Test Started");
         let options = server::ServerOptions::builder().port(9124).build().unwrap();

@@ -661,7 +661,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tcp_stream_server_default_behavior() {
         // Test that TcpStreamServer::new works with default options
         // This verifies normal operation when IP detection succeeds
@@ -709,7 +709,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_tcp_stream_server_fallback_to_loopback() {
         // Test fallback behavior using a mock resolver that always fails
         // This guarantees the fallback logic is triggered

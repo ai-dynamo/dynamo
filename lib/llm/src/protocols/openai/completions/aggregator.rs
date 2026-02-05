@@ -270,7 +270,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_empty_stream() {
         // Create an empty stream
         let stream: DataStream<Annotated<NvCreateCompletionResponse>> = Box::pin(stream::empty());
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(response.inner.choices.len(), 0);
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_single_delta() {
         // Create a sample delta
         let annotated_delta = create_test_delta(0, "Hello,", Some("length".to_string()), None);
@@ -327,7 +327,7 @@ mod tests {
         assert!(choice.logprobs.is_none());
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_deltas_same_choice() {
         // Create multiple deltas with the same choice index
         // One will have a MessageRole and no FinishReason,
@@ -363,7 +363,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[loom_rs::test]
     async fn test_multiple_choices() {
         // Create a delta with multiple choices
         let inner = dynamo_async_openai::types::CreateCompletionResponse {

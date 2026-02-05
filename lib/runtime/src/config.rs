@@ -9,7 +9,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use validator::Validate;
 
 pub mod environment_names;
@@ -365,15 +365,12 @@ impl RuntimeConfig {
     }
 
     /// Create a new default runtime configuration
-    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(
-                self.num_worker_threads
-                    .unwrap_or_else(|| std::thread::available_parallelism().unwrap().get()),
-            )
-            .max_blocking_threads(self.max_blocking_threads)
-            .enable_all()
-            .build()
+    pub(crate) fn create_runtime(&self) -> anyhow::Result<loom_rs::LoomRuntime> {
+        let num_cores = std::thread::available_parallelism().unwrap().get();
+
+        Ok(loom_rs::LoomBuilder::new()
+            .tokio_threads(num_cores.max(4).min(1))
+            .build()?)
     }
 }
 
