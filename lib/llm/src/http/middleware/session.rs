@@ -34,11 +34,6 @@ pub struct RequestSession {
     /// share the same conversation history and can reference each other
     /// via previous_response_id.
     pub session_id: String,
-
-    /// User identifier (from x-user-id header, optional)
-    ///
-    /// Used for logging and audit purposes. Not required for functionality.
-    pub user_id: Option<String>,
 }
 
 /// Middleware to extract request session from headers
@@ -46,7 +41,6 @@ pub struct RequestSession {
 /// # Headers
 /// - `x-tenant-id` (required): Tenant identifier
 /// - `x-session-id` (required): Session/conversation identifier
-/// - `x-user-id` (optional): User identifier for logging
 ///
 /// # Errors
 /// Returns 400 Bad Request if required headers are missing or invalid.
@@ -82,17 +76,10 @@ pub async fn extract_session_middleware(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Extract user_id (optional)
-    let user_id = headers
-        .get("x-user-id")
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string());
-
     // Insert context into request extensions for downstream handlers
     request.extensions_mut().insert(RequestSession {
         tenant_id,
         session_id,
-        user_id,
     });
 
     Ok(next.run(request).await)
@@ -114,10 +101,7 @@ mod tests {
     async fn test_handler(
         axum::Extension(ctx): axum::Extension<RequestSession>,
     ) -> impl IntoResponse {
-        format!(
-            "tenant={}, session={}, user={:?}",
-            ctx.tenant_id, ctx.session_id, ctx.user_id
-        )
+        format!("tenant={}, session={}", ctx.tenant_id, ctx.session_id)
     }
 
     fn create_test_router() -> Router {
@@ -134,7 +118,6 @@ mod tests {
             .uri("/test")
             .header("x-tenant-id", "tenant_123")
             .header("x-session-id", "session_456")
-            .header("x-user-id", "user_789")
             .body(Body::empty())
             .unwrap();
 
@@ -149,32 +132,8 @@ mod tests {
 
         assert!(body_str.contains("tenant=tenant_123"));
         assert!(body_str.contains("session=session_456"));
-        assert!(body_str.contains("user=Some(\"user_789\")"));
     }
 
-    #[tokio::test]
-    async fn test_optional_user_id() {
-        let app = create_test_router();
-
-        let request = Request::builder()
-            .uri("/test")
-            .header("x-tenant-id", "tenant_123")
-            .header("x-session-id", "session_456")
-            // No x-user-id header
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body_str = String::from_utf8(body.to_vec()).unwrap();
-
-        assert!(body_str.contains("user=None"));
-    }
 
     #[tokio::test]
     async fn test_missing_tenant_id() {
@@ -238,20 +197,4 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
-    async fn test_invalid_header_encoding() {
-        let app = create_test_router();
-
-        let request = Request::builder()
-            .uri("/test")
-            .header("x-tenant-id", "tenant_123")
-            .header("x-session-id", "session_456")
-            // Invalid UTF-8 in user_id won't cause failure (optional header)
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-    }
 }
