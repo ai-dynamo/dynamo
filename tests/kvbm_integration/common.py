@@ -770,10 +770,13 @@ class TestDeterminism:
         )
         return bench_process, bench_file, bench_log
 
-    def _wait_for_benchmark_activity(self, initial_offload: int) -> bool:
+    def _wait_for_benchmark_activity(
+        self, metrics_port: int, initial_offload: int
+    ) -> bool:
         """Wait for benchmark to start creating offload activity.
 
         Args:
+            metrics_port: Port number for the KVBM metrics endpoint
             initial_offload: Initial offload block count to compare against
 
         Returns:
@@ -787,7 +790,7 @@ class TestDeterminism:
             elapsed = (wait_iteration + 1) * 5
 
             try:
-                current_metrics = fetch_kvbm_metrics()
+                current_metrics = fetch_kvbm_metrics(port=metrics_port)
                 current_offload = current_metrics.get("kvbm_offload_blocks_d2h", 0)
 
                 if current_offload > initial_offload:
@@ -935,10 +938,11 @@ class TestDeterminism:
                 f"Exact matches: {exact_matches}/{num_requests} ({exact_matches/num_requests:.1%})"
             )
 
-    def _show_final_kvbm_stats(self, initial_offload: int):
+    def _show_final_kvbm_stats(self, metrics_port: int, initial_offload: int):
         """Display final KVBM metrics and compare with initial state.
 
         Args:
+            metrics_port: Port number for the KVBM metrics endpoint
             initial_offload: Initial offload block count to compare against
 
         Raises:
@@ -948,7 +952,7 @@ class TestDeterminism:
         print("FINAL KVBM STATS")
         print(f"{'='*70}")
         try:
-            final_metrics = fetch_kvbm_metrics()
+            final_metrics = fetch_kvbm_metrics(port=metrics_port)
             final_offload = final_metrics.get("kvbm_offload_blocks_d2h", 0)
             final_onboard = final_metrics.get("kvbm_onboard_blocks_h2d", 0)
 
@@ -1030,7 +1034,7 @@ class TestDeterminism:
             # Check initial metrics
             print("\nChecking initial KVBM metrics...")
             try:
-                initial_metrics = fetch_kvbm_metrics()
+                initial_metrics = fetch_kvbm_metrics(port=llm_server.metrics_port)
                 initial_offload = initial_metrics.get("kvbm_offload_blocks_d2h", 0)
                 print(f"Initial offload: {initial_offload} blocks")
             except Exception as e:
@@ -1038,7 +1042,9 @@ class TestDeterminism:
                 initial_offload = 0
 
             # Wait for benchmark activity
-            benchmark_started = self._wait_for_benchmark_activity(initial_offload)
+            benchmark_started = self._wait_for_benchmark_activity(
+                llm_server.metrics_port, initial_offload
+            )
             if not benchmark_started:
                 pytest.fail(
                     "Benchmark failed to start or create offload activity. "
@@ -1116,7 +1122,7 @@ class TestDeterminism:
             )
 
             # Show final KVBM stats
-            self._show_final_kvbm_stats(initial_offload)
+            self._show_final_kvbm_stats(llm_server.metrics_port, initial_offload)
 
         finally:
             print("\nStopping benchmark...")
@@ -1292,7 +1298,7 @@ def parse_kvbm_metrics(metrics_text: str) -> dict:
     return metrics
 
 
-def fetch_kvbm_metrics(port: Optional[int] = None, timeout: int = 10) -> dict:
+def fetch_kvbm_metrics(port: int, timeout: int = 10) -> dict:
     """Fetch and parse KVBM metrics from the metrics endpoint.
 
     Args:
@@ -1303,14 +1309,8 @@ def fetch_kvbm_metrics(port: Optional[int] = None, timeout: int = 10) -> dict:
         Dictionary of parsed metrics
 
     Raises:
-        ValueError: If port is not provided
         RuntimeError: If metrics endpoint is unreachable or returns error
     """
-    if port is None:
-        raise ValueError(
-            "port must be provided explicitly. "
-            "Hardcoded default port is not supported for pytest-xdist compatibility."
-        )
     response = requests.get(f"http://localhost:{port}/metrics", timeout=timeout)
     if response.status_code != 200:
         raise RuntimeError(
