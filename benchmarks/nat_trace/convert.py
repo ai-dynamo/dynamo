@@ -50,8 +50,8 @@ def parse_args():
     parser.add_argument(
         "--block-size",
         type=int,
-        default=128,
-        help="Block size for hash generation (default: 128)",
+        default=64,
+        help="Block size for hash generation (default: 64)",
     )
     parser.add_argument(
         "--num-requests",
