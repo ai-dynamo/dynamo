@@ -13,20 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import logging
 import time
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.multimodal_utils.image_batch_loader import load_image_batch
-from dynamo.multimodal_utils.image_loader import ImageLoader
+from dynamo.common.multimodal.image_batch_loader import load_image_batch
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -141,19 +140,70 @@ class MultimodalRequestProcessor:
                 logging.error(f"Failed to load tensor from local path: {e}")
                 raise RuntimeError("Failed to load tensor")
 
+    def extract_prompt_and_media(
+        self, messages: List[Dict]
+    ) -> Tuple[str, List[str], List[str]]:
+        """Extracts text prompt, image URLs, and embedding paths from messages."""
+        text_parts = []
+        image_urls = []
+        embedding_paths = []
+
+        for message in messages:
+            for content in message.get("content", []):
+                if isinstance(content, str):
+                    text_parts.append(content)
+                else:
+                    if content.get("type") == "text":
+                        text_parts.append(content.get("text", ""))
+                    elif content.get("type") == "image_url":
+                        url = content.get("image_url", {}).get("url", "")
+                        if not url:
+                            continue
+                        self.modality = "image"
+                        if url.endswith((".pt", ".pth", ".bin")):
+                            embedding_paths.append(url)
+                        else:
+                            image_urls.append(url)
+
+        return "".join(text_parts), image_urls, embedding_paths
+
     async def process_openai_request(
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
     ) -> Optional[Any]:
         """
         Process OpenAI request and return multimodal data in TokensPrompt format.
 
+        Supports three flows:
+        1. EPD Case 1: Encoder fully processed (has _epd_processed_prompt)
+        2. EPD Case 2: NIXL embeddings (embeddings parameter is not None)
+        3. PD Flow: Rust pre-tokenized with direct media loading
+
         Returns dict compatible with TRT-LLM's generate_async:
         {
             "prompt_token_ids": List[int],
             "multi_modal_data": Dict[str, List[torch.Tensor]]
         }
+        or for EPD Case 1:
+        {
+            "prompt": str,
+            "prompt_token_ids": List[int]
+        }
         """
         self.previous_decoded_text = ""
+
+        # EPD Flow Case 1: Encoder has fully processed the prompt
+        # The encode worker has done everything: vision encoding, prompt processing, tokenization
+        # Return the encoder's processed prompt and tokens directly
+        processed_prompt_from_encoder = request.get("_epd_processed_prompt")
+        if processed_prompt_from_encoder is not None:
+            logging.info("Using fully processed prompt from encoder (EPD Case 1)")
+            result = {"prompt": processed_prompt_from_encoder}
+            prompt_token_ids = request.get("_epd_prompt_token_ids")
+            if prompt_token_ids:
+                result["prompt_token_ids"] = prompt_token_ids
+            else:
+                logging.warning("EPD Case 1: No prompt_token_ids from encoder")
+            return result
 
         # Get token_ids from request (already tokenized by Rust frontend)
         token_ids = request.get("token_ids")
@@ -165,38 +215,99 @@ class MultimodalRequestProcessor:
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
         processed_inputs = {"prompt_token_ids": token_ids, "mm_processor_kwargs": {}}
 
+        # EPD Flow Case 2: Embeddings received via NIXL from encode worker
+        # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
+        # We need to pass these embeddings directly to TRT-LLM's generate_async
+        if embeddings is not None:
+            logging.info(
+                f"Using NIXL embeddings from encoder (EPD Case 2): shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
+            )
+
+            # Structure embeddings in the format TRT-LLM's generate_async expects
+            # Looking at TRT-LLM code, multi_modal_embeddings can be passed directly
+            processed_inputs[
+                "multi_modal_embeddings"
+            ] = embeddings  # Pass NIXL embeddings directly
+
+            return processed_inputs
+
+        # PD Flow: Pre-tokenized by Rust frontend with direct media loading
+        # TODO: Add frontend decoding support
+
         # Handle multimodal data if present
         multi_modal_data = request.get("multi_modal_data")
         if multi_modal_data and isinstance(multi_modal_data, dict):
             processed_mm_data = {}
 
-            # Process images - keep as PIL Images for TRT-LLM's input processor
-            # TRT-LLM will auto-detect this and compute mrope_config
+            # Process images and embedding paths from image_url field
             image_items = multi_modal_data.get("image_url", [])
             if image_items and isinstance(image_items, list):
-                try:
-                    pil_images = await load_image_batch(image_items, self.image_loader)
-                    if pil_images:
-                        processed_mm_data["image"] = pil_images
-                        logging.info(f"Loaded {len(pil_images)} image(s) as PIL Images")
-                except Exception as e:
-                    logging.error(f"Failed to load images: {e}")
-                    return None
+                # Separate embedding paths from regular image URLs
+                # Items come from Rust in format: {"Url": "..."} or {"Decoded": ...}
+                embedding_paths = []
+                image_urls = []
+
+                for item in image_items:
+                    # Extract URL from item (Rust enum serialization uses "Url" with capital U)
+                    if isinstance(item, dict) and "Url" in item:
+                        url = item["Url"]
+                    elif isinstance(item, dict) and "Decoded" in item:
+                        # Already decoded data (NIXL) - always treat as image
+                        image_urls.append(item)
+                        continue
+                    elif isinstance(item, str):
+                        # Fallback for string URLs (backward compatibility)
+                        url = item
+                    else:
+                        logging.warning(
+                            f"Unexpected item format in image_items: {item}"
+                        )
+                        continue
+
+                    # Check if this is an embedding file based on extension
+                    if url.endswith((".pt", ".pth", ".bin")):
+                        embedding_paths.append(url)
+                    else:
+                        # Keep original item format for load_image_batch
+                        image_urls.append(item)
+
+                # Load regular images as PIL Images for TRT-LLM's input processor
+                # TRT-LLM will auto-detect this and compute mrope_config
+                if image_urls:
+                    try:
+                        pil_images = await load_image_batch(
+                            image_urls, self.image_loader
+                        )
+                        if pil_images:
+                            processed_mm_data["image"] = pil_images
+                            logging.info(
+                                f"Loaded {len(pil_images)} image(s) as PIL Images"
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to load images: {e}")
+                        return None
+
+                # Load embedding files (.pt, .pth, .bin) for PD flow
+                # These are pre-computed vision encoder outputs
+                if embedding_paths:
+                    try:
+                        loaded_embeddings = [
+                            self.load_tensor_from_path_or_url(path)
+                            for path in embedding_paths
+                        ]
+                        if loaded_embeddings:
+                            processed_mm_data["embedding"] = loaded_embeddings
+                            logging.info(
+                                f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to load embeddings: {e}")
+                        return None
 
             # TODO: Add support for video_url, audio_url
-            # TODO: Handle embedding paths (.pt, .pth files)
 
             if processed_mm_data:
                 processed_inputs["multi_modal_data"] = processed_mm_data
-
-        # TODO: Handle disaggregated params & embeddings for EPD flows
-        if ep_disaggregated_params:
-            logging.warning("EPD flow not yet updated for new multimodal path")
-
-        if embeddings is not None:
-            logging.warning(
-                "External embeddings not yet updated for new multimodal path"
-            )
 
         return processed_inputs
 
