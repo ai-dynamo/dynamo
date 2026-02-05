@@ -20,19 +20,18 @@ Expected input JSON format (JSONL - one JSON object per line):
 
 import argparse
 import json
-import logging
 import os
 import subprocess
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
+from common import (
+    DEFAULT_BLOCK_SIZE,
+    add_common_args,
+    get_common_aiperf_flags,
+    resolve_tokenizer,
+    setup_logger,
 )
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
+
+logger = setup_logger(__name__)
 
 
 def get_aiperf_cmd(
@@ -42,6 +41,7 @@ def get_aiperf_cmd(
     artifact_dir,
     seed,
     concurrency,
+    block_size,
     url="http://localhost:8000",
 ):
     """Build aiperf command for concurrency-based trace benchmarking."""
@@ -52,11 +52,6 @@ def get_aiperf_cmd(
         model,
         "--tokenizer",
         tokenizer,
-        "--endpoint-type",
-        "chat",
-        "--endpoint",
-        "v1/chat/completions",
-        "--streaming",
         "--url",
         url,
         "--input-file",
@@ -65,16 +60,14 @@ def get_aiperf_cmd(
         "mooncake_trace",
         "--concurrency",
         str(concurrency),
+        "--prompt-input-tokens-block-size",
+        str(block_size),
         "--random-seed",
         str(seed),
         "--artifact-dir",
         artifact_dir,
-        "--no-gpu-telemetry",
-        "-H",
-        "Authorization: Bearer NOT USED",
-        "-H",
-        "Accept: text/event-stream",
     ]
+    cmd.extend(get_common_aiperf_flags())
     return cmd
 
 
@@ -136,6 +129,7 @@ def run_benchmark(
     url,
     seed,
     concurrency,
+    block_size,
 ):
     """Run aiperf benchmark with concurrency mode."""
     aiperf_cmd = get_aiperf_cmd(
@@ -145,6 +139,7 @@ def run_benchmark(
         artifact_dir,
         seed,
         concurrency,
+        block_size,
         url,
     )
 
@@ -165,25 +160,9 @@ def main():
         description="Run concurrency-based benchmark with multi-turn conversation traces"
     )
 
-    # Model and server configuration
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Model name",
-    )
-    parser.add_argument(
-        "--tokenizer",
-        type=str,
-        default=None,
-        help="Tokenizer name (defaults to model)",
-    )
-    parser.add_argument(
-        "--url",
-        type=str,
-        default="http://localhost:8000",
-        help="Server URL",
-    )
+    # Common arguments
+    add_common_args(parser)
+
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -215,17 +194,14 @@ def main():
         "Set to 0 to remove all delays.",
     )
     parser.add_argument(
-        "--seed",
+        "--block-size",
         type=int,
-        default=0,
-        help="Random seed for reproducibility (default: 0)",
+        default=DEFAULT_BLOCK_SIZE,
+        help=f"Block size for prompt generation from hash_ids (default: {DEFAULT_BLOCK_SIZE})",
     )
 
     args = parser.parse_args()
-
-    # Use tokenizer from model if not specified
-    if args.tokenizer is None:
-        args.tokenizer = args.model
+    resolve_tokenizer(args)
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -252,6 +228,7 @@ def main():
         args.url,
         args.seed,
         args.concurrency,
+        args.block_size,
     )
 
     logger.info(f"Results saved to: {artifact_dir}")
