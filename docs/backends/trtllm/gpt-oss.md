@@ -485,6 +485,7 @@ flowchart TD
 
 ### Common Issues
 
+
 1. **CUDA Out-of-Memory Errors**
    - Reduce `--max-num-tokens` in the launch commands (currently 20000 for prefill, 16384 for decode)
    - Lower `--free-gpu-memory-fraction` from 0.9 to 0.8 or 0.7
@@ -508,6 +509,21 @@ flowchart TD
    - Check Docker daemon is running with GPU support
    - Ensure sufficient disk space for model weights and container images
 
+5. **Token Repetition / Generation Won't Stop**
+   - When using `reasoning_effort: high`, the model may produce repeated tokens and fail to stop
+   - **Solution**: Set `top_p=1` in your request. These are the [recommended sampling parameters from OpenAI](https://huggingface.co/openai/gpt-oss-120b/discussions/21)
+   - Example request with recommended parameters:
+     ```bash
+     curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+       "model": "openai/gpt-oss-120b",
+       "messages": [{"role": "user", "content": "Hello"}],
+       "chat_template_args": {
+          "reasoning_effort": "high"
+        },
+       "top_p": 1,
+       "max_tokens": 300
+     }'
+     ```
 ## Next Steps
 
 - **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../../examples/basics/multinode/README.md)
