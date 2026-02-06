@@ -66,6 +66,7 @@ FEATURE_MARKERS = [
     "kvbm_v2: marks tests using KVBM V2",
     "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
     "fault_tolerance: marks tests as fault tolerance tests",
+    "aiconfigurator: marks tests using AIConfigurator",
 ]
 
 

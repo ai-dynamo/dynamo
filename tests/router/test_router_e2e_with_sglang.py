@@ -29,6 +29,7 @@ MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.router,
     pytest.mark.sglang,
     pytest.mark.model(MODEL_NAME),
 ]

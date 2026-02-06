@@ -21,6 +21,11 @@ from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
 from benchmarks.profiler.utils.model_info import ModelInfo  # noqa: E402
 
 
+pytestmark = [
+    pytest.mark.aiconfigurator,
+]
+
+
 # Override the logger fixture from conftest.py to prevent directory creation
 @pytest.fixture(autouse=True)
 def logger(request):
@@ -78,8 +83,8 @@ class TestProfileSlaAiconfigurator:
         return Args()
 
     @pytest.mark.pre_merge
+    @pytest.mark.trtllm
     @pytest.mark.gpu_0
-    @pytest.mark.performance
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.parametrize("missing_arg", ["aic_system", "aic_hf_id"])
@@ -92,7 +97,6 @@ class TestProfileSlaAiconfigurator:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    @pytest.mark.performance
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -113,13 +117,16 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
-    @pytest.mark.gpu_1
+    @pytest.mark.gpu_0
     @pytest.mark.integration
     async def test_trtllm_aiconfigurator_single_model(self, llm_args):
         # Test that profile_sla works with the model & backend in the llm_args fixture.
         await run_profile(llm_args)
 
     @pytest.mark.parallel
+    @pytest.mark.vllm
+    @pytest.mark.trtllm
+    @pytest.mark.sglang
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
     @pytest.mark.integration

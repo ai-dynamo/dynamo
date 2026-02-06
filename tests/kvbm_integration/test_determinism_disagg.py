@@ -37,6 +37,8 @@ from .common import check_module_available
 # Todo: enable the rest when kvbm is built in the ci
 pytestmark = [
     pytest.mark.kvbm,
+    pytest.mark.vllm,
+    # pytest.mark.trtllm,  # TODO enable when TRT-LLM disagg is stable and skipif is removed.
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_2,
