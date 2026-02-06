@@ -1,0 +1,42 @@
+direction: right
+
+aggregated: Aggregated {
+  frontend: Frontend
+  router: Router
+
+  w1: "W1 (TP2)"
+  w2: "W2 (TP2)"
+  w3: "W3 (TP2)"
+  w4: "W4 (TP2)"
+
+  frontend -> router
+  router -> w1
+  router -> w2
+  router -> w3
+  router -> w4
+
+  note: |md
+    Each worker handles both
+    prefill and decode.
+  |
+}
+
+disaggregated: Disaggregated {
+  frontend: Frontend
+  router: Router
+
+  p1: "Prefill 1 (TP2)"
+  p2: "Prefill 2 (TP2)"
+  decode: "Decode (TP4)"
+
+  frontend -> router
+  router -> p1
+  router -> p2
+  p1 -> decode: "KV Cache via RDMA"
+  p2 -> decode: "KV Cache via RDMA"
+
+  note: |md
+    Prefill and decode on
+    separate workers.
+  |
+}

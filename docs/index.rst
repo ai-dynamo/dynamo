@@ -59,7 +59,7 @@ Quickstart
    :caption: User Guides
 
    KV Cache Aware Routing <components/router/router_guide.md>
-   Disaggregated Serving <design_docs/disagg_serving.md>
+   Disaggregated Serving Guide <features/disaggregated_serving/README.md>
    KV Cache Offloading <components/kvbm/kvbm_guide.md>
    Benchmarking <benchmarks/benchmarking.md>
    Multimodality Support <features/multimodal/README.md>

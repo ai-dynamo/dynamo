@@ -39,7 +39,6 @@
 
    reference/cli.md
    reference/glossary.md
-   performance/aiconfigurator.md
    performance/tuning.md
 
    backends/vllm/deepseek-r1.md
