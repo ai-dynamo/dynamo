@@ -44,7 +44,13 @@ use dynamo_kv_router::protocols::{
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Env var to enable structured KV cache allocation/eviction trace logs.
+/// Set to "1" or "true" (case-insensitive) to enable. Default: off.
+const ENV_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
 
 #[derive(Getters)]
 pub struct KvManager {
@@ -97,7 +103,13 @@ impl KvManager {
         }
     }
 
-    /// Converts stored/removed blocks into KvCacheEventData and publishes if sink is available
+    fn kv_cache_trace_enabled() -> bool {
+        env::var(ENV_KV_CACHE_TRACE)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    /// Converts stored/removed blocks into KvCacheEventData and publishes if sink is available.
     fn publish_kv_event(
         &mut self,
         full_blocks: Vec<SequenceHash>,
@@ -112,6 +124,32 @@ impl KvManager {
         let Some(ref sink) = self.kv_event_sink else {
             return;
         };
+
+        if Self::kv_cache_trace_enabled() {
+            let timestamp_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let active_len = self.active_blocks.len();
+            let inactive_len = self.inactive_blocks.len();
+            let free_blocks = self
+                .max_capacity
+                .saturating_sub(active_len)
+                .saturating_sub(inactive_len);
+            let event = if is_store { "allocation" } else { "eviction" };
+            tracing::info!(
+                event,
+                timestamp_ms,
+                block_ids = ?&full_blocks,
+                block_size = self.block_size,
+                free_blocks_after = free_blocks,
+                active_blocks = active_len,
+                inactive_blocks = inactive_len,
+                total_blocks = self.max_capacity,
+                dp_rank = self.dp_rank,
+                "KV cache trace"
+            );
+        }
 
         let event_data = if is_store {
             let num_blocks = full_blocks.len();
@@ -263,17 +301,21 @@ impl KvManager {
                     "uuid_block {uuid_block:?} should exist and be unique with ref_count=1"
                 );
 
-                let hash_ref_count = if let Some(ref_count) = self.active_blocks.get(&hash_block) {
-                    *ref_count
-                } else if self.inactive_blocks.remove(&hash_block) {
-                    0
-                } else {
-                    self.publish_kv_event(vec![*hash], &[*local_hash], *parent_hash, true);
-                    0
-                };
+                let (hash_ref_count, need_publish_stored) =
+                    if let Some(ref_count) = self.active_blocks.get(&hash_block) {
+                        (*ref_count, false)
+                    } else if self.inactive_blocks.remove(&hash_block) {
+                        (0, false)
+                    } else {
+                        (0, true)
+                    };
 
                 self.active_blocks
                     .insert(hash_block.clone(), hash_ref_count + 1);
+
+                if need_publish_stored {
+                    self.publish_kv_event(vec![*hash], &[*local_hash], *parent_hash, true);
+                }
             }
         }
 
