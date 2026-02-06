@@ -73,10 +73,6 @@ def process_multimodal(
     """Process multimodal request: load images, get expanded tokens and mm_hashes."""
     try:
         prompt = build_prompt_from_messages(messages)
-        prompt = messages
-        logger.info(f"prompt: {prompt}")
-        logger.info(f"image_urls: {image_urls}")
-        logger.info(f"messages: {messages}")
 
         # Use TRT-LLM loader to process images and get mm data
         inputs = default_multimodal_input_loader(
