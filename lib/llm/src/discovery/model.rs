@@ -246,13 +246,17 @@ impl Model {
                 .and_then(|entry| extract(entry.value()));
         }
 
-        // Collect eligible sets with their worker counts
+        // Collect eligible sets with their worker counts, skipping sets with no workers
         let eligible: Vec<(T, usize)> = self
             .worker_sets
             .iter()
             .filter_map(|entry| {
                 let ws = entry.value();
-                extract(ws).map(|val| (val, ws.worker_count().max(1)))
+                let count = ws.worker_count();
+                if count == 0 {
+                    return None;
+                }
+                extract(ws).map(|val| (val, count))
             })
             .collect();
 
