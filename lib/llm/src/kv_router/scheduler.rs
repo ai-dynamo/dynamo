@@ -11,7 +11,7 @@ use dynamo_runtime::transports::event_plane::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
@@ -82,7 +82,7 @@ impl PartialOrd for QueueEntry {
 /// Requests are ordered by effective arrival time: arrival_offset - priority_jump.
 pub struct SchedulerQueue {
     pending: Mutex<BinaryHeap<QueueEntry>>,
-    ready: Mutex<BinaryHeap<QueueEntry>>,
+    ready: Mutex<VecDeque<SchedulingRequest>>,
     slots: Arc<ActiveSequencesMultiWorker>,
     workers_with_configs: Arc<RuntimeConfigs>,
     ready_notify: Arc<Notify>,
@@ -104,7 +104,7 @@ impl SchedulerQueue {
         }
         Self {
             pending: Mutex::new(BinaryHeap::new()),
-            ready: Mutex::new(BinaryHeap::new()),
+            ready: Mutex::new(VecDeque::new()),
             slots,
             workers_with_configs,
             ready_notify,
@@ -128,23 +128,23 @@ impl SchedulerQueue {
     /// If queueing is disabled (env var not set), fast-track to ready.
     /// Otherwise, check busy condition and place in ready or pending.
     pub async fn enqueue(&self, request: SchedulingRequest) {
-        let entry = self.make_entry(request);
         let Some(threshold) = self.threshold_frac else {
-            self.ready.lock().await.push(entry);
+            self.ready.lock().await.push_back(request);
             return;
         };
 
         if self.all_workers_busy(threshold).await {
             tracing::debug!("all workers busy, queueing request");
+            let entry = self.make_entry(request);
             self.pending.lock().await.push(entry);
         } else {
-            self.ready.lock().await.push(entry);
+            self.ready.lock().await.push_back(request);
         }
     }
 
     /// Try to dequeue the highest-priority request from the ready queue.
     pub async fn try_dequeue(&self) -> Option<SchedulingRequest> {
-        self.ready.lock().await.pop().map(|e| e.request)
+        self.ready.lock().await.pop_front()
     }
 
     /// Called on prefill_complete/free. Re-checks pending requests and moves eligible to ready.
@@ -165,7 +165,7 @@ impl SchedulerQueue {
             let entry = self.pending.lock().await.pop();
             if let Some(entry) = entry {
                 tracing::debug!("moving request from pending to ready");
-                self.ready.lock().await.push(entry);
+                self.ready.lock().await.push_back(entry.request);
                 moved = true;
             } else {
                 break;
