@@ -1,0 +1,224 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+data:
+  prefill.yaml: |
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 9216
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 30
+    disable_overlap_scheduler: true
+    enable_attention_dp: false
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.8
+    max_batch_size: 64
+    max_num_tokens: 20000
+    max_seq_len: 9000
+    moe_config:
+      backend: TRTLLM
+    moe_expert_parallel_size: 1
+    num_postprocess_workers: 4
+    pipeline_parallel_size: 1
+    print_iter_log: true
+    stream_interval: 20
+    tensor_parallel_size: 1
+    trust_remote_code: true
+  decode.yaml: |
+    allreduce_strategy: AUTO
+    attention_dp_config:
+      enable_balance: true
+    cache_transceiver_config:
+      backend: UCX
+      max_tokens_in_buffer: 9216
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 1280
+    disable_overlap_scheduler: false
+    enable_attention_dp: false
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.85
+    max_batch_size: 1280
+    max_num_tokens: 20000
+    max_seq_len: 11000
+    moe_config:
+      backend: TRTLLM
+    moe_expert_parallel_size: 1
+    num_postprocess_workers: 4
+    pipeline_parallel_size: 1
+    print_iter_log: true
+    stream_interval: 20
+    tensor_parallel_size: 4
+    trust_remote_code: true
+
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: gpt-oss-disagg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: gpt-oss-disagg
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - gpt-oss-disagg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+      replicas: 1
+    TrtllmPrefillWorker:
+      componentType: main
+      dynamoNamespace: gpt-oss-disagg
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "openai/gpt-oss-120b" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --disaggregation-mode prefill
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: OVERRIDE_QUANT_ALGO
+            value: "W4A8_MXFP4_MXFP8"
+          - name: NCCL_GRAPH_REGISTER
+            value: "0"
+          - name: OMPI_MCA_coll_ucc_enable
+            value: "0"
+          - name: SERVED_MODEL_NAME
+            value: "openai/gpt-oss-120b"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/prefill.yaml"
+          - name: MODEL_PATH
+            value: "/opt/models/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+          - name: HF_HOME
+            value: /opt/models
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config
+            readOnly: true
+          workingDir: /workspace/examples/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config
+          name: llm-config
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+    TrtllmDecodeWorker:
+      componentType: main
+      dynamoNamespace: gpt-oss-disagg
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "openai/gpt-oss-120b" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --disaggregation-mode decode
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: OVERRIDE_QUANT_ALGO
+            value: "W4A8_MXFP4_MXFP8"
+          - name: NCCL_GRAPH_REGISTER
+            value: "0"
+          - name: OMPI_MCA_coll_ucc_enable
+            value: "0"
+          - name: SERVED_MODEL_NAME
+            value: "openai/gpt-oss-120b"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/decode.yaml"
+          - name: MODEL_PATH
+            value: "/opt/models/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+          - name: HF_HOME
+            value: /opt/models
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config
+            readOnly: true
+          workingDir: /workspace/examples/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config
+          name: llm-config
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
