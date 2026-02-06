@@ -39,6 +39,7 @@ from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
+from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -72,9 +73,16 @@ class RequestHandlerConfig:
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
 
 
-class HandlerBase:
+class HandlerBase(BaseGenerativeHandler):
     """
-    Base class for request handlers.
+    Base class for LLM request handlers (text generation, multimodal LLM).
+
+    This class is dedicated to LLM-based generation using TensorRT-LLM engine.
+    For diffusion-based handlers (video, image), see VideoGenerationHandler
+    and ImageGenerationHandler which inherit directly from BaseGenerativeHandler.
+
+    Inherits from BaseGenerativeHandler to ensure a consistent interface
+    across all generative handlers (LLM, video, image).
     """
 
     def __init__(self, config: RequestHandlerConfig):
