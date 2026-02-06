@@ -17,6 +17,7 @@ Submodules:
 from dynamo.common.utils import (
     endpoint_types,
     engine_response,
+    namespace,
     otel_tracing,
     paths,
     prometheus,
@@ -26,6 +27,7 @@ from dynamo.common.utils import (
 __all__ = [
     "endpoint_types",
     "engine_response",
+    "namespace",
     "otel_tracing",
     "paths",
     "prometheus",
