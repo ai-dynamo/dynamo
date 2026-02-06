@@ -47,7 +47,6 @@ use std::sync::{Arc, Weak};
 
 use handle::BlockRegistrationHandleInner;
 
-
 pub use crate::blocks::RegisteredReturnFn;
 
 pub type PositionalRadixTree<V> = dynamo_tokens::PositionalRadixTree<V, SequenceHash>;

@@ -13,15 +13,15 @@ use crate::{BlockId, pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 
 use crate::{
     blocks::{
-        Block, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock,
-        RegisteredBlock, state::Reset,
+        Block, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, RegisteredBlock,
+        state::Reset,
     },
-    registry::BlockRegistry,
     pools::{
         ActivePool, BlockDuplicationPolicy, InactivePool, InactivePoolBackend, ResetPool,
         ReusePolicy, SequenceHash,
         backends::{HashMapBackend, LruBackend, MultiLruBackend},
     },
+    registry::BlockRegistry,
 };
 
 /// Capacity settings for TinyLFU frequency tracker
@@ -647,13 +647,12 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::blocks::BlockError;
     use super::*;
     use crate::KvbmSequenceHashProvider;
+    use crate::blocks::BlockError;
     use crate::testing::{
-        self, TestMeta,
+        self, TestMeta, create_iota_token_block,
         create_test_token_block as testing_create_token_block,
-        create_iota_token_block,
     };
     use rstest::rstest;
 

@@ -39,10 +39,10 @@
 //! ```
 
 use super::request::SchedulerRequest;
+use crate::v2::BlockId;
 use crate::v2::integrations::connector::leader::{
     BlockBoundaryInfo, ConnectorLeader, EvictionScore, FinishedStatus, SchedulerOutput,
 };
-use crate::v2::BlockId;
 
 use anyhow::Result;
 use parking_lot::RwLock;

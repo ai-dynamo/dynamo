@@ -12,8 +12,7 @@ use crate::blocks::{
 };
 use crate::pools::InactivePool;
 use crate::testing::{
-    self, MetadataA, MetadataB, MetadataC, TestMeta, TestPoolSetupBuilder,
-    create_staged_block,
+    self, MetadataA, MetadataB, MetadataC, TestMeta, TestPoolSetupBuilder, create_staged_block,
 };
 
 use std::any::TypeId;

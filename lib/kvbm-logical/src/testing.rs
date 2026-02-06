@@ -13,8 +13,8 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use dynamo_tokens::{TokenBlock, TokenBlockSequence};
 
-use crate::test_config::DEFAULT_TEST_BLOCK_SIZE;
 use crate::BlockId;
+use crate::test_config::DEFAULT_TEST_BLOCK_SIZE;
 
 use crate::blocks::{
     Block, BlockMetadata,
@@ -127,7 +127,11 @@ pub fn register_test_block<T: BlockMetadata + std::fmt::Debug>(
     let staged = create_staged_block::<T>(block_id, tokens);
     let seq_hash = staged.sequence_hash();
     let handle = registry.register_sequence_hash(seq_hash);
-    (staged.register_with_handle(handle.clone()), seq_hash, handle)
+    (
+        staged.register_with_handle(handle.clone()),
+        seq_hash,
+        handle,
+    )
 }
 
 /// Create a reset block with the given ID and block size.
@@ -136,7 +140,10 @@ pub fn create_reset_block<T: BlockMetadata>(id: BlockId, block_size: usize) -> B
 }
 
 /// Create multiple reset blocks with sequential IDs starting from 0.
-pub fn create_reset_blocks<T: BlockMetadata>(count: usize, block_size: usize) -> Vec<Block<T, Reset>> {
+pub fn create_reset_blocks<T: BlockMetadata>(
+    count: usize,
+    block_size: usize,
+) -> Vec<Block<T, Reset>> {
     (0..count as BlockId)
         .map(|id| Block::new(id, block_size))
         .collect()

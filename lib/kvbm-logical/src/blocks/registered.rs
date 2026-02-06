@@ -8,8 +8,7 @@ use std::sync::{Arc, Weak};
 
 use super::{
     Block, BlockId, BlockMetadata, BlockRegistrationHandle, RegisteredBlock, RegisteredReturnFn,
-    ResetReturnFn, SequenceHash,
-    state::Registered,
+    ResetReturnFn, SequenceHash, state::Registered,
 };
 
 /// Weak references to a block for resurrection during pool transitions.

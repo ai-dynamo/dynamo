@@ -153,7 +153,10 @@ fn test_shim_has_slot_tracking() {
     assert!(result.is_ok(), "get_num_new_matched_tokens should succeed");
 
     // After the call, shim should have created a slot
-    assert!(shim.has_slot("req-1"), "Shim should have slot after get_num_new_matched_tokens");
+    assert!(
+        shim.has_slot("req-1"),
+        "Shim should have slot after get_num_new_matched_tokens"
+    );
 
     // Call request_finished to clean up the slot
     let status = shim.request_finished("req-1");

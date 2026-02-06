@@ -4,9 +4,8 @@
 //! Facade re-exporting from `dynamo-kvbm-logical`.
 
 pub use dynamo_kvbm_logical::{
-    blocks, events, manager, pools, registry,
-    BlockRegistry, BlockError, BlockMetadata, CompleteBlock, ImmutableBlock,
-    MutableBlock, WeakBlock, LogicalLayoutHandle,
+    BlockError, BlockMetadata, BlockRegistry, CompleteBlock, ImmutableBlock, LogicalLayoutHandle,
+    MutableBlock, WeakBlock, blocks, events, manager, pools, registry,
 };
 
 pub use super::BlockId;

@@ -206,9 +206,10 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     ) -> Option<Arc<PrimaryBlock<T>>> {
         let mut inner = self.inner.write();
         let matched = inner.backend.find_matches(&[hash], touch);
-        matched.into_iter().next().map(|block| {
-            PrimaryBlock::new_unattached(Arc::new(block), self.return_fn.clone())
-        })
+        matched
+            .into_iter()
+            .next()
+            .map(|block| PrimaryBlock::new_unattached(Arc::new(block), self.return_fn.clone()))
     }
 
     /// Get the number of blocks in the pool

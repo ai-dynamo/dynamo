@@ -23,8 +23,8 @@ pub mod state;
 pub use registered::{DuplicateBlock, PrimaryBlock, WeakBlockEntry};
 
 // Re-export from the new registry module location for backward compatibility
-pub use crate::registry::BlockRegistry;
 pub use crate::registry::BlockRegistrationHandle;
+pub use crate::registry::BlockRegistry;
 
 pub trait BlockMetadata: Clone + Send + Sync + 'static {}
 impl<T: Clone + Send + Sync + 'static> BlockMetadata for T {}
@@ -40,8 +40,7 @@ pub type ResetReturnFn<T> = Arc<dyn Fn(Block<T, state::Reset>) + Send + Sync>;
 
 /// Return function for registered blocks returning to the inactive pool.
 /// Used by PrimaryBlock drop and pool management.
-pub type RegisteredReturnFn<T> =
-    Arc<dyn Fn(Arc<Block<T, state::Registered>>) + Send + Sync>;
+pub type RegisteredReturnFn<T> = Arc<dyn Fn(Arc<Block<T, state::Registered>>) + Send + Sync>;
 
 /// Upgrade function for finding/promoting blocks by sequence hash.
 /// Used by ImmutableBlock and WeakBlock upgrade paths.

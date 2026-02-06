@@ -118,7 +118,10 @@ fn test_abort_running_request() {
 
     // Record cache usage before abort
     let usage_before = engine.cache_usage();
-    assert!(usage_before > 0.0, "Running request should have allocated blocks");
+    assert!(
+        usage_before > 0.0,
+        "Running request should have allocated blocks"
+    );
 
     // Abort while running
     engine.abort_request("req-1");
@@ -153,7 +156,11 @@ fn test_abort_running_request_with_output_tokens() {
     assert_eq!(engine.num_running(), 1);
 
     // Verify we have generated some output tokens
-    let output_len = engine.output_tokens.get("req-1").map(|t| t.len()).unwrap_or(0);
+    let output_len = engine
+        .output_tokens
+        .get("req-1")
+        .map(|t| t.len())
+        .unwrap_or(0);
     assert!(output_len > 0, "Should have generated output tokens");
 
     // Abort mid-generation

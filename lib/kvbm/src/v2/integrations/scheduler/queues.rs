@@ -261,7 +261,10 @@ impl PausedRequests {
 
     /// Get the number of blocks lent from a request.
     pub fn num_lent_blocks(&self, request_id: &str) -> usize {
-        self.lent_blocks.get(request_id).map(|v| v.len()).unwrap_or(0)
+        self.lent_blocks
+            .get(request_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     /// Remove a request from the paused collection (for eviction).

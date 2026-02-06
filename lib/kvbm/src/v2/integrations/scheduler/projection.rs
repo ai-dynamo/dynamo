@@ -1385,7 +1385,8 @@ impl GlobalProjectionState {
 
         // Convert relative events to absolute iterations and insert into sorted list
         for event in &schedule.block_events {
-            let absolute_iteration = schedule.base_iteration + event.iteration_offset + ALLOCATION_DELAY;
+            let absolute_iteration =
+                schedule.base_iteration + event.iteration_offset + ALLOCATION_DELAY;
 
             // Find insertion point using binary search
             let pos = self
@@ -1425,7 +1426,8 @@ impl GlobalProjectionState {
 
         // Remove events by subtracting deltas
         for event in &schedule.block_events {
-            let absolute_iteration = schedule.base_iteration + event.iteration_offset + ALLOCATION_DELAY;
+            let absolute_iteration =
+                schedule.base_iteration + event.iteration_offset + ALLOCATION_DELAY;
 
             // Find the event
             if let Ok(pos) = self
@@ -2314,7 +2316,9 @@ mod tests {
             starting_blocks: 3, // Simulating 3 blocks allocated
             peak_blocks: 4,
             freeable_blocks: 0,
-            phase: RequestPhase::Decode { remaining_output: 100 },
+            phase: RequestPhase::Decode {
+                remaining_output: 100,
+            },
             user_priority: None,
             is_restored: false,
             earliest_completion_iteration: 1,
@@ -2379,7 +2383,7 @@ mod tests {
         // - K=16 (iter 66): token 305 → 20 blocks (event K=16)
         let schedule = RequestBlockSchedule {
             request_id: "boundary_test".to_string(),
-            base_iteration: 49, // Prefill iteration
+            base_iteration: 49,  // Prefill iteration
             starting_blocks: 18, // 288 tokens → 18 blocks
             peak_blocks: 20,
             freeable_blocks: 0,
@@ -2493,10 +2497,10 @@ mod tests {
         // starting_blocks depends on block_state.total_blocks()
         // Since we didn't allocate real blocks, it's 0 in this test
         // The important thing is the event offsets
-        println!("Schedule: base={}, starting={}, events={:?}",
-            schedule.base_iteration,
-            schedule.starting_blocks,
-            schedule.block_events);
+        println!(
+            "Schedule: base={}, starting={}, events={:?}",
+            schedule.base_iteration, schedule.starting_blocks, schedule.block_events
+        );
 
         // Check blocks at various iterations
         // Note: since starting_blocks=0 (no real blocks), we check relative changes
@@ -2519,7 +2523,9 @@ mod tests {
         if schedule.block_events.len() >= 2 {
             // Look for the event that would cross from 19 to 20 blocks
             // This should be at K=16 (token 305)
-            let crossover_event = schedule.block_events.iter()
+            let crossover_event = schedule
+                .block_events
+                .iter()
                 .find(|e| e.iteration_offset >= 15 && e.iteration_offset <= 17);
 
             if let Some(event) = crossover_event {
@@ -2550,7 +2556,7 @@ mod tests {
         // This simulates a 351-token request where decode starts at a block boundary
         let schedule = RequestBlockSchedule {
             request_id: "r1".to_string(),
-            base_iteration: 25, // Request added at iteration 25
+            base_iteration: 25,  // Request added at iteration 25
             starting_blocks: 22, // 351 tokens → ceil(351/16) = 22 blocks
             peak_blocks: 23,
             freeable_blocks: 0,

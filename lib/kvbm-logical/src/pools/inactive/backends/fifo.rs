@@ -91,7 +91,7 @@ impl ReusePolicy for FifoReusePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{create_staged_block, TestMeta};
+    use crate::testing::{TestMeta, create_staged_block};
     use std::thread;
     use std::time::Duration;
 

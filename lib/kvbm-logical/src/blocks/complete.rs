@@ -4,8 +4,7 @@
 //! RAII guard for complete blocks
 
 use super::{
-    Block, BlockId, BlockMetadata, MutableBlock, ResetReturnFn, SequenceHash,
-    state::Staged,
+    Block, BlockId, BlockMetadata, MutableBlock, ResetReturnFn, SequenceHash, state::Staged,
 };
 
 /// RAII guard for [`Block<T, Staged>`] that automatically returns to ResetPool on drop

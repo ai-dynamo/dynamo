@@ -20,7 +20,10 @@ fn test_mock_engine_with_connector_creation() {
     };
     let engine = MockEngineCore::new(config).expect("Should create engine with connector");
 
-    assert!(engine.has_connector(), "Engine should have connector enabled");
+    assert!(
+        engine.has_connector(),
+        "Engine should have connector enabled"
+    );
     assert!(
         engine.connector_instance().is_some(),
         "Should have connector instance"

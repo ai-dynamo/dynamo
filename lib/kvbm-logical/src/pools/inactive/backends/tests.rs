@@ -7,11 +7,7 @@ mod backend_tests {
 
     use rstest::rstest;
 
-    use crate::{
-        BlockId,
-        pools::tests::fixtures::*,
-        tinylfu::TinyLFUTracker,
-    };
+    use crate::{BlockId, pools::tests::fixtures::*, tinylfu::TinyLFUTracker};
 
     // Import TestData from fixtures (which re-exports from testing)
     use crate::pools::tests::TestData;

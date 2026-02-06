@@ -25,11 +25,10 @@ pub mod test_config;
 pub mod testing;
 
 // Re-export common types and traits
-pub use registry::BlockRegistry;
 pub use blocks::{
-    BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock,
-    WeakBlock,
+    BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, WeakBlock,
 };
+pub use registry::BlockRegistry;
 
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
