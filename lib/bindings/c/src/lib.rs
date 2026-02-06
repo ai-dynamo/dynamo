@@ -497,20 +497,16 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         };
 
         let kv_router_config = if use_kv_routing {
-            Some(KvRouterConfig::new(
-                (overlap_score_weight >= 0.0).then_some(overlap_score_weight),
-                (router_temperature >= 0.0).then_some(router_temperature),
-                Some(use_kv_events),
-                Some(router_replica_sync),
-                None, // track_active_blocks
-                None, // track_output_blocks
-                None, // assume_kv_reuse
-                None, // router_snapshot_threshold
-                None, // router_reset_states
-                None, // router_ttl_secs
-                None, // router_max_tree_size
-                None, // router_prune_target_ratio
-            ))
+            let mut cfg = KvRouterConfig::default();
+            if overlap_score_weight >= 0.0 {
+                cfg.overlap_score_weight = overlap_score_weight;
+            }
+            if router_temperature >= 0.0 {
+                cfg.router_temperature = router_temperature;
+            }
+            cfg.use_kv_events = use_kv_events;
+            cfg.router_replica_sync = router_replica_sync;
+            Some(cfg)
         } else {
             None
         };

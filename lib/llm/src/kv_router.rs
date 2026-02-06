@@ -192,44 +192,6 @@ impl Default for KvRouterConfig {
 }
 
 impl KvRouterConfig {
-    /// Create a new KvRouterConfig with optional weight values.
-    /// If a weight is None, the default value will be used.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        overlap_score_weight: Option<f64>,
-        temperature: Option<f64>,
-        use_kv_events: Option<bool>,
-        replica_sync: Option<bool>,
-        track_active_blocks: Option<bool>,
-        track_output_blocks: Option<bool>,
-        assume_kv_reuse: Option<bool>,
-        router_snapshot_threshold: Option<Option<u32>>,
-        router_reset_states: Option<bool>,
-        router_ttl_secs: Option<f64>,
-        router_max_tree_size: Option<usize>,
-        router_prune_target_ratio: Option<f64>,
-    ) -> Self {
-        let default = Self::default();
-        Self {
-            overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
-            router_temperature: temperature.unwrap_or(default.router_temperature),
-            use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
-            router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
-            router_track_active_blocks: track_active_blocks
-                .unwrap_or(default.router_track_active_blocks),
-            router_track_output_blocks: track_output_blocks
-                .unwrap_or(default.router_track_output_blocks),
-            router_assume_kv_reuse: assume_kv_reuse.unwrap_or(default.router_assume_kv_reuse),
-            router_snapshot_threshold: router_snapshot_threshold
-                .unwrap_or(default.router_snapshot_threshold),
-            router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
-            router_ttl_secs: router_ttl_secs.unwrap_or(default.router_ttl_secs),
-            router_max_tree_size: router_max_tree_size.unwrap_or(default.router_max_tree_size),
-            router_prune_target_ratio: router_prune_target_ratio
-                .unwrap_or(default.router_prune_target_ratio),
-        }
-    }
-
     /// Compute sequence hashes for active block tracking based on configuration.
     ///
     /// Returns:

@@ -178,24 +178,23 @@ impl Flags {
     }
 
     pub fn router_config(&self) -> RouterConfig {
-        RouterConfig::new(
-            self.router_mode.into(),
-            KvRouterConfig::new(
-                self.kv_overlap_score_weight,
-                self.router_temperature,
-                self.use_kv_events,
-                self.router_replica_sync,
-                self.router_track_active_blocks,
-                None, // track_output_blocks
-                // defaulting below args (no longer maintaining new flags for dynamo-run)
-                None, // assume_kv_reuse
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-        )
+        let mut cfg = KvRouterConfig::default();
+        if let Some(w) = self.kv_overlap_score_weight {
+            cfg.overlap_score_weight = w;
+        }
+        if let Some(t) = self.router_temperature {
+            cfg.router_temperature = t;
+        }
+        if let Some(v) = self.use_kv_events {
+            cfg.use_kv_events = v;
+        }
+        if let Some(v) = self.router_replica_sync {
+            cfg.router_replica_sync = v;
+        }
+        if let Some(v) = self.router_track_active_blocks {
+            cfg.router_track_active_blocks = v;
+        }
+        RouterConfig::new(self.router_mode.into(), cfg)
     }
 
     /// Load extra engine arguments from a JSON file
