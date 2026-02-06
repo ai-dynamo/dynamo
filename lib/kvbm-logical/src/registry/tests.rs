@@ -854,6 +854,7 @@ fn test_with_all_mut_no_attachments() {
     let handle = registry.register_sequence_hash(seq_hash);
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     struct UnusedType(i32);
 
     // Call with_all_mut without attaching anything — exercises the None arm
