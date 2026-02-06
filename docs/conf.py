@@ -38,6 +38,8 @@ extensions = [
 
 # Redirects configuration
 redirects = {
+    # Frontend migration
+    "frontends/kserve": "../components/frontend/frontend_guide.html",
     # PR  #3802
     "guides/tool-calling": "../agents/tool-calling.html",  # key format corrected
     "architecture/architecture": "../design_docs/architecture.html",
