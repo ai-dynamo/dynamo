@@ -414,7 +414,7 @@ class TrtllmWorker:
         await asyncio.sleep(2)
 
         try:
-            events = self.llm.get_kv_cache_events_async(timeout=None)
+            events = self.llm.get_kv_cache_events_async(timeout=5)
             logger.info(f"Worker {self.worker_id}: KV events iterator obtained")
 
             async for event in events:
