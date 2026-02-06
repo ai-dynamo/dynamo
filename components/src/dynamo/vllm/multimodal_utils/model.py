@@ -45,9 +45,12 @@ class SupportedModels:
     QWEN_3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
     QWEN_3_VL_30B_A3B = "Qwen/Qwen3-VL-30B-A3B-Instruct"
     QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+    QWEN_3_VL_8B = "Qwen/Qwen3-VL-8B-Instruct"
     QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
     QWEN_3_VL_4B = "Qwen/Qwen3-VL-4B-Instruct"
     QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
+    QWEN_3_VL_32B = "Qwen/Qwen3-VL-32B-Instruct"
+    QWEN_3_VL_32B_FP8 = "Qwen/Qwen3-VL-32B-Instruct-FP8"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
@@ -129,9 +132,12 @@ QWEN_VL_MODELS = [
     SupportedModels.QWEN_3_VL_2B,
     SupportedModels.QWEN_3_VL_30B_A3B,
     SupportedModels.QWEN_3_VL_30B_A3B_FP8,
+    SupportedModels.QWEN_3_VL_8B,
     SupportedModels.QWEN_3_VL_8B_FP8,
     SupportedModels.QWEN_3_VL_4B,
     SupportedModels.QWEN_3_VL_4B_FP8,
+    SupportedModels.QWEN_3_VL_32B,
+    SupportedModels.QWEN_3_VL_32B_FP8,
 ]
 
 
