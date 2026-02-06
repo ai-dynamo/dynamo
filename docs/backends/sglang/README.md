@@ -38,7 +38,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Conditional Disaggregation**](../../design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../router/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/sla_planner.md) | ✅ |  |
-| [**Multimodal Support**](../../multimodal/sglang.md) | ✅ |  |
+| [**Multimodal Support**](../../features/multimodal/multimodal_sglang.md) | ✅ |  |
 | [**KVBM**](../../kvbm/README.md) | ❌ | Planned |
 
 

@@ -100,7 +100,7 @@ Or, you can create your own DGDR for your own needs.
 > **Important - Profiling Config Cases**: Prior to 0.8.1, any fields under `profilingConfig.config` are represented in snake_case. Starting 0.8.1, fields under `profilingConfig.config` are represented in camelCase for uniformity. There is backwards compatibility to snake_case, but as all example DGDRs are using camelCase, anyone using a release prior to 0.8.1 must manually update the configs under the examples to have snake_case config fields.
 
 > [!TIP]
-> For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference).
+> For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](/docs/components/profiler/profiler_guide.md#dgdr-configuration-reference).
 
 ### Step 2: Apply the DGDR
 
@@ -227,11 +227,11 @@ sweep:
 ```
 
 > [!NOTE]
-> For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-methods).
+> For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/components/profiler/profiler_guide.md#profiling-methods).
 
 ### Hardware Configuration
 
-For details on hardware configuration and GPU discovery options, see [Hardware Configuration in SLA-Driven Profiling](/docs/benchmarks/sla_driven_profiling.md#hardware-configuration).
+For details on hardware configuration and GPU discovery options, see [Hardware Configuration in SLA-Driven Profiling](/docs/components/profiler/profiler_guide.md#hardware-configuration).
 
 ### Advanced Configuration
 
@@ -324,7 +324,7 @@ profilingConfig:
 
 ## Understanding Profiling Results
 
-For details about the profiling process, performance plots, and interpolation data, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-process-details).
+For details about the profiling process, performance plots, and interpolation data, see [SLA-Driven Profiling Documentation](/docs/components/profiler/profiler_guide.md#profiling-process-details).
 
 ## Advanced Topics
 
@@ -353,7 +353,7 @@ Profiling still runs against the real backend (via GPUs or AIC) to collect perfo
 
 ### Using a Model Cache PVC (0.8.1 or later)
 
-Starting in Dynamo 0.8.1, for large models, you can use a pre-populated PVC containing model weights instead of downloading from HuggingFace. See [Model Cache PVC](/docs/benchmarks/sla_driven_profiling.md#model-cache-pvc-advanced) for configuration details.
+Starting in Dynamo 0.8.1, for large models, you can use a pre-populated PVC containing model weights instead of downloading from HuggingFace. See [Model Cache PVC](/docs/components/profiler/profiler_guide.md#model-cache-pvc-advanced) for configuration details.
 
 ### DGDR Immutability
 
@@ -499,11 +499,11 @@ kubectl logs -l job-name=profile-sla-aic -n $NAMESPACE
 | **DGD not deployed** | Verify `autoApply: true` in DGDR spec |
 
 > [!NOTE]
-> For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](/docs/benchmarks/sla_driven_profiling.md#troubleshooting).
+> For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](/docs/components/profiler/profiler_guide.md#troubleshooting).
 
 ## Configuration Reference
 
-For comprehensive documentation of all DGDR configuration options, see the [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference).
+For comprehensive documentation of all DGDR configuration options, see the [DGDR Configuration Reference](/docs/components/profiler/profiler_guide.md#dgdr-configuration-reference).
 
 This includes detailed explanations of:
 - **SLA Configuration**: ISL, OSL, TTFT, ITL with use cases and trade-offs
@@ -516,6 +516,6 @@ This includes detailed explanations of:
 ## Related Documentation
 
 - [DGDR API Reference](/docs/kubernetes/api_reference.md)
-- [Pre-Deployment Profiling Details](/docs/benchmarks/sla_driven_profiling.md)
+- [Pre-Deployment Profiling Details](/docs/components/profiler/profiler_guide.md)
 - [SLA Planner Architecture](/docs/planner/sla_planner.md)
 - [Dynamo Operator Guide](/docs/kubernetes/dynamo_operator.md)

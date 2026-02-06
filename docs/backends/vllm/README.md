@@ -144,7 +144,7 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
 This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
 
-**Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
+**Guide:** [Speculative Decoding Guide](../../features/speculative_decoding/speculative_decoding_vllm.md)
 
 > **See also:** [Speculative Decoding Feature Overview](../../features/speculative_decoding/README.md) for cross-backend documentation.
 
