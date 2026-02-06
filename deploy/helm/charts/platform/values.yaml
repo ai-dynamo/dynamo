@@ -68,11 +68,11 @@ dynamo-operator:
       # Container image configuration for the operator manager
       image:
         # -- Official NVIDIA Dynamo operator image repository
-        repository: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
+        repository: "nvcr.io/nvidian/dynamo-dev/dynamo-operator"
         # -- Image tag (leave empty to use chart default)
-        tag: ""
+        tag: "schwinns-latest"
         # -- Image pull policy - when to pull the image
-        pullPolicy: IfNotPresent
+        pullPolicy: Always
 
       # Command line arguments for the operator manager
       args:
@@ -82,7 +82,8 @@ dynamo-operator:
         - --metrics-bind-address=127.0.0.1:8080
 
   # -- Secrets for pulling private container images
-  imagePullSecrets: []
+  imagePullSecrets:
+    - name: ngc-secret
 
   # Core Dynamo platform configuration
   dynamo:
@@ -208,6 +209,49 @@ dynamo-operator:
 
           # -- Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued.
           renewBefore: "720h"
+
+  # Checkpoint configuration for fast pod restore using CRIU/cuda-checkpoint
+  # NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
+  # using the chrek Helm chart in each namespace where checkpointing is needed.
+  checkpoint:
+    # -- Whether to enable checkpoint/restore functionality
+    enabled: true
+
+    # Storage configuration
+    # These settings tell the operator where to find checkpoint storage
+    # Must match the configuration in the chrek chart
+    storage:
+      # -- Storage backend type: pvc, s3, or oci
+      type: pvc
+
+      # -- Host path for signal files (communication between checkpoint pod and DaemonSet)
+      signalHostPath: "/var/lib/chrek/signals"
+
+      # PVC storage configuration (used when type=pvc)
+      pvc:
+        # -- Name of the PVC created by the chrek chart
+        pvcName: "chrek-pvc"
+        # -- Base path within the PVC for storing checkpoints
+        basePath: "/checkpoints"
+
+      # S3 storage configuration (used when type=s3)
+      s3:
+        # -- S3 URI in format: s3://[endpoint/]bucket/prefix
+        uri: ""
+        # -- Reference to a secret containing AWS credentials
+        credentialsSecretRef: ""
+
+      # OCI registry storage configuration (used when type=oci)
+      oci:
+        # -- OCI URI in format: oci://registry/repository
+        uri: ""
+        # -- Reference to a docker config secret for registry authentication
+        credentialsSecretRef: ""
+
+    # CRIU timeout configuration (shared across checkpoint and restore)
+    criu:
+      # -- CRIU operation timeout in seconds. Default: 21600 (6 hours)
+      timeout: "21600"
 
 
 # Grove component - distributed inference orchestration

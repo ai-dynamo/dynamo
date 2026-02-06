@@ -280,31 +280,30 @@ async def test_approx_kv_indexer(distributed_runtime):
 class EventPublisher:
     def __init__(self, component: Component, worker_id: int, kv_block_size: int):
         self.publisher = KvEventPublisher(component, worker_id, kv_block_size)
-        self.event_id_counter = 0
+        # Counter for generating unique block hashes (event_id is now managed internally by publisher)
+        self.block_hash_counter = 0
         self.block_hashes: List[int] = []
 
     def store_event(self, tokens, lora_id):
-        parent_hash = self.event_id_counter if self.event_id_counter > 0 else None
+        # Parent hash should reference the last published block, not the current one
+        parent_hash = self.block_hashes[-1] if self.block_hashes else None
         self.publisher.publish_stored(
-            self.event_id_counter,  # event_id
             tokens,  # token_ids
             [
                 len(tokens),
             ],  # num_block_tokens
             [
-                self.event_id_counter,
+                self.block_hash_counter,
             ],  # block_hashes
             lora_id,  # lora_id
             parent_hash,  # parent_hash
         )
-        self.block_hashes.append(self.event_id_counter)
-        self.event_id_counter += 1
+        self.block_hashes.append(self.block_hash_counter)
+        self.block_hash_counter += 1
 
     def remove_event(self):
         self.publisher.publish_removed(
-            self.event_id_counter,  # event_id
             [
                 self.block_hashes[-1],
             ],  # block_hashes
         )
-        self.event_id_counter += 1

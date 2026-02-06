@@ -59,7 +59,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, o
 
 	// Create validator and perform validation
 	validator := NewDynamoComponentDeploymentValidator(deployment)
-	return validator.Validate()
+	return validator.Validate(ctx)
 }
 
 // ValidateUpdate validates a DynamoComponentDeployment update request.
@@ -88,7 +88,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, o
 	validator := NewDynamoComponentDeploymentValidator(newDeployment)
 
 	// Validate stateless rules
-	warnings, err := validator.Validate()
+	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err
 	}

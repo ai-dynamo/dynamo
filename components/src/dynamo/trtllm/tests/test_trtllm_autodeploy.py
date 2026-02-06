@@ -56,7 +56,10 @@ class TestTensorRTLLMEngine:
             ({"moe_cluster_parallel_size": 3}, True),
             ({"moe_tensor_parallel_size": 3}, True),
             ({"moe_expert_parallel_size": 3}, True),
-            ({"enable_attention_dp": True}, True),
+            (
+                {"enable_attention_dp": True},
+                True,
+            ),  # AutoDeploy doesn't support attention DP
             # Default value is an empty dict.
             ({"cp_config": {"foo", "bar"}}, True),
             ({"scheduler_config": {}}, False),

@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Multi-node Examples"
 ---
+
+# Multi-node Examples
 
 This guide covers deploying vLLM across multiple nodes using Dynamo's distributed capabilities.
 

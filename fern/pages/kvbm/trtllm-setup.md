@@ -1,20 +1,20 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Running KVBM in TensorRT-LLM"
 ---
+
+# Running KVBM in TensorRT-LLM
 
 This guide explains how to leverage KVBM (KV Block Manager) to manage KV cache and do KV offloading in TensorRT-LLM (trtllm).
 
 To learn what KVBM is, please check [here](kvbm-architecture.md)
 
-<Note>
-- Ensure that `etcd` and `nats` are running before starting.
-- KVBM only supports TensorRT-LLM’s PyTorch backend.
-- Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
-- KVBM requires TensorRT-LLM v1.1.0rc5 or newer.
-- Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
-</Note>
+> [!NOTE]
+> - Ensure that `etcd` and `nats` are running before starting.
+> - KVBM only supports TensorRT-LLM's PyTorch backend.
+> - Disable partial reuse `enable_partial_reuse: false` in the LLM API config's `kv_connector_config` to increase offloading cache hits.
+> - KVBM requires TensorRT-LLM v1.2.0rc2 or newer.
+> - Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
 
 ## Quick Start
 
@@ -50,10 +50,9 @@ export DYN_KVBM_DISK_CACHE_GB=8
 # DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS to specify exact block counts instead of GB
 ```
 
-<Note>
-When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
-To disable disk offload filtering, set `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` to true or 1.
-</Note>
+> [!NOTE]
+> When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
+> To disable disk offload filtering, set `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` to true or 1.
 
 ```bash
 # write an example LLM API config
@@ -92,6 +91,16 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "max_tokens": 30
   }'
 
+```
+
+KVBM is also supported on the prefill worker of disaggregated serving. To launch the prefill worker, run:
+```bash
+# [DYNAMO] To serve an LLM model with dynamo
+python3 -m dynamo.trtllm \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
+  --extra-engine-args /tmp/kvbm_llm_api_config.yaml
+  --disaggregation-mode prefill &
 ```
 
 Alternatively, can use "trtllm-serve" with KVBM by replacing the above two [DYNAMO] cmds with below:

@@ -41,7 +41,7 @@ classifiers = [
 
 dependencies = [
     "aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@release/0.6.0",
-    "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75",
+    "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@c3fc969e9e30e9ddad35b2f613aa7c1d418f2de9",
     "matplotlib",
     "networkx",
     "numpy",
@@ -49,7 +49,7 @@ dependencies = [
     "pydantic>=2",
     "tabulate",
     "types-tabulate",
-    # Satisfies vLLM 0.11.0 (>=4.55.2), vLLM 0.11.2 (>=4.56.0,<5), TRT-LLM 1.2.0rc6.post2 (==4.57.1), SGLang 0.5.8 (==4.57.1)
+    # Satisfies vLLM 0.11.0 (>=4.55.2), vLLM 0.11.2 (>=4.56.0,<5), TRT-LLM 1.3.0rc1 (==4.57.1), SGLang 0.5.8 (==4.57.1)
     "transformers>=4.56.0",
     "pytest-mypy",
 ]

@@ -39,7 +39,7 @@ From the Dynamo repository root:
 
 ```bash
 # Build the base Dynamo image
-./container/build.sh
+./container/build.sh --framework NONE
 
 # Build the Triton worker image
 cd examples/backends/tritonserver

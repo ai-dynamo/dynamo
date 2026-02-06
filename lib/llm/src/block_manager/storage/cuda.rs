@@ -28,7 +28,7 @@
 //! ## Usage
 //!
 //! ### Using Allocators
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{DeviceAllocator, PinnedAllocator, StorageAllocator};
 //!
 //! // Create a pinned memory allocator
@@ -41,7 +41,7 @@
 //! ```
 //!
 //! ### Memory Operations
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{
 //!     PinnedAllocator, StorageAllocator, Storage, StorageMemset
 //! };

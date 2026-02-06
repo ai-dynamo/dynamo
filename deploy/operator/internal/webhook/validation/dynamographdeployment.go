@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -25,6 +26,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -32,18 +34,29 @@ import (
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentValidator struct {
 	deployment *nvidiacomv1alpha1.DynamoGraphDeployment
+	mgr        ctrl.Manager // Optional: for API group detection via discovery client
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
 func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
 		deployment: deployment,
+		mgr:        nil,
+	}
+}
+
+// NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
+func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
+	return &DynamoGraphDeploymentValidator{
+		deployment: deployment,
+		mgr:        mgr,
 	}
 }
 
 // Validate performs stateless validation on the DynamoGraphDeployment.
+// Context is required for operations that may need to query the cluster (e.g., CRD checks).
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) Validate() (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	// Validate that at least one service is specified
 	if len(v.deployment.Spec.Services) == 0 {
 		return nil, fmt.Errorf("spec.services must have at least one service")
@@ -63,7 +76,7 @@ func (v *DynamoGraphDeploymentValidator) Validate() (admission.Warnings, error) 
 
 	// Validate each service
 	for serviceName, service := range v.deployment.Spec.Services {
-		warnings, err := v.validateService(serviceName, service)
+		warnings, err := v.validateService(ctx, serviceName, service)
 		if err != nil {
 			return nil, err
 		}
@@ -223,12 +236,19 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 
 // validateService validates a single service configuration using SharedSpecValidator.
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
 	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
 	calculatedNamespace := v.deployment.GetDynamoNamespaceForService(service)
-	sharedValidator := NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
-	return sharedValidator.Validate()
+
+	var sharedValidator *SharedSpecValidator
+	if v.mgr != nil {
+		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr)
+	} else {
+		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
+	}
+
+	return sharedValidator.Validate(ctx)
 }
 
 // validatePVCs validates the PVC configurations.

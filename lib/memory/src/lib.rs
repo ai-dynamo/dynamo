@@ -17,6 +17,7 @@ pub mod pool;
 pub mod prelude;
 
 mod device;
+#[cfg(target_os = "linux")]
 mod disk;
 mod pinned;
 mod system;
@@ -27,6 +28,7 @@ mod tests;
 
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
+#[cfg(target_os = "linux")]
 pub use disk::DiskStorage;
 pub use pinned::PinnedStorage;
 pub use system::SystemStorage;

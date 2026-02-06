@@ -31,11 +31,16 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             "DYN_LOG": "debug",
             "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
         }
+        # WARNING: terminate_all_matching_process_names=True is NOT pytest-xdist safe!
+        # DANGER: Kills ALL dynamo-frontend processes system-wide, including other parallel tests.
+        # For parallel-safe alternative, use terminate_all_matching_process_names=False.
+        # See tests/kvbm_integration/common.py:llm_server_kvbm for example.
+        # TODO: Switch to terminate_all_matching_process_names=False with dynamic ports
         super().__init__(
             request,
             router_mode="round-robin",
             extra_env=extra_env,
-            terminate_existing=True,
+            terminate_all_matching_process_names=True,  # TODO: Change to False
         )
 
 
@@ -90,7 +95,7 @@ class EtcdReplicaServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             data_dir=data_dir,
             log_dir=log_dir,
         )

@@ -114,16 +114,28 @@ class EmbeddingsProcessor:
     def create_multimodal_item(
         embeddings: torch.Tensor, request: SglangMultimodalRequest
     ) -> dict:
-        """Create multimodal item for SGLang generation"""
+        """
+        Create multimodal item for SGLang generation.
 
-        precomputed_embeddings = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
+        Uses format="precomputed_embedding" since Dynamo's Encoder has already
+        run the vision encoder. SGLang expects 2D embeddings (num_patches, hidden_dim).
+        """
+        precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
+
+        # SGLang expects 2D tensor for precomputed_embedding format
+        # Encoder outputs 3D (1, num_patches, hidden_dim) for internal consistency
+        # Squeeze batch dimension at SGLang boundary
+        if precomputed.dim() == 3 and precomputed.shape[0] == 1:
+            precomputed = precomputed.squeeze(0)
+
         grid_thw_tensor = torch.tensor(request.image_grid_thw)
 
-        mm_item = dict(
-            modality="IMAGE",
-            image_grid_thw=grid_thw_tensor,
-            precomputed_embeddings=precomputed_embeddings,
-        )
+        mm_item = {
+            "format": "precomputed_embedding",
+            "feature": precomputed,
+            "image_grid_thw": grid_thw_tensor,
+            "modality": "IMAGE",
+        }
 
         return mm_item
 
@@ -400,9 +412,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         return bootstrap_info
 
     def cleanup(self):
+        super().cleanup()
         self.engine.shutdown()
         logger.info("Multimodal worker engine shutdown")
-        super().cleanup()
 
 
 class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
@@ -515,6 +527,6 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
             pass
 
     def cleanup(self):
+        super().cleanup()
         self.engine.shutdown()
         logger.info("Multimodal prefill engine shutdown")
-        super().cleanup()

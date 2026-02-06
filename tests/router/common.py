@@ -48,6 +48,7 @@ class KVRouterProcess(ManagedProcess):
         enforce_disagg: bool = False,
         blocks_threshold: float | None = None,
         tokens_threshold: float | None = None,
+        tokens_threshold_frac: float | None = None,
         request_plane: str = "nats",
     ):
         command = [
@@ -75,6 +76,11 @@ class KVRouterProcess(ManagedProcess):
         if tokens_threshold is not None:
             command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
 
+        if tokens_threshold_frac is not None:
+            command.extend(
+                ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
+            )
+
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
 
@@ -88,7 +94,7 @@ class KVRouterProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
             ],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         self.port = frontend_port
 
@@ -1216,7 +1222,7 @@ def _test_router_overload_503(
                 )
             ],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         kv_router.__enter__()
 
@@ -1835,7 +1841,7 @@ def _test_router_decisions_disagg(
                         verify_response_timing(timing_info)
 
                     # Small delay between requests
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)
 
             return prefill_worker_ids, decode_worker_ids
 
@@ -1940,24 +1946,8 @@ def _test_router_decisions(
 
     # Use async to manage the test flow
     async def test_sync():
-        # Calculate expected number of instances
-        # With data parallelism:
-        # - vLLM/SGLang: each DP rank registers as a separate instance
-        # - Mockers: all DP ranks share the same worker instance ID (instance_ids returns worker IDs)
-        if test_dp_rank:
-            if (
-                hasattr(engine_workers, "data_parallel_size")
-                and engine_workers.data_parallel_size is not None
-            ):
-                # vLLM/SGLang: each DP rank registers as a separate instance
-                expected_num_instances = (
-                    engine_workers.num_workers * engine_workers.data_parallel_size
-                )
-            else:
-                # Mockers with dp_size or no DP: instance_ids() returns worker IDs
-                expected_num_instances = engine_workers.num_workers
-        else:
-            expected_num_instances = engine_workers.num_workers
+        # Workers register one instance per process (not per dp_rank)
+        expected_num_instances = engine_workers.num_workers
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
@@ -2408,6 +2398,52 @@ def _test_busy_threshold_endpoint(
                     data = await response.json()
                     logger.info(
                         f"POST /busy_threshold (invalid tokens) response: {data}"
+                    )
+
+                # Test 10: Set active_prefill_tokens_threshold_frac (fraction of max_num_batched_tokens)
+                test_frac_threshold = 0.8
+                logger.info(
+                    f"Testing POST /busy_threshold to set active_prefill_tokens_threshold_frac={test_frac_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold_frac": test_frac_threshold,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set frac) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_prefill_tokens_threshold_frac")
+                        == test_frac_threshold
+                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set frac) response: {data}")
+
+                # Test 11: Verify frac threshold appears in GET /busy_threshold list
+                logger.info(
+                    "Testing GET /busy_threshold to verify frac threshold in list"
+                )
+                async with session.get(busy_threshold_url) as response:
+                    assert (
+                        response.status == 200
+                    ), f"GET /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    thresholds = data.get("thresholds", [])
+                    model_entry = next(
+                        (t for t in thresholds if t["model"] == model_name), None
+                    )
+                    assert (
+                        model_entry is not None
+                    ), f"Expected model '{model_name}' in thresholds: {data}"
+                    assert (
+                        model_entry.get("active_prefill_tokens_threshold_frac")
+                        == test_frac_threshold
+                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    logger.info(
+                        f"GET /busy_threshold (after set frac) response: {data}"
                     )
 
                 logger.info("All busy_threshold endpoint tests passed!")

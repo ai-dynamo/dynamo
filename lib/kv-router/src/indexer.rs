@@ -31,6 +31,9 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
+#[cfg(feature = "bench")]
+use std::time::Instant;
+
 use async_trait::async_trait;
 #[cfg(feature = "metrics")]
 pub use dynamo_runtime::protocols::maybe_error::MaybeError;
@@ -335,6 +338,25 @@ pub struct MatchRequest {
     early_exit: bool,
     /// A channel sender to send the `OverlapScores` response.
     resp: oneshot::Sender<OverlapScores>,
+    /// Timestamp when the request was created (for queue wait time measurement)
+    #[cfg(feature = "bench")]
+    created_at: Instant,
+}
+
+impl MatchRequest {
+    fn new(
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        resp: oneshot::Sender<OverlapScores>,
+    ) -> Self {
+        Self {
+            sequence,
+            early_exit,
+            resp,
+            #[cfg(feature = "bench")]
+            created_at: Instant::now(),
+        }
+    }
 }
 
 /// A request to dump the tree as events
@@ -551,10 +573,16 @@ impl KvIndexer {
 
                         Some(event) = event_rx.recv() => {
                             let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                            let event_id = event.event.event_id;
+                            let worker_id = event.worker_id;
                             // Only clone if we need the event for prune_manager afterward
                             let event_for_prune = prune_manager.is_some().then(|| event.clone());
                             let result = trie.apply_event(event);
                             let result_is_ok = result.is_ok();
+                            let tree_size = trie.current_size();
+                            tracing::trace!(
+                                "Applied KV event to global radix tree: event_type={event_type}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
+                            );
                             metrics.increment_event_applied(event_type, result);
 
                             // Track blocks in PruneManager if TTL is enabled and event was stored successfully
@@ -643,7 +671,24 @@ impl KvIndexer {
                         }
 
                         Some(req) = match_rx.recv() => {
+                            #[cfg(feature = "bench")]
+                            let queue_wait = req.created_at.elapsed();
+                            #[cfg(feature = "bench")]
+                            let seq_len = req.sequence.len();
+
+                            #[cfg(feature = "bench")]
+                            let process_start = Instant::now();
                             let matches = trie.find_matches(req.sequence, req.early_exit);
+                            #[cfg(feature = "bench")]
+                            let process_time = process_start.elapsed();
+
+                            #[cfg(feature = "bench")]
+                            tracing::info!(
+                                seq_len,
+                                queue_wait_us = queue_wait.as_micros() as u64,
+                                process_us = process_time.as_micros() as u64,
+                                "indexer: processed find_matches"
+                            );
                             let _ = req.resp.send(matches);
                         }
 
@@ -742,12 +787,11 @@ impl KvIndexerInterface for KvIndexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
+        #[cfg(feature = "bench")]
+        let start = Instant::now();
+        let seq_len = sequence.len();
         let (resp_tx, resp_rx) = oneshot::channel();
-        let req = MatchRequest {
-            sequence,
-            early_exit: false,
-            resp: resp_tx,
-        };
+        let req = MatchRequest::new(sequence, false, resp_tx);
 
         if let Err(e) = self.match_tx.send(req).await {
             tracing::error!(
@@ -757,9 +801,23 @@ impl KvIndexerInterface for KvIndexer {
             return Err(KvRouterError::IndexerOffline);
         }
 
-        resp_rx
+        let result = resp_rx
             .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+            .map_err(|_| KvRouterError::IndexerDroppedRequest);
+
+        #[cfg(feature = "bench")]
+        {
+            let elapsed = start.elapsed();
+            tracing::info!(
+                seq_len,
+                elapsed_us = elapsed.as_micros() as u64,
+                "find_matches completed"
+            );
+        }
+        #[cfg(not(feature = "bench"))]
+        let _ = seq_len;
+
+        result
     }
 
     async fn find_matches_for_request(
@@ -1131,6 +1189,24 @@ pub struct ShardedMatchRequest {
     sequence: Vec<LocalBlockHash>,
     early_exit: bool,
     resp: mpsc::Sender<OverlapScores>,
+    #[cfg(feature = "bench")]
+    created_at: Instant,
+}
+
+impl ShardedMatchRequest {
+    fn new(
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        resp: mpsc::Sender<OverlapScores>,
+    ) -> Self {
+        Self {
+            sequence,
+            early_exit,
+            resp,
+            #[cfg(feature = "bench")]
+            created_at: Instant::now(),
+        }
+    }
 }
 
 /// A sharded KV Indexer that partitions the RadixTree across multiple independent shards.
@@ -1374,7 +1450,24 @@ impl KvIndexerSharded {
                             }
 
                             Ok(req) = shard_broadcast_rx.recv() => {
+                                #[cfg(feature = "bench")]
+                                let queue_wait = req.created_at.elapsed();
+                                #[cfg(feature = "bench")]
+                                let seq_len = req.sequence.len();
+
+                                #[cfg(feature = "bench")]
+                                let process_start = Instant::now();
                                 let matches = trie.find_matches(req.sequence, req.early_exit);
+                                #[cfg(feature = "bench")]
+                                let process_time = process_start.elapsed();
+
+                                #[cfg(feature = "bench")]
+                                tracing::info!(
+                                    seq_len,
+                                    queue_wait_us = queue_wait.as_micros() as u64,
+                                    process_us = process_time.as_micros() as u64,
+                                    "sharded indexer: processed find_matches"
+                                );
                                 if let Err(e) = req.resp.send(matches).await {
                                     tracing::trace!("Failed to send match response: {:?}", e);
                                 }
@@ -1442,14 +1535,18 @@ impl KvIndexerInterface for KvIndexerSharded {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
+        #[cfg(feature = "bench")]
+        let start = Instant::now();
+        #[cfg(feature = "bench")]
+        let seq_len = sequence.len();
+        #[cfg(feature = "bench")]
+        let num_shards = self.event_tx.len();
+
         'match_loop: loop {
             let (match_tx, mut match_rx) = mpsc::channel(self.event_tx.len());
+            let sharded_req = ShardedMatchRequest::new(sequence.clone(), false, match_tx);
             self.request_broadcast_tx
-                .send(ShardedMatchRequest {
-                    sequence: sequence.clone(),
-                    early_exit: false,
-                    resp: match_tx,
-                })
+                .send(sharded_req)
                 .map_err(|_| KvRouterError::IndexerOffline)?;
 
             let mut scores = OverlapScores::new();
@@ -1481,6 +1578,17 @@ impl KvIndexerInterface for KvIndexerSharded {
                         continue 'match_loop;
                     }
                 }
+            }
+
+            #[cfg(feature = "bench")]
+            {
+                let elapsed = start.elapsed();
+                tracing::info!(
+                    seq_len,
+                    num_shards,
+                    elapsed_us = elapsed.as_micros() as u64,
+                    "find_matches (sharded) completed"
+                );
             }
             return Ok(scores);
         }

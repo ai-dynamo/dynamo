@@ -59,6 +59,30 @@ pub mod openai {
         pub type OpenAIEmbeddingsStreamingEngine =
             ServerStreamingEngine<NvCreateEmbeddingRequest, Annotated<NvCreateEmbeddingResponse>>;
     }
+
+    pub mod images {
+        use super::*;
+
+        pub use protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Images API
+        pub type OpenAIImagesUnaryEngine = UnaryEngine<NvCreateImageRequest, NvImagesResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Images API.
+        ///
+        /// **Note**: This "streaming" refers to the internal routing/distribution architecture,
+        /// NOT client-facing Server-Sent Events (SSE) streaming. Image generation does not
+        /// support progressive streaming to clients - images are generated completely and
+        /// returned as finished artifacts (URLs or base64).
+        ///
+        /// The HTTP endpoint folds this stream into a single response before returning to clients,
+        /// similar to how embeddings work. The streaming infrastructure is used for:
+        /// - Consistent routing architecture across all model types
+        /// - Request distribution via PushRouter
+        /// - Worker fault detection and load balancing
+        pub type OpenAIImagesStreamingEngine =
+            ServerStreamingEngine<NvCreateImageRequest, Annotated<NvImagesResponse>>;
+    }
 }
 
 pub mod generic {

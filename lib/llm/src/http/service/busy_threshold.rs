@@ -17,9 +17,9 @@
 //! **Set thresholds:**
 //! ```json
 //! // Request
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}
 //! // Response
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}
 //! ```
 //!
 //! **Get thresholds (omit thresholds):**
@@ -27,9 +27,9 @@
 //! // Request
 //! {"model": "llama-3-70b"}
 //! // Response (if configured)
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}
 //! // Response (if not configured)
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold": null}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold": null, "active_prefill_tokens_threshold_frac": null}
 //! ```
 //!
 //! ### GET /busy_threshold
@@ -38,10 +38,11 @@
 //!
 //! ```json
 //! // Response
-//! {"thresholds": [{"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}]}
+//! {"thresholds": [{"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}]}
 //! ```
 
 use super::{RouteDoc, service_v2};
+use crate::discovery::LoadThresholdConfig;
 use axum::{
     Json, Router,
     extract::Request,
@@ -65,6 +66,8 @@ pub struct BusyThresholdRequest {
     pub active_decode_blocks_threshold: Option<f64>,
     /// The active prefill tokens threshold value (literal token count), or null to just get the current value
     pub active_prefill_tokens_threshold: Option<u64>,
+    /// The active prefill tokens threshold as fraction of max_num_batched_tokens, or null to just get the current value
+    pub active_prefill_tokens_threshold_frac: Option<f64>,
 }
 
 /// Response for a threshold operation
@@ -76,6 +79,8 @@ pub struct BusyThresholdResponse {
     pub active_decode_blocks_threshold: Option<f64>,
     /// The active prefill tokens threshold value (null if no threshold is configured)
     pub active_prefill_tokens_threshold: Option<u64>,
+    /// The active prefill tokens threshold as fraction of max_num_batched_tokens
+    pub active_prefill_tokens_threshold_frac: Option<f64>,
 }
 
 /// Response for listing all thresholds
@@ -155,19 +160,26 @@ async fn busy_threshold_handler(
 
     let manager = state.manager();
 
+    // Build LoadThresholdConfig from request if any threshold is being set
+    let is_setting = request.active_decode_blocks_threshold.is_some()
+        || request.active_prefill_tokens_threshold.is_some()
+        || request.active_prefill_tokens_threshold_frac.is_some();
+
+    let update_config = if is_setting {
+        Some(LoadThresholdConfig {
+            active_decode_blocks_threshold: request.active_decode_blocks_threshold,
+            active_prefill_tokens_threshold: request.active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac: request.active_prefill_tokens_threshold_frac,
+        })
+    } else {
+        None
+    };
+
     // Get or set the thresholds via the model's worker monitor
-    let active_decode_blocks_threshold = manager
-        .active_decode_blocks_threshold(&request.model, request.active_decode_blocks_threshold);
-    let active_prefill_tokens_threshold = manager
-        .active_prefill_tokens_threshold(&request.model, request.active_prefill_tokens_threshold);
+    let config = manager.load_threshold_config(&request.model, update_config.as_ref());
 
     // If trying to SET but model has no monitor, return 404
-    let is_setting = request.active_decode_blocks_threshold.is_some()
-        || request.active_prefill_tokens_threshold.is_some();
-    if is_setting
-        && active_decode_blocks_threshold.is_none()
-        && active_prefill_tokens_threshold.is_none()
-    {
+    if is_setting && config.is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!(ErrorResponse {
@@ -182,11 +194,22 @@ async fn busy_threshold_handler(
     if is_setting {
         tracing::info!(
             model = %request.model,
-            active_decode_blocks_threshold = ?active_decode_blocks_threshold,
-            active_prefill_tokens_threshold = ?active_prefill_tokens_threshold,
+            config = ?config,
             "Updated busy thresholds"
         );
     }
+
+    let (
+        active_decode_blocks_threshold,
+        active_prefill_tokens_threshold,
+        active_prefill_tokens_threshold_frac,
+    ) = config.map_or((None, None, None), |c| {
+        (
+            c.active_decode_blocks_threshold,
+            c.active_prefill_tokens_threshold,
+            c.active_prefill_tokens_threshold_frac,
+        )
+    });
 
     (
         StatusCode::OK,
@@ -194,6 +217,7 @@ async fn busy_threshold_handler(
             model: request.model,
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac,
         })),
     )
 }
@@ -207,15 +231,12 @@ async fn list_busy_thresholds_handler(
     let response = ListBusyThresholdsResponse {
         thresholds: thresholds
             .into_iter()
-            .map(
-                |(model, active_decode_blocks_threshold, active_prefill_tokens_threshold)| {
-                    BusyThresholdResponse {
-                        model,
-                        active_decode_blocks_threshold: Some(active_decode_blocks_threshold),
-                        active_prefill_tokens_threshold: Some(active_prefill_tokens_threshold),
-                    }
-                },
-            )
+            .map(|(model, config)| BusyThresholdResponse {
+                model,
+                active_decode_blocks_threshold: config.active_decode_blocks_threshold,
+                active_prefill_tokens_threshold: config.active_prefill_tokens_threshold,
+                active_prefill_tokens_threshold_frac: config.active_prefill_tokens_threshold_frac,
+            })
             .collect(),
     };
 

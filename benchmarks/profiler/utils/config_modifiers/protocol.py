@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, Tuple
 
 from benchmarks.profiler.utils.config import (
     Config,
@@ -69,7 +69,7 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def get_model_name(cls, config: dict) -> str:
+    def get_model_name(cls, config: dict) -> Tuple[str, str]:
         ...
 
     @classmethod
@@ -131,6 +131,53 @@ class BaseConfigModifier:
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
+
+    @classmethod
+    def _get_model_name_and_path_from_args(cls, args: list[str]) -> Tuple[str, str]:
+        """
+        Extract model name and path from worker args.
+
+        Checks --served-model-name first (API name), then falls back to
+        backend-specific path argument (--model-path or --model).
+
+        Args:
+            args: Broken argument list
+
+        Returns:
+            Tuple of (model_name, model_path)
+
+        Raises:
+            ValueError: If neither --served-model-name nor model path arg is found
+        """
+        model_name = None
+        # Check for --served-model-name first (API model name)
+        for i, arg in enumerate(args):
+            if arg == cls.WORKER_SERVED_MODEL_NAME_ARG and i + 1 < len(args):
+                model_name = args[i + 1]
+                break
+
+        # Check for backend-specific path argument
+        model_path = None
+        for i, arg in enumerate(args):
+            if arg == cls.WORKER_MODEL_PATH_ARG and i + 1 < len(args):
+                model_path = args[i + 1]
+                break
+
+        # Require at least one to be specified
+        if model_name is None and model_path is None:
+            raise ValueError(
+                f"Cannot determine model: neither {cls.WORKER_MODEL_PATH_ARG} nor "
+                f"{cls.WORKER_SERVED_MODEL_NAME_ARG} found in worker configuration. "
+                f"Please specify a model name/path in your config."
+            )
+
+        # If only one is specified, use it for both
+        if model_path is None:
+            model_path = model_name
+        elif model_name is None:
+            model_name = model_path
+
+        return model_name, model_path
 
     @classmethod
     def _normalize_model_path(cls, pvc_mount_path: str, pvc_path: str) -> str:

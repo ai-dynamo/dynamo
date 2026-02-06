@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Tool Calling with Dynamo"
 ---
+
+# Tool Calling with Dynamo
 
 You can connect Dynamo to external tools and services using function calling (also known as tool calling). By providing a list of available functions, Dynamo can choose
 to output function arguments for the relevant function(s) which you can execute to augment the prompt with relevant external information.
@@ -21,14 +22,12 @@ To enable this feature, you should set the following flag while launching the ba
 python -m dynamo.<backend> --help"
 ```
 
-<Note>
-If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on `<TOOLCALL>` and `<|python_tag|>` tool tags.
-</Note>
+> [!NOTE]
+> If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on `<TOOLCALL>` and `<|python_tag|>` tool tags.
 
-<Tip>
-If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
-with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
-</Tip>
+> [!TIP]
+> If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
+> with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
 
 
 Parser to Model Mapping

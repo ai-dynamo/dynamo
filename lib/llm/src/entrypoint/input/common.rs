@@ -271,6 +271,9 @@ where
 
     let service_backend = match router_mode {
         RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+            // Non-KV routing: use PushRouter directly.
+            // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
+            // available in KV routing mode where the router has actual bookkeeping.
             ServiceBackend::from_engine(Arc::new(router))
         }
         RouterMode::KV => {

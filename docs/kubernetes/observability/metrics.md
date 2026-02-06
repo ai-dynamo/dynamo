@@ -29,11 +29,11 @@ helm install prometheus -n monitoring --create-namespace prometheus-community/ku
 
 ### Install Dynamo Operator
 Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../installation_guide.md) for detailed instructions on deploying the Dynamo operator.
-Make sure to set the `prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
+Make sure to set the `dynamo-operator.dynamo.metrics.prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
 
 ```bash
 helm install dynamo-platform ...
-  --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+  --set dynamo-operator.dynamo.metrics.prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
 ```
 
 

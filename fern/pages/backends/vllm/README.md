@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "LLM Deployment using vLLM"
 ---
+
+# LLM Deployment using vLLM
 
 This directory contains reference implementations for deploying Large Language Models (LLMs) in various configurations using vLLM. For Dynamo integration, we leverage vLLM's native KV cache events, NIXL based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
@@ -55,13 +56,18 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
-### Start NATS and ETCD in the background
+### Start Infrastructure Services (Local Development Only)
 
-Start using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml)
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Pull or build container
 
@@ -81,9 +87,8 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 
 ## Run Single Node Examples
 
-<Warning>
-Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
-</Warning>
+> [!WARNING]
+> Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
 
 ### Aggregated Serving
 
@@ -127,9 +132,8 @@ cd examples/backends/vllm
 bash launch/dep.sh
 ```
 
-<Tip>
-Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
-</Tip>
+> [!TIP]
+> Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
 
 ## Advanced Examples
 

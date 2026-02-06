@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
+All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Dynamo Feature Compatibility Matrices
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
@@ -90,7 +96,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 | **KV Block Manager** | ✅ | ✅ | ✅ | — | | | | | | |
 | **Multimodal** | ✅<sup>1</sup> | <sup>2</sup> | — | ✅ | — | | | | | |
 | **Request Migration** | 🚧<sup>3</sup> | ✅ | ✅ | ✅ | 🚧 | — | | | | |
-| **Request Cancellation** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | | | |
+| **Request Cancellation** | ✅<sup>5</sup> | ✅<sup>5</sup> | ✅<sup>5</sup> | ✅<sup>5</sup> | ✅<sup>5</sup> | ✅<sup>5</sup> | — | | | |
 | **LoRA** | | | | | | | | — | | |
 | **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | — | |
 | **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | | ✅ | — |
@@ -100,6 +106,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 > 2. **Multimodal + KV-Aware Routing**: Not supported. The KV router currently tracks token-based blocks only. ([Source][kv-routing])
 > 3. **Request Migration**: Supported on **Decode/Aggregated** workers only. **Prefill** workers do not support migration. ([Source][trtllm-readme])
 > 4. **Speculative Decoding**: Llama 4 + Eagle support documented. ([Source][trtllm-eagle])
+> 5. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
 
 ---
 
@@ -112,19 +119,19 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 <!-- Design Docs -->
 [disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/router/kv_cache_routing.md
-[planner]: docs/planner/planner_intro.rst
-[kvbm]: docs/kvbm/kvbm_intro.rst
+[kv-routing]: docs/components/router/router_guide.md
+[planner]: docs/components/planner/README.md
+[kvbm]: docs/components/kvbm/README.md
 [migration]: docs/fault_tolerance/request_migration.md
 [tools]: docs/agents/tool-calling.md
 
 <!-- Multimodal -->
-[mm]: docs/multimodal/index.md
-[mm-vllm]: docs/multimodal/vllm.md
-[mm-trtllm]: docs/multimodal/trtllm.md
-[mm-sglang]: docs/multimodal/sglang.md
+[mm]: docs/features/multimodal/README.md
+[mm-vllm]: docs/features/multimodal/multimodal_vllm.md
+[mm-trtllm]: docs/features/multimodal/multimodal_trtllm.md
+[mm-sglang]: docs/features/multimodal/multimodal_sglang.md
 
 <!-- Feature-specific -->
 [lora]: docs/kubernetes/deployment/dynamomodel-guide.md
-[vllm-spec]: docs/backends/vllm/speculative_decoding.md
+[vllm-spec]: docs/features/speculative_decoding/speculative_decoding_vllm.md
 [trtllm-eagle]: docs/backends/trtllm/llama4_plus_eagle.md

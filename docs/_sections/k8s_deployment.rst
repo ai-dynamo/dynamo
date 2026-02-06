@@ -12,3 +12,4 @@ Deployment Guide
    Minikube Setup <../kubernetes/deployment/minikube>
    Managing Models with DynamoModel <../kubernetes/deployment/dynamomodel-guide>
    Autoscaling <../kubernetes/autoscaling>
+   Checkpointing <../kubernetes/chrek/README>

@@ -34,10 +34,10 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
-    pytest.mark.post_merge,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.post_merge,  # post_merge to pinpoint failure commit
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
+    pytest.mark.xfail(reason="Cancellation is temporarily disabled", strict=True),
 ]
 
 
@@ -133,7 +133,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             log_dir=log_dir,
         )
 

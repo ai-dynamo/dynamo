@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Dynamo Metrics Collection on Kubernetes"
 ---
+
+# Dynamo Metrics Collection on Kubernetes
 
 ## Overview
 
@@ -28,17 +29,16 @@ helm install prometheus -n monitoring --create-namespace prometheus-community/ku
   --set prometheus.prometheusSpec.probeNamespaceSelector="{}"
 ```
 
-<Note>
-The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
-</Note>
+> [!NOTE]
+> The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
 
 ### Install Dynamo Operator
 Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../installation-guide.md) for detailed instructions on deploying the Dynamo operator.
-Make sure to set the `prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
+Make sure to set the `dynamo-operator.dynamo.metrics.prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
 
 ```bash
 helm install dynamo-platform ...
-  --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+  --set dynamo-operator.dynamo.metrics.prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
 ```
 
 
@@ -46,9 +46,8 @@ helm install dynamo-platform ...
 
 The Dynamo Grafana dashboard includes panels for node-level CPU utilization, system load, and container resource usage. These metrics are collected and exported to Prometheus via [node-exporter](https://github.com/prometheus/node_exporter), which exposes hardware and OS metrics from Linux systems.
 
-<Note>
-The kube-prometheus-stack installation described above includes node-exporter by default. If you're using a custom Prometheus setup, you'll need to ensure node-exporter is deployed as a DaemonSet on your cluster nodes.
-</Note>
+> [!NOTE]
+> The kube-prometheus-stack installation described above includes node-exporter by default. If you're using a custom Prometheus setup, you'll need to ensure node-exporter is deployed as a DaemonSet on your cluster nodes.
 
 To verify node-exporter is running:
 

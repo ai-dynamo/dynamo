@@ -153,12 +153,9 @@ impl DeltaGenerator {
 
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
-        // Create request tracker if tracking is enabled
-        let tracker = if options.enable_tracking {
-            Some(Arc::new(RequestTracker::new()))
-        } else {
-            None
-        };
+        // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
+        // The enable_tracking option only controls whether timing info is included in the response.
+        let tracker = Some(Arc::new(RequestTracker::new()));
 
         Self {
             id: chatcmpl_id,
@@ -503,6 +500,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
     fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
         DeltaGenerator::get_usage(self)
+    }
+
+    fn tracker(&self) -> Option<std::sync::Arc<crate::protocols::common::timing::RequestTracker>> {
+        self.tracker.clone()
     }
 }
 

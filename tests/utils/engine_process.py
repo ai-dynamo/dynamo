@@ -187,7 +187,7 @@ class EngineProcess(ManagedProcess):
                 ),
             ],
             delayed_start=config.delayed_start,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=config.stragglers,
             log_dir=request.node.name,
         )

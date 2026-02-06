@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Running KVBM in vLLM"
 ---
+
+# Running KVBM in vLLM
 
 This guide explains how to leverage KVBM (KV Block Manager) to manage KV cache and do KV offloading in vLLM.
 
@@ -43,29 +44,27 @@ cd $DYNAMO_HOME/examples/backends/vllm
 ./launch/disagg_kvbm_2p2d.sh
 ```
 
-<Note>
-Configure or tune KVBM cache tiers (choose one of the following options):
-```bash
-# Option 1: CPU cache only (GPU -> CPU offloading)
-# 4 means 4GB of pinned CPU memory would be used
-export DYN_KVBM_CPU_CACHE_GB=4
-# Option 2: Both CPU and Disk cache (GPU -> CPU -> Disk tiered offloading)
-export DYN_KVBM_CPU_CACHE_GB=4
-# 8 means 8GB of disk would be used
-export DYN_KVBM_DISK_CACHE_GB=8
-# [Experimental] Option 3: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
-# NOTE: this option is only experimental and it might not give out the best performance.
-# NOTE: disk offload filtering is not supported when using this option.
-export DYN_KVBM_DISK_CACHE_GB=8
-```
-You can also use "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS" or
-"DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS" to specify exact block counts instead of GB
-</Note>
+> [!NOTE]
+> Configure or tune KVBM cache tiers (choose one of the following options):
+> ```bash
+> # Option 1: CPU cache only (GPU -> CPU offloading)
+> # 4 means 4GB of pinned CPU memory would be used
+> export DYN_KVBM_CPU_CACHE_GB=4
+> # Option 2: Both CPU and Disk cache (GPU -> CPU -> Disk tiered offloading)
+> export DYN_KVBM_CPU_CACHE_GB=4
+> # 8 means 8GB of disk would be used
+> export DYN_KVBM_DISK_CACHE_GB=8
+> # [Experimental] Option 3: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
+> # NOTE: this option is only experimental and it might not give out the best performance.
+> # NOTE: disk offload filtering is not supported when using this option.
+> export DYN_KVBM_DISK_CACHE_GB=8
+> ```
+> You can also use "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS" or
+> "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS" to specify exact block counts instead of GB
 
-<Note>
-When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
-To disable disk offload filtering, set `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` to true or 1.
-</Note>
+> [!NOTE]
+> When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
+> To disable disk offload filtering, set `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` to true or 1.
 
 ### Sample Request
 ```bash

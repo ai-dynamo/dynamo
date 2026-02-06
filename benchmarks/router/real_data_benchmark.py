@@ -5,23 +5,20 @@
 
 import argparse
 import json
-import logging
 import os
 import subprocess
 
 import numpy as np
+from common import (
+    DEFAULT_MOONCAKE_BLOCK_SIZE,
+    add_common_args,
+    get_common_aiperf_flags,
+    resolve_tokenizer,
+    setup_logger,
+)
 from prefix_data_generator.synthesizer import Synthesizer
 
-# Setup logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
-)
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
+logger = setup_logger(__name__)
 
 
 def get_aiperf_cmd_for_trace(
@@ -30,20 +27,16 @@ def get_aiperf_cmd_for_trace(
     input_dataset,
     artifact_dir,
     seed,
+    block_size,
     url="http://localhost:8888",
 ):
-    return [
+    cmd = [
         "aiperf",
         "profile",
         "--model",
         model,
         "--tokenizer",
         tokenizer,
-        "--endpoint-type",
-        "chat",
-        "--endpoint",
-        "v1/chat/completions",
-        "--streaming",
         "--url",
         url,
         "--input-file",
@@ -51,15 +44,15 @@ def get_aiperf_cmd_for_trace(
         "--custom-dataset-type",
         "mooncake_trace",
         "--fixed-schedule-auto-offset",
+        "--prompt-input-tokens-block-size",
+        str(block_size),
         "--random-seed",
         str(seed),
         "--artifact-dir",
         artifact_dir,
-        "-H",
-        "Authorization: Bearer NOT USED",
-        "-H",
-        "Accept: text/event-stream",
     ]
+    cmd.extend(get_common_aiperf_flags())
+    return cmd
 
 
 def run_benchmark_with_trace(
@@ -69,6 +62,7 @@ def run_benchmark_with_trace(
     artifact_dir,
     url,
     seed,
+    block_size,
 ):
     """Run aiperf benchmark with a trace dataset"""
     aiperf_cmd = get_aiperf_cmd_for_trace(
@@ -77,6 +71,7 @@ def run_benchmark_with_trace(
         trace_dataset,
         artifact_dir,
         seed,
+        block_size,
         url,
     )
 
@@ -100,25 +95,9 @@ def main():
         description="Benchmark with real or synthesized mooncake-style trace data"
     )
 
-    # Model and server configuration
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Model name",
-    )
-    parser.add_argument(
-        "--tokenizer",
-        type=str,
-        default=None,
-        help="Tokenizer name (defaults to model)",
-    )
-    parser.add_argument(
-        "--url",
-        type=str,
-        default="http://localhost:8000",
-        help="Server URL",
-    )
+    # Common arguments
+    add_common_args(parser)
+
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -190,26 +169,12 @@ def main():
     parser.add_argument(
         "--block-size",
         type=int,
-        default=512,
-        help="Block size for prefilling and decoding (default: 512)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Random seed for reproducibility (default: 0)",
-    )
-    parser.add_argument(
-        "--use-expected-osl",
-        action="store_true",
-        help="Pass expected_output_tokens to nvext for router tracking",
+        default=DEFAULT_MOONCAKE_BLOCK_SIZE,
+        help=f"Block size for prefilling and decoding (default: {DEFAULT_MOONCAKE_BLOCK_SIZE})",
     )
 
     args = parser.parse_args()
-
-    # Use tokenizer from model if not specified
-    if args.tokenizer is None:
-        args.tokenizer = args.model
+    resolve_tokenizer(args)
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -350,6 +315,7 @@ def main():
         artifact_dir,
         args.url,
         args.seed,
+        args.block_size,
     )
 
     logger.info(f"Results saved to: {artifact_dir}")

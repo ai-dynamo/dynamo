@@ -25,7 +25,6 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-import torch
 from cuda.bindings import driver as cuda
 from gpu_memory_service.client.cuda_vmm_utils import (
     free_va,
@@ -34,6 +33,8 @@ from gpu_memory_service.client.cuda_vmm_utils import (
     release_handle,
     reserve_va,
     set_access,
+    set_current_device,
+    synchronize,
     unmap,
 )
 from gpu_memory_service.client.rpc import GMSRPCClient
@@ -138,9 +139,8 @@ class GMSClientMemoryManager:
             ""  # Hash from server, saved on connect/commit
         )
 
-        # Ensure torch is on the right device for subsequent CUDA operations.
-        if torch.cuda.is_available():
-            torch.cuda.set_device(self.device)
+        # Set the current CUDA device for subsequent operations.
+        set_current_device(self.device)
 
         # Cache granularity for VA alignment
         self.granularity = get_allocation_granularity(device)
@@ -342,8 +342,7 @@ class GMSClientMemoryManager:
         """
         self._require_rw()
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
+        synchronize()
 
         # After publishing, prevent further writes locally.
         for va, m in list(self._mappings.items()):
@@ -395,8 +394,7 @@ class GMSClientMemoryManager:
         if self.lock_type != GrantedLockType.RO:
             raise RuntimeError("unmap() requires RO mode")
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
+        synchronize()
 
         # Preserve allocation IDs for remapping on remap
         self._preserved_allocation_ids = list(self._allocation_id_to_va.keys())
@@ -404,6 +402,11 @@ class GMSClientMemoryManager:
         # Unmap physical memory but keep VA reservations
         self._unmap_preserving_va()
         self._va_preserved = True
+
+        # Ensure all CUDA VMM unmap operations complete before releasing the lock.
+        # This prevents race conditions where remap() may be called before
+        # physical memory is fully released.
+        synchronize()
 
         self._client_rpc.close()
         self._client = None
@@ -430,8 +433,7 @@ class GMSClientMemoryManager:
         if not self._unmapped:
             return True
 
-        if torch.cuda.is_available():
-            torch.cuda.set_device(self.device)
+        set_current_device(self.device)
 
         eff_timeout = timeout_ms if timeout_ms is not None else self._timeout_ms
         self._connect(
@@ -489,8 +491,7 @@ class GMSClientMemoryManager:
             return
 
         # Ensure kernels are done before tearing down mappings.
-        if torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
+        synchronize()
 
         # Release all mappings including preserved VA reservations
         self._unmap_all()
@@ -566,8 +567,7 @@ class GMSClientMemoryManager:
         Returns the VA.
         Raises StaleMemoryLayoutError if allocation is missing or size changed.
         """
-        if torch.cuda.is_available():
-            torch.cuda.set_device(self.device)
+        set_current_device(self.device)
 
         va = self._allocation_id_to_va.get(allocation_id)
         if va is None:
@@ -608,7 +608,7 @@ class GMSClientMemoryManager:
         set_access(va, mapping.aligned_size, self.device, current_access)
 
         # Synchronize to ensure mapping is complete before any access
-        cuda.cuCtxSynchronize()
+        synchronize()
 
         # Validate the pointer is accessible (this is what Triton checks)
         result, _dev_ptr = cuda.cuPointerGetAttribute(

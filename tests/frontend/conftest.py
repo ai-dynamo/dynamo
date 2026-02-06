@@ -58,7 +58,7 @@ def start_services_with_http(
     with DynamoFrontendProcess(
         request,
         frontend_port=ports.frontend_port,
-        terminate_existing=False,
+        terminate_all_matching_process_names=False,
     ):
         logger.info(f"HTTP Frontend started on port {ports.frontend_port}")
         yield ports.frontend_port, ports.system_ports[0]
@@ -188,7 +188,7 @@ def start_services_with_grpc(
         with DynamoFrontendProcess(
             request,
             frontend_port=ports.frontend_port,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             extra_args=[
                 "--kserve-grpc-server",
                 "--grpc-metrics-port",
@@ -261,7 +261,7 @@ class MockerWorkerProcess(ManagedProcess):
             ],
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.mocker"],
             log_dir=log_dir,

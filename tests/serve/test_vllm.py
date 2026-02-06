@@ -304,6 +304,37 @@ vllm_configs = {
             )
         ],
     ),
+    "multimodal_agg_frontend_decoding": VLLMConfig(
+        name="multimodal_agg_frontend_decoding",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
+        script_args=[
+            "--model",
+            "Qwen/Qwen2-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["green"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "multimodal_agg_llava_epd": VLLMConfig(
         name="multimodal_agg_llava_epd",
         directory=vllm_dir,

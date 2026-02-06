@@ -49,6 +49,7 @@ use crate::protocols::openai::{
     },
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
+    images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse},
 };
 use crate::request_template::RequestTemplate;
@@ -1545,6 +1546,99 @@ pub fn responses_router(
         .route(&path, post(handler_responses))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state((state, template));
+    (vec![doc], router)
+}
+
+async fn images(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateImageRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
+
+    // Images are typically not streamed, so we default to non-streaming
+    let streaming = false;
+
+    // Get the model name from the request (diffusion model)
+    let model = request
+        .inner
+        .model
+        .as_ref()
+        .map(|m| match m {
+            dynamo_async_openai::types::ImageModel::DallE2 => "dall-e-2".to_string(),
+            dynamo_async_openai::types::ImageModel::DallE3 => "dall-e-3".to_string(),
+            dynamo_async_openai::types::ImageModel::Other(s) => s.clone(),
+        })
+        .unwrap_or_else(|| "diffusion".to_string());
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    // Get the image generation engine
+    let engine = state
+        .manager()
+        .get_images_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    // this will increment the inflight gauge for the model
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Images, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    // Issue the generate call on the engine
+    // Note: This uses ServerStreamingEngine for internal routing/distribution,
+    // NOT for client-facing SSE streaming. The stream is immediately folded into
+    // a single response below.
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate images"))?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first response
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        // Calls observe_response() on each item - drops http_queue_guard on first item
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Images are returned as a single response (non-streaming to client)
+    // Fold the internal stream into a single response
+    let response = NvImagesResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
+            ErrorMessage::internal_server_error("Failed to fold images stream")
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Images endpoint
+/// If not path is provided, the default path is `/v1/images/generations`
+pub fn images_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/images/generations".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(images))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
     (vec![doc], router)
 }
 

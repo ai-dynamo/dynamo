@@ -46,3 +46,8 @@ tokio = { workspace = true, features = ["rt", "macros", "time"] }
 name = "radix_tree_microbench"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "kv_indexer_bench"
+harness = false
+required-features = ["bench"]

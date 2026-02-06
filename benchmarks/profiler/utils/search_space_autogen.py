@@ -80,8 +80,8 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             model_name_or_path = args.model
     else:
         # get the model name from config
-        args.model = config_modifier.get_model_name(config)
-        model_name_or_path = args.model
+        args.model, args.model_path = config_modifier.get_model_name(config)
+        model_name_or_path = args.model_path
     logger.info(f"Getting model info for {args.model} at {model_name_or_path}...")
     try:
         model_info = get_model_info(model_name_or_path)

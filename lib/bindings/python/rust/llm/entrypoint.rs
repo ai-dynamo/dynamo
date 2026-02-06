@@ -10,6 +10,7 @@ use std::sync::Arc;
 use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
+use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::EngineFactoryCallback;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
@@ -94,18 +95,21 @@ pub struct RouterConfig {
     active_decode_blocks_threshold: Option<f64>,
     /// Threshold for active prefill tokens utilization (literal token count)
     active_prefill_tokens_threshold: Option<u64>,
+    /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
+    active_prefill_tokens_threshold_frac: Option<f64>,
     enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
+        active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
     ) -> Self {
         Self {
@@ -113,6 +117,7 @@ impl RouterConfig {
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac,
             enforce_disagg,
         }
     }
@@ -123,8 +128,11 @@ impl From<RouterConfig> for RsRouterConfig {
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
-            active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
+            load_threshold_config: RsLoadThresholdConfig {
+                active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
+                active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
+                active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
+            },
             enforce_disagg: rc.enforce_disagg,
         }
     }
@@ -163,8 +171,6 @@ pub(crate) struct EntrypointArgs {
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     namespace: Option<String>,
-    custom_backend_metrics_endpoint: Option<String>,
-    custom_backend_metrics_polling_interval: Option<f64>,
     is_prefill: bool,
     engine_factory: Option<PyEngineFactory>,
 }
@@ -173,7 +179,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false, engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -191,8 +197,6 @@ impl EntrypointArgs {
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
         namespace: Option<String>,
-        custom_backend_metrics_endpoint: Option<String>,
-        custom_backend_metrics_polling_interval: Option<f64>,
         is_prefill: bool,
         engine_factory: Option<PyObject>,
     ) -> PyResult<Self> {
@@ -237,8 +241,6 @@ impl EntrypointArgs {
             tls_key_path,
             extra_engine_args,
             namespace,
-            custom_backend_metrics_endpoint,
-            custom_backend_metrics_polling_interval,
             is_prefill,
             engine_factory,
         })
@@ -279,9 +281,7 @@ pub fn make_engine<'p>(
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
-        .namespace(args.namespace.clone())
-        .custom_backend_metrics_endpoint(args.custom_backend_metrics_endpoint.clone())
-        .custom_backend_metrics_polling_interval(args.custom_backend_metrics_polling_interval);
+        .namespace(args.namespace.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         if let Some(model_path) = args.model_path.clone() {
             let local_path = if model_path.exists() {
@@ -394,7 +394,7 @@ async fn select_engine(
 
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine = dynamo_llm::mocker::engine::make_mocker_engine(
+            let engine = dynamo_llm::mocker::make_mocker_engine(
                 distributed_runtime.inner,
                 endpoint,
                 mocker_args,

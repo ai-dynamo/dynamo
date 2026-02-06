@@ -84,7 +84,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=120,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=[
                 "VLLM::EngineCore",
             ],

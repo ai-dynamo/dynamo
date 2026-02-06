@@ -222,6 +222,8 @@ pub struct ActiveSequenceEvent {
     pub worker: WorkerWithDpRank,
     pub data: ActiveSequenceEventData,
     pub router_id: u64,
+    #[serde(default)]
+    pub lora_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

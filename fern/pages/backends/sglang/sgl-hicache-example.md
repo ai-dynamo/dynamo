@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Enable SGLang Hierarchical Cache (HiCache)"
 ---
+
+# Enable SGLang Hierarchical Cache (HiCache)
 
 This guide shows how to enable SGLang's Hierarchical Cache (HiCache) inside Dynamo.
 

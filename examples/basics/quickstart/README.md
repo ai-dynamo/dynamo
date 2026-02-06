@@ -99,7 +99,7 @@ In each terminal where you started Dynamo components, press `Ctrl+C` to stop the
 If you don't plan to run any more examples, stop the etcd and NATS services that were started with Docker Compose:
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml down
+docker compose -f deploy/docker-compose.yml down
 ```
 
 This will stop and remove the containers for etcd and NATS.

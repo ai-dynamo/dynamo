@@ -64,4 +64,4 @@ curl http://localhost:8000/v1/chat/completions \
 
 - Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluster before deploying
 - Model download takes approximately 15-30 minutes depending on network speed
-- For GAIE (Gateway API Inference Extension) integration, see [vllm/agg/gaie/](vllm/agg/gaie/)
+- For GAIE (Gateway API Inference Extension) integration, `kubectl apply` the files from the corresponding subfolder i.e. [vllm/agg/gaie/](vllm/agg/gaie/)

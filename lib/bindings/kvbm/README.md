@@ -86,6 +86,7 @@ Note that the default pip wheel built is not compatible with CUDA 13 at the mome
 | `DYN_KVBM_METRICS` | Enable metrics endpoint | `false` |
 | `DYN_KVBM_METRICS_PORT` | Metrics port | `6880` |
 | `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` | Disable disk offload filtering to remove SSD lifespan protection | `false` |
+| `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY` | Minimum priority (0-100) for CPU offload with contiguous (prefix) semantics: offloading stops at the first block below threshold, and all subsequent blocks are also skipped. Used for priority-based filtering. | `0` (no filtering) |
 
 #### Disk Storage Configuration
 
@@ -113,7 +114,7 @@ DYN_KVBM_CPU_CACHE_GB=100 vllm serve \
   Qwen/Qwen3-8B
 ```
 
-For more detailed integration with dynamo, disaggregated serving support and benchmarking, please check [vllm-setup](../../../docs/kvbm/vllm-setup.md)
+For more detailed integration with dynamo, disaggregated serving support and benchmarking, please check [vllm-setup](../../../docs/components/kvbm/kvbm_guide.md#run-kvbm-in-dynamo-with-vllm)
 
 ### TensorRT-LLM
 
@@ -135,12 +136,11 @@ DYN_KVBM_CPU_CACHE_GB=100 trtllm-serve Qwen/Qwen3-8B \
   --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
 ```
 
-For more detailed integration with dynamo and benchmarking, please check [trtllm-setup](../../../docs/kvbm/trtllm-setup.md)
+For more detailed integration with dynamo and benchmarking, please check [trtllm-setup](../../../docs/components/kvbm/kvbm_guide.md#run-kvbm-in-dynamo-with-tensorrt-llm)
 
 
 ## 📚 Docs
 
-- [Architecture](../../../docs/kvbm/kvbm_architecture.md)
-- [Motivation](../../../docs/kvbm/kvbm_motivation.md)
-- [Design Deepdive](../../../docs/kvbm/kvbm_design_deepdive.md)
+- [Architecture](../../../docs/components/kvbm/README.md#architecture)
+- [Design Deepdive](../../../docs/design_docs/kvbm_design.md)
 - [NIXL Overview](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)

@@ -75,9 +75,17 @@ pub struct WorkerIdInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefill_worker_id: Option<u64>,
 
+    /// The prefill worker's data parallel rank
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
+
     /// The decode worker ID that processed this request
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
+
+    /// The decode worker's data parallel rank
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_dp_rank: Option<u32>,
 }
 
 /// NVIDIA LLM response extensions
