@@ -1,6 +1,4 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Adapted Count-Min Sketch with time decay
-/// Adapted from Moka's TinyLFU
-pub mod tinylfu;
+pub use dynamo_kvbm_logical::tinylfu;

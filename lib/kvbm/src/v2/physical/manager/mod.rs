@@ -428,6 +428,7 @@ impl TransferManager {
 
     /// Get the CUDA memory pool (for testing only).
     #[cfg(test)]
+    #[expect(dead_code)]
     pub(crate) fn cuda_pool(&self) -> &std::sync::Arc<dynamo_memory::CudaMemPool> {
         self.context.cuda_pool()
     }
