@@ -177,7 +177,13 @@ def parse_args():
         "--namespace",
         type=str,
         default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
-        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
+        help="Dynamo namespace for model discovery scoping. Use for exact namespace matching. If --namespace-prefix is also specified, prefix takes precedence.",
+    )
+    parser.add_argument(
+        "--namespace-prefix",
+        type=str,
+        default=os.environ.get("DYN_NAMESPACE_PREFIX"),
+        help="Dynamo namespace prefix for model discovery scoping. Discovers models from namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', 'ns-def456'). Takes precedence over --namespace if both are specified.",
     )
     parser.add_argument(
         "--router-replica-sync",
@@ -405,6 +411,8 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.namespace_prefix:
+        kwargs["namespace_prefix"] = flags.namespace_prefix
     if flags.kserve_grpc_server and flags.grpc_metrics_port:
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
 
