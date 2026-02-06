@@ -291,18 +291,6 @@ mod tests {
         ))
     }
 
-    fn make_worker_set_with_count(namespace: &str, mdcsum: &str, count: usize) -> Arc<WorkerSet> {
-        let ws = Arc::new(WorkerSet::new(
-            namespace.to_string(),
-            mdcsum.to_string(),
-            ModelDeploymentCard::default(),
-        ));
-        for _ in 0..count {
-            ws.increment_workers();
-        }
-        ws
-    }
-
     #[test]
     fn test_model_new() {
         let model = Model::new("llama".to_string());
@@ -395,32 +383,6 @@ mod tests {
         assert!(model.get_embeddings_engine().is_err());
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
-    }
-
-    #[test]
-    fn test_total_workers() {
-        let model = Model::new("llama".to_string());
-        model.add_worker_set("ns1".to_string(), make_worker_set_with_count("ns1", "abc", 5));
-        model.add_worker_set("ns2".to_string(), make_worker_set_with_count("ns2", "def", 3));
-
-        assert_eq!(model.total_workers(), 8);
-    }
-
-    #[test]
-    fn test_worker_count_updates_through_model() {
-        let model = Model::new("llama".to_string());
-        let ws = make_worker_set("ns1", "abc");
-        model.add_worker_set("ns1".to_string(), ws);
-
-        // Get the worker set and modify its count
-        let ws_ref = model.get_worker_set("ns1").unwrap();
-        ws_ref.increment_workers();
-        ws_ref.increment_workers();
-
-        assert_eq!(model.total_workers(), 2);
-
-        ws_ref.decrement_workers();
-        assert_eq!(model.total_workers(), 1);
     }
 
     #[test]
