@@ -1,1 +1,1 @@
-../../docs/benchmarks/sla_driven_profiling.md
+../../docs/components/profiler/profiler_guide.md
