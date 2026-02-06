@@ -384,6 +384,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             token_ids: vec![token_id],
                             tokens: None,  // Let backend handle detokenization
                             text: None,
+                            output_type: Default::default(),
+                            content_parts: None,
                             cum_log_probs: None,
                             log_probs: None,
                             top_logprobs: None,

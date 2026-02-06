@@ -169,6 +169,7 @@ impl ModelManager {
             .chain(self.list_completions_models())
             .chain(self.list_embeddings_models())
             .chain(self.list_tensor_models())
+            .chain(self.list_images_models())
             .chain(self.list_prefill_models())
             .collect()
     }
@@ -191,6 +192,10 @@ impl ModelManager {
 
     pub fn list_prefill_models(&self) -> Vec<String> {
         self.prefill_engines.read().list()
+    }
+
+    pub fn list_images_models(&self) -> Vec<String> {
+        self.images_engines.read().list()
     }
 
     pub fn add_completions_model(
