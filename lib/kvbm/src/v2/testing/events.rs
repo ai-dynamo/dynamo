@@ -270,11 +270,7 @@ mod tests {
         let complete_blocks: Vec<_> = allocated_blocks
             .into_iter()
             .zip(token_sequence.blocks())
-            .map(|(block, token_block)| {
-                block
-                    .complete(token_block.clone())
-                    .expect("Should complete")
-            })
+            .map(|(block, token_block)| block.complete(&token_block).expect("Should complete"))
             .collect();
 
         // Register blocks - this triggers Create events via the integrated EventsManager
@@ -361,11 +357,7 @@ mod tests {
         let complete_blocks: Vec<_> = allocated_blocks
             .into_iter()
             .zip(token_sequence.blocks())
-            .map(|(block, token_block)| {
-                block
-                    .complete(token_block.clone())
-                    .expect("Should complete")
-            })
+            .map(|(block, token_block)| block.complete(&token_block).expect("Should complete"))
             .collect();
 
         let _immutable_blocks = manager.register_blocks(complete_blocks);
@@ -446,11 +438,7 @@ mod tests {
         let complete_blocks: Vec<_> = allocated_blocks
             .into_iter()
             .zip(token_sequence1.blocks())
-            .map(|(block, token_block)| {
-                block
-                    .complete(token_block.clone())
-                    .expect("Should complete")
-            })
+            .map(|(block, token_block)| block.complete(&token_block).expect("Should complete"))
             .collect();
 
         // Register and immediately drop handles to return blocks to pool
@@ -484,11 +472,7 @@ mod tests {
         let complete_blocks: Vec<_> = allocated_blocks
             .into_iter()
             .zip(token_sequence2.blocks())
-            .map(|(block, token_block)| {
-                block
-                    .complete(token_block.clone())
-                    .expect("Should complete")
-            })
+            .map(|(block, token_block)| block.complete(&token_block).expect("Should complete"))
             .collect();
 
         let _second_batch = manager.register_blocks(complete_blocks);

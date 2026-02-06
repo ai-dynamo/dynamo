@@ -144,7 +144,6 @@ mod tests;
 #[cfg(test)]
 mod trace_tests;
 
-
 pub use config::{SchedulerConfig, SchedulerConfigBuilder, SchedulerConfigBuilderError};
 pub use connector_shim::SchedulerConnectorShim;
 pub use core::{Scheduler, SchedulerBuilder, SchedulerBuilderError};

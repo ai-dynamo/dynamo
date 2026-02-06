@@ -31,23 +31,7 @@ pub struct Message {
 /// A subscription stream that yields messages.
 pub type Subscription = BoxStream<'static, Message>;
 
-/// Publisher trait for sending messages to subjects.
-///
-/// Publishers are responsible for sending messages to named subjects.
-/// Messages are delivered to all subscribers matching the subject pattern.
-pub trait Publisher: Send + Sync {
-    /// Publish a message to a subject.
-    ///
-    /// This queues the message for delivery and returns immediately.
-    /// Use [`flush`](Publisher::flush) to ensure delivery.
-    fn publish(&self, subject: &str, payload: Bytes) -> Result<()>;
-
-    /// Flush pending messages to ensure delivery.
-    ///
-    /// Returns when all previously published messages have been acknowledged
-    /// by the messaging system.
-    fn flush(&self) -> BoxFuture<'static, Result<()>>;
-}
+pub use dynamo_kvbm_logical::pubsub::Publisher;
 
 /// Subscriber trait for receiving messages from subjects.
 ///

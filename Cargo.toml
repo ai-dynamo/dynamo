@@ -20,6 +20,7 @@ members = [
     "lib/nova-common",
     "lib/nova-discovery",
     "lib/kvbm",
+    "lib/kvbm-logical",
     "lib/kvbm-config",
     "lib/kvbm-kernels",
 ]
@@ -40,6 +41,7 @@ default-members = [
     "lib/nova-common",
     "lib/nova-discovery",
     "lib/kvbm",
+    "lib/kvbm-logical",
     "lib/kvbm-config",
     "lib/kvbm-kernels",
 ]
@@ -70,6 +72,7 @@ dynamo-memory = { path = "lib/memory", version = "0.9.0" }
 
 # kvbm
 dynamo-kvbm = { path = "lib/kvbm", version = "0.9.0" }
+dynamo-kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
 dynamo-kvbm-config = { path = "lib/kvbm-config", version = "0.9.0" }
 dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.9.0" }
 

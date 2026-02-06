@@ -18,6 +18,7 @@ mod local_transfers;
 ///     // ... test code that requires CUDA ...
 /// }
 /// ```
+#[allow(unused_macros)]
 macro_rules! skip_if_stubs {
     () => {
         if dynamo_kvbm_kernels::is_using_stubs() {
@@ -49,6 +50,7 @@ macro_rules! skip_if_stubs_and_device {
 }
 
 // Make the macros available to submodules
+#[allow(unused_imports)]
 pub(crate) use skip_if_stubs;
 pub(crate) use skip_if_stubs_and_device;
 
@@ -155,6 +157,7 @@ pub fn create_test_agent(name: &str) -> NixlAgent {
 }
 
 /// Create a test agent with specific backends (strict - all must succeed).
+#[expect(dead_code)]
 pub fn create_test_agent_with_backends(name: &str, backends: &[&str]) -> Result<NixlAgent> {
     NixlAgent::with_backends(name, backends)
 }

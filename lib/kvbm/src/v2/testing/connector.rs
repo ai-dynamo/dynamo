@@ -27,7 +27,7 @@ use crate::v2::BlockId;
 use crate::v2::distributed::leader::InstanceLeader;
 use crate::v2::integrations::connector::leader::ConnectorLeader;
 use crate::v2::integrations::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
-use crate::v2::logical::pools::SequenceHash;
+use crate::v2::logical::SequenceHash;
 use crate::v2::physical::layout::LayoutConfig;
 use crate::v2::physical::transfer::{BlockChecksum, FillPattern};
 use crate::{InstanceId, KvbmRuntime};

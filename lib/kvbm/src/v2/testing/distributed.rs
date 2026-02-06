@@ -21,7 +21,7 @@ use crate::{
             leader::InstanceLeader,
             worker::{DirectWorker, Worker},
         },
-        logical::pools::SequenceHash,
+        logical::SequenceHash,
         physical::{
             layout::LayoutConfig,
             transfer::{BlockChecksum, FillPattern},
@@ -1115,7 +1115,7 @@ mod tests {
             .await
             .expect("Should create pair");
 
-        let empty_hashes: Vec<crate::v2::logical::pools::SequenceHash> = vec![];
+        let empty_hashes: Vec<crate::v2::logical::SequenceHash> = vec![];
 
         let blocks: Vec<TieredBlock> =
             pair.leader_a

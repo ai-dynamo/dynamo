@@ -4,6 +4,7 @@
 //! Mock engine core for CPU-only scheduler testing.
 
 use super::model::MockModelRunner;
+use crate::v2::G1;
 use crate::v2::integrations::common::{Request, SchedulerOutput};
 use crate::v2::integrations::scheduler::{
     GlobalProjectionState, KVCacheManager, Scheduler, SchedulerConfig,
@@ -11,7 +12,6 @@ use crate::v2::integrations::scheduler::{
 use crate::v2::logical::manager::BlockManager;
 use crate::v2::testing::connector::{ConnectorTestConfig, TestConnectorInstance};
 use crate::v2::testing::managers::TestRegistryBuilder;
-use crate::v2::G1;
 
 use std::collections::{HashMap, HashSet};
 
@@ -199,8 +199,7 @@ impl MockEngineCore {
         // Track in our state
         self.output_tokens
             .insert(request.request_id.clone(), Vec::new());
-        self.requests
-            .insert(request.request_id.clone(), request);
+        self.requests.insert(request.request_id.clone(), request);
 
         // Add to scheduler
         self.scheduler.add_request(scheduler_request);

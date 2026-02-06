@@ -205,7 +205,7 @@ impl KVCacheManager {
         let mut failed_blocks: Vec<MutableBlock<G1>> = Vec::new();
 
         for (block, token_block) in blocks.into_iter().zip(token_blocks.into_iter()) {
-            match block.complete(token_block) {
+            match block.complete(&token_block) {
                 Ok(complete) => complete_blocks.push(complete),
                 Err(err) => {
                     // Extract the block from the error

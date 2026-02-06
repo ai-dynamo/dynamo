@@ -186,13 +186,7 @@ impl Request {
         metadata: Option<RequestMetadata>,
     ) -> Self {
         Self::with_priority(
-            request_id,
-            tokens,
-            lora_name,
-            salt,
-            min_tokens,
-            max_tokens,
-            None, // priority
+            request_id, tokens, lora_name, salt, min_tokens, max_tokens, None, // priority
             metadata,
         )
     }
@@ -248,7 +242,9 @@ impl Request {
         max_tokens: Option<usize>,
         metadata: Option<RequestMetadata>,
     ) -> Self {
-        Self::with_token_limits(request_id, tokens, lora_name, salt, None, max_tokens, metadata)
+        Self::with_token_limits(
+            request_id, tokens, lora_name, salt, None, max_tokens, metadata,
+        )
     }
 
     /// Clone the request without metadata.

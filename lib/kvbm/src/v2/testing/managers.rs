@@ -14,7 +14,7 @@ use crate::{
         events::EventsManager,
         manager::{BlockManager, FrequencyTrackingCapacity},
     },
-    v2::logical::pools::SequenceHash,
+    v2::logical::SequenceHash,
 };
 
 use super::token_blocks;
@@ -242,7 +242,7 @@ pub fn populate_manager_with_blocks<T: BlockMetadata>(
         .zip(token_blocks.iter())
         .map(|(block, token_block)| {
             block
-                .complete(token_block.clone())
+                .complete(&token_block)
                 .map_err(|e| anyhow::anyhow!("Failed to complete block: {:?}", e))
         })
         .collect::<Result<Vec<_>>>()?;

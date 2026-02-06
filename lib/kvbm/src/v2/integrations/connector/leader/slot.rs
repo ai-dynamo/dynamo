@@ -2520,10 +2520,7 @@ mod tests {
             assert!(result.is_ok());
 
             // Verify state changed
-            assert!(matches!(
-                slot.txn_state(),
-                TransactionState::Offloading(_)
-            ));
+            assert!(matches!(slot.txn_state(), TransactionState::Offloading(_)));
         }
 
         #[test]
@@ -2837,10 +2834,7 @@ mod tests {
 
             // 2. Start offloading
             slot.txn_start_offloading().unwrap();
-            assert!(matches!(
-                slot.txn_state(),
-                TransactionState::Offloading(_)
-            ));
+            assert!(matches!(slot.txn_state(), TransactionState::Offloading(_)));
 
             // 3. Complete offloading
             let state = slot.txn_take_offloading().unwrap();
@@ -2922,10 +2916,7 @@ mod tests {
 
             // 5. Can start a new transaction
             slot.txn_start_offloading().unwrap();
-            assert!(matches!(
-                slot.txn_state(),
-                TransactionState::Offloading(_)
-            ));
+            assert!(matches!(slot.txn_state(), TransactionState::Offloading(_)));
         }
 
         // =========================================================================
@@ -2962,10 +2953,7 @@ mod tests {
 
             // Start offloading
             slot.txn_start_offloading().unwrap();
-            assert!(matches!(
-                slot.txn_state(),
-                TransactionState::Offloading(_)
-            ));
+            assert!(matches!(slot.txn_state(), TransactionState::Offloading(_)));
 
             // Reset
             slot.reset_for_preemption();
@@ -3040,10 +3028,7 @@ mod tests {
             assert!(state.handles.is_empty());
 
             // Now in Offloading state
-            assert!(matches!(
-                slot.txn_state(),
-                TransactionState::Offloading(_)
-            ));
+            assert!(matches!(slot.txn_state(), TransactionState::Offloading(_)));
 
             // Get or create again should return same state
             let state2 = slot.get_or_create_offloading_state();
