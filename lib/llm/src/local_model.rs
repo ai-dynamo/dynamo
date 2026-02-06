@@ -56,6 +56,7 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
+    namespace_prefix: Option<String>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
 }
@@ -83,6 +84,7 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
+            namespace_prefix: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
         }
@@ -157,6 +159,11 @@ impl LocalModelBuilder {
 
     pub fn namespace(&mut self, namespace: Option<String>) -> &mut Self {
         self.namespace = namespace;
+        self
+    }
+
+    pub fn namespace_prefix(&mut self, namespace_prefix: Option<String>) -> &mut Self {
+        self.namespace_prefix = namespace_prefix;
         self
     }
 
@@ -359,6 +366,7 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
+    namespace_prefix: Option<String>,
     migration_limit: u32,
 }
 
@@ -429,6 +437,10 @@ impl LocalModel {
 
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
+    }
+
+    pub fn namespace_prefix(&self) -> Option<&str> {
+        self.namespace_prefix.as_deref()
     }
 
     /// An endpoint to identify this model by.
