@@ -69,10 +69,6 @@ def render(args, context, script_dir):
     with open(f"{script_dir}/{filename}", "w") as f:
         f.write(cleaned)
 
-    print(
-        f"INFO: Generated Dockerfile written to {script_dir}/{filename}"
-    )
-
     if args.show_result:
         print("##############")
         print("# Dockerfile #")
@@ -80,7 +76,10 @@ def render(args, context, script_dir):
         print(cleaned)
         print("##############")
 
+    print(f"INFO: Generated Dockerfile written to {script_dir}/{filename}")
+
     return
+
 
 def main():
     args = parse_args()
@@ -98,6 +97,7 @@ def main():
         print(
             "      Recommendation: --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)"
         )
+
 
 if __name__ == "__main__":
     main()

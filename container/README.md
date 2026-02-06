@@ -115,7 +115,8 @@ The `run.sh` script and rendering scripts are convenience that simplify common D
 ### 1. runtime target (runs as non-root dynamo user):
 ```bash
 # Build runtime image
-container/render.py --framework vllm --target runtime
+python container/render.py --framework vllm --target runtime --short-output
+docker build -t dynamo:latest-vllm-runtime -f rendered.Dockerfile .
 
 # Run runtime container
 container/run.sh --image dynamo:latest-vllm-runtime -it
@@ -225,29 +226,43 @@ Note: `uv` commands set `UV_CACHE_DIR` per `RUN` so `uv` always uses the same pa
 
 ```bash
 # Build vLLM dev image called dynamo:latest-vllm (default). This runs as root and is for development.
-container/render.py --framework=vllm --target=dev
-docker build -t dynamo:vllm-dev -f rendered.Dockerfile .
+python container/render.py --framework=vllm --target=dev --short-output
+docker build -t dynamo:latest-vllm-dev -f rendered.Dockerfile .
 
 # Build a local-dev image. The local-dev image will run as `dynamo` with UID/GID matched to your host user,
 # which is useful when mounting partitions for development.
-container/render.py --framework=vllm --target=local-dev
-docker build -t dynamo:vllm-local-dev -f rendered.Dockerfile .
+python container/render.py --framework=vllm --target=local-dev --short-output
+docker build -t dynamo:latest-vllm-local-dev -f rendered.Dockerfile .
 
 # Build TensorRT-LLM development image called dynamo:latest-trtllm
-container/render.py --framework=trtllm --target=runtime
-docker build -t dynamo:trtllm-runtime -f rendered.Dockerfile .
+python container/render.py --framework=trtllm --target=runtime --short-output
+docker build -t dynamo:latest-trtllm-runtime -f rendered.Dockerfile .
 ```
 
 ### Building the Frontend Image
 
 The frontend image is a specialized container that includes the Dynamo components (Dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
 
-#TODO ADD EPP IMAGE BUILD HERE
+**Build EPP Image**
+```bash
+sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
+curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+. "$HOME/.cargo/env"
+cargo install cbindgen
 
+pushd deploy/inference-gateway/epp
+make all
+popd
+
+EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
+EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
+```
+
+**Build Frontend Image**
 ```bash
 # Build the frontend image (automatically builds EPP image as a dependency)
-container/render.py --framework=dynamo --target=frontend
-docker build -t dynamo:frontend -f rendered.Dockerfile .
+python container/render.py --framework=dynamo --target=frontend --short-output
+docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f rendered.Dockerfile .
 ```
 
 <!-- The build process automatically:
@@ -408,7 +423,7 @@ See Docker documentation for custom network creation and management.
 ### Development Workflow
 ```bash
 # 1. Build local-dev image (builds runtime, then dev as intermediate, then local-dev as final image)
-container/render.py --framework=vllm --target=local-dev
+python container/render.py --framework=vllm --target=local-dev --short-output
 docker build -t dynamo:latest-vllm-local-dev -f rendered.Dockerfile .
 
 # 2. Run development container using the local-dev image
@@ -426,7 +441,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ### Production Workflow
 ```bash
 # 1. Build production runtime image (runs as non-root dynamo user)
-container/render.py --framework=vllm --target=runtime
+python container/render.py --framework=vllm --target=runtime --short-output
 docker build -t dynamo:latest-vllm-runtime -f rendered.Dockerfile .
 
 # 2. Run production container as non-root dynamo user
@@ -436,7 +451,7 @@ container/run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/
 ### Testing Workflow
 ```bash
 # 1. Build dev image
-container/render.py --framework=vllm --target=dev
+python container/render.py --framework=vllm --target=dev --short-output
 docker build -t dynamo:latest-vllm-dev -f rendered.Dockerfile .
 
 # 2. Run tests with network isolation for reproducible results (no -it needed for CI)

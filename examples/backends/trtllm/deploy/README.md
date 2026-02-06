@@ -112,7 +112,7 @@ Before using these templates, ensure you have:
 The deployment files currently require access to `my-registry/tensorrtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
-python container/render.py --framework=trtllm
+python container/render.py --framework=trtllm --short-output
 docker build -f container/rendered.Dockerfile .
 # Tag and push to your container registry
 # Update the image references in the YAML files
@@ -125,7 +125,7 @@ apt-get update && apt-get -y install git git-lfs
 
 For ARM machines, use:
 ```bash
-python container/render.py --framework=vllm --platform arm64
+python container/render.py --framework=vllm --platform arm64 --short-output
 docker build -f container/rendered.Dockerfile .
 ```
 
