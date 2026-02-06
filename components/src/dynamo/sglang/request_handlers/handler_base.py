@@ -18,8 +18,82 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
 
-class BaseWorkerHandler(ABC):
-    """Abstract base class for SGLang worker handlers."""
+class BaseGenerativeHandler(ABC):
+    """Minimal base class for all generative handlers (LLM, diffusion, etc.).
+
+    Provides common infrastructure for:
+    - Component and configuration management
+    - Metrics and KV event publishing
+    - Distributed tracing integration
+    """
+
+    def __init__(
+        self,
+        component: Component,
+        config: Config,
+        publisher: Optional[DynamoSglangPublisher] = None,
+    ) -> None:
+        """Initialize base generative handler.
+
+        Args:
+            component: The Dynamo runtime component.
+            config: SGLang and Dynamo configuration.
+            publisher: Optional metrics publisher for the worker.
+        """
+        self.component = component
+        self.config = config
+
+        # Set up metrics and KV publishers
+        if publisher is not None:
+            self.metrics_publisher = publisher.metrics_publisher
+            self.kv_publisher = publisher.kv_publisher
+        else:
+            self.metrics_publisher = None
+            self.kv_publisher = None
+
+    @abstractmethod
+    async def generate(
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Generate response from request.
+
+        Args:
+            request: Request dict with input and parameters.
+            context: Context object for cancellation handling.
+
+        Yields:
+            Response data (format varies by handler implementation).
+        """
+        pass
+
+    def cleanup(self) -> None:
+        """Cleanup resources. Override in subclasses as needed."""
+        pass
+
+    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
+        """Get trace header dict for passing to generation functions.
+
+        Args:
+            context: Dynamo Context object containing trace information.
+
+        Returns:
+            Dict with traceparent header if trace context available, None otherwise.
+        """
+        trace_id = context.trace_id
+        span_id = context.span_id
+        if not trace_id or not span_id:
+            return None
+        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+
+
+class BaseWorkerHandler(BaseGenerativeHandler):
+    """Abstract base class for SGLang LLM worker handlers.
+
+    Extends BaseGenerativeHandler with LLM-specific functionality:
+    - SGLang Engine integration
+    - Tokenization and input parameter management
+    - Disaggregated serving support
+    """
 
     def __init__(
         self,
@@ -27,6 +101,7 @@ class BaseWorkerHandler(ABC):
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
+        generate_endpoint=None,
     ) -> None:
         """Initialize base worker handler.
 
@@ -35,10 +110,16 @@ class BaseWorkerHandler(ABC):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
+            generate_endpoint: The endpoint handle for discovery registration.
         """
-        self.component = component
+        # Call parent constructor
+        super().__init__(component, config, publisher)
+
+        # LLM-specific initialization
         self.engine = engine
         self.config = config
+        self.generate_endpoint = generate_endpoint
+        self.publisher = publisher
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
@@ -53,6 +134,135 @@ class BaseWorkerHandler(ABC):
             self.engine.tokenizer_manager.tokenizer
             if not self.skip_tokenizer_init
             else None
+        )
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        """Release GPU memory occupation and unregister from discovery.
+
+        Args:
+            body: Dict with optional 'tags' key for which memory to release.
+                  Default: ["kv_cache", "weights", "cuda_graph"]
+
+        Order of operations:
+        1. Unregister from discovery - stop accepting new requests
+        2. Pause generation - drain in-flight requests
+        3. Release memory - safe now that no requests are active
+        """
+        from sglang.srt.managers.io_struct import (
+            PauseGenerationReqInput,
+            ReleaseMemoryOccupationReqInput,
+        )
+
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            tags = ["kv_cache", "weights", "cuda_graph"]
+
+        try:
+            # Step 1: Unregister endpoint from discovery FIRST
+            try:
+                await self.generate_endpoint.unregister_endpoint_instance()
+            except Exception as unreg_err:
+                logging.warning(
+                    f"Failed to unregister endpoint from discovery: {unreg_err}"
+                )
+
+            # Step 2: Pause generation to drain in-flight requests
+            pause_req = PauseGenerationReqInput()
+            await self.engine.tokenizer_manager.pause_generation(pause_req)
+
+            # Step 3: Release memory now that it's safe
+            release_req = ReleaseMemoryOccupationReqInput(tags=tags)
+            await self.engine.tokenizer_manager.release_memory_occupation(
+                release_req, None
+            )
+
+            return {
+                "status": "ok",
+                "message": f"Memory released for tags: {tags}",
+            }
+        except Exception as e:
+            logging.error(f"Failed to release memory occupation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        """Resume GPU memory occupation and re-register to discovery.
+
+        Args:
+            body: Dict with optional 'tags' key for which memory to resume.
+                  Default: ["kv_cache", "weights", "cuda_graph"]
+
+        Order of operations:
+        1. Resume memory - restore GPU allocations
+        2. Continue generation - ready to serve requests
+        3. Re-register to discovery - allow frontend to route here
+        """
+        from sglang.srt.managers.io_struct import (
+            ContinueGenerationReqInput,
+            ResumeMemoryOccupationReqInput,
+        )
+
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            tags = ["kv_cache", "weights", "cuda_graph"]
+
+        try:
+            # Step 1: Resume memory first - must be ready before accepting requests
+            resume_req = ResumeMemoryOccupationReqInput(tags=tags)
+            await self.engine.tokenizer_manager.resume_memory_occupation(
+                resume_req, None
+            )
+
+            # Step 2: Continue generation
+            continue_req = ContinueGenerationReqInput()
+            await self.engine.tokenizer_manager.continue_generation(continue_req)
+
+            # Step 3: Re-register to discovery so frontend can route to us
+            try:
+                await self.generate_endpoint.register_endpoint_instance()
+            except Exception as reg_err:
+                logging.warning(
+                    f"Failed to re-register endpoint to discovery: {reg_err}"
+                )
+
+            return {
+                "status": "ok",
+                "message": f"Memory resumed for tags: {tags}",
+            }
+        except Exception as e:
+            logging.error(f"Failed to resume memory occupation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters passed to start_profile.
+        """
+        await self.engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        await self.engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    def register_engine_routes(self, runtime) -> None:
+        """Register all engine routes for this handler.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route("start_profile", self.start_profile)
+        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route(
+            "release_memory_occupation", self.release_memory_occupation
+        )
+        runtime.register_engine_route(
+            "resume_memory_occupation", self.resume_memory_occupation
         )
 
     @abstractmethod
@@ -70,7 +280,8 @@ class BaseWorkerHandler(ABC):
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
-        pass
+        if self.publisher is not None:
+            self.publisher.cleanup()
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
@@ -139,21 +350,6 @@ class BaseWorkerHandler(ABC):
             bootstrap_host = f"[{bootstrap_host}]"
 
         return bootstrap_host, bootstrap_port
-
-    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
-        """Get trace header dict for passing to SGLang's external_trace_header parameter.
-
-        Args:
-            context: Dynamo Context object containing trace information.
-
-        Returns:
-            Dict with traceparent header if trace context available, None otherwise.
-        """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
     async def _handle_cancellation(
         self, request_id_future: asyncio.Future, context: Context

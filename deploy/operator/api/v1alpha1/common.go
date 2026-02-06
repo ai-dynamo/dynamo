@@ -135,3 +135,41 @@ type ScalingAdapter struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 }
+
+// CheckpointMode defines how checkpoint creation is handled
+// +kubebuilder:validation:Enum=Auto;Manual
+type CheckpointMode string
+
+const (
+	// CheckpointModeAuto means the DGD controller will automatically create a Checkpoint CR
+	CheckpointModeAuto CheckpointMode = "Auto"
+	// CheckpointModeManual means the user must create the Checkpoint CR themselves
+	CheckpointModeManual CheckpointMode = "Manual"
+)
+
+// ServiceCheckpointConfig configures checkpointing for a DGD service
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified"
+type ServiceCheckpointConfig struct {
+	// Enabled indicates whether checkpointing is enabled for this service
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Mode defines how checkpoint creation is handled
+	// - Auto: DGD controller creates Checkpoint CR automatically
+	// - Manual: User must create Checkpoint CR
+	// +optional
+	// +kubebuilder:default=Auto
+	Mode CheckpointMode `json:"mode,omitempty"`
+
+	// CheckpointRef references an existing Checkpoint CR to use
+	// If specified, Identity is ignored and this checkpoint is used directly
+	// +optional
+	CheckpointRef *string `json:"checkpointRef,omitempty"`
+
+	// Identity defines the checkpoint identity for hash computation
+	// Used when Mode is Auto or when looking up existing checkpoints
+	// Required when checkpointRef is not specified
+	// +optional
+	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
+}
