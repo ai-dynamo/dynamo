@@ -15,6 +15,14 @@ from PIL import Image
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
+
+try:
+    from dynamo._core import encode_base64 as _rust_encode_base64
+    from dynamo._core import encode_image as _rust_encode_image
+
+    _HAS_RUST_ENCODER = True
+except ImportError:
+    _HAS_RUST_ENCODER = False
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
@@ -166,31 +174,24 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         images = result["frames"] if "frames" in result else []
 
-        # Convert images to bytes (handle PIL Images, numpy arrays, or bytes)
+        # Convert images to PNG bytes (handle PIL Images, numpy arrays, or raw bytes)
         image_bytes_list = []
         for img in images:
             if isinstance(img, bytes):
                 image_bytes_list.append(img)
             elif Image is not None and isinstance(img, Image.Image):
-                # Convert PIL Image to bytes
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                image_bytes_list.append(buf.getvalue())
+                image_bytes_list.append(self._pil_to_png(img))
             else:
                 try:
                     import numpy as np
 
                     if isinstance(img, np.ndarray):
-                        # Convert numpy array to PIL Image then to bytes
-                        pil_img = Image.fromarray(img)
-                        buf = io.BytesIO()
-                        pil_img.save(buf, format="PNG")
-                        image_bytes_list.append(buf.getvalue())
+                        image_bytes_list.append(self._ndarray_to_png(img))
                     else:
                         raise ValueError(f"Unsupported image type: {type(img)}")
                 except ImportError:
                     raise RuntimeError(
-                        "Cannot convert image format. Install Pillow: pip install Pillow"
+                        "Cannot convert image format. Install numpy and Pillow."
                     )
 
         return image_bytes_list
@@ -230,6 +231,44 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         return f"{self.base_url}/{storage_path}"
 
+    @staticmethod
+    def _pil_to_png(img: Image.Image) -> bytes:
+        """Convert a PIL Image to PNG bytes, using Rust encoder when available."""
+        import numpy as np
+
+        if _HAS_RUST_ENCODER:
+            # Normalize color mode to one the Rust encoder supports
+            if img.mode not in ("L", "RGB", "RGBA"):
+                img = img.convert("RGB")
+            arr = np.array(img)
+            h, w = arr.shape[:2]
+            c = 1 if arr.ndim == 2 else arr.shape[2]
+            return bytes(_rust_encode_image(arr.tobytes(), w, h, c, "png"))
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _ndarray_to_png(arr) -> bytes:
+        """Convert a numpy ndarray (HWC, uint8) to PNG bytes."""
+        import numpy as np
+
+        if not isinstance(arr, np.ndarray):
+            raise ValueError(f"Expected np.ndarray, got {type(arr)}")
+
+        if _HAS_RUST_ENCODER:
+            h, w = arr.shape[:2]
+            c = 1 if arr.ndim == 2 else arr.shape[2]
+            return bytes(_rust_encode_image(arr.tobytes(), w, h, c, "png"))
+
+        pil_img = Image.fromarray(arr)
+        buf = io.BytesIO()
+        pil_img.save(buf, format="PNG")
+        return buf.getvalue()
+
     def _encode_base64(self, image_bytes: bytes) -> str:
-        """Encode image as base64 string"""
+        """Encode image as base64 string, using Rust encoder when available."""
+        if _HAS_RUST_ENCODER:
+            return _rust_encode_base64(image_bytes)
         return base64.b64encode(image_bytes).decode("utf-8")
