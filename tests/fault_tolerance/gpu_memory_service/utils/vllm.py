@@ -61,7 +61,7 @@ class VLLMWithGMSProcess(ManagedProcess):
             ],
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=[],
             log_dir=log_dir,
         )

@@ -58,6 +58,7 @@ vllm = [
     "uvloop",
     "nixl[cu12]<=0.9.0",
     "vllm[flashinfer,runai]==0.14.1",
+    "vllm-omni==0.14.0",
 ]
 
 sglang = [

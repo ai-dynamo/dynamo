@@ -83,7 +83,7 @@ jobs:
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-nixl,media-ffmpeg --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg && \
+                      cargo test --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg,testing-nixl && \
                       cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
         if: always()

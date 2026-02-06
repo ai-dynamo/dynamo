@@ -695,6 +695,16 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 		}
 		// Sort for deterministic output
 		sort.Strings(servicesToCheck)
+
+		// For a new restart request with services, immediately return Restarting phase without checking readiness.
+		if len(servicesToCheck) > 0 {
+			return &nvidiacomv1alpha1.RestartStatus{
+				ObservedID: specID,
+				Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+				InProgress: servicesToCheck,
+			}
+		}
+		// If no services, fall through to the empty check below
 	} else if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
 		// Continuing existing restart: use current InProgress list
 		servicesToCheck = dgd.Status.Restart.InProgress
