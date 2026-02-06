@@ -28,6 +28,7 @@ from ..multimodal_utils import (
     vLLMMultimodalRequest,
 )
 from ..multimodal_utils.embedding_cache import EmbeddingCache
+from ..multimodal_utils.model import is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
@@ -177,14 +178,20 @@ class EncodeWorkerHandler:
 
                 # [gluo FIXME] This is specific to qwen vision processing..
                 # Split concatenated embeddings for each image item.
-                merge_size = self.vision_encoder.spatial_merge_size
-                sizes = (
-                    image_embeds["image_grid_thw"].prod(-1) // merge_size // merge_size
-                ).tolist()
-                splitted_embeddings = embeddings.cpu().squeeze(0).split(sizes)
-                logger.info(
-                    f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
-                )
+                if is_qwen_vl_model(self.model):
+                    merge_size = self.vision_encoder.spatial_merge_size
+                    sizes = (
+                        image_embeds["image_grid_thw"].prod(-1)
+                        // merge_size
+                        // merge_size
+                    ).tolist()
+                    splitted_embeddings = embeddings.cpu().squeeze(0).split(sizes)
+                    logger.info(
+                        f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
+                    )
+                else:
+                    logger.info(f"Single image embedding shape: {embeddings.shape}")
+                    splitted_embeddings = embeddings.cpu()
 
                 image_grid_thw = (
                     image_embeds["image_grid_thw"].tolist()
@@ -196,7 +203,9 @@ class EncodeWorkerHandler:
             splitted_idx = 0
             for idx in range(len(embedding_lists)):
                 if embedding_lists[idx][3] is not None:
-                    embedding_lists[idx][1] = [image_grid_thw[splitted_idx]]
+                    embedding_lists[idx][1] = (
+                        [image_grid_thw[splitted_idx]] if image_grid_thw else None
+                    )
                     embedding_lists[idx][2] = splitted_embeddings[
                         splitted_idx
                     ].unsqueeze(0)
