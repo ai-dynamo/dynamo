@@ -249,7 +249,7 @@ def parse_args():
         "--speedup-ratio",
         type=float,
         default=None,
-        help="Speedup ratio for mock execution (default: 1.0)",
+        help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
         "--data-parallel-size",

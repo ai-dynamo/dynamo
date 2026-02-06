@@ -37,8 +37,6 @@
    kubernetes/README.md
    reference/cli.md
    observability/metrics.md
-   kvbm/vllm-setup.md
-   kvbm/trtllm-setup.md
    agents/tool-calling.md
    development/jail_stream.md
 
@@ -77,15 +75,22 @@
 
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
-   backends/vllm/LMCache_Integration.md
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
    backends/vllm/prompt-embeddings.md
    backends/vllm/speculative_decoding.md
 
+   features/speculative_decoding/README.md
+   features/speculative_decoding/speculative_decoding_vllm.md
+
    benchmarks/kv-router-ab-testing.md
 
    mocker/mocker.md
+
+   multimodal/index.md
+   multimodal/vllm.md
+   multimodal/sglang.md
+   multimodal/trtllm.md
 
    frontends/kserve.md
    _sections/frontends.rst

@@ -15,6 +15,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
+> [!NOTE]
+> **This content has moved.** The canonical location for this documentation is now
+> [docs/features/multimodal/](../features/multimodal/README.md).
+> This file will be removed in a future release.
+
 # Multimodal Inference in Dynamo
 
 Dynamo supports multimodal inference across multiple LLM backends, enabling models to process images, video, and audio alongside text. This section provides comprehensive documentation for deploying multimodal models.

@@ -96,7 +96,7 @@ class GMSServerProcess(ManagedProcess):
             env={**os.environ, "DYN_LOG": "debug"},
             timeout=60,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             log_dir=log_dir,
             health_check_funcs=[self._socket_ready],
         )

@@ -40,8 +40,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
-| [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ |  |
-| [**LMCache**](./LMCache_Integration.md) | ✅ |  |
+| [**KVBM**](../../../docs/kvbm/README.md) | ✅ |  |
+| [**LMCache**](../../integrations/lmcache_integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
@@ -145,6 +145,8 @@ Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggr
 This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
 
 **Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
+
+> **See also:** [Speculative Decoding Feature Overview](../../features/speculative_decoding/README.md) for cross-backend documentation.
 
 ### Kubernetes Deployment
 
