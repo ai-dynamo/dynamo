@@ -14,16 +14,23 @@
 # limitations under the License.
 
 # NOTE: You can remove the namespace field if using kubectl apply -n
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+# InferencePool (stable API - inference.networking.k8s.io/v1)
+# Used by both kGateway (to resolve HTTPRoute backends) and EPP (to discover backend pods)
+apiVersion: inference.networking.k8s.io/v1
 kind: InferencePool
 metadata:
   name: llama3-70b-agg-pool
 spec:
-  targetPortNumber: 8000
+  targetPorts:
+    - number: 8000
   selector:
-    nvidia.com/dynamo-component-type: frontend
-  extensionRef:
-    failureMode: FailOpen
+    matchLabels:
+      nvidia.com/dynamo-component: Frontend
+      # NOTE: Update this to match your DYNAMO_NAMESPACE env var in deployment.yaml
+      nvidia.com/dynamo-namespace: llama3-70b-agg
+  endpointPickerRef:
     group: ""
     kind: Service
     name: llama3-70b-agg-epp
+    port:
+      number: 9002
