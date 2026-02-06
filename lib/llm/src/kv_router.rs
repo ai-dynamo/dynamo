@@ -24,6 +24,7 @@ use futures::stream::{self, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
 pub use dynamo_kv_router::approx;
@@ -133,10 +134,12 @@ pub struct RouterConfigOverride {
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
 pub struct KvRouterConfig {
+    #[validate(range(min = 0.0))]
     pub overlap_score_weight: f64,
 
+    #[validate(range(min = 0.0))]
     pub router_temperature: f64,
 
     pub use_kv_events: bool,
@@ -157,18 +160,22 @@ pub struct KvRouterConfig {
     pub router_assume_kv_reuse: bool,
 
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
+    #[validate(range(min = 1))]
     pub router_snapshot_threshold: Option<u32>,
 
     /// Whether to reset the router state on startup (default: false)
     pub router_reset_states: bool,
 
     /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
+    #[validate(range(min = 0.0))]
     pub router_ttl_secs: f64,
 
     /// Maximum tree size before pruning (only used when use_kv_events is false, default: 2^20 = 1048576)
+    #[validate(range(min = 1))]
     pub router_max_tree_size: usize,
 
     /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
+    #[validate(range(min = 0.0, max = 1.0))]
     pub router_prune_target_ratio: f64,
 }
 
@@ -309,6 +316,7 @@ impl KvRouter {
         worker_type: &'static str,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
+        kv_router_config.validate()?;
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
 

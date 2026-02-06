@@ -497,16 +497,13 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         };
 
         let kv_router_config = if use_kv_routing {
-            let mut cfg = KvRouterConfig::default();
-            if overlap_score_weight >= 0.0 {
-                cfg.overlap_score_weight = overlap_score_weight;
-            }
-            if router_temperature >= 0.0 {
-                cfg.router_temperature = router_temperature;
-            }
-            cfg.use_kv_events = use_kv_events;
-            cfg.router_replica_sync = router_replica_sync;
-            Some(cfg)
+            Some(KvRouterConfig {
+                overlap_score_weight,
+                router_temperature,
+                use_kv_events,
+                router_replica_sync,
+                ..KvRouterConfig::default()
+            })
         } else {
             None
         };
