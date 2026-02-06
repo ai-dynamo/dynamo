@@ -16,7 +16,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dynamo_kv_router::{
     bench_utils::{LatencyStats, SequenceData, generate_sequences},
-    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded},
+    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer},
     nested_map::PositionalIndexer,
     protocols::{LocalBlockHash, RouterEvent},
 };
@@ -218,7 +218,7 @@ impl BenchableIndexer for KvIndexerSharded {
 }
 
 #[async_trait::async_trait]
-impl BenchableIndexer for PositionalIndexer {
+impl BenchableIndexer for ThreadPoolIndexer<PositionalIndexer> {
     async fn apply_event(&mut self, event: RouterEvent) {
         KvIndexerInterface::apply_event(self, event).await;
     }
@@ -741,7 +741,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
     // Benchmark nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
         let mut indexer =
-            PositionalIndexer::new(args.num_shards, args.common.block_size, args.jump_size);
+            ThreadPoolIndexer::new(PositionalIndexer::new(args.jump_size), args.num_shards, args.common.block_size);
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
         results.push(result);
         indexer.shutdown();
@@ -1323,7 +1323,7 @@ async fn run_stress_mode(args: StressArgs) {
     // Test nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
         let indexer =
-            PositionalIndexer::new(args.num_shards, args.common.block_size, args.jump_size);
+            ThreadPoolIndexer::new(PositionalIndexer::new(args.jump_size), args.num_shards, args.common.block_size);
 
         println!(
             "\n  Applying {} store events to PositionalIndexer...",

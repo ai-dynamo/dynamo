@@ -29,6 +29,7 @@ use std::{
 
 use dashmap::DashMap;
 
+use crate::indexer::SyncIndexer;
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -121,10 +122,8 @@ impl Drop for ConcurrentRadixTree {
 
         // Iteratively free any uniquely-owned blocks without recursion
         while let Some(block) = stack.pop() {
-            if let Ok(rwlock) = Arc::try_unwrap(block) {
-                if let Ok(mut inner) = rwlock.into_inner() {
-                    stack.extend(inner.children.drain().map(|(_, v)| v));
-                }
+            if let Ok(rwlock) = Arc::try_unwrap(block) && let Ok(mut inner) = rwlock.into_inner() {
+                stack.extend(inner.children.drain().map(|(_, v)| v));
             }
         }
     }
@@ -146,14 +145,14 @@ impl ConcurrentRadixTree {
     ///
     /// ### Arguments
     ///
-    /// * `sequence` - A vector of `LocalBlockHash` representing the sequence to match.
+    /// * `sequence` - A slice of `LocalBlockHash` representing the sequence to match.
     /// * `early_exit` - A boolean indicating whether to exit early if a single match is found.
     ///
     /// ### Returns
     ///
     /// An `OverlapScores` representing the match scores.
     /// Note: `frequencies` field will be empty since frequency tracking is not supported.
-    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
+    pub fn find_matches_impl(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         let mut scores = OverlapScores::new();
         let mut current = self.root.clone();
 
@@ -253,23 +252,32 @@ impl ConcurrentRadixTree {
             None => self.root.clone(),
         };
 
+        let mut needs_worker_insert = false;
+
+        // In each iteration, we lock the parent block and insert the worker into it from
+        // the previous iteration. This avoids locking a block twice.
         for block_data in op.blocks {
-            // Write-lock parent to access/modify children
-            // Keep parent lock held while writing to child to detect self-referential blocks
             let child = {
                 let mut parent_guard = current.write().unwrap();
 
-                let child = match parent_guard.children.get(&block_data.tokens_hash) {
+                // Insert worker into this node if it was the child from the
+                // previous iteration (skxip for the initial parent, which is
+                // not one of the blocks being stored).
+                if needs_worker_insert {
+                    parent_guard.workers.insert(worker);
+                }
+                needs_worker_insert = true;
+
+                // parent_guard is dropped at the end of this block
+                match parent_guard.children.get(&block_data.tokens_hash) {
                     Some(existing) => {
                         // Verify our simplifying assumption: block_hash is uniform across workers
-                        if let Ok(existing_guard) = existing.read() {
-                            if existing_guard.block_hash != Some(block_data.block_hash) {
-                                tracing::warn!(
-                                    expected = ?block_data.block_hash,
-                                    actual = ?existing_guard.block_hash,
-                                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                                );
-                            }
+                        if let Ok(existing_guard) = existing.read() && existing_guard.block_hash != Some(block_data.block_hash) {
+                            tracing::warn!(
+                                expected = ?block_data.block_hash,
+                                actual = ?existing_guard.block_hash,
+                                "block_hash mismatch: sequence hashes should be uniform across workers"
+                            );
                         }
                         existing.clone()
                     }
@@ -287,32 +295,19 @@ impl ConcurrentRadixTree {
                             .insert(block_data.tokens_hash, new_block.clone());
                         new_block
                     }
-                };
-
-                // Write-lock child to add worker while parent is still locked
-                // Use try_write to detect self-referential blocks (when parent == child)
-                {
-                    let mut child_guard = child.try_write().map_err(|_| {
-                        tracing::warn!(
-                            worker_id = worker.worker_id.to_string(),
-                            dp_rank = worker.dp_rank,
-                            id,
-                            block_hash = ?block_data.block_hash,
-                            "Detected self referencing block in store event; rejecting sequence"
-                        );
-                        KvCacheEventError::InvalidBlockSequence
-                    })?;
-                    child_guard.workers.insert(worker);
                 }
-
-                child
             };
-            // Parent lock released here
 
             // Update lookup
             worker_lookup.insert(block_data.block_hash, child.clone());
 
             current = child;
+        }
+
+        // Insert worker into the last child (not yet handled since there is
+        // no subsequent iteration to pick it up).
+        if needs_worker_insert {
+            current.write().unwrap().workers.insert(worker);
         }
 
         Ok(())
@@ -385,12 +380,10 @@ impl ConcurrentRadixTree {
 
         while let Some(current) = stack.pop() {
             let guard = current.read().unwrap();
-            for (_, child) in &guard.children {
-                if let Ok(child_guard) = child.read() {
-                    if let Some(hash) = child_guard.block_hash {
-                        result.push(hash);
-                        stack.push(child.clone());
-                    }
+            for child in guard.children.values() {
+                if let Ok(child_guard) = child.read() && let Some(hash) = child_guard.block_hash {
+                    result.push(hash);
+                    stack.push(child.clone());
                 }
             }
         }
@@ -520,6 +513,29 @@ impl ConcurrentRadixTree {
     }
 }
 
+// ============================================================================
+// SyncIndexer implementation for ConcurrentRadixTree
+// ============================================================================
+
+impl SyncIndexer for ConcurrentRadixTree {
+    fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
+        // Delegate to the existing find_matches method
+        self.find_matches_impl(sequence, early_exit)
+    }
+
+    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+        self.apply_event(event)
+    }
+
+    fn remove_worker(&self, worker_id: WorkerId) {
+        self.remove_worker(worker_id);
+    }
+
+    fn dump_events(&self) -> Vec<RouterEvent> {
+        self.dump_tree_as_events()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,8 +553,8 @@ mod tests {
         trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
             .unwrap();
 
-        let scores = trie.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+        let scores = trie.find_matches_impl(
+            &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             false,
         );
         assert_eq!(
@@ -561,8 +577,8 @@ mod tests {
         trie.apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None))
             .unwrap();
 
-        let scores = trie.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+        let scores = trie.find_matches_impl(
+            &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             false,
         );
         assert_eq!(
@@ -636,22 +652,6 @@ mod tests {
             KvCacheEventError::ParentBlockNotFound
         ));
 
-        // Self referencing block detection
-        // First, create a fresh tree to avoid state from previous test
-        let trie = ConcurrentRadixTree::new();
-
-        trie.apply_event(create_store_event(worker_0, 4, vec![1], None))
-            .unwrap();
-        let result = trie.apply_event(create_store_event(
-            worker_0,
-            5,
-            vec![1, 2, 3],
-            Some(ExternalSequenceBlockHash(100)),
-        ));
-        assert!(matches!(
-            result.unwrap_err(),
-            KvCacheEventError::InvalidBlockSequence
-        ));
     }
 
     #[test]
@@ -666,7 +666,7 @@ mod tests {
         trie.apply_event(create_store_event(worker_1, 0, vec![0, 2, 3], None))
             .unwrap();
 
-        let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
+        let result = trie.find_matches_impl(&[LocalBlockHash(0)], false).scores;
         assert_eq!(result.len(), 2);
 
         trie.clear_all_blocks(worker_0);
@@ -683,7 +683,7 @@ mod tests {
         );
 
         let result = trie
-            .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
+            .find_matches_impl(&[LocalBlockHash(0), LocalBlockHash(2)], false)
             .scores;
         assert_eq!(result.len(), 1);
         assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 2);
@@ -713,8 +713,8 @@ mod tests {
         assert_eq!(trie.lookup.len(), 1);
 
         let result = trie
-            .find_matches(
-                vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+            .find_matches_impl(
+                &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
                 false,
             )
             .scores;
@@ -754,7 +754,7 @@ mod tests {
             .map(|_| {
                 let tree = trie.clone();
                 let seq = sequence.clone();
-                thread::spawn(move || tree.find_matches(seq, false))
+                thread::spawn(move || tree.find_matches_impl(&seq, false))
             })
             .collect();
 
@@ -800,7 +800,7 @@ mod tests {
                 let seq = sequence.clone();
                 thread::spawn(move || {
                     for _ in 0..100 {
-                        let _ = tree.find_matches(seq.clone(), false);
+                        let _ = tree.find_matches_impl(&seq, false);
                     }
                 })
             })
@@ -865,4 +865,223 @@ mod tests {
         assert_eq!(worker_lookup.len(), 0);
     }
 
+    // ========================================================================
+    // ThreadPoolIndexer<ConcurrentRadixTree> Tests
+    // ========================================================================
+
+    mod thread_pool_indexer_tests {
+        use super::*;
+        use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
+
+        fn make_indexer(num_workers: usize, kv_block_size: u32) -> ThreadPoolIndexer<ConcurrentRadixTree> {
+            ThreadPoolIndexer::new(ConcurrentRadixTree::new(), num_workers, kv_block_size)
+        }
+
+        #[tokio::test]
+        async fn test_thread_pool_indexer_basic() {
+            let indexer = make_indexer(4, 16);
+
+            let worker_1 = 0;
+            let worker_2 = 1;
+
+            indexer
+                .apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
+                .await;
+            indexer
+                .apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None))
+                .await;
+
+            indexer.flush().await;
+
+            let scores = indexer
+                .find_matches(vec![
+                    LocalBlockHash(1),
+                    LocalBlockHash(2),
+                    LocalBlockHash(3),
+                ])
+                .await
+                .unwrap();
+
+            assert_eq!(
+                scores
+                    .scores
+                    .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                    .unwrap(),
+                &3
+            );
+            assert_eq!(
+                scores
+                    .scores
+                    .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                    .unwrap(),
+                &1
+            );
+
+            indexer.shutdown();
+        }
+
+        #[tokio::test]
+        async fn test_thread_pool_indexer_remove_worker() {
+            let indexer = make_indexer(2, 16);
+
+            let worker_0 = 0;
+            let worker_1 = 1;
+
+            indexer
+                .apply_event(create_store_event(worker_0, 1, vec![1, 2, 3], None))
+                .await;
+            indexer
+                .apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
+                .await;
+
+            indexer.flush().await;
+
+            assert_eq!(indexer.backend().get_workers().len(), 2);
+
+            indexer.remove_worker(worker_0).await;
+
+            let workers = indexer.backend().get_workers();
+            assert_eq!(workers.len(), 1);
+            assert!(!workers.contains(&worker_0));
+            assert!(workers.contains(&worker_1));
+
+            indexer.shutdown();
+        }
+
+        #[tokio::test]
+        async fn test_thread_pool_indexer_dump_events() {
+            let indexer = make_indexer(2, 16);
+
+            indexer
+                .apply_event(create_store_event(0, 1, vec![1, 2, 3], None))
+                .await;
+
+            indexer.flush().await;
+
+            let events = indexer.dump_events().await.unwrap();
+            assert_eq!(events.len(), 3);
+
+            indexer.shutdown();
+        }
+
+        #[tokio::test]
+        async fn test_thread_pool_indexer_find_matches_for_request() {
+            let indexer = make_indexer(2, 1);
+
+            indexer
+                .apply_event(create_store_event(0, 1, vec![100, 200, 300], None))
+                .await;
+
+            indexer.flush().await;
+
+            let scores = indexer.find_matches_for_request(&[100, 200, 300]).await;
+            assert!(scores.is_ok());
+
+            indexer.shutdown();
+        }
+
+        #[tokio::test]
+        async fn test_thread_pool_indexer_sticky_routing() {
+            let indexer = make_indexer(4, 16);
+
+            for i in 0..10 {
+                indexer
+                    .apply_event(create_store_event(0, i, vec![i as u64], None))
+                    .await;
+            }
+
+            indexer.flush().await;
+
+            assert_eq!(indexer.backend().current_size(), 10);
+
+            indexer.shutdown();
+        }
+
+        #[tokio::test]
+        async fn test_thread_pool_indexer_multiple_workers() {
+            let indexer = make_indexer(4, 16);
+
+            for worker_id in 0..8 {
+                indexer
+                    .apply_event(create_store_event(
+                        worker_id,
+                        1,
+                        vec![1, 2, worker_id as u64 + 10],
+                        None,
+                    ))
+                    .await;
+            }
+
+            indexer.flush().await;
+
+            assert_eq!(indexer.backend().get_workers().len(), 8);
+
+            let scores = indexer
+                .find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)])
+                .await
+                .unwrap();
+
+            assert_eq!(scores.scores.len(), 8);
+            for (_, score) in scores.scores.iter() {
+                assert_eq!(*score, 2);
+            }
+
+            indexer.shutdown();
+        }
+
+        #[tokio::test]
+        async fn test_thread_pool_indexer_shutdown_idempotent() {
+            let indexer = make_indexer(2, 16);
+
+            indexer
+                .apply_event(create_store_event(0, 1, vec![1, 2, 3], None))
+                .await;
+
+            indexer.flush().await;
+
+            indexer.shutdown();
+            indexer.shutdown();
+        }
+
+        #[tokio::test]
+        async fn test_thread_pool_indexer_concurrent_operations() {
+            use std::sync::Arc;
+
+            let indexer = Arc::new(make_indexer(4, 16));
+
+            for worker_id in 0..4 {
+                indexer
+                    .apply_event(create_store_event(
+                        worker_id,
+                        1,
+                        vec![1, 2, 3, 4, 5],
+                        None,
+                    ))
+                    .await;
+            }
+            indexer.flush().await;
+
+            let sequence = vec![
+                LocalBlockHash(1),
+                LocalBlockHash(2),
+                LocalBlockHash(3),
+            ];
+
+            let mut handles = Vec::new();
+            for _ in 0..10 {
+                let idx = indexer.clone();
+                let seq = sequence.clone();
+                handles.push(tokio::spawn(async move {
+                    idx.find_matches(seq).await.unwrap()
+                }));
+            }
+
+            for handle in handles {
+                let scores = handle.await.unwrap();
+                assert_eq!(scores.scores.len(), 4);
+            }
+
+            indexer.shutdown();
+        }
+    }
 }

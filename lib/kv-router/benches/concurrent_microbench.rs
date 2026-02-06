@@ -431,7 +431,7 @@ fn bench_concurrent(
                         let query = get_query_for_thread(
                             thread_id, warmup_iter, &sequences, query_mode, num_threads, &mut rng,
                         );
-                        let _ = tree.find_matches(query, false);
+                        let _ = tree.find_matches_impl(&query, false);
                         warmup_iter += 1;
                     }
 
@@ -445,7 +445,7 @@ fn bench_concurrent(
                             thread_id, iter, &sequences, query_mode, num_threads, &mut rng,
                         );
                         let op_start = Instant::now();
-                        let _ = tree.find_matches(query, false);
+                        let _ = tree.find_matches_impl(&query, false);
                         latencies.push(op_start.elapsed());
                         iter += 1;
                     }
@@ -516,7 +516,7 @@ fn bench_mixed_workload(
                             let query = get_query_for_thread(
                                 thread_id, warmup_iter, &read_sequences, query_mode, num_threads, &mut rng,
                             );
-                            let _ = tree.find_matches(query, false);
+                            let _ = tree.find_matches_impl(&query, false);
                         }
                         warmup_iter += 1;
                     }
@@ -543,7 +543,7 @@ fn bench_mixed_workload(
                             let query = get_query_for_thread(
                                 thread_id, iter, &read_sequences, query_mode, num_threads, &mut rng,
                             );
-                            let _ = tree.find_matches(query, false);
+                            let _ = tree.find_matches_impl(&query, false);
                             read_latencies.push(op_start.elapsed());
                             read_count += 1;
                         }
@@ -638,7 +638,7 @@ fn phase_overhead(args: &Args, sequences: &[SequenceData]) {
     // Benchmark ConcurrentRadixTree
     println!("\nBenchmarking ConcurrentRadixTree (single-threaded)...");
     let concurrent_stats = bench_single_threaded(sequences, duration, warmup, |hashes| {
-        let _ = concurrent_tree.find_matches(hashes.to_vec(), false);
+        let _ = concurrent_tree.find_matches_impl(hashes, false);
     });
     concurrent_stats.print("ConcurrentRadixTree");
 

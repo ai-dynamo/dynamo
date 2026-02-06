@@ -63,7 +63,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
-            KvIndex::Concurrent(tree) => tree.find_matches(local_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches_impl(&local_hashes, early_exit),
             KvIndex::Nested(map) => map.find_matches(local_hashes, early_exit),
         };
         start.elapsed()
@@ -76,7 +76,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(miss_hashes, early_exit),
-            KvIndex::Concurrent(tree) => tree.find_matches(miss_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches_impl(&miss_hashes, early_exit),
             KvIndex::Nested(map) => map.find_matches(miss_hashes, early_exit),
         };
         start.elapsed()
@@ -96,7 +96,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(partial, early_exit),
-            KvIndex::Concurrent(tree) => tree.find_matches(partial, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches_impl(&partial, early_exit),
             KvIndex::Nested(map) => map.find_matches(partial, early_exit),
         };
         start.elapsed()
@@ -113,7 +113,7 @@ impl KvIndex {
     fn find_matches(&self, local_hashes: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
         match self {
             KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
-            KvIndex::Concurrent(tree) => tree.find_matches(local_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches_impl(&local_hashes, early_exit),
             KvIndex::Nested(map) => map.find_matches(local_hashes, early_exit),
         }
     }
@@ -445,7 +445,6 @@ fn bench_store_remove_cycle(args: &Args, time_store: bool) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
-        true, // use_cumulative_hash
     );
 
     let mut index = build_index(&sequences, args.nested_map, args.concurrent);
@@ -507,7 +506,6 @@ fn bench_find_matches(args: &Args) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
-        true, // use_cumulative_hash
     );
 
     let index = build_index(&sequences, args.nested_map, args.concurrent);
@@ -812,7 +810,6 @@ fn bench_sweep(args: &Args) {
             args.prefix_prompt_ratio,
             num_prefix_prompts,
             args.seed,
-            true, // use_cumulative_hash
         );
         let tree_sequences = &all_sequences[..num_sequences];
         let extra_sequences = &all_sequences[num_sequences..];
@@ -924,7 +921,6 @@ fn bench_dump(args: &Args) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
-        true, // use_cumulative_hash
     );
 
     let index = build_index(&sequences, args.nested_map, args.concurrent);
