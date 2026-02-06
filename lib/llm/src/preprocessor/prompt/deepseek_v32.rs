@@ -472,14 +472,14 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
 
             if let Some(idx) = system_idx {
                 // Add to existing system message
-                if let Some(msg) = messages_array.get_mut(idx) {
-                    if let Some(obj) = msg.as_object_mut() {
-                        if let Some(tools) = tools_json {
-                            obj.insert("tools".to_string(), tools);
-                        }
-                        if let Some(rf) = response_format_json {
-                            obj.insert("response_format".to_string(), rf);
-                        }
+                if let Some(msg) = messages_array.get_mut(idx)
+                    && let Some(obj) = msg.as_object_mut()
+                {
+                    if let Some(tools) = tools_json {
+                        obj.insert("tools".to_string(), tools);
+                    }
+                    if let Some(rf) = response_format_json {
+                        obj.insert("response_format".to_string(), rf);
                     }
                 }
             } else {
@@ -602,13 +602,13 @@ mod tests {
         fn tools(&self) -> Option<minijinja::value::Value> {
             self.tools
                 .as_ref()
-                .map(|t| minijinja::value::Value::from_serialize(t))
+                .map(minijinja::value::Value::from_serialize)
         }
 
         fn response_format(&self) -> Option<minijinja::value::Value> {
             self.response_format
                 .as_ref()
-                .map(|rf| minijinja::value::Value::from_serialize(rf))
+                .map(minijinja::value::Value::from_serialize)
         }
 
         fn should_add_generation_prompt(&self) -> bool {

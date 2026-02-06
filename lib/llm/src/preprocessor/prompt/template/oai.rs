@@ -242,7 +242,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         self.inner
             .response_format
             .as_ref()
-            .map(|rf| Value::from_serialize(rf))
+            .map(Value::from_serialize)
     }
 
     fn should_add_generation_prompt(&self) -> bool {
