@@ -465,7 +465,7 @@ impl KvScheduler {
                             }
                         }
                         Err(KvSchedulerError::NoEndpoints) => {
-                            tracing::trace!("no endpoints available, dropping request");
+                            tracing::warn!("no endpoints available, dropping request");
                         }
                         Err(e) => {
                             tracing::error!("error scheduling request: {:?}", e);
