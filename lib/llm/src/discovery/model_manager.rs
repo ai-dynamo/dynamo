@@ -10,7 +10,7 @@ use super::worker_monitor::LoadThresholdConfig;
 use super::{KvWorkerMonitor, Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
 
 use dynamo_runtime::{
-    component::{Client, Endpoint, build_transport_type},
+    component::{Endpoint, build_transport_type},
     discovery::DiscoverySpec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
@@ -64,7 +64,7 @@ pub struct ModelManager {
     /// Per-instance model cards, keyed by instance path. Used for cleanup on worker removal.
     cards: DashMap<String, ModelDeploymentCard>,
 
-    /// Prefill router activation rendezvous, keyed by model name.
+    /// Prefill router activation rendezvous, keyed by "model_name:namespace".
     prefill_router_activators: DashMap<String, PrefillActivationState>,
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
@@ -103,14 +103,14 @@ impl ModelManager {
     }
 
     /// Remove a Model if it has no remaining WorkerSets.
+    /// Uses atomic remove_if to avoid TOCTOU race between checking is_empty and removing.
     pub fn remove_model_if_empty(&self, model_name: &str) {
-        // Only remove if the model is empty (no worker sets)
-        if let Some(model) = self.models.get(model_name) {
-            if model.is_empty() {
-                drop(model); // Release the read reference before removing
-                self.models.remove(model_name);
-                tracing::info!(model_name, "Removed empty model from manager");
-            }
+        if self
+            .models
+            .remove_if(model_name, |_, model| model.is_empty())
+            .is_some()
+        {
+            tracing::info!(model_name, "Removed empty model from manager");
         }
     }
 
@@ -145,7 +145,6 @@ impl ModelManager {
     /// None if model doesn't exist or no WorkerSet exists for this namespace (new namespace is OK).
     pub fn is_valid_checksum(
         &self,
-        _model_type: crate::model_type::ModelType,
         model_name: &str,
         namespace: &str,
         candidate_checksum: &str,
@@ -208,6 +207,7 @@ impl ModelManager {
             if model.has_chat_engine()
                 || model.has_completions_engine()
                 || model.has_embeddings_engine()
+                || model.has_images_engine()
                 || model.has_tensor_engine()
                 || model.has_images_engine()
                 || model.has_videos_engine()
@@ -371,6 +371,9 @@ impl ModelManager {
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
     // These create a WorkerSet with a default namespace for local models.
+    // TODO: These methods use ModelDeploymentCard::default() for the WorkerSet, which means
+    // parsing_options() returns defaults (no tool_call_parser/reasoning_parser). Pass the real
+    // MDC from callers so ParsingOptions reflect the model's actual configuration.
 
     pub fn add_chat_completions_model(
         &self,
@@ -617,23 +620,6 @@ impl ModelManager {
         Ok(Arc::new(chooser))
     }
 
-    // -- Worker monitor creation --
-
-    pub fn get_or_create_worker_monitor(
-        &self,
-        model: &str,
-        client: Client,
-        config: LoadThresholdConfig,
-    ) -> KvWorkerMonitor {
-        // Check if any existing WorkerSet for this model has a monitor
-        if let Some(existing) = self.get_worker_monitor(model) {
-            existing.set_load_threshold_config(&config);
-            return existing;
-        }
-        // Create new monitor
-        KvWorkerMonitor::new(client, config)
-    }
-
     // -- Prefill router coordination --
     // Keyed by "model_name:namespace" so each namespace's decode WorkerSet gets its own
     // prefill router activated by same-namespace prefill workers.
@@ -649,10 +635,10 @@ impl ModelManager {
     /// Returns None if a decode WorkerSet in this namespace was already registered.
     pub fn register_prefill_router(
         &self,
-        model_name: String,
+        model_name: &str,
         namespace: &str,
     ) -> Option<oneshot::Receiver<Endpoint>> {
-        let key = Self::model_namespace_key(&model_name, namespace);
+        let key = Self::model_namespace_key(model_name, namespace);
         match self.prefill_router_activators.remove(&key) {
             Some((_, PrefillActivationState::PrefillReady(rx))) => {
                 // Prefill endpoint already arrived - rx will immediately resolve

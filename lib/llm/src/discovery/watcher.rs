@@ -24,7 +24,7 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    discovery::{WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
@@ -181,7 +181,6 @@ impl ModelWatcher {
                     // checksums don't match, reject the new worker. Different namespaces
                     // may legitimately have different checksums.
                     let can_add = self.manager.is_valid_checksum(
-                        card.model_type,
                         card.name(),
                         &mcid.namespace,
                         card.mdcsum(),
@@ -437,7 +436,7 @@ impl ModelWatcher {
             let model_name = card.name().to_string();
             let prefill_chooser = self
                 .manager
-                .register_prefill_router(model_name.clone(), &namespace)
+                .register_prefill_router(&model_name, &namespace)
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
                     let mut prefill_config = self.router_config.kv_router_config;
@@ -454,12 +453,11 @@ impl ModelWatcher {
                     )
                 });
 
-            // Get or create the worker monitor for this model.
-            // Always create the monitor for Prometheus metrics (active_decode_blocks, active_prefill_tokens,
+            // Create a new worker monitor for this WorkerSet. Each WorkerSet gets its own
+            // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
+            // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
             // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
-            // LoadThresholdConfig allows dynamic threshold updates via the ModelManager.
-            let worker_monitor = Some(self.manager.get_or_create_worker_monitor(
-                card.name(),
+            let worker_monitor = Some(KvWorkerMonitor::new(
                 client.clone(),
                 self.router_config.load_threshold_config.clone(),
             ));
