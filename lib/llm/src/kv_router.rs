@@ -124,12 +124,13 @@ pub trait WorkerSelector {
 }
 
 /// Override configuration for router settings that can be specified per-request
-#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
 pub struct RouterConfigOverride {
     #[builder(default)]
     pub overlap_score_weight: Option<f64>,
 
     #[builder(default)]
+    #[validate(range(min = 0.0))]
     pub router_temperature: Option<f64>,
 }
 
