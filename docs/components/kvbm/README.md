@@ -53,7 +53,7 @@ Offloading KV cache to CPU or storage is most effective when KV Cache exceeds GP
 
 ## Architecture
 
-![KVBM Architecture](../images/kvbm-architecture.png)
+![KVBM Architecture](../../images/kvbm-architecture.png)
 *High-level layered architecture view of Dynamo KV Block Manager and how it interfaces with different components of the LLM inference ecosystem*
 
 KVBM has three primary logical layers:
@@ -70,7 +70,7 @@ KVBM has three primary logical layers:
 
 - **[KVBM Guide](kvbm_guide.md)** — Installation, configuration, and deployment instructions
 - **[KVBM Design](kvbm_design.md)** — Architecture deep dive, components, and data flows
-- **[LMCache Integration](../integrations/lmcache_integration.md)** — Use LMCache with Dynamo vLLM backend
-- **[FlexKV Integration](../integrations/flexkv_integration.md)** — Use FlexKV for KV cache management
-- **[SGLang HiCache](../integrations/sglang_hicache.md)** — Enable SGLang's hierarchical cache with NIXL
+- **[LMCache Integration](../../integrations/lmcache_integration.md)** — Use LMCache with Dynamo vLLM backend
+- **[FlexKV Integration](../../integrations/flexkv_integration.md)** — Use FlexKV for KV cache management
+- **[SGLang HiCache](../../integrations/sglang_hicache.md)** — Enable SGLang's hierarchical cache with NIXL
 - **[NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)** — NIXL communication library details

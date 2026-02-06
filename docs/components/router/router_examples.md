@@ -113,7 +113,7 @@ For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployme
 - [Distributed inference tutorial](../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
 
 **For A/B Testing and Advanced K8s Setup:**
-See the comprehensive [KV Router A/B Benchmarking Guide](../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
+See the comprehensive [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
 
 ### Example with Advanced Configuration
 
@@ -270,7 +270,7 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Maximize cache reuse**: Use `best_worker()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
-See [Router Design](../design_docs/router_design.md) for architecture details and the cost function algorithm.
+See [Router Design](../../design_docs/router_design.md) for architecture details and the cost function algorithm.
 
 ## KV Event Publishing for Custom Engines
 
@@ -547,4 +547,4 @@ Each event in the payload is a dictionary with `type` field (`BlockStored`, `Blo
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
 - **[Router Guide](router_guide.md)**: Configuration, tuning, and production setup
-- **[Router Design](../design_docs/router_design.md)**: Architecture details and event transport modes
+- **[Router Design](../../design_docs/router_design.md)**: Architecture details and event transport modes

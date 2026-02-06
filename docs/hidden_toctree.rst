@@ -49,6 +49,10 @@
    components/router/README.md
    components/router/router_guide.md
    components/router/router_examples.md
+   components/frontend/frontend_guide.md
+   design_docs/kvbm_design.md
+   integrations/flexkv_integration.md
+   integrations/sglang_hicache.md
    fault_tolerance/README.md
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md
