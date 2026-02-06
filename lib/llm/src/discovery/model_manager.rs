@@ -592,6 +592,7 @@ impl ModelManager {
         let key = Self::prefill_key(&model_name, namespace);
         match self.prefill_router_activators.remove(&key) {
             Some((_, PrefillActivationState::PrefillReady(rx))) => {
+                // Prefill endpoint already arrived - rx will immediately resolve
                 tracing::debug!(
                     model_name = %model_name,
                     namespace = %namespace,
@@ -600,6 +601,7 @@ impl ModelManager {
                 Some(rx)
             }
             Some((key, PrefillActivationState::DecodeWaiting(tx))) => {
+                // Decode already registered - this shouldn't happen, restore state and return None
                 tracing::error!(
                     model_name = %model_name,
                     namespace = %namespace,
@@ -610,6 +612,7 @@ impl ModelManager {
                 None
             }
             None => {
+                // New registration: create tx/rx pair, store sender and return receiver
                 let (tx, rx) = oneshot::channel();
                 self.prefill_router_activators.insert(
                     key,
