@@ -68,21 +68,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Install system dependencies from apt
-          sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
-          # Install Rust (cargo + rustc)
-          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
-          # Make cargo available to later steps
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Install cbindgen
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install cbindgen
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -91,6 +76,25 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build EPP image
+        if: ${{ inputs.target == 'frontend' }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        run: |
+          sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          cargo install cbindgen
+
+          DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+          pushd deploy/inference-gateway/epp
+          make all DOCKER_PROXY=${DOCKER_PROXY}
+          popd
+
+          EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
+          EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
+          echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
       - name: Build Frontend Container
         id: build-image
         uses: ./.github/actions/docker-build

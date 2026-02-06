@@ -79,25 +79,6 @@ runs:
             --show-result \
             --short-output
         echo "::endgroup::"
-    - name: Build EPP image
-      if: ${{ inputs.target == 'frontend' }}
-      shell: bash
-      env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
-      run: |
-        sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
-        curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
-        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-        cargo install cbindgen
-
-        DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
-        pushd deploy/inference-gateway/epp
-        make all DOCKER_PROXY=${DOCKER_PROXY}
-        popd
-
-        EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
-        EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
-        echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
     - name: Build image
       id: build
       shell: bash
@@ -152,7 +133,7 @@ runs:
         fi
 
         EPP_IMAGE_ARG=""
-        if [[ ${{ inputs.target == framework }} ]]; then
+        if [[ ${{ inputs.target }} == "frontend" ]]; then
           EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
         fi
 
