@@ -357,7 +357,7 @@ The OpenAI-compatible frontend exposes an OpenAPI 3 spec at `/openapi.json`. To 
 cargo run -p dynamo-llm --bin generate-frontend-openapi
 ```
 
-This writes to `docs/frontends/openapi.json`.
+This writes to `docs/reference/api/openapi.json`.
 
 ## Service Discovery and Messaging
 

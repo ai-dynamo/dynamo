@@ -75,7 +75,7 @@ Quickstart
    :caption: Components
 
    Backends <_sections/backends>
-   Frontends <_sections/frontends>
+   Frontend <components/frontend/README>
    Router <router/README>
    Planner <planner/planner_intro>
    Profiler <components/profiler/README>

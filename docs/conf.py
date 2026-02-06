@@ -102,6 +102,8 @@ redirects = {
     "multimodal/vllm": "../features/multimodal/multimodal_vllm.html",
     "multimodal/sglang": "../features/multimodal/multimodal_sglang.html",
     "multimodal/trtllm": "../features/multimodal/multimodal_trtllm.html",
+    # Frontend migration
+    "frontends/kserve": "../components/frontend/frontend_guide.html",
     # Profiler consolidation
     "benchmarks/sla_driven_profiling": "../components/profiler/profiler_guide.html",
 }
