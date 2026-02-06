@@ -5,7 +5,10 @@
 
 import argparse
 
-from dynamo.common.configuration.utils import add_negatable_bool, env_or_default
+from dynamo.common.configuration.utils import (
+    add_negatable_bool_argument,
+    env_or_default,
+)
 
 
 class TestEnvOrDefault:
@@ -86,8 +89,12 @@ class TestAddNegatableBool:
     def test_positive_flag(self):
         """Test that --flag added."""
         parser = argparse.ArgumentParser()
-        add_negatable_bool(
-            parser, "enable-feature", "TEST_ENABLE", True, "Enable feature"
+        add_negatable_bool_argument(
+            parser,
+            flag_name="--enable-feature",
+            env_var="TEST_ENABLE",
+            default=True,
+            help="Enable feature",
         )
 
         # Test positive flag
@@ -98,8 +105,12 @@ class TestAddNegatableBool:
         """Test that --no-flag are added."""
         # Test negative flag
         parser = argparse.ArgumentParser()
-        add_negatable_bool(
-            parser, "enable-feature", "TEST_ENABLE", True, "Enable feature"
+        add_negatable_bool_argument(
+            parser,
+            flag_name="--enable-feature",
+            env_var="TEST_ENABLE",
+            default=True,
+            help="Enable feature",
         )
         args = parser.parse_args(["--no-enable-feature"])
         assert args.enable_feature is False
@@ -109,8 +120,12 @@ class TestAddNegatableBool:
         monkeypatch.delenv("TEST_ENABLE", raising=False)
 
         parser = argparse.ArgumentParser()
-        add_negatable_bool(
-            parser, "enable-feature", "TEST_ENABLE", True, "Enable feature"
+        add_negatable_bool_argument(
+            parser,
+            flag_name="--enable-feature",
+            env_var="TEST_ENABLE",
+            default=True,
+            help="Enable feature",
         )
 
         args = parser.parse_args([])
@@ -121,8 +136,12 @@ class TestAddNegatableBool:
         monkeypatch.setenv("TEST_ENABLE", "false")
 
         parser = argparse.ArgumentParser()
-        add_negatable_bool(
-            parser, "enable-feature", "TEST_ENABLE", True, "Enable feature"
+        add_negatable_bool_argument(
+            parser,
+            flag_name="--enable-feature",
+            env_var="TEST_ENABLE",
+            default=True,
+            help="Enable feature",
         )
 
         args = parser.parse_args([])
@@ -131,8 +150,12 @@ class TestAddNegatableBool:
     def test_converts_hyphens_to_underscores(self):
         """Test that flag name with hyphens converts to underscores in dest."""
         parser = argparse.ArgumentParser()
-        add_negatable_bool(
-            parser, "my-cool-feature", "TEST_FEATURE", False, "Cool feature"
+        add_negatable_bool_argument(
+            parser,
+            flag_name="--my-cool-feature",
+            env_var="TEST_FEATURE",
+            default=False,
+            help="Cool feature",
         )
 
         args = parser.parse_args([])
@@ -142,18 +165,30 @@ class TestAddNegatableBool:
     def test_help_includes_env_var(self):
         """Test that help text includes environment variable name."""
         parser = argparse.ArgumentParser()
-        add_negatable_bool(parser, "feature", "MY_ENV_VAR", True, "Test feature")
+        add_negatable_bool_argument(
+            parser,
+            flag_name="--feature",
+            env_var="MY_ENV_VAR",
+            default=True,
+            help="Test feature",
+        )
 
         help_text = parser.format_help()
         assert "MY_ENV_VAR" in help_text
         assert "Test feature" in help_text
 
     def test_help_shows_current_default(self, monkeypatch):
-        """Test that help shows the effective default (after env var)."""
+        """Test that help shows the default value."""
         monkeypatch.setenv("TEST_VAR", "true")
 
         parser = argparse.ArgumentParser()
-        add_negatable_bool(parser, "feature", "TEST_VAR", False, "Test")
+        add_negatable_bool_argument(
+            parser,
+            flag_name="--feature",
+            env_var="TEST_VAR",
+            default=False,
+            help="Test",
+        )
 
         help_text = parser.format_help()
-        assert "True" in help_text or "true" in help_text
+        assert "False" in help_text or "false" in help_text

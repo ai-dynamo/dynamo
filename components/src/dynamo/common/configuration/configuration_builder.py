@@ -50,7 +50,7 @@ class ConfigurationBuilder:
         """
         parser = argparse.ArgumentParser(
             description=description,
-            formatter_class=argparse.RawDescriptionHelpFormatter,
+            formatter_class=argparse.RawTextHelpFormatter,
         )
 
         # Let each group add its arguments

@@ -12,13 +12,15 @@ This module provides a modular, domain-driven configuration architecture where:
 
 from .arg_group import ArgGroup
 from .configuration_builder import ConfigurationBuilder
-from .utils import add_negatable_bool, env_or_default
+from .utils import add_argument, add_negatable_bool_argument, env_or_default
 
 __all__ = [
     # Base classes
     "ArgGroup",
     "ConfigurationBuilder",
+    "DynamoComponent",
     # Utilities
+    "add_argument",
     "env_or_default",
-    "add_negatable_bool",
+    "add_negatable_bool_argument",
 ]
