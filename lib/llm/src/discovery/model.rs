@@ -192,20 +192,23 @@ impl Model {
     // -- Worker monitoring (aggregated across WorkerSets) --
 
     /// Get load threshold config from the first WorkerSet that has a monitor.
-    /// Optionally updates the config.
+    /// When `config` is Some, updates ALL monitors (each WorkerSet has its own).
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
+        let mut result = None;
         for entry in self.worker_sets.iter() {
             if let Some(ref monitor) = entry.value().worker_monitor {
                 if let Some(cfg) = config {
                     monitor.set_load_threshold_config(cfg);
                 }
-                return Some(monitor.load_threshold_config());
+                if result.is_none() {
+                    result = Some(monitor.load_threshold_config());
+                }
             }
         }
-        None
+        result
     }
 
     /// Get a worker monitor from the first WorkerSet that has one.
@@ -237,13 +240,21 @@ impl Model {
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
-        // Fast path: single set
+        // Fast path: single set (same zero-worker filtering as the multi-set path below)
+        // TODO: When the single set has 0 workers, this returns None which maps to
+        // ModelNotFound (404). Ideally should be 503 "no available workers" — see follow-up.
         if self.worker_sets.len() == 1 {
             return self
                 .worker_sets
                 .iter()
                 .next()
-                .and_then(|entry| extract(entry.value()));
+                .and_then(|entry| {
+                    let ws = entry.value();
+                    if ws.worker_count() == 0 {
+                        return None;
+                    }
+                    extract(ws)
+                });
         }
 
         // Collect eligible sets with their worker counts, skipping sets with no workers.
