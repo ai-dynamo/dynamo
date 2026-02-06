@@ -27,6 +27,7 @@ ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inferen
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
@@ -134,10 +135,17 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
-RUN yum groupinstall -y 'Development Tools' &&  \
-    dnf install -y almalinux-release-synergy && \
+RUN dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
+        # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
+        autoconf \
+        automake \
+        libtool \
+        make \
+        # RPM build tools (required for gdrcopy's build-rpm-packages.sh)
+        rpm-build \
+        rpm-sign \
         # Build tools
         cmake \
         ninja-build \
@@ -163,7 +171,8 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel
+        hwloc-devel && \
+    dnf clean all && rm -rf /var/cache/dnf/
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -198,7 +207,10 @@ ENV CUDA_PATH=/usr/local/cuda \
 # Create virtual environment for building wheels
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
-RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
+# Cache uv downloads; uv handles its own locking for this cache.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
@@ -376,6 +388,8 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
@@ -391,10 +405,14 @@ COPY launch/ /opt/dynamo/launch/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build dynamo wheels
+# Build dynamo wheels. The caches do not need the "shared" lock because Cargo has its own locking mechanism.
 ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
@@ -430,6 +448,13 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             target/wheels/*.whl; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
+
+# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        source ${VIRTUAL_ENV}/bin/activate && \
+        uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
+    fi
 
 ##############################################
 ########## Runtime image ##############
@@ -480,7 +505,9 @@ COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/whe
 # Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
 # This is needed to create venv and install dynamo packages
 ARG PYTHON_VERSION
-RUN apt-get update && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv && \
@@ -495,17 +522,32 @@ ENV HOME=/home/dynamo
 # Create and activate virtual environment
 # Use login shell to pick up umask 002 from /etc/profile.d/00-umask.sh for group-writable files
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-RUN uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
+# Cache uv downloads; uv handles its own locking for the cache.
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Install dynamo wheels (runtime packages only, no test dependencies)
+# uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
-RUN uv pip install \
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$GMS_WHEEL"; \
+    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -529,7 +571,9 @@ FROM ${EPP_IMAGE} AS epp
 FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
 
 ARG PYTHON_VERSION
-RUN apt-get update -y \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update -y \
     && apt-get install -y --no-install-recommends \
         # required for EPP
         ca-certificates \
@@ -581,22 +625,37 @@ COPY --chown=dynamo: --from=runtime /bin/uv /bin/uvx /bin/
 COPY --chown=dynamo: --from=runtime /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 
 # Create virtual environment
-RUN mkdir -p /opt/dynamo/venv && \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
-# Install common and test dependencies
+# Install common and test dependencies. In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
 ARG ENABLE_KVBM
-RUN uv pip install \
+ARG ENABLE_GPU_MEMORY_SERVICE
+# In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$GMS_WHEEL"; \
+    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -606,7 +665,8 @@ RUN uv pip install \
         uv pip install "$KVBM_WHEEL"; \
     fi && \
     cd /workspace/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache .
+    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install .
 
 # Setup environment for all users
 USER root

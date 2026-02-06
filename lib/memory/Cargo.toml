@@ -11,7 +11,7 @@ repository.workspace = true
 description = "Memory management library for Dynamo"
 
 [features]
-default = ["testing-all"]
+default = []
 
 # feature to enable unsafe slices of memory descriptors
 # for advanced testing in other crates
@@ -27,7 +27,7 @@ dynamo-config = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { version = "0.8" }
+nixl-sys = { version = "0.9" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }

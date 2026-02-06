@@ -23,6 +23,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        generate_endpoint=None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -31,12 +32,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
+            generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
             component,
             engine,
             config,
             publisher,
+            generate_endpoint,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -47,9 +50,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
+        super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
-        super().cleanup()
 
     def _build_sampling_params(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Build sampling params from request format.
@@ -123,6 +126,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 self._get_trace_header(context) if self.enable_trace else None
             )
 
+            # Extract dp_rank from routing info (set by KV router)
+            routing = request.get("routing") or {}
+            dp_rank = routing.get("dp_rank")
+
             decode = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
@@ -132,6 +139,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_info["bootstrap_room"],
                 external_trace_header=trace_header,
                 rid=trace_id,
+                data_parallel_rank=dp_rank,
             )
 
             if self.skip_tokenizer_init:
@@ -158,6 +166,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 self._get_trace_header(context) if self.enable_trace else None
             )
 
+            # Extract dp_rank from routing info (set by KV router)
+            routing = request.get("routing") or {}
+            dp_rank = routing.get("dp_rank")
+
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,
@@ -165,6 +177,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 stream=True,
                 external_trace_header=trace_header,
                 rid=trace_id,
+                data_parallel_rank=dp_rank,
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
@@ -180,6 +193,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
+        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
+        containing only new tokens since the last output. We pass these through directly.
+
         Args:
             stream_source: Async generator from engine.async_generate.
             context: Context object for cancellation handling.
@@ -187,8 +203,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             Dict with token_ids and optional finish_reason.
         """
-        num_output_tokens_so_far = 0
-
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
@@ -210,6 +224,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if finish_reason:
                     out["finish_reason"] = finish_reason["type"]
 
+                # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
                 # If request is not finished yet, but there are no outputs, return an error.
                 if not output_ids and not finish_reason:
@@ -217,9 +232,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         yield {"finish_reason": "error", "token_ids": []}
                     break
 
-                next_total_toks = len(output_ids)
-                out["token_ids"] = output_ids[num_output_tokens_so_far:]
-                num_output_tokens_so_far = next_total_toks
+                # Pass through disjoint token segments directly
+                out["token_ids"] = output_ids
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
                     completion_tokens = res["meta_info"]["completion_tokens"]

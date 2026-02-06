@@ -153,6 +153,11 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
 
 
 def parse_args():
+    """Parse command-line arguments for the Dynamo mocker engine.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -244,7 +249,7 @@ def parse_args():
         "--speedup-ratio",
         type=float,
         default=None,
-        help="Speedup ratio for mock execution (default: 1.0)",
+        help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
         "--data-parallel-size",
@@ -311,11 +316,22 @@ def parse_args():
         "If not specified, bootstrap rendezvous is disabled.",
     )
     parser.add_argument(
+        "--stagger-delay",
+        type=float,
+        default=-1.0,
+        help=(
+            "Delay in seconds between launching each worker to avoid overwhelming "
+            "etcd/NATS/frontend with many workers. Set to 0 to disable staggering. "
+            "Use -1 for auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
+            "Default: -1 (auto)"
+        ),
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",

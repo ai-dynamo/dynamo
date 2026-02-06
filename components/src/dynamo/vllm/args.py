@@ -36,10 +36,10 @@ class Config:
     endpoint: str
     is_prefill_worker: bool
     is_decode_worker: bool
-    migration_limit: int = 0
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
+    event_plane: str
     enable_local_indexer: bool = False
 
     # mirror vLLM
@@ -61,7 +61,7 @@ class Config:
 
     # multimodal options
     multimodal_processor: bool = False
-    # Emebdding Cache Processor is different from the regular processor
+    # Embedding Cache Processor is different from the regular processor
     # TODO: Have a single processor for all cases and adopting rust based processor
     ec_processor: bool = False
     multimodal_encode_worker: bool = False
@@ -70,6 +70,7 @@ class Config:
     enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+    frontend_decoding: bool = False
 
     # vLLM-native encoder worker (ECConnector mode)
     vllm_native_encoder_worker: bool = False
@@ -78,11 +79,19 @@ class Config:
     ec_extra_config: Optional[str] = None
     ec_consumer_mode: bool = False
 
+    # vLLM-Omni worker for multi-stage pipelines
+    omni: bool = False
+    # Path to vLLM-Omni stage configuration YAML
+    stage_configs_path: Optional[str] = None
+
     # dump config to file
     dump_config_to: Optional[str] = None
 
     # Use vLLM's tokenizer for pre/post processing
     use_vllm_tokenizer: bool = False
+
+    # sleep mode support (enable_sleep_mode comes from vLLM's engine_args)
+    sleep_mode_level: int = 1
 
     # Whether to enable NATS for KV events (derived from kv_events_config in overwrite_args)
     use_kv_events: bool = False
@@ -102,10 +111,16 @@ class Config:
 
 @register_encoder(Config)
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
+    """Convert Config object to dictionary for encoding."""
     return config.__dict__
 
 
 def parse_args() -> Config:
+    """Parse command-line arguments for the vLLM backend.
+
+    Returns:
+        Config: Parsed configuration object.
+    """
     parser = FlexibleArgumentParser(
         description="vLLM server integrated with Dynamo LLM."
     )
@@ -121,12 +136,6 @@ def parse_args() -> Config:
         "--is-decode-worker",
         action="store_true",
         help="Mark this as a decode worker which does not publish KV events.",
-    )
-    parser.add_argument(
-        "--migration-limit",
-        type=int,
-        default=0,
-        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
     parser.add_argument(
         "--connector",
@@ -211,6 +220,15 @@ def parse_args() -> Config:
         ),
     )
     parser.add_argument(
+        "--frontend-decoding",
+        action="store_true",
+        help=(
+            "Enable frontend decoding of multimodal images. "
+            "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
+            "Without this flag, images are decoded in the Python backend (default behavior)."
+        ),
+    )
+    parser.add_argument(
         "--vllm-native-encoder-worker",
         action="store_true",
         help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
@@ -239,11 +257,22 @@ def parse_args() -> Config:
         help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
     )
     parser.add_argument(
+        "--omni",
+        action="store_true",
+        help="Run as vLLM-Omni worker for multi-stage pipelines (supports text-to-text, text-to-image, etc.)",
+    )
+    parser.add_argument(
+        "--stage-configs-path",
+        type=str,
+        default=None,
+        help="Path to vLLM-Omni stage configuration YAML file. Required for --omni.",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -251,6 +280,13 @@ def parse_args() -> Config:
         choices=["nats", "http", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
         "--enable-local-indexer",
@@ -264,6 +300,13 @@ def parse_args() -> Config:
         action="store_true",
         default=False,
         help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+    )
+    parser.add_argument(
+        "--sleep-mode-level",
+        type=int,
+        default=1,
+        choices=[1, 2, 3],
+        help="Sleep mode level (1=offload to CPU, 2=discard weights, 3=discard all). Default: 1",
     )
     add_config_dump_args(parser)
 
@@ -345,6 +388,13 @@ def parse_args() -> Config:
                 "Specify a shared storage path for encoder cache."
             )
 
+    # Validate omni worker requirements
+    if args.omni and not args.stage_configs_path:
+        raise ValueError(
+            "--stage-configs-path is required when using --omni. "
+            "Specify a YAML file containing stage configurations for the multi-stage pipeline."
+        )
+
     # Set component and endpoint based on worker type
     if args.multimodal_processor or args.ec_processor:
         config.component = "processor"
@@ -365,6 +415,10 @@ def parse_args() -> Config:
         # Multimodal prefill worker stays as "backend" to maintain encoder connection
         config.component = "backend"
         config.endpoint = "generate"
+    elif args.omni:
+        # Omni worker uses "backend" component for multi-stage pipeline orchestration
+        config.component = "backend"
+        config.endpoint = "generate"
     elif args.is_prefill_worker:
         config.component = "prefill"
         config.endpoint = "generate"
@@ -375,7 +429,6 @@ def parse_args() -> Config:
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.is_decode_worker = args.is_decode_worker
-    config.migration_limit = args.migration_limit
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
@@ -388,15 +441,20 @@ def parse_args() -> Config:
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
+    config.frontend_decoding = args.frontend_decoding
     config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
     config.ec_connector_backend = args.ec_connector_backend
     config.ec_storage_path = args.ec_storage_path
     config.ec_extra_config = args.ec_extra_config
     config.ec_consumer_mode = args.ec_consumer_mode
+    config.omni = args.omni
+    config.stage_configs_path = args.stage_configs_path
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.event_plane = args.event_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
+    config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config
 
     # Validate custom Jinja template file exists if provided
@@ -572,6 +630,7 @@ def overwrite_args(config):
     defaults["kv_events_config"] = kv_cfg
     # Derive use_kv_events from whether kv_events_config is set AND enable_kv_cache_events is True
     config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
+
     logger.info(
         f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
         f"(use_kv_events={config.use_kv_events})"

@@ -150,6 +150,29 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Active decode blocks (KV cache blocks) per worker
+    /// Gauge metric tracking current KV cache block utilization for each worker
+    pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";
+
+    /// Active prefill tokens per worker
+    /// Gauge metric tracking current queued prefill tokens for each worker
+    pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
+
+    /// Last observed time to first token per worker (in seconds)
+    /// Gauge metric tracking the most recent TTFT for each worker
+    pub const WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS: &str =
+        "worker_last_time_to_first_token_seconds";
+
+    /// Last observed input sequence tokens per worker
+    /// Gauge metric tracking the input token count from the same request as WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
+    /// Updated atomically with TTFT to correlate latency with input size
+    pub const WORKER_LAST_INPUT_SEQUENCE_TOKENS: &str = "worker_last_input_sequence_tokens";
+
+    /// Last observed inter-token latency per worker (in seconds)
+    /// Gauge metric tracking the most recent ITL for each worker
+    pub const WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS: &str =
+        "worker_last_inter_token_latency_seconds";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
@@ -301,39 +324,6 @@ pub mod kvbm {
     /// Number of failed object storage write operations (blocks)
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
-
-/// KvStats metrics from LLM workers
-pub mod kvstats {
-    /// Macro to generate KvStats metric names with the prefix
-    macro_rules! kvstats_name {
-        ($name:expr) => {
-            concat!("kvstats_", $name)
-        };
-    }
-
-    /// Prefix for all KvStats metrics
-    pub const PREFIX: &str = kvstats_name!("");
-
-    /// Number of active KV cache blocks currently in use
-    pub const ACTIVE_BLOCKS: &str = kvstats_name!("active_blocks");
-
-    /// Total number of KV cache blocks available
-    pub const TOTAL_BLOCKS: &str = kvstats_name!("total_blocks");
-
-    /// GPU cache usage as a percentage (0.0-1.0)
-    pub const GPU_CACHE_USAGE_PERCENT: &str = kvstats_name!("gpu_cache_usage_percent");
-
-    /// GPU prefix cache hit rate as a percentage (0.0-1.0)
-    pub const GPU_PREFIX_CACHE_HIT_RATE: &str = kvstats_name!("gpu_prefix_cache_hit_rate");
-}
-
-/// All KvStats Prometheus metric names as an array for iteration/validation
-pub const KVSTATS_METRICS: &[&str] = &[
-    kvstats::ACTIVE_BLOCKS,
-    kvstats::TOTAL_BLOCKS,
-    kvstats::GPU_CACHE_USAGE_PERCENT,
-    kvstats::GPU_PREFIX_CACHE_HIT_RATE,
-];
 
 // KvRouter (including KvInexer) Prometheus metric names
 pub mod kvrouter {

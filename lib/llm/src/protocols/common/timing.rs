@@ -6,7 +6,10 @@
 //! This module provides [`RequestTracker`] for tracking timing and routing information
 //! that can be returned to clients via the `nvext` response field.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU32, AtomicU64, Ordering},
+};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -15,6 +18,17 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
 
 use crate::protocols::openai::nvext::WorkerIdInfo;
+
+/// Sentinel value indicating no worker ID has been set.
+/// We use 0 as the sentinel since valid worker IDs are non-zero lease IDs from etcd.
+const NO_WORKER_ID: u64 = 0;
+const NO_DP_RANK: u32 = u32::MAX;
+
+/// Worker type constants for Prometheus metric labels.
+/// These are stored in RequestTracker at routing time to avoid costly MDC lookups
+/// when updating per-worker metrics (TTFT, ITL).
+pub const WORKER_TYPE_PREFILL: &str = "prefill";
+pub const WORKER_TYPE_DECODE: &str = "decode";
 
 /// Phase of the request in disaggregated serving.
 ///
@@ -48,10 +62,15 @@ impl std::fmt::Display for RequestPhase {
 /// - `first_token_time`: When the first token was generated (set once via OnceLock)
 /// - `request_finish_time`: When the request finished (set once via OnceLock)
 /// - KV cache hit rate information
+/// - Worker IDs and types for per-worker Prometheus metrics
 ///
 /// The `OnceLock` fields ensure that values are set exactly once,
 /// which is important for disaggregated serving where the "first token"
 /// might appear multiple times.
+///
+/// Worker IDs use `AtomicU64` instead of `OnceLock<u64>` for lower overhead since
+/// the tracker is created for every request. The sentinel value `NO_WORKER_ID` (0)
+/// indicates no worker has been recorded yet.
 #[derive(Debug)]
 pub struct RequestTracker {
     /// When the request was received (monotonic clock for duration calculations)
@@ -75,11 +94,30 @@ pub struct RequestTracker {
     /// Input sequence length in blocks (for hit rate calculation) - set once via OnceLock
     isl_blocks: OnceLock<usize>,
 
-    /// Prefill worker ID (for disaggregated serving) - set once via OnceLock
-    prefill_worker_id: OnceLock<u64>,
+    /// Prefill worker ID (for disaggregated serving).
+    /// Uses atomic with compare-exchange for set-once semantics.
+    /// Value of 0 (NO_WORKER_ID) means not yet set.
+    prefill_worker_id: AtomicU64,
 
-    /// Decode worker ID - set once via OnceLock
-    decode_worker_id: OnceLock<u64>,
+    /// Prefill DP rank. Value of u32::MAX (NO_DP_RANK) means not yet set.
+    prefill_dp_rank: AtomicU32,
+
+    /// Decode worker ID. Value of 0 (NO_WORKER_ID) means not yet set.
+    decode_worker_id: AtomicU64,
+
+    /// Decode DP rank. Value of u32::MAX (NO_DP_RANK) means not yet set.
+    decode_dp_rank: AtomicU32,
+
+    /// Worker type for the prefill worker ("prefill" or "decode").
+    /// Stored at routing time to avoid MDC lookup when updating Prometheus metrics.
+    /// In aggregated mode, this will be "decode" since the same worker handles both.
+    /// This is necessary because TTFT metrics need to know the worker type label,
+    /// and looking up MDC by worker_id would require iterating all cards (O(n)).
+    prefill_worker_type: OnceLock<&'static str>,
+
+    /// Worker type for the decode worker (always "decode").
+    /// Stored for symmetry with prefill_worker_type, though decode is always "decode".
+    decode_worker_type: OnceLock<&'static str>,
 
     /// Request phase (Prefill/Decode/Aggregated)
     phase: Mutex<RequestPhase>,
@@ -108,8 +146,12 @@ impl RequestTracker {
             request_finish_time: OnceLock::new(),
             kv_overlap_blocks: OnceLock::new(),
             isl_blocks: OnceLock::new(),
-            prefill_worker_id: OnceLock::new(),
-            decode_worker_id: OnceLock::new(),
+            prefill_worker_id: AtomicU64::new(NO_WORKER_ID),
+            prefill_dp_rank: AtomicU32::new(NO_DP_RANK),
+            decode_worker_id: AtomicU64::new(NO_WORKER_ID),
+            decode_dp_rank: AtomicU32::new(NO_DP_RANK),
+            prefill_worker_type: OnceLock::new(),
+            decode_worker_type: OnceLock::new(),
             phase: Mutex::new(RequestPhase::Aggregated),
             phase_semaphore: Arc::new(Semaphore::new(1)),
         }
@@ -177,12 +219,82 @@ impl RequestTracker {
 
     /// Record the prefill worker ID. Returns true if this was the first call.
     pub fn record_prefill_worker(&self, id: u64) -> bool {
-        self.prefill_worker_id.set(id).is_ok()
+        self.prefill_worker_id
+            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Record the prefill worker ID and DP rank. Returns true if worker_id was recorded for the first time.
+    /// Only sets the dp_rank if the worker_id is newly set to avoid mismatched worker_id/dp_rank pairs.
+    pub fn record_prefill_worker_with_rank(&self, id: u64, dp_rank: u32) -> bool {
+        let is_new = self
+            .prefill_worker_id
+            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if is_new {
+            self.prefill_dp_rank.store(dp_rank, Ordering::SeqCst);
+        }
+        is_new
+    }
+
+    /// Record the prefill worker ID, DP rank, and worker type.
+    /// The worker_type is stored to avoid MDC lookup when updating Prometheus metrics.
+    /// Returns true if worker_id was recorded for the first time.
+    pub fn record_prefill_worker_full(
+        &self,
+        id: u64,
+        dp_rank: u32,
+        worker_type: &'static str,
+    ) -> bool {
+        let is_new = self
+            .prefill_worker_id
+            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if is_new {
+            self.prefill_dp_rank.store(dp_rank, Ordering::SeqCst);
+            let _ = self.prefill_worker_type.set(worker_type);
+        }
+        is_new
     }
 
     /// Record the decode worker ID. Returns true if this was the first call.
     pub fn record_decode_worker(&self, id: u64) -> bool {
-        self.decode_worker_id.set(id).is_ok()
+        self.decode_worker_id
+            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Record the decode worker ID and DP rank. Returns true if worker_id was recorded for the first time.
+    /// Only sets the dp_rank if the worker_id is newly set to avoid mismatched worker_id/dp_rank pairs.
+    pub fn record_decode_worker_with_rank(&self, id: u64, dp_rank: u32) -> bool {
+        let is_new = self
+            .decode_worker_id
+            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if is_new {
+            self.decode_dp_rank.store(dp_rank, Ordering::SeqCst);
+        }
+        is_new
+    }
+
+    /// Record the decode worker ID, DP rank, and worker type.
+    /// The worker_type is stored to avoid MDC lookup when updating Prometheus metrics.
+    /// Returns true if worker_id was recorded for the first time.
+    pub fn record_decode_worker_full(
+        &self,
+        id: u64,
+        dp_rank: u32,
+        worker_type: &'static str,
+    ) -> bool {
+        let is_new = self
+            .decode_worker_id
+            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if is_new {
+            self.decode_dp_rank.store(dp_rank, Ordering::SeqCst);
+            let _ = self.decode_worker_type.set(worker_type);
+        }
+        is_new
     }
 
     /// Set the request phase and return a permit that blocks subsequent phase changes.
@@ -230,10 +342,56 @@ impl RequestTracker {
         }
     }
 
+    /// Record worker ID and DP rank based on the current phase.
+    ///
+    /// - Prefill phase: records as prefill_worker_id/prefill_dp_rank
+    /// - Decode phase: records as decode_worker_id/decode_dp_rank
+    /// - Aggregated phase: records as both prefill and decode worker/rank
+    pub fn record_worker_with_rank(&self, instance_id: u64, dp_rank: u32) {
+        match self.phase() {
+            RequestPhase::Prefill => {
+                self.record_prefill_worker_with_rank(instance_id, dp_rank);
+            }
+            RequestPhase::Decode => {
+                self.record_decode_worker_with_rank(instance_id, dp_rank);
+            }
+            RequestPhase::Aggregated => {
+                self.record_prefill_worker_with_rank(instance_id, dp_rank);
+                self.record_decode_worker_with_rank(instance_id, dp_rank);
+            }
+        }
+    }
+
+    /// Record worker ID, DP rank, and worker type based on the current phase.
+    ///
+    /// This is the preferred method when worker_type is known (from MDC or router config),
+    /// as it stores the worker_type for later use in Prometheus metric updates without
+    /// requiring an expensive MDC lookup.
+    ///
+    /// - Prefill phase: records as prefill worker with given worker_type
+    /// - Decode phase: records as decode worker with given worker_type
+    /// - Aggregated phase: records as both prefill and decode worker with the same worker_type
+    pub fn record_worker_full(&self, instance_id: u64, dp_rank: u32, worker_type: &'static str) {
+        match self.phase() {
+            RequestPhase::Prefill => {
+                self.record_prefill_worker_full(instance_id, dp_rank, worker_type);
+            }
+            RequestPhase::Decode => {
+                self.record_decode_worker_full(instance_id, dp_rank, worker_type);
+            }
+            RequestPhase::Aggregated => {
+                // In aggregated mode, both prefill and decode happen on the same worker,
+                // so we record the same worker_type for both
+                self.record_prefill_worker_full(instance_id, dp_rank, worker_type);
+                self.record_decode_worker_full(instance_id, dp_rank, worker_type);
+            }
+        }
+    }
+
     /// Get worker ID information if any worker IDs have been recorded.
     pub fn get_worker_info(&self) -> Option<WorkerIdInfo> {
-        let prefill = self.prefill_worker_id.get().copied();
-        let decode = self.decode_worker_id.get().copied();
+        let prefill = self.prefill_worker_id();
+        let decode = self.decode_worker_id();
 
         if prefill.is_none() && decode.is_none() {
             return None;
@@ -241,8 +399,44 @@ impl RequestTracker {
 
         Some(WorkerIdInfo {
             prefill_worker_id: prefill,
+            prefill_dp_rank: self.prefill_dp_rank(),
             decode_worker_id: decode,
+            decode_dp_rank: self.decode_dp_rank(),
         })
+    }
+
+    /// Get the decode worker ID if recorded.
+    pub fn decode_worker_id(&self) -> Option<u64> {
+        let id = self.decode_worker_id.load(Ordering::SeqCst);
+        if id == NO_WORKER_ID { None } else { Some(id) }
+    }
+
+    /// Get the decode DP rank if recorded.
+    pub fn decode_dp_rank(&self) -> Option<u32> {
+        let rank = self.decode_dp_rank.load(Ordering::SeqCst);
+        if rank == NO_DP_RANK { None } else { Some(rank) }
+    }
+
+    /// Get the prefill worker ID if recorded.
+    pub fn prefill_worker_id(&self) -> Option<u64> {
+        let id = self.prefill_worker_id.load(Ordering::SeqCst);
+        if id == NO_WORKER_ID { None } else { Some(id) }
+    }
+
+    /// Get the prefill DP rank if recorded.
+    pub fn prefill_dp_rank(&self) -> Option<u32> {
+        let rank = self.prefill_dp_rank.load(Ordering::SeqCst);
+        if rank == NO_DP_RANK { None } else { Some(rank) }
+    }
+
+    /// Get the prefill worker type if recorded.
+    pub fn prefill_worker_type(&self) -> Option<&'static str> {
+        self.prefill_worker_type.get().copied()
+    }
+
+    /// Get the decode worker type if recorded.
+    pub fn decode_worker_type(&self) -> Option<&'static str> {
+        self.decode_worker_type.get().copied()
     }
 
     pub fn get_timing_info(&self) -> TimingInfo {

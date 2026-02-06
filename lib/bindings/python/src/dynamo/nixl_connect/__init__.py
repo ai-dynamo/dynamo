@@ -441,10 +441,13 @@ class ActiveOperation(AbstractOperation):
         self._status = OperationStatus.CANCELLED
         self._xfer_hndl = None
 
-    async def _wait_for_completion_(self) -> None:
+    async def _wait_for_completion_(
+        self, min_poll_ms=5, max_poll_ms=100, backoff_factor=1.5
+    ) -> None:
         # Loop until the operation is no longer in progress (or "initialized"),
         # yielding control to the event loop to allow other operations to run.
         iteration_count = 0
+        sleep_time = min_poll_ms
         while True:
             if iteration_count & 10 == 0:
                 logger.debug(
@@ -452,10 +455,9 @@ class ActiveOperation(AbstractOperation):
                 )
             match self.status:
                 # "in progress" or "initialized" means the operation is ongoing.
-                case OperationStatus.INITIALIZED:
-                    await asyncio.sleep(0.1)
-                case OperationStatus.IN_PROGRESS:
-                    await asyncio.sleep(0.1)
+                case OperationStatus.INITIALIZED | OperationStatus.IN_PROGRESS:
+                    await asyncio.sleep(sleep_time / 1000)
+                    sleep_time = min(sleep_time * backoff_factor, max_poll_ms)
                 # Any other state indicates completion or error.
                 case _:
                     return
@@ -1371,16 +1373,18 @@ class PassiveOperation(AbstractOperation):
             f")"
         )
 
-    async def _wait_for_completion_(self) -> None:
+    async def _wait_for_completion_(
+        self, min_poll_ms=5, max_poll_ms=100, backoff_factor=1.5
+    ) -> None:
         # Loop until the operation is no longer in progress (or "initialized"),
         # yielding control to the event loop to allow other operations to run.
+        sleep_time = min_poll_ms
         while True:
             match self.status:
                 # "in progress" or "initialized" means the operation is ongoing.
-                case OperationStatus.INITIALIZED:
-                    await asyncio.sleep(0.1)
-                case OperationStatus.IN_PROGRESS:
-                    await asyncio.sleep(0.1)
+                case OperationStatus.INITIALIZED | OperationStatus.IN_PROGRESS:
+                    await asyncio.sleep(sleep_time / 1000)
+                    sleep_time = min(sleep_time * backoff_factor, max_poll_ms)
                 # Any other state indicates completion or error.
                 case _:
                     return

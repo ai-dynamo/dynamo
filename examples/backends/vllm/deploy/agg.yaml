@@ -8,6 +8,7 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       componentType: frontend
       replicas: 1
       extraPodSpec:

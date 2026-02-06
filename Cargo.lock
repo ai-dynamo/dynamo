@@ -703,7 +703,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -721,7 +721,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -867,6 +867,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bs58"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
+dependencies = [
+ "tinyvec",
+]
+
+[[package]]
 name = "bs62"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -940,9 +949,9 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
+checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 dependencies = [
  "serde",
 ]
@@ -2217,7 +2226,7 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -2256,14 +2265,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2280,8 +2289,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kv-router"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap 4.5.53",
+ "dynamo-runtime",
+ "dynamo-tokens",
+ "indicatif 0.18.3",
+ "prometheus",
+ "rand 0.9.2",
+ "rstest 0.18.2",
+ "rstest_reuse",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "dynamo-llm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2313,13 +2345,17 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
+ "dynamo-kv-router",
  "dynamo-memory",
+ "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
+ "dynamo-tokens",
  "either",
  "erased-serde",
  "etcd-client",
  "ffmpeg-next",
+ "flate2",
  "futures",
  "futures-util",
  "galil-seiferas",
@@ -2392,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2408,8 +2444,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-mocker"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "dashmap 6.1.0",
+ "derive-getters",
+ "derive_builder",
+ "dynamo-kv-router",
+ "dynamo-tokens",
+ "ndarray",
+ "ndarray-interp",
+ "ndarray-npy",
+ "rand 0.9.2",
+ "rstest 0.18.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid 1.18.1",
+ "validator",
+]
+
+[[package]]
 name = "dynamo-parsers"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -2428,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2456,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2493,6 +2553,7 @@ dependencies = [
  "libc",
  "local-ip-address",
  "log",
+ "lru",
  "nid",
  "nix 0.29.0",
  "notify",
@@ -2517,6 +2578,7 @@ dependencies = [
  "temp-env",
  "tempfile",
  "thiserror 2.0.17",
+ "tmq",
  "tokio",
  "tokio-rayon",
  "tokio-stream",
@@ -2530,17 +2592,20 @@ dependencies = [
  "uuid 1.18.1",
  "validator",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
+ "bs58",
  "bytemuck",
  "dashmap 6.1.0",
  "derive-getters",
  "serde",
  "thiserror 2.0.17",
+ "uuid 1.18.1",
  "xxhash-rust",
 ]
 
@@ -2971,21 +3036,12 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "foreign-types"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
-dependencies = [
- "foreign-types-shared 0.1.1",
-]
-
-[[package]]
-name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d737d9aa519fb7b749cbc3b962edcf310a8dd1f4b67c91c4f83975dbdd17d965"
 dependencies = [
  "foreign-types-macros",
- "foreign-types-shared 0.3.1",
+ "foreign-types-shared",
 ]
 
 [[package]]
@@ -2998,12 +3054,6 @@ dependencies = [
  "quote",
  "syn 2.0.111",
 ]
-
-[[package]]
-name = "foreign-types-shared"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "foreign-types-shared"
@@ -3909,22 +3959,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-tls"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper 1.8.1",
- "hyper-util",
- "native-tls",
- "tokio",
- "tokio-native-tls",
- "tower-service",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4345,15 +4379,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -4701,7 +4726,7 @@ checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -4839,6 +4864,15 @@ dependencies = [
  "num-traits",
  "sparsevec",
  "vob",
+]
+
+[[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -5072,7 +5106,7 @@ dependencies = [
  "bitflags 2.10.0",
  "block",
  "core-graphics-types",
- "foreign-types 0.5.0",
+ "foreign-types",
  "log",
  "objc",
  "paste",
@@ -5087,7 +5121,7 @@ dependencies = [
  "bitflags 2.10.0",
  "block",
  "core-graphics-types",
- "foreign-types 0.5.0",
+ "foreign-types",
  "log",
  "objc",
  "paste",
@@ -5529,23 +5563,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "native-tls"
-version = "0.2.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87de3442987e9dbec73158d5c715e7ad9072fda936bb03d19d7fa10e00520f0e"
-dependencies = [
- "libc",
- "log",
- "openssl",
- "openssl-probe",
- "openssl-sys",
- "schannel",
- "security-framework 2.11.1",
- "security-framework-sys",
- "tempfile",
-]
-
-[[package]]
 name = "ndarray"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5686,10 +5703,12 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06518de4709489510ec1fa8938f1f510f8c9c1f154b096c3c0913ab2feade9b0"
+checksum = "1e3d48272133186f64c82a89faff4405b342478a2f015bb35d78550eff2a9961"
 dependencies = [
+ "anyhow",
+ "bincode 1.3.3",
  "bindgen 0.71.1",
  "cc",
  "libc",
@@ -6185,9 +6204,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneshot"
-version = "0.1.11"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ce411919553d3f9fa53a0880544cda985a112117a0444d5ff1e870a893d6ea"
+checksum = "269bca4c2591a28585d6bf10d9ed0332b7d76900a1b02bec41bdc3a2cdcda107"
 
 [[package]]
 name = "onig"
@@ -6242,58 +6261,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "openssl"
-version = "0.10.75"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08838db121398ad17ab8531ce9de97b244589089e290a384c900cb9ff7434328"
-dependencies = [
- "bitflags 2.10.0",
- "cfg-if 1.0.4",
- "foreign-types 0.3.2",
- "libc",
- "once_cell",
- "openssl-macros",
- "openssl-sys",
-]
-
-[[package]]
-name = "openssl-macros"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.111",
-]
-
-[[package]]
 name = "openssl-probe"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
-
-[[package]]
-name = "openssl-src"
-version = "300.5.4+3.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a507b3792995dae9b0df8a1c1e3771e8418b7c2d9f0baeba32e6fe8b06c7cb72"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "openssl-sys"
-version = "0.9.111"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
-dependencies = [
- "cc",
- "libc",
- "openssl-src",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "opentelemetry"
@@ -7547,13 +7518,11 @@ dependencies = [
  "http-body-util",
  "hyper 1.8.1",
  "hyper-rustls",
- "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
  "mime",
  "mime_guess",
- "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -7565,7 +7534,6 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper 1.0.2",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower 0.5.2",
@@ -9395,16 +9363,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.111",
-]
-
-[[package]]
-name = "tokio-native-tls"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
-dependencies = [
- "native-tls",
- "tokio",
 ]
 
 [[package]]
