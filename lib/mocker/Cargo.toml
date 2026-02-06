@@ -17,6 +17,7 @@ dynamo-kv-router = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+validator = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
