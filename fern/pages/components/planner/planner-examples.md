@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Planner Examples
 
-Practical examples for deploying the SLA Planner with different configurations. For deployment concepts, see the [Planner Guide](planner-guide). For a quick overview, see the [Planner README](README).
+Practical examples for deploying the SLA Planner with different configurations. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
 
 ## Basic Examples
 
@@ -377,8 +377,8 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 
 ## Related Documentation
 
-- [Planner README](README) -- Overview and quick start
-- [Planner Guide](planner-guide) -- Deployment, configuration, integration
+- [Planner README](README.md) -- Overview and quick start
+- [Planner Guide](planner-guide.md) -- Deployment, configuration, integration
 - [Planner Design](/docs/design-docs/planner-design) -- Architecture deep-dive
 - [DGDR Configuration Reference](/docs/components/profiler/profiler-guide#dgdr-configuration-reference)
 - [SLA-Driven Profiling](/docs/components/profiler/profiler-guide)

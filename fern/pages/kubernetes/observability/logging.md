@@ -15,7 +15,7 @@ This guide demonstrates how to set up logging for Dynamo in Kubernetes using Gra
 
 ### 1. Dynamo Kubernetes Platform
 
-This guide assumes you have installed Dynamo Kubernetes Platform. For more information, see [Dynamo Kubernetes Platform](../README).
+This guide assumes you have installed Dynamo Kubernetes Platform. For more information, see [Dynamo Kubernetes Platform](../README.md).
 
 ### 2. Kube-prometheus
 

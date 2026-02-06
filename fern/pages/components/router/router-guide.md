@@ -78,8 +78,8 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | `--no-kv-events` | `DYN_KV_EVENTS=false` | `true` |
 | `--kv-overlap-score-weight` | `DYN_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
 
-For complete K8s examples and advanced configuration, see [K8s Examples](router-examples#k8s-examples).
-For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing).
+For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples).
+For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
 ## KV Cache Routing
 
@@ -187,7 +187,7 @@ The main KV-aware routing arguments:
 >
 > The cli args `--router-ttl`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When KV events are enabled (default), the router relies on worker-side eviction events and these parameters are ignored.
 
-To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines).
+To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 
 ## Basic Routing
 
@@ -207,9 +207,9 @@ We can then use the default routing methods exposed by the client class to send 
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
-For benchmarking KV router performance, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing).
+For benchmarking KV router performance, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
-For custom routing logic and advanced patterns, see [Routing Patterns](router-examples#routing-patterns) in the examples documentation.
+For custom routing logic and advanced patterns, see [Routing Patterns](router-examples.md#routing-patterns) in the examples documentation.
 
 ## Tuning Guidelines
 
@@ -249,7 +249,7 @@ The `router_temperature` parameter controls routing randomness:
 
 ## Disaggregated Serving
 
-Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../../development/backend-guide)), the frontend automatically detects them and activates an internal prefill router.
+Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../../development/backend-guide.md)), the frontend automatically detects them and activates an internal prefill router.
 
 ### Automatic Prefill Router Activation
 
@@ -332,7 +332,7 @@ For improved fault tolerance, you can launch multiple frontend + router replicas
 
 ### Router State Management
 
-The KV Router tracks two types of state (see [Router Design](../../design-docs/router-design) for details):
+The KV Router tracks two types of state (see [Router Design](../../design-docs/router-design.md) for details):
 
 1. **Prefix blocks (cached KV blocks)**: Maintained in a radix tree, tracking which blocks are cached on each worker. This state is **persistent** - backed by NATS JetStream events and object store snapshots. New router replicas automatically sync this state on startup, ensuring consistent cache awareness across restarts.
 
@@ -416,7 +416,7 @@ curl http://localhost:8000/busy_threshold
 
 ## See Also
 
-- **[Router README](README)**: Quick start guide for the KV Router
-- **[Router Examples](router-examples)**: Python API usage, K8s examples, and custom routing patterns
-- **[Router Design](../../design-docs/router-design)**: Architecture details and event transport modes
-- **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines)**: Integrate custom inference engines with KV-aware routing
+- **[Router README](README.md)**: Quick start guide for the KV Router
+- **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
+- **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
+- **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing

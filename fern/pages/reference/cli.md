@@ -150,19 +150,19 @@ The KV-aware routing arguments:
 
 ### Request Migration
 
-In a [Distributed System](#distributed-system), you can enable [request migration](../fault-tolerance/request-migration) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+In a [Distributed System](#distributed-system), you can enable [request migration](../fault-tolerance/request-migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
 dynamo-run in=dyn://... out=<engine> ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../fault-tolerance/request-migration) documentation for details on how this works.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../fault-tolerance/request-migration.md) documentation for details on how this works.
 
 ### Request Cancellation
 
 When using the HTTP interface (`in=http`), if the HTTP request connection is dropped by the client, Dynamo automatically cancels the downstream request to the worker. This ensures that computational resources are not wasted on generating responses that are no longer needed.
 
-For detailed information about how request cancellation works across the system, see the [Request Cancellation Architecture](../fault-tolerance/request-cancellation) documentation.
+For detailed information about how request cancellation works across the system, see the [Request Cancellation Architecture](../fault-tolerance/request-cancellation.md) documentation.
 
 ## Development
 

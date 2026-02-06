@@ -28,7 +28,7 @@ The [prometheus_names.rs](../../lib/runtime/src/metrics/prometheus_names.rs) mod
 
 ## Metrics API in Rust
 
-The metrics API is accessible through the `.metrics()` method on runtime, namespace, component, and endpoint objects. See [Runtime Hierarchy](metrics#runtime-hierarchy) for details on the hierarchical structure.
+The metrics API is accessible through the `.metrics()` method on runtime, namespace, component, and endpoint objects. See [Runtime Hierarchy](metrics.md#runtime-hierarchy) for details on the hierarchical structure.
 
 ### Available Methods
 
@@ -131,7 +131,7 @@ let counter = endpoint.metrics().create_counter(
 
 ## Related Documentation
 
-- [Metrics Overview](metrics)
-- [Prometheus and Grafana Setup](prometheus-grafana)
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime)
+- [Metrics Overview](metrics.md)
+- [Prometheus and Grafana Setup](prometheus-grafana.md)
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 

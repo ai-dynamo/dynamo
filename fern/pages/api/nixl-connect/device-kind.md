@@ -17,7 +17,7 @@ limitations under the License.
 
 # dynamo.nixl_connect.DeviceKind(IntEnum)
 
-Represents the kind of device a [`Device`](device) object represents.
+Represents the kind of device a [`Device`](device.md) object represents.
 
 
 ## Values
@@ -33,11 +33,11 @@ System (CPU) memory.
 
 ## Related Classes
 
-  - [Connector](connector)
-  - [Descriptor](descriptor)
-  - [Device](device)
-  - [OperationStatus](operation-status)
-  - [RdmaMetadata](rdma-metadata)
-  - [ReadOperation](read-operation)
-  - [WritableOperation](writable-operation)
-  - [WriteOperation](write-operation)
+  - [Connector](connector.md)
+  - [Descriptor](descriptor.md)
+  - [Device](device.md)
+  - [OperationStatus](operation-status.md)
+  - [RdmaMetadata](rdma-metadata.md)
+  - [ReadOperation](read-operation.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)

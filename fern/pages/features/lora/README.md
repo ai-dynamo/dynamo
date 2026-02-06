@@ -16,7 +16,7 @@ LoRA (Low-Rank Adaptation) enables efficient fine-tuning and serving of speciali
 | SGLang | 🚧 | In progress |
 | TensorRT-LLM | ❌ | Not yet supported |
 
-See the [Feature Matrix](../../reference/feature-matrix) for full compatibility details.
+See the [Feature Matrix](../../reference/feature-matrix.md) for full compatibility details.
 
 ## Overview
 
@@ -263,15 +263,15 @@ kubectl get dynamomodel customer-support-lora
 ```
 
 For complete Kubernetes deployment details, see:
-- [Managing Models with DynamoModel](../../kubernetes/deployment/dynamomodel-guide)
-- [Kubernetes LoRA Deployment Example](../../../examples/backends/vllm/deploy/lora/README)
+- [Managing Models with DynamoModel](../../kubernetes/deployment/dynamomodel-guide.md)
+- [Kubernetes LoRA Deployment Example](../../../examples/backends/vllm/deploy/lora/README.md)
 
 ## Examples
 
 | Example | Description |
 |---------|-------------|
-| [Local LoRA with MinIO](../../../examples/backends/vllm/launch/lora/README) | Local development with S3-compatible storage |
-| [Kubernetes LoRA Deployment](../../../examples/backends/vllm/deploy/lora/README) | Production deployment with DynamoModel CRD |
+| [Local LoRA with MinIO](../../../examples/backends/vllm/launch/lora/README.md) | Local development with S3-compatible storage |
+| [Kubernetes LoRA Deployment](../../../examples/backends/vllm/deploy/lora/README.md) | Production deployment with DynamoModel CRD |
 
 ## Troubleshooting
 
@@ -308,7 +308,7 @@ kubectl logs deployment/my-worker | grep -i lora
 
 ## See Also
 
-- [Feature Matrix](../../reference/feature-matrix) - Backend compatibility overview
-- [vLLM Backend](../../backends/vllm/README) - vLLM-specific configuration
-- [Dynamo Operator](../../kubernetes/dynamo-operator) - Kubernetes operator overview
-- [KV-Aware Routing](../../components/router/router-guide) - LoRA-aware request routing
+- [Feature Matrix](../../reference/feature-matrix.md) - Backend compatibility overview
+- [vLLM Backend](../../backends/vllm/README.md) - vLLM-specific configuration
+- [Dynamo Operator](../../kubernetes/dynamo-operator.md) - Kubernetes operator overview
+- [KV-Aware Routing](../../components/router/router-guide.md) - LoRA-aware request routing

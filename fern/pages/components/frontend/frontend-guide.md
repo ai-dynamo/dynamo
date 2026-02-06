@@ -146,19 +146,19 @@ The frontend includes an integrated router for request distribution. Configure r
 python -m dynamo.frontend --router-mode kv --http-port 8000
 ```
 
-See [Router Documentation](../router/README) for routing configuration details.
+See [Router Documentation](../router/README.md) for routing configuration details.
 
 ### With Backends
 
 Backends auto-register with the frontend when they call `register_llm()`. Supported backends:
 
-- [vLLM Backend](../../backends/vllm/README)
-- [SGLang Backend](../../backends/sglang/README)
-- [TensorRT-LLM Backend](../../backends/trtllm/README)
+- [vLLM Backend](../../backends/vllm/README.md)
+- [SGLang Backend](../../backends/sglang/README.md)
+- [TensorRT-LLM Backend](../../backends/trtllm/README.md)
 
 ## See Also
 
 | Document | Description |
 |----------|-------------|
-| [Frontend Overview](README) | Quick start and feature matrix |
-| [Router Documentation](../router/README) | KV-aware routing configuration |
+| [Frontend Overview](README.md) | Quick start and feature matrix |
+| [Router Documentation](../router/README.md) | KV-aware routing configuration |

@@ -41,7 +41,7 @@ This document provides a comprehensive guide for multimodal inference using vLLM
 
 ## Deployment Patterns
 
-vLLM supports all multimodal deployment patterns. See [Architecture Patterns](README#architecture-patterns) for detailed explanations.
+vLLM supports all multimodal deployment patterns. See [Architecture Patterns](README.md#architecture-patterns) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|

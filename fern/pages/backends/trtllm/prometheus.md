@@ -13,9 +13,9 @@ Additional performance metrics are available via non-Prometheus APIs (see [Non-P
 
 As of the date of this documentation, the included TensorRT-LLM version 1.1.0rc5 exposes **5 basic Prometheus metrics**. Note that the `trtllm_` prefix is added by Dynamo.
 
-**For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics).
+**For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics.md).
 
-**For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](../../observability/prometheus-grafana).
+**For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](../../observability/prometheus-grafana.md).
 
 ## Environment Variables
 
@@ -29,7 +29,7 @@ This is a single machine example.
 
 ### Start Observability Stack
 
-For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](../../observability/README#getting-started-quickly) for instructions.
+For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](../../observability/README.md#getting-started-quickly) for instructions.
 
 ### Launch Dynamo Components
 
@@ -185,8 +185,8 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 - [TensorRT-LLM Metrics Collector](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py) - Source code reference
 
 ### Dynamo Metrics
-- [Dynamo Metrics Guide](../../observability/metrics) - Complete documentation on Dynamo runtime metrics
-- [Prometheus and Grafana Setup](../../observability/prometheus-grafana) - Visualization setup instructions
+- [Dynamo Metrics Guide](../../observability/metrics.md) - Complete documentation on Dynamo runtime metrics
+- [Prometheus and Grafana Setup](../../observability/prometheus-grafana.md) - Visualization setup instructions
 - Dynamo runtime metrics (prefixed with `dynamo_*`) are available at the same `/metrics` endpoint alongside TensorRT-LLM metrics
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

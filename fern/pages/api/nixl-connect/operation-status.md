@@ -49,11 +49,11 @@ The operation has not been initialized yet and is not in a valid state.
 
 ## Related Classes
 
-  - [Connector](connector)
-  - [Descriptor](descriptor)
-  - [Device](device)
-  - [RdmaMetadata](rdma-metadata)
-  - [ReadOperation](read-operation)
-  - [ReadableOperation](readable-operation)
-  - [WritableOperation](writable-operation)
-  - [WriteOperation](write-operation)
+  - [Connector](connector.md)
+  - [Descriptor](descriptor.md)
+  - [Device](device.md)
+  - [RdmaMetadata](rdma-metadata.md)
+  - [ReadOperation](read-operation.md)
+  - [ReadableOperation](readable-operation.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)

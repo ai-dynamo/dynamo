@@ -515,9 +515,9 @@ spec:
 
 ## Related Documentation
 
-- [ChReK Overview](README) - ChReK architecture and use cases
-- [ChReK Standalone Usage Guide](standalone) - Use ChReK without Dynamo Platform
-- [ChReK Helm Chart README](../../../deploy/helm/charts/chrek/README) - Chart configuration
-- [Installation Guide](../installation-guide) - Platform installation
-- [API Reference](../api-reference) - Complete CRD specifications
+- [ChReK Overview](README.md) - ChReK architecture and use cases
+- [ChReK Standalone Usage Guide](standalone.md) - Use ChReK without Dynamo Platform
+- [ChReK Helm Chart README](../../../deploy/helm/charts/chrek/README.md) - Chart configuration
+- [Installation Guide](../installation-guide.md) - Platform installation
+- [API Reference](../api-reference.md) - Complete CRD specifications
 

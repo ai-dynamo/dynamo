@@ -41,9 +41,9 @@ SGLang Multimodal <multimodal_sglang.md>
 
 | Stack | E/PD | E/P/D | EP/D | EPD | Image | Video | Audio |
 |-------|------|-------|------|-----|-------|-------|-------|
-| **[vLLM](multimodal-vllm)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
-| **[TRT-LLM](multimodal-trtllm)** | ❌ | 🚧* | ✅ | ✅ | ✅ | ❌ | ❌ |
-| **[SGLang](multimodal-sglang)** | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| **[vLLM](multimodal-vllm.md)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
+| **[TRT-LLM](multimodal-trtllm.md)** | ❌ | 🚧* | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **[SGLang](multimodal-sglang.md)** | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
 \* E/P/D supported in TRT-LLM with pre-computed embeddings only; image URL support is WIP ([PR #4668](https://github.com/ai-dynamo/dynamo/pull/4668))
 

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Planner Guide
 
-Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README). For architecture internals, see [Planner Design](/docs/design-docs/planner-design).
+Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README.md). For architecture internals, see [Planner Design](/docs/design-docs/planner-design).
 
 ## Deployment
 
@@ -450,8 +450,8 @@ For comprehensive troubleshooting including AI Configurator constraints, perform
 
 ## Related Documentation
 
-- [Planner README](README) -- Overview and quick start
-- [Planner Examples](planner-examples) -- DGDR YAML examples and sample configurations
+- [Planner README](README.md) -- Overview and quick start
+- [Planner Examples](planner-examples.md) -- DGDR YAML examples and sample configurations
 - [Planner Design](/docs/design-docs/planner-design) -- Architecture deep-dive for contributors
 - [DGDR API Reference](/docs/kubernetes/api-reference)
 - [Pre-Deployment Profiling](/docs/components/profiler/profiler-guide)

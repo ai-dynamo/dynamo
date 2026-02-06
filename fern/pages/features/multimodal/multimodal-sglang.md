@@ -36,7 +36,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 
 ## Deployment Patterns
 
-SGLang supports EPD, E/PD, and E/P/D patterns. See [Multimodal Architecture Patterns](README#architecture-patterns) for detailed explanations.
+SGLang supports EPD, E/PD, and E/P/D patterns. See [Multimodal Architecture Patterns](README.md#architecture-patterns) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
@@ -139,7 +139,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Workflow
 
-The `MultimodalEncodeWorker` downloads and encodes the image and passes the embeddings to the MultimodalWorker. The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface. The `MultimodalWorker` then prefills and decodes the prompt in the same engine, as in the [LLM aggregated serving](../../backends/sglang/README) example. Only the processor is registered to the Dynamo frontend as an available endpoint. Workers do NOT register - they are internal components and communicate via NATS.
+The `MultimodalEncodeWorker` downloads and encodes the image and passes the embeddings to the MultimodalWorker. The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface. The `MultimodalWorker` then prefills and decodes the prompt in the same engine, as in the [LLM aggregated serving](../../backends/sglang/README.md) example. Only the processor is registered to the Dynamo frontend as an available endpoint. Workers do NOT register - they are internal components and communicate via NATS.
 
 ```mermaid
 flowchart LR

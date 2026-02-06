@@ -118,7 +118,7 @@ spec:
 ```
 
 **For complete field specifications, validation rules, and all options, see:**
-📖 [DynamoModel API Reference](../api-reference#dynamomodel)
+📖 [DynamoModel API Reference](../api-reference.md#dynamomodel)
 
 ### Status Summary
 
@@ -605,7 +605,7 @@ The operator automatically handles all service discovery - you don't configure s
 
 For complete field specifications, validation rules, and detailed type definitions, see:
 
-**📖 [Dynamo CRD API Reference](../api-reference#dynamomodel)**
+**📖 [Dynamo CRD API Reference](../api-reference.md#dynamomodel)**
 
 ## Summary
 
@@ -619,5 +619,5 @@ DynamoModel provides declarative model management for Dynamo deployments:
 **Next Steps:**
 - Try the [Quick Start](#quick-start) example
 - Explore [Common Use Cases](#common-use-cases)
-- Check the [API Reference](../api-reference#dynamomodel) for advanced configuration
+- Check the [API Reference](../api-reference.md#dynamomodel) for advanced configuration
 

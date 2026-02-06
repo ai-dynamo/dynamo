@@ -34,12 +34,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../design-docs/disagg-serving) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| [**KV-Aware Routing**](../../components/router/README) | ✅ |  |
-| [**SLA-Based Planner**](../../components/planner/planner-guide) | ✅ |  |
-| [**Multimodal Support**](../../features/multimodal/multimodal-sglang) | ✅ |  |
-| [**KVBM**](../../components/kvbm/README) | ❌ | Planned |
+| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
+| [**Multimodal Support**](../../features/multimodal/multimodal-sglang.md) | ✅ |  |
+| [**KVBM**](../../components/kvbm/README.md) | ❌ | Planned |
 
 
 ## Dynamo SGLang Integration
@@ -82,7 +82,7 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 > [!WARNING]
 > ⚠️ SGLang backend currently does not support cancellation during remote prefill phase in disaggregated mode.
 
-For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation) documentation.
+For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
 
 ## Installation
 
@@ -208,7 +208,7 @@ curl localhost:8000/v1/embeddings \
 
 ### Disaggregated serving
 
-See [SGLang Disaggregation](sglang-disaggregation) to learn more about how sglang and dynamo handle disaggregated serving.
+See [SGLang Disaggregation](sglang-disaggregation.md) to learn more about how sglang and dynamo handle disaggregated serving.
 
 
 ```bash
@@ -258,7 +258,7 @@ curl localhost:8000/v1/chat/completions \
 We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes](../../../examples/backends/sglang/deploy/README)**
+- **[Deploying Dynamo with SGLang on Kubernetes](../../../examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](../../../examples/backends/sglang/slurm-jobs/README)**
+- **[Deploying Dynamo with SGLang on SLURM](../../../examples/backends/sglang/slurm-jobs/README.md)**

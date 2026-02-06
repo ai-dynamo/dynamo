@@ -20,7 +20,7 @@ Use ChReK as part of the Dynamo platform for automatic checkpoint management:
 - Seamless integration with DynamoGraphDeployment CRDs
 - Built-in autoscaling with fast restore
 
-📖 **[Read the Dynamo Integration Guide →](dynamo)**
+📖 **[Read the Dynamo Integration Guide →](dynamo.md)**
 
 ### 2. Standalone (Without Dynamo)
 
@@ -29,7 +29,7 @@ Use ChReK independently in your own Kubernetes applications:
 - Build your own restore-enabled container images
 - Full control over checkpoint lifecycle
 
-📖 **[Read the Standalone Usage Guide →](standalone)**
+📖 **[Read the Standalone Usage Guide →](standalone.md)**
 
 ## Architecture
 
@@ -60,8 +60,8 @@ helm install chrek nvidia/chrek \
 
 ### Choose Your Integration Path
 
-- **Using Dynamo Platform?** → Follow the [Dynamo Integration Guide](dynamo)
-- **Using standalone?** → Follow the [Standalone Usage Guide](standalone)
+- **Using Dynamo Platform?** → Follow the [Dynamo Integration Guide](dynamo.md)
+- **Using standalone?** → Follow the [Standalone Usage Guide](standalone.md)
 
 ## Key Features
 
@@ -111,9 +111,9 @@ ChReK is best suited for:
 ## Documentation
 
 ### Getting Started
-- [Dynamo Integration Guide](dynamo) - Using ChReK with Dynamo Platform
-- [Standalone Usage Guide](standalone) - Using ChReK independently
-- [ChReK Helm Chart README](../../../deploy/helm/charts/chrek/README) - Helm chart configuration
+- [Dynamo Integration Guide](dynamo.md) - Using ChReK with Dynamo Platform
+- [Standalone Usage Guide](standalone.md) - Using ChReK independently
+- [ChReK Helm Chart README](../../../deploy/helm/charts/chrek/README.md) - Helm chart configuration
 
 ### Related Documentation
 - [CRIU Documentation](https://criu.org/Main_Page) - Upstream CRIU docs
@@ -145,8 +145,8 @@ ChReK is best suited for:
 - Check for `PSM3_DISABLED=1` and `GLOO_SOCKET_IFNAME=lo` environment variables
 
 For detailed troubleshooting, see:
-- [Dynamo Integration Guide - Troubleshooting](dynamo#troubleshooting)
-- [Standalone Guide - Troubleshooting](standalone#troubleshooting)
+- [Dynamo Integration Guide - Troubleshooting](dynamo.md#troubleshooting)
+- [Standalone Guide - Troubleshooting](standalone.md#troubleshooting)
 
 ## Contributing
 

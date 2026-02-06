@@ -24,7 +24,7 @@ KVBM offers:
 - Support for **block lifecycles** (allocate → register → match) with event-based state transitions
 - Integration with **[NIXL](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)**, a dynamic memory exchange layer for remote registration, sharing, and access of memory blocks
 
-> **Get started:** See the [KVBM Guide](kvbm-guide) for installation and deployment instructions.
+> **Get started:** See the [KVBM Guide](kvbm-guide.md) for installation and deployment instructions.
 
 ## When to Use KV Cache Offloading
 
@@ -64,15 +64,15 @@ KVBM has three primary logical layers:
 
 **NIXL Layer** — The bottom layer provides unified support for all data and storage transactions. NIXL enables P2P GPU transfers, RDMA and NVLink remote memory sharing, dynamic block registration and metadata exchange, and provides a plugin interface for storage backends including block memory (GPU HBM, Host DRAM, Remote DRAM, Local SSD), local/remote filesystems, object stores, and cloud storage.
 
-> **Learn more:** See the [KVBM Design Document](../../design-docs/kvbm-design) for detailed architecture, components, and data flows.
+> **Learn more:** See the [KVBM Design Document](../../design-docs/kvbm-design.md) for detailed architecture, components, and data flows.
 
 ## Next Steps
 
-- **[KVBM Guide](kvbm-guide)** — Installation, configuration, and deployment instructions
-- **[KVBM Design](../../design-docs/kvbm-design)** — Architecture deep dive, components, and data flows
-- **[LMCache Integration](../../integrations/lmcache-integration)** — Use LMCache with Dynamo vLLM backend
-- **[FlexKV Integration](../../integrations/flexkv-integration)** — Use FlexKV for KV cache management
-- **[SGLang HiCache](../../integrations/sglang-hicache)** — Enable SGLang's hierarchical cache with NIXL
+- **[KVBM Guide](kvbm-guide.md)** — Installation, configuration, and deployment instructions
+- **[KVBM Design](../../design-docs/kvbm-design.md)** — Architecture deep dive, components, and data flows
+- **[LMCache Integration](../../integrations/lmcache-integration.md)** — Use LMCache with Dynamo vLLM backend
+- **[FlexKV Integration](../../integrations/flexkv-integration.md)** — Use FlexKV for KV cache management
+- **[SGLang HiCache](../../integrations/sglang-hicache.md)** — Enable SGLang's hierarchical cache with NIXL
 - **[NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)** — NIXL communication library details
 
 ```{toctree}

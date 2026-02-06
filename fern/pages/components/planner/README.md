@@ -19,7 +19,7 @@ limitations under the License.
 
 The Planner monitors system performance and automatically scales prefill/decode workers to meet latency SLAs. It runs as a component inside the Dynamo inference graph on Kubernetes.
 
-> **New to the Planner?** Start with the [SLA Planner Quick Start Guide](planner-guide) for a complete workflow including profiling and deployment.
+> **New to the Planner?** Start with the [SLA Planner Quick Start Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
 ## Feature Matrix
 
@@ -57,7 +57,7 @@ The fastest path to a planner-enabled deployment is through a DynamoGraphDeploym
 kubectl apply -f benchmarks/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
 ```
 
-This automatically profiles your model and deploys with the SLA planner. See [SLA Planner Guide](planner-guide) for the full workflow.
+This automatically profiles your model and deploys with the SLA planner. See [SLA Planner Guide](planner-guide.md) for the full workflow.
 
 ### Deploy with DGD (Manual)
 
@@ -72,11 +72,11 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 
 | Document | Description |
 |----------|-------------|
-| [Planner Guide](planner-guide) | Deployment, configuration, integration, troubleshooting |
-| [Planner Examples](planner-examples) | DGDR YAML examples, sample configurations, advanced patterns |
-| [SLA Planner Guide](planner-guide) | End-to-end DGDR workflow: define SLAs, profile, deploy, monitor |
-| [SLA-based Planner](planner-guide) | Scaling algorithm, correction factors, load prediction details |
-| [Load-based Planner](README) | Legacy load-based scaling (deprecated) |
+| [Planner Guide](planner-guide.md) | Deployment, configuration, integration, troubleshooting |
+| [Planner Examples](planner-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
+| [SLA Planner Guide](planner-guide.md) | End-to-end DGDR workflow: define SLAs, profile, deploy, monitor |
+| [SLA-based Planner](planner-guide.md) | Scaling algorithm, correction factors, load prediction details |
+| [Load-based Planner](README.md) | Legacy load-based scaling (deprecated) |
 | [SLA-Driven Profiling](/docs/components/profiler/profiler-guide) | Pre-deployment profiling process and configuration |
 | [Planner Design](/docs/design-docs/planner-design) | Architecture deep-dive for contributors |
 

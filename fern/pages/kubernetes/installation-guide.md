@@ -34,7 +34,7 @@ Determine your cluster environment:
 - Can use cluster-wide operator (default)
 
 **Local Development** (Minikube, testing):
-- See [Minikube Setup](deployment/minikube) first, then follow installation steps below
+- See [Minikube Setup](deployment/minikube.md) first, then follow installation steps below
 
 To check if CRDs already exist:
 ```bash
@@ -55,7 +55,7 @@ kubectl get clusterrolebinding -o json | \
 
 ## Installation Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/helm/charts/platform/README).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/helm/charts/platform/README.md).
 
 **Path A: Pre-built Artifacts**
 - Use case: Production deployment, shared or dedicated clusters
@@ -124,9 +124,9 @@ Before proceeding, run the pre-deployment check script to verify your cluster me
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](../../deploy/pre-deployment/README) for details.
+This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](../../deploy/pre-deployment/README.md) for details.
 
-> **No cluster?** See [Minikube Setup](deployment/minikube) for local development.
+> **No cluster?** See [Minikube Setup](deployment/minikube.md) for local development.
 
 **Estimated installation time:** 5-30 minutes depending on path
 
@@ -183,7 +183,7 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 >   - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
 > - These must be installed manually before deploying multinode workloads with LWS.
 >
-> See the [Multinode Deployment Guide](./deployment/multinode-deployment) for details on orchestrator selection.
+> See the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for details on orchestrator selection.
 
 > [!TIP]
 > By default, Model Express Server is not used.
@@ -286,13 +286,13 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](../../examples/backends/vllm/deploy/README)
-   - [SGLang Deployments](../../examples/backends/sglang/deploy/README)
-   - [TensorRT-LLM Deployments](../../examples/backends/trtllm/deploy/README)
+   - [vLLM Deployments](../../examples/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](../../examples/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](../../examples/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
-   - [Set up Prometheus & Grafana](./observability/metrics)
-   - [SLA Planner Guide](../components/planner/planner-guide) (for SLA-aware scheduling and autoscaling)
+   - [Set up Prometheus & Grafana](./observability/metrics.md)
+   - [SLA Planner Guide](../components/planner/planner-guide.md) (for SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
 
@@ -379,7 +379,7 @@ kubectl delete crd <crd-name>
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../deploy/helm/charts/platform/README)
-- [Create custom deployments](./deployment/create-deployment)
-- [Dynamo Operator details](./dynamo-operator)
+- [Helm Chart Configuration](../../deploy/helm/charts/platform/README.md)
+- [Create custom deployments](./deployment/create-deployment.md)
+- [Dynamo Operator details](./dynamo-operator.md)
 - [Model Express Server details](https://github.com/ai-dynamo/modelexpress)

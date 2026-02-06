@@ -8,7 +8,7 @@ The Dynamo Operator exposes Prometheus metrics for monitoring its own health and
 
 ## Prerequisites
 
-The operator metrics feature requires the same monitoring infrastructure as application metrics. For detailed setup instructions, see the [Kubernetes Metrics Guide](./metrics#prerequisites).
+The operator metrics feature requires the same monitoring infrastructure as application metrics. For detailed setup instructions, see the [Kubernetes Metrics Guide](./metrics.md#prerequisites).
 
 **Quick checklist:**
 - ✅ kube-prometheus-stack installed (for ServiceMonitor support)
@@ -199,7 +199,7 @@ When "All" is selected for Resource Type, all panels will show data for all five
 
 ## Accessing Metrics Directly
 
-For instructions on accessing Prometheus and Grafana, see the [Kubernetes Metrics Guide](./metrics#viewing-the-metrics).
+For instructions on accessing Prometheus and Grafana, see the [Kubernetes Metrics Guide](./metrics.md#viewing-the-metrics).
 
 Once you have access to Prometheus, you can query operator metrics directly:
 
@@ -259,6 +259,6 @@ kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n moni
 
 ## Related Documentation
 
-- [Kubernetes Metrics Guide](./metrics) - Application metrics for frontends and workers
-- [Dynamo Operator Guide](../dynamo-operator) - Operator architecture and deployment modes
-- [Operator Webhooks](../webhooks) - Webhook validation details
+- [Kubernetes Metrics Guide](./metrics.md) - Application metrics for frontends and workers
+- [Dynamo Operator Guide](../dynamo-operator.md) - Operator architecture and deployment modes
+- [Operator Webhooks](../webhooks.md) - Webhook validation details

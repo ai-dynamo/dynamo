@@ -323,6 +323,6 @@ If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling:
 
 ## Related Documentation
 
-- [Health Checks](../observability/health-checks) - Worker health monitoring
-- [Metrics](../observability/metrics) - Available Prometheus metrics
-- [Request Migration](request-migration) - Handling failed requests
+- [Health Checks](../observability/health-checks.md) - Worker health monitoring
+- [Metrics](../observability/metrics.md) - Available Prometheus metrics
+- [Request Migration](request-migration.md) - Handling failed requests

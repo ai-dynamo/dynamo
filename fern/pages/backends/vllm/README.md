@@ -35,14 +35,14 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | vLLM | Notes |
 |---------|------|-------|
-| [**Disaggregated Serving**](../../../docs/design-docs/disagg-serving) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/design-docs/disagg-serving#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../components/router/README) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/components/planner/planner-guide) | ✅ |  |
-| [**Load Based Planner**](../../../docs/components/planner/README) | 🚧 | WIP |
-| [**KVBM**](../../../docs/components/kvbm/README) | ✅ |  |
-| [**LMCache**](../../integrations/lmcache-integration) | ✅ |  |
-| [**Prompt Embeddings**](./prompt-embeddings) | ✅ | Requires `--enable-prompt-embeds` flag |
+| [**Disaggregated Serving**](../../../docs/design-docs/disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/components/planner/planner-guide.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/components/planner/README.md) | 🚧 | WIP |
+| [**KVBM**](../../../docs/components/kvbm/README.md) | ✅ |  |
+| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
+| [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
 
@@ -144,13 +144,13 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
 This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
 
-**Guide:** [Speculative Decoding Quickstart](../../features/speculative-decoding/speculative-decoding-vllm)
+**Guide:** [Speculative Decoding Quickstart](../../features/speculative-decoding/speculative-decoding-vllm.md)
 
-> **See also:** [Speculative Decoding Feature Overview](../../features/speculative-decoding/README) for cross-backend documentation.
+> **See also:** [Speculative Decoding Feature Overview](../../features/speculative-decoding/README.md) for cross-backend documentation.
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md)
 
 ## Configuration
 
@@ -179,11 +179,11 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [Router Design](../../design-docs/router-design#deterministic-event-ids) on deterministic event IDs.
+See the high-level notes in [Router Design](../../design-docs/router-design.md#deterministic-event-ids) on deterministic event IDs.
 
 ## Request Migration
 
-Dynamo supports [request migration](../../../docs/fault-tolerance/request-migration) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../../docs/fault-tolerance/request-migration) documentation for configuration details.
+Dynamo supports [request migration](../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../../docs/fault-tolerance/request-migration.md) documentation for configuration details.
 
 ## Request Cancellation
 
@@ -196,4 +196,4 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | **Aggregated** | ✅ | ✅ |
 | **Disaggregated** | ✅ | ✅ |
 
-For more details, see the [Request Cancellation Architecture](../../../docs/fault-tolerance/request-cancellation) documentation.
+For more details, see the [Request Cancellation Architecture](../../../docs/fault-tolerance/request-cancellation.md) documentation.

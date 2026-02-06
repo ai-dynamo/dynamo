@@ -44,11 +44,11 @@ KVBM can be used independently without using the rest of the Dynamo stack:
 pip install kvbm
 ```
 
-See the [support matrix](../../reference/support-matrix) for version compatibility.
+See the [support matrix](../../reference/support-matrix.md) for version compatibility.
 
 ### Build from Source
 
-To build KVBM from source, see the detailed instructions in the [KVBM bindings README](../../../lib/bindings/kvbm/README#build-from-source).
+To build KVBM from source, see the detailed instructions in the [KVBM bindings README](../../../lib/bindings/kvbm/README.md#build-from-source).
 
 ## Run KVBM in Dynamo with vLLM
 
@@ -190,7 +190,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-> **Learn more:** See the [SGLang HiCache Integration Guide](../../integrations/sglang-hicache) for detailed configuration, deployment examples, and troubleshooting.
+> **Learn more:** See the [SGLang HiCache Integration Guide](../../integrations/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
 
 ## Disaggregated Serving with KVBM
 
@@ -413,8 +413,8 @@ uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 
 ## See Also
 
-- [KVBM Overview](README) for a quick overview of KV Caching, KVBM and its architecture
-- [KVBM Design](../../design-docs/kvbm-design) for a deep dive into KVBM architecture
-- [LMCache Integration](../../integrations/lmcache-integration)
-- [FlexKV Integration](../../integrations/flexkv-integration)
-- [SGLang HiCache](../../integrations/sglang-hicache)
+- [KVBM Overview](README.md) for a quick overview of KV Caching, KVBM and its architecture
+- [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
+- [LMCache Integration](../../integrations/lmcache-integration.md)
+- [FlexKV Integration](../../integrations/flexkv-integration.md)
+- [SGLang HiCache](../../integrations/sglang-hicache.md)

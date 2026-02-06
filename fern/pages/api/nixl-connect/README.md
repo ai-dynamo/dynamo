@@ -38,7 +38,7 @@ The `dynamo.nixl_connect` library can be imported by any Dynamo container hosted
 import dynamo.nixl_connect
 ```
 
-All operations using the NIXL Connect library begin with the [`Connector`](connector) class and the type of operation required.
+All operations using the NIXL Connect library begin with the [`Connector`](connector.md) class and the type of operation required.
 There are four types of supported operations:
 
  1. **Register local readable memory**:
@@ -81,9 +81,9 @@ sequenceDiagram
 
 ### Generic Example
 
-In the diagram below, Local creates a [`WritableOperation`](writable-operation) intended to receive data from Remote.
+In the diagram below, Local creates a [`WritableOperation`](writable-operation.md) intended to receive data from Remote.
 Local then sends metadata about the requested operation to Remote.
-Remote then uses the metadata to create a [`WriteOperation`](write-operation) which will perform the GPU Direct RDMA memory transfer, when available, from Remote's GPU memory to Local's GPU memory.
+Remote then uses the metadata to create a [`WriteOperation`](write-operation.md) which will perform the GPU Direct RDMA memory transfer, when available, from Remote's GPU memory to Local's GPU memory.
 
 ```mermaid
 ---
@@ -103,7 +103,7 @@ flowchart LR
 
 ### Multimodal Example
 
-In the case of the [Dynamo Multimodal Disaggregated Example](../../features/multimodal/multimodal-vllm):
+In the case of the [Dynamo Multimodal Disaggregated Example](../../features/multimodal/multimodal-vllm.md):
 
  1. The HTTP frontend accepts a text prompt and a URL to an image.
 
@@ -154,29 +154,29 @@ flowchart LR
 #### Code Examples
 
 See [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) or [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) from our Multimodal example,
-for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable-operation),
+for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable-operation.md),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
 See [MultimodalEncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) from our Multimodal example,
-for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor),
-a [`WriteOperation`](write-operation) is created using the metadata provided by the requesting worker,
+for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md),
+a [`WriteOperation`](write-operation.md) is created using the metadata provided by the requesting worker,
 and the worker awaits for the data transfer to complete for yielding a response.
 
 
 ## Python Classes
 
-  - [Connector](connector)
-  - [Descriptor](descriptor)
-  - [Device](device)
-  - [ReadOperation](read-operation)
-  - [ReadableOperation](readable-operation)
-  - [WritableOperation](writable-operation)
-  - [WriteOperation](write-operation)
+  - [Connector](connector.md)
+  - [Descriptor](descriptor.md)
+  - [Device](device.md)
+  - [ReadOperation](read-operation.md)
+  - [ReadableOperation](readable-operation.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)
 
 
 ## References
 
   - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo) @ [GitHub](https://github.com/ai-dynamo/dynamo)
   - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0) @ [GitHub](https://github.com/ai-dynamo/nixl)
-  - [Dynamo Multimodal Example](../../..//examples/multimodal)
+  - [Dynamo Multimodal Example](../../..//examples/multimodal.md)
   - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect)

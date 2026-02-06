@@ -29,7 +29,7 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 
 ### Start Observability Stack
 
-For collecting and visualizing logs with Grafana Loki (Kubernetes), or viewing trace context in logs alongside Grafana Tempo, start the observability stack. See [Observability Getting Started](README#getting-started-quickly) for instructions.
+For collecting and visualizing logs with Grafana Loki (Kubernetes), or viewing trace context in logs alongside Grafana Tempo, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
 
 ### Enable Structured Logging
 
@@ -100,7 +100,7 @@ When `DYN_LOGGING_JSONL` is enabled, all logs include `trace_id` and `span_id` f
 
 The trace and span information uses the OpenTelemetry format and libraries, which means the IDs are compatible with OpenTelemetry-based tracing backends like Tempo or Jaeger if you later choose to enable trace export.
 
-**Note:** This section has overlap with [Distributed Tracing with Tempo](tracing). For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing).
+**Note:** This section has overlap with [Distributed Tracing with Tempo](tracing.md). For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing.md).
 
 ### Configuration for Logging
 
@@ -262,7 +262,7 @@ Notice how the `x_request_id` field appears in all log entries, alongside the `t
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime)
-- [Dynamo Architecture Overview](../design-docs/architecture)
-- [Backend Guide](../development/backend-guide)
-- [Log Aggregation in Kubernetes](../kubernetes/observability/logging)
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
+- [Dynamo Architecture Overview](../design-docs/architecture.md)
+- [Backend Guide](../development/backend-guide.md)
+- [Log Aggregation in Kubernetes](../kubernetes/observability/logging.md)

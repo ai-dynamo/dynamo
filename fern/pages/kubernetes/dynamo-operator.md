@@ -108,11 +108,11 @@ Dynamo provides the following Custom Resources:
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](./api-reference)**
+**📖 [Dynamo CRD API Reference](./api-reference.md)**
 
 For a user-focused guide on deploying and managing models with DynamoModel, see:
 
-**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide)**
+**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 
 ## Webhooks
 
@@ -127,7 +127,7 @@ The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validat
 
 For complete documentation on webhooks, certificate management, and troubleshooting, see:
 
-**📖 [Webhooks Guide](./webhooks)**
+**📖 [Webhooks Guide](./webhooks.md)**
 
 ## Observability
 
@@ -153,7 +153,7 @@ A pre-built Grafana dashboard is available for visualizing operator metrics. The
 
 For complete setup instructions and metrics reference, see:
 
-**📖 [Operator Metrics Guide](./observability/operator-metrics)**
+**📖 [Operator Metrics Guide](./observability/operator-metrics.md)**
 
 ## Installation
 
@@ -199,7 +199,7 @@ helm install dynamo-platform ./platform/ \
   --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 ```
 
-For detailed installation options, see the [Installation Guide](./installation-guide)
+For detailed installation options, see the [Installation Guide](./installation-guide.md)
 
 
 ## Development

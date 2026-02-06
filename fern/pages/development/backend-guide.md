@@ -114,7 +114,7 @@ In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.
 
 A Python worker may need to be shut down promptly, for example when the node running the worker is to be reclaimed and there isn't enough time to complete all ongoing requests before the shutdown deadline.
 
-In such cases, you can signal incomplete responses by raising a `GeneratorExit` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
+In such cases, you can signal incomplete responses by raising a `GeneratorExit` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
 
 > [!WARNING]
 > We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
@@ -137,7 +137,7 @@ class RequestHandler:
 
 When `GeneratorExit` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
 
-For more information about how request migration works, see the [Request Migration Architecture](../fault-tolerance/request-migration) documentation.
+For more information about how request migration works, see the [Request Migration Architecture](../fault-tolerance/request-migration.md) documentation.
 
 ## Request Cancellation
 
@@ -159,4 +159,4 @@ class RequestHandler:
 
 The context parameter is optional - if your generate method doesn't include it in its signature, Dynamo will call your method without the context argument.
 
-For detailed information about request cancellation, including async cancellation monitoring and context propagation patterns, see the [Request Cancellation Architecture](../fault-tolerance/request-cancellation) documentation.
+For detailed information about request cancellation, including async cancellation monitoring and context propagation patterns, see the [Request Cancellation Architecture](../fault-tolerance/request-cancellation.md) documentation.

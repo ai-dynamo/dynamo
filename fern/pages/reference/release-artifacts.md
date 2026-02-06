@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 This document provides a comprehensive inventory of all Dynamo release artifacts including container images, Python wheels, Helm charts, and Rust crates.
 
-> **See also:** [Support Matrix](support-matrix) for hardware and platform compatibility | [Feature Matrix](feature-matrix) for backend feature support
+> **See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support
 
 Release history in this document begins at v0.6.0.
 
@@ -75,7 +75,7 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 
 ### Container Images (NGC)
 
-> For detailed run instructions, see the [Container README](../../container/README) or backend-specific guides: [vLLM](../backends/vllm/README) | [SGLang](../backends/sglang/README) | [TensorRT-LLM](../backends/trtllm/README)
+> For detailed run instructions, see the [Container README](../../container/README.md) or backend-specific guides: [vLLM](../backends/vllm/README.md) | [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md)
 
 ```bash
 # Runtime containers
@@ -113,7 +113,7 @@ uv pip install kvbm==0.8.1
 
 ### Helm Charts (NGC)
 
-> For Kubernetes deployment instructions, see the [Kubernetes Installation Guide](../kubernetes/installation-guide).
+> For Kubernetes deployment instructions, see the [Kubernetes Installation Guide](../kubernetes/installation-guide.md).
 
 ```bash
 helm install dynamo-crds oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds --version 0.8.1
@@ -136,7 +136,7 @@ cargo add dynamo-config@0.8.1
 
 ## CUDA and Driver Requirements
 
-For detailed CUDA toolkit versions and minimum driver requirements for each container image, see the [Support Matrix](support-matrix#cuda-and-driver-requirements).
+For detailed CUDA toolkit versions and minimum driver requirements for each container image, see the [Support Matrix](support-matrix.md#cuda-and-driver-requirements).
 
 ## Known Issues
 

@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 This document provides the support matrix for Dynamo, including hardware, software and build instructions.
 
-**See also:** [Release Artifacts](release-artifacts) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix) for backend feature support
+**See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support
 
 ## Backend Dependencies
 
@@ -54,7 +54,7 @@ The following table shows the backend framework versions included with each Dyna
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
 
-For detailed artifact versions and NGC links (including container images, Python wheels, Helm charts, and Rust crates), see the [Release Artifacts](release-artifacts) page.
+For detailed artifact versions and NGC links (including container images, Python wheels, Helm charts, and Rust crates), see the [Release Artifacts](release-artifacts.md) page.
 
 ## Hardware Compatibility
 
@@ -63,7 +63,7 @@ For detailed artifact versions and NGC links (including container images, Python
 | **x86_64**           | Supported    |
 | **ARM64**            | Supported    |
 
-Dynamo provides multi-arch container images supporting both AMD64 (x86_64) and ARM64 architectures. See [Release Artifacts](release-artifacts) for available images.
+Dynamo provides multi-arch container images supporting both AMD64 (x86_64) and ARM64 architectures. See [Release Artifacts](release-artifacts.md) for available images.
 
 ### GPU Compatibility
 
@@ -117,7 +117,7 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 | | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
 | | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
 
-Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts) for availability.
+Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
 
 #### CUDA Compatibility Resources
 
@@ -144,7 +144,7 @@ For extended driver compatibility beyond the minimum versions listed above, cons
 
 ## Build Support
 
-For version-specific artifact details, installation commands, and release history, see [Release Artifacts](release-artifacts).
+For version-specific artifact details, installation commands, and release history, see [Release Artifacts](release-artifacts.md).
 
 **Dynamo** currently provides build support in the following ways:
 

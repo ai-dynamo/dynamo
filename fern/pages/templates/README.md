@@ -173,4 +173,4 @@ After adding new documentation:
 1. **Sphinx (current):** Update `docs/index.rst` or the appropriate `_sections/*.rst` file to include your new docs in the navigation
 2. **Fern (future):** Update `fern/docs.yml` with your new pages
 
-See [docs/README.md](../README) for documentation build instructions.
+See [docs/README.md](../README.md) for documentation build instructions.

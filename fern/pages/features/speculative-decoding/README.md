@@ -88,10 +88,10 @@ curl http://localhost:8000/v1/chat/completions \
 
 | Backend | Guide |
 |---------|-------|
-| vLLM | [speculative_decoding_vllm.md](./speculative-decoding-vllm) |
+| vLLM | [speculative_decoding_vllm.md](./speculative-decoding-vllm.md) |
 
 ## See Also
 
-- [vLLM Backend](../../backends/vllm/README) - Full vLLM deployment guide
-- [Disaggregated Serving](../../design-docs/disagg-serving) - Alternative optimization approach
+- [vLLM Backend](../../backends/vllm/README.md) - Full vLLM deployment guide
+- [Disaggregated Serving](../../design-docs/disagg-serving.md) - Alternative optimization approach
 - [Meta-Llama-3.1-8B-Instruct on Hugging Face](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)

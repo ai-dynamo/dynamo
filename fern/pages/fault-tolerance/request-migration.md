@@ -124,7 +124,7 @@ These metrics can be used to:
 - Alert on excessive migration rates indicating infrastructure issues
 - Track the effectiveness of fault tolerance mechanisms
 
-For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics).
+For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics.md).
 
 ## Operational Impact
 

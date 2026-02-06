@@ -361,6 +361,6 @@ There are two components of the interface:
 
 ## See Also
 
-- [KVBM Overview](../components/kvbm/README)
-- [KVBM Guide](../components/kvbm/kvbm-guide)
+- [KVBM Overview](../components/kvbm/README.md)
+- [KVBM Guide](../components/kvbm/kvbm-guide.md)
 - [NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)

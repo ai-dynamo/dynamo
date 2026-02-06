@@ -40,7 +40,7 @@ When a worker fails during request processing, Dynamo can migrate in-progress re
 - Transparently continues generation on a new worker
 - Maintains seamless token flow to clients
 
-See [Request Migration](request-migration) for details.
+See [Request Migration](request-migration.md) for details.
 
 ### Request Cancellation
 
@@ -50,7 +50,7 @@ Dynamo supports canceling in-flight requests to free computational resources:
 - Kill signals for immediate termination
 - Hierarchical cancellation propagation through request chains
 
-See [Request Cancellation](request-cancellation) for details.
+See [Request Cancellation](request-cancellation.md) for details.
 
 ### Graceful Shutdown
 
@@ -60,7 +60,7 @@ Workers handle shutdown signals (SIGTERM/SIGINT) gracefully:
 - Optionally drain in-flight requests before terminating
 - Clean up resources (engines, connections, temp files)
 
-See [Graceful Shutdown](graceful-shutdown) for details.
+See [Graceful Shutdown](graceful-shutdown.md) for details.
 
 ### Request Rejection (Load Shedding)
 
@@ -70,7 +70,7 @@ When workers are overloaded, Dynamo rejects new requests to prevent cascading fa
 - Real-time worker load monitoring
 - HTTP 503 responses with retry guidance
 
-See [Request Rejection](request-rejection) for details.
+See [Request Rejection](request-rejection.md) for details.
 
 ### Health Checks
 
@@ -80,7 +80,7 @@ Dynamo provides multiple health check mechanisms:
 - **Canary Health Checks**: Active monitoring via periodic test requests
 - **Engine Monitoring**: Automatic shutdown on engine failure detection
 
-See [Health Checks](../observability/health-checks) for details.
+See [Health Checks](../observability/health-checks.md) for details.
 
 ## Configuration Quick Reference
 
@@ -133,13 +133,13 @@ Dynamo includes a comprehensive testing framework for validating fault tolerance
 - etcd HA failover tests
 - Hardware fault injection (GPU XID, network partitions)
 
-See [Fault Tolerance Testing](testing) for details.
+See [Fault Tolerance Testing](testing.md) for details.
 
 ## Related Documentation
 
-- [Observability](../observability/README) - Metrics and monitoring
-- [Distributed Runtime](../design-docs/distributed-runtime) - Service discovery architecture
-- [Event Plane](../design-docs/event-plane) - etcd and NATS coordination
+- [Observability](../observability/README.md) - Metrics and monitoring
+- [Distributed Runtime](../design-docs/distributed-runtime.md) - Service discovery architecture
+- [Event Plane](../design-docs/event-plane.md) - etcd and NATS coordination
 
 ```{toctree}
 :hidden:

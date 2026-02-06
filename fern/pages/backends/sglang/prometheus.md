@@ -11,9 +11,9 @@ When running SGLang through Dynamo, SGLang engine metrics are automatically pass
 
 **For the complete and authoritative list of all SGLang metrics**, always refer to the [official SGLang Production Metrics documentation](https://docs.sglang.io/references/production_metrics.html).
 
-**For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics).
+**For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics.md).
 
-**For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](../../observability/prometheus-grafana).
+**For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](../../observability/prometheus-grafana.md).
 
 ## Environment Variables
 
@@ -27,7 +27,7 @@ This is a single machine example.
 
 ### Start Observability Stack
 
-For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](../../observability/README#getting-started-quickly) for instructions.
+For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](../../observability/README.md#getting-started-quickly) for instructions.
 
 ### Launch Dynamo Components
 
@@ -115,8 +115,8 @@ For the complete and authoritative list of all SGLang metrics, see the [official
 - [SGLang GitHub - Metrics Collector](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/metrics/collector.py)
 
 ### Dynamo Metrics
-- [Dynamo Metrics Guide](../../observability/metrics) - Complete documentation on Dynamo runtime metrics
-- [Prometheus and Grafana Setup](../../observability/prometheus-grafana) - Visualization setup instructions
+- [Dynamo Metrics Guide](../../observability/metrics.md) - Complete documentation on Dynamo runtime metrics
+- [Prometheus and Grafana Setup](../../observability/prometheus-grafana.md) - Visualization setup instructions
 - Dynamo runtime metrics (prefixed with `dynamo_*`) are available at the same `/metrics` endpoint alongside SGLang metrics
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

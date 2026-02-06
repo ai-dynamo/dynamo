@@ -161,14 +161,14 @@ Planner is deployed as a service component within your DGD. It:
 
 **Deployment:**
 
-The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../components/planner/planner-guide) for complete instructions.
+The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../components/planner/planner-guide.md) for complete instructions.
 
 Example configurations with Planner:
 - `examples/backends/vllm/deploy/disagg_planner.yaml`
 - `examples/backends/sglang/deploy/disagg_planner.yaml`
 - `examples/backends/trtllm/deploy/disagg_planner.yaml`
 
-For more details, see the [SLA Planner documentation](../components/planner/planner-guide).
+For more details, see the [SLA Planner documentation](../components/planner/planner-guide.md).
 
 ## Autoscaling with Kubernetes HPA
 
@@ -216,7 +216,7 @@ spec:
 
 Dynamo exports several metrics useful for autoscaling. These are available at the `/metrics` endpoint on each frontend pod.
 
-> **See also**: For a complete list of all Dynamo metrics, see the [Metrics Reference](../observability/metrics). For Prometheus and Grafana setup, see the [Prometheus and Grafana Setup Guide](../observability/prometheus-grafana).
+> **See also**: For a complete list of all Dynamo metrics, see the [Metrics Reference](../observability/metrics.md). For Prometheus and Grafana setup, see the [Prometheus and Grafana Setup Guide](../observability/prometheus-grafana.md).
 
 #### Available Dynamo Metrics
 
@@ -731,7 +731,7 @@ If you see unstable scaling:
 - [Kubernetes HPA Documentation](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)
 - [KEDA Documentation](https://keda.sh/)
 - [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
-- [Planner Documentation](../components/planner/planner-guide)
-- [Dynamo Metrics Reference](../observability/metrics)
-- [Prometheus and Grafana Setup](../observability/prometheus-grafana)
+- [Planner Documentation](../components/planner/planner-guide.md)
+- [Dynamo Metrics Reference](../observability/metrics.md)
+- [Prometheus and Grafana Setup](../observability/prometheus-grafana.md)
 

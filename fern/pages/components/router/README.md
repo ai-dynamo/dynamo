@@ -73,17 +73,17 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | `--no-kv-events` | `DYN_KV_EVENTS=false` | `true` |
 | `--kv-overlap-score-weight` | `DYN_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
 
-For complete K8s examples and advanced configuration, see [K8s Examples](router-examples#k8s-examples).
+For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples).
 
-For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing).
+For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
-For more configuration options and tuning guidelines, see the [Router Guide](router-guide).
+For more configuration options and tuning guidelines, see the [Router Guide](router-guide.md).
 
 ## Prerequisites and Limitations
 
 **Requirements:**
 - **Dynamic endpoints only**: KV router requires `register_llm()` with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
-- Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../../development/backend-guide))
+- Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../../development/backend-guide.md))
 - You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
 
 **Multimodal Support:**
@@ -98,9 +98,9 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 
 ## Next Steps
 
-- **[Router Guide](router-guide)**: Deep dive into KV cache routing, configuration, disaggregated serving, and tuning
-- **[Router Examples](router-examples)**: Python API usage, K8s examples, and custom routing patterns
-- **[Router Design](../../design-docs/router-design)**: Architecture details, algorithms, and event transport modes
+- **[Router Guide](router-guide.md)**: Deep dive into KV cache routing, configuration, disaggregated serving, and tuning
+- **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
+- **[Router Design](../../design-docs/router-design.md)**: Architecture details, algorithms, and event transport modes
 
 ```{toctree}
 :hidden:

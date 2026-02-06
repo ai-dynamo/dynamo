@@ -39,7 +39,7 @@ This starts an OpenAI-compatible HTTP server with integrated preprocessing and r
 python -m dynamo.frontend --kserve-grpc-server
 ```
 
-See the [Frontend Guide](frontend-guide) for KServe-specific configuration and message formats.
+See the [Frontend Guide](frontend-guide.md) for KServe-specific configuration and message formats.
 
 ### Kubernetes
 
@@ -71,14 +71,14 @@ spec:
 | `--kserve-grpc-server` | false | Enable KServe gRPC server |
 | `--router-mode` | `round_robin` | Routing strategy: `round_robin`, `random`, `kv` |
 
-See the [Frontend Guide](frontend-guide) for full configuration options.
+See the [Frontend Guide](frontend-guide.md) for full configuration options.
 
 ## Next Steps
 
 | Document | Description |
 |----------|-------------|
-| [Frontend Guide](frontend-guide) | KServe gRPC configuration and integration |
-| [Router Documentation](../router/README) | KV-aware routing configuration |
+| [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
+| [Router Documentation](../router/README.md) | KV-aware routing configuration |
 
 ```{toctree}
 :hidden:

@@ -30,17 +30,17 @@ docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-observability.yml up -d
 ```
 
-For detailed setup instructions and configuration, see [Prometheus + Grafana Setup](prometheus-grafana).
+For detailed setup instructions and configuration, see [Prometheus + Grafana Setup](prometheus-grafana.md).
 
 ## Observability Documentations
 
 | Guide | Description | Environment Variables to Control |
 |-------|-------------|----------------------------------|
-| [Metrics](metrics) | Available metrics reference | `DYN_SYSTEM_PORT`† |
-| [Operator Metrics (Kubernetes)](../kubernetes/observability/operator-metrics) | Operator controller and webhook metrics for Kubernetes | N/A (configured via Helm) |
-| [Health Checks](health-checks) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
-| [Tracing](tracing) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
-| [Logging](logging) | Structured logging configuration | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`† |
+| [Metrics](metrics.md) | Available metrics reference | `DYN_SYSTEM_PORT`† |
+| [Operator Metrics (Kubernetes)](../kubernetes/observability/operator-metrics.md) | Operator controller and webhook metrics for Kubernetes | N/A (configured via Helm) |
+| [Health Checks](health-checks.md) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
+| [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
+| [Logging](logging.md) | Structured logging configuration | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`† |
 
 **Variables marked with † are shared across multiple observability systems.**
 
@@ -48,13 +48,13 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 
 | Guide | Description | Environment Variables to Control |
 |-------|-------------|----------------------------------|
-| [Metrics Developer Guide](metrics-developer-guide) | Creating custom metrics in Rust and Python | `DYN_SYSTEM_PORT`† |
+| [Metrics Developer Guide](metrics-developer-guide.md) | Creating custom metrics in Rust and Python | `DYN_SYSTEM_PORT`† |
 
 ## Kubernetes
 
-For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/).
+For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/.md).
 
-**Operator Metrics**: The Dynamo Operator running in Kubernetes exposes its own set of metrics for monitoring controller reconciliation, webhook validation, and resource inventory. See the [Operator Metrics Guide](../kubernetes/observability/operator-metrics).
+**Operator Metrics**: The Dynamo Operator running in Kubernetes exposes its own set of metrics for monitoring controller reconciliation, webhook validation, and resource inventory. See the [Operator Metrics Guide](../kubernetes/observability/operator-metrics.md).
 
 ---
 

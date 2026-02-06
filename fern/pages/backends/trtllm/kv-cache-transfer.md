@@ -23,7 +23,7 @@ In disaggregated serving architectures, KV cache must be transferred between pre
 
 ## Using NIXL for KV Cache Transfer
 
-Start the disaggregated service: See [Disaggregated Serving](./README#disaggregated) to learn how to start the deployment.
+Start the disaggregated service: See [Disaggregated Serving](./README.md#disaggregated) to learn how to start the deployment.
 
 ## Default Method: NIXL
 By default, TensorRT-LLM uses **NIXL** (NVIDIA Inference Xfer Library) with UCX (Unified Communication X) as backend for KV cache transfer between prefill and decode workers. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.

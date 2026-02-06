@@ -640,7 +640,7 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 
 ## See Also
 
-- [Profiler Examples](profiler-examples) - Complete DGDR YAML examples
+- [Profiler Examples](profiler-examples.md) - Complete DGDR YAML examples
 - [SLA Planner Guide](/docs/components/planner/planner-guide) - End-to-end deployment workflow
 - [SLA Planner Architecture](/docs/components/planner/planner-guide) - How the Planner uses profiling data
 - [DGDR API Reference](/docs/kubernetes/api-reference) - DGDR specification

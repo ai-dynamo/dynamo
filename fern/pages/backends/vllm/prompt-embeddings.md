@@ -250,5 +250,5 @@ pytest tests/integration/test_prompt_embeds_integration.py -v
 
 ## See Also
 
-- [vLLM Backend](README)
-- [vLLM Configuration](README#configuration)
+- [vLLM Backend](README.md)
+- [vLLM Configuration](README.md#configuration)

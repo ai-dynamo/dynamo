@@ -92,7 +92,7 @@ Backend workers always use `graceful_shutdown=True`, meaning they wait for in-fl
 
 - When migration is enabled at the frontend, disconnected streams from failed workers are automatically retried on healthy workers
 - Workers don't need to know about migration configuration - they simply complete their work or signal incomplete streams
-- See [Request Migration Architecture](./request-migration) for details on how migration works
+- See [Request Migration Architecture](./request-migration.md) for details on how migration works
 
 ## Resource Cleanup
 
@@ -255,6 +255,6 @@ def cleanup(self):
 
 ## Related Documentation
 
-- [Request Migration](request-migration) - How requests migrate during shutdown
-- [Request Cancellation](request-cancellation) - Canceling in-flight requests
-- [Health Checks](../observability/health-checks) - Liveness and readiness probes
+- [Request Migration](request-migration.md) - How requests migrate during shutdown
+- [Request Cancellation](request-cancellation.md) - Canceling in-flight requests
+- [Health Checks](../observability/health-checks.md) - Liveness and readiness probes

@@ -26,7 +26,7 @@ helm install prometheus -n monitoring --create-namespace prometheus-community/ku
 > The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
 
 ### Install Dynamo Operator
-Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../installation-guide) for detailed instructions on deploying the Dynamo operator.
+Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../installation-guide.md) for detailed instructions on deploying the Dynamo operator.
 Make sure to set the `dynamo-operator.dynamo.metrics.prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
 
 ```bash
@@ -77,8 +77,8 @@ This will create two components:
 - A Worker component exposing metrics on its system port
 
 Both components expose a `/metrics` endpoint following the OpenMetrics format, but with different metrics appropriate to their roles. For details about:
-- Deployment configuration: See the [vLLM README](../../backends/vllm/README)
-- Available metrics: See the [metrics guide](../../observability/metrics)
+- Deployment configuration: See the [vLLM README](../../backends/vllm/README.md)
+- Available metrics: See the [metrics guide](../../observability/metrics.md)
 
 ### Validate the Deployment
 
@@ -100,7 +100,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-For more information about validating the deployment, see the [vLLM README](../../backends/vllm/README).
+For more information about validating the deployment, see the [vLLM README](../../backends/vllm/README.md).
 
 ## Set Up Metrics Collection
 
@@ -177,7 +177,7 @@ Once logged in, find the Dynamo dashboard under General.
 
 > **Note:** The metrics described above are for Dynamo **applications** (frontends, workers). The Dynamo **Operator** itself also exposes metrics for monitoring controller reconciliation, webhook validation, and resource inventory.
 >
-> See the **[Operator Metrics Guide](operator-metrics)** for details on operator-specific metrics and the operator dashboard.
+> See the **[Operator Metrics Guide](operator-metrics.md)** for details on operator-specific metrics and the operator dashboard.
 
 ```{toctree}
 :hidden:

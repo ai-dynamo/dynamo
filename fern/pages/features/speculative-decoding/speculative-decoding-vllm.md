@@ -19,7 +19,7 @@ limitations under the License.
 
 Using Speculative Decoding with the vLLM backend.
 
-> **See also**: [Speculative Decoding Overview](./README) for cross-backend documentation.
+> **See also**: [Speculative Decoding Overview](./README.md) for cross-backend documentation.
 
 ## Prerequisites
 
@@ -33,7 +33,7 @@ This guide walks through deploying **Meta-Llama-3.1-8B-Instruct** with **Eagle3*
 
 ### Step 1: Set Up Your Docker Environment
 
-First, initialize a Docker container using the vLLM backend. See the [vLLM Quickstart Guide](../../backends/vllm/README#vllm-quick-start) for details.
+First, initialize a Docker container using the vLLM backend. See the [vLLM Quickstart Guide](../../backends/vllm/README.md#vllm-quick-start) for details.
 
 ```bash
 # Launch infrastructure services
@@ -127,6 +127,6 @@ See `examples/backends/vllm/launch/agg_spec_decoding.sh` for the full configurat
 
 | Document | Path |
 |----------|------|
-| Speculative Decoding Overview | [README.md](./README) |
-| vLLM Backend Guide | [vLLM README](../../backends/vllm/README) |
+| Speculative Decoding Overview | [README.md](./README.md) |
+| vLLM Backend Guide | [vLLM README](../../backends/vllm/README.md) |
 | Meta-Llama-3.1-8B-Instruct | [Hugging Face](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) |

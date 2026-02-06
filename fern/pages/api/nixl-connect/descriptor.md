@@ -57,7 +57,7 @@ When the descriptor is assigned to a NIXL operation, it will be automatically re
 def device(self) -> Device:
 ```
 
-Gets a reference to the [`Device`](device) that contains the buffer the descriptor represents.
+Gets a reference to the [`Device`](device.md) that contains the buffer the descriptor represents.
 
 ### `size`
 
@@ -70,11 +70,11 @@ Gets the size of the memory allocation the descriptor represents.
 
 ## Related Classes
 
-  - [Connector](connector)
-  - [Device](device)
-  - [OperationStatus](operation-status)
-  - [RdmaMetadata](rdma-metadata)
-  - [ReadOperation](read-operation)
-  - [ReadableOperation](readable-operation)
-  - [WritableOperation](writable-operation)
-  - [WriteOperation](write-operation)
+  - [Connector](connector.md)
+  - [Device](device.md)
+  - [OperationStatus](operation-status.md)
+  - [RdmaMetadata](rdma-metadata.md)
+  - [ReadOperation](read-operation.md)
+  - [ReadableOperation](readable-operation.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)

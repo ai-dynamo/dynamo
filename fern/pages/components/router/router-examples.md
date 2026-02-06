@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Router Examples
 
-For quick start instructions, see the [Router README](README). This document provides further examples for using the Dynamo Router, including Python API usage, Kubernetes deployments, and custom routing patterns.
+For quick start instructions, see the [Router README](README.md). This document provides further examples for using the Dynamo Router, including Python API usage, Kubernetes deployments, and custom routing patterns.
 
 ## Table of Contents
 
@@ -103,7 +103,7 @@ if __name__ == "__main__":
 
 ## K8s Examples
 
-For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](README#kubernetes-deployment) in the Quick Start guide.
+For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](README.md#kubernetes-deployment) in the Quick Start guide.
 
 ### Complete K8s Examples
 
@@ -113,7 +113,7 @@ For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployme
 - [Distributed inference tutorial](../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
 
 **For A/B Testing and Advanced K8s Setup:**
-See the comprehensive [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
+See the comprehensive [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
 
 ### Example with Advanced Configuration
 
@@ -270,7 +270,7 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Maximize cache reuse**: Use `best_worker()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
-See [Router Design](../../design-docs/router-design) for architecture details and the cost function algorithm.
+See [Router Design](../../design-docs/router-design.md) for architecture details and the cost function algorithm.
 
 ## KV Event Publishing for Custom Engines
 
@@ -545,6 +545,6 @@ Each event in the payload is a dictionary with `type` field (`BlockStored`, `Blo
 
 ## See Also
 
-- **[Router README](README)**: Quick start guide for the KV Router
-- **[Router Guide](router-guide)**: Configuration, tuning, and production setup
-- **[Router Design](../../design-docs/router-design)**: Architecture details and event transport modes
+- **[Router README](README.md)**: Quick start guide for the KV Router
+- **[Router Guide](router-guide.md)**: Configuration, tuning, and production setup
+- **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
