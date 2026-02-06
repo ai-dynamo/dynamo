@@ -228,7 +228,9 @@ def _get_replacement_id(model_path: str) -> int:
         logger.info(f"Got vocab_size={config.vocab_size} from AutoConfig")
         return replacement_id
     except Exception as e:
-        logger.warning(f"Failed to load model config: {e}")
+        raise RuntimeError(
+            f"Failed to get vocab_size from model config '{model_path}': {e}"
+        ) from e
 
 
 def _find_and_replace_image_tokens(

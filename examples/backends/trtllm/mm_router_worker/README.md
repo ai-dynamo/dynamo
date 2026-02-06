@@ -159,4 +159,4 @@ This is passed to `compute_block_hash_for_seq_py()` to compute MM-aware block ha
 
 ## Known Limitations
 
-- **Qwen2-VL specific**: The image token IDs are hardcoded for Qwen2-VL (original: 151655, replacement: 151937). Supporting other multimodal models requires updating these values in `mm_processor.py` and `publisher.py`.
+- **Qwen2-VL specific**: The `_compute_tokens_per_image()` logic in `mm_processor.py` currently only supports `qwen2_vl` model type. Supporting other multimodal models requires adding their visual token computation logic.

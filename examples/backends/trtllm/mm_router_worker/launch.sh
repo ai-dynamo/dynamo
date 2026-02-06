@@ -34,20 +34,15 @@ echo "HTTP Port: $HTTP_PORT"
 echo "Num Workers: $NUM_WORKERS"
 echo ""
 
-# # Ensure etcd and NATS are running
-# echo "Checking etcd and NATS..."
-# if ! docker ps | grep -q etcd; then
-#     echo "Starting etcd and NATS via docker-compose..."
-#     docker compose -f deploy/docker-compose.yml up -d
-#     sleep 5
-# fi
+# Collect PIDs for cleanup
+PIDS=()
 
-# Function to cleanup on exit
 cleanup() {
     echo "Cleaning up..."
-    pkill -f "dynamo.trtllm" || true
-    pkill -f "mm_router_worker" || true
-    pkill -f "dynamo.frontend" || true
+    for pid in "${PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    wait 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -66,6 +61,7 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
         --publish-events-and-metrics \
         --kv-block-size "$BLOCK_SIZE" \
         2>&1 | sed "s/^/[trtllm-$i] /" &
+    PIDS+=($!)
 done
 
 # Wait for workers to initialize
@@ -86,6 +82,7 @@ DYN_REQUEST_PLANE=nats python -m examples.backends.trtllm.mm_router_worker \
     --downstream-endpoint generate \
     --block-size "$BLOCK_SIZE" \
     2>&1 | sed "s/^/[mm_router] /" &
+PIDS+=($!)
 
 # Wait for router to initialize
 echo "Waiting for MM Router to initialize..."
@@ -99,6 +96,7 @@ DYN_REQUEST_PLANE=nats python -m dynamo.frontend \
     --http-port "$HTTP_PORT" \
     --router-mode round-robin \
     2>&1 | sed "s/^/[frontend] /" &
+PIDS+=($!)
 
 echo ""
 echo "=== All services started ==="
