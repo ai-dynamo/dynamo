@@ -152,7 +152,7 @@ runs:
         fi
 
         EPP_IMAGE_ARG=""
-        if [[ ${{ inputs.target == framework }} ]]; then
+        if [[ "${{ inputs.target }} == "frontend" ]]; then
           EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
         fi
 

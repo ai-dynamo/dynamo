@@ -60,7 +60,7 @@ python -m dynamo.mocker \
 
 The profile results directory should contain `selected_prefill_interpolation/` and `selected_decode_interpolation/` subdirectories with `raw_data.npz` files. This works seamlessly in Kubernetes where profile data is mounted via ConfigMap or PersistentVolume.
 
-To generate profiling data for your own model/hardware configuration, run the profiler (see [SLA-driven profiling documentation](../../../../docs/benchmarks/sla_driven_profiling.md) for details):
+To generate profiling data for your own model/hardware configuration, run the profiler (see [SLA-driven profiling documentation](../../../../docs/components/profiler/profiler_guide.md) for details):
 
 ```bash
 python benchmarks/profiler/profile_sla.py \

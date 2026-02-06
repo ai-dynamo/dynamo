@@ -806,7 +806,6 @@ class BaseWorkerHandler(ABC):
         Decode base64-encoded prompt embeddings in PyTorch format.
 
         Format: PyTorch tensor serialized with torch.save() and base64-encoded.
-        This matches NIM-LLM's implementation for compatibility.
 
         Args:
             prompt_embeds_base64: Base64-encoded PyTorch tensor

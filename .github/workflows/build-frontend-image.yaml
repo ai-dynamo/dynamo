@@ -68,21 +68,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Install system dependencies from apt
-          sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
-          # Install Rust (cargo + rustc)
-          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
-          # Make cargo available to later steps
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Install cbindgen
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install cbindgen
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:

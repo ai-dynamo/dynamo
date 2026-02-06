@@ -117,7 +117,7 @@ kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-For SLA-based autoscaling, see [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
+For SLA-based autoscaling, see [SLA Planner Guide](/docs/components/planner/planner_guide.md).
 
 ## Understanding Dynamo's Custom Resources
 
