@@ -8,6 +8,10 @@
 name: CI Test Suite
 
 on:
+  push:
+    branches:
+      - poc-dockerfile-templating
+    
   workflow_call:
     inputs:
       pipeline_type:
