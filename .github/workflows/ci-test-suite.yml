@@ -104,7 +104,7 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: amd64
-          cuda_version: ''
+          cuda_version: '12.9'
           image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -134,13 +134,9 @@ jobs:
       matrix:
         include:
           - framework: vllm
-            base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
-            runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
             cuda_version: '12.9'
           - framework: sglang
-            base_image_tag: ''
-            runtime_image_tag: ''
-            cuda_version: ''
+            cuda_version: '12.9'
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
