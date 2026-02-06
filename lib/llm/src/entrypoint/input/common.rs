@@ -83,7 +83,7 @@ pub async fn prepare_engine(
                 .await?;
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(discovery_stream, None).await;
+                inner_watch_obj.watch(discovery_stream, crate::namespace::NamespaceFilter::Global).await;
             });
             tracing::info!("Waiting for remote model..");
 

@@ -47,7 +47,7 @@ use crate::{
 };
 
 use super::ModelManager;
-use crate::namespace::{is_global_namespace, NamespaceFilter};
+use crate::namespace::NamespaceFilter;
 
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
