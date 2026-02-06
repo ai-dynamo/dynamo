@@ -102,6 +102,21 @@ redirects = {
     "multimodal/vllm": "../features/multimodal/multimodal_vllm.html",
     "multimodal/sglang": "../features/multimodal/multimodal_sglang.html",
     "multimodal/trtllm": "../features/multimodal/multimodal_trtllm.html",
+    # Component consolidation into docs/components/
+    "router/README": "../components/router/README.html",
+    "router/kv_cache_routing": "../components/router/router_guide.html",
+    "router/kv_events": "../integrations/kv_events_custom_engines.html",
+    "planner/planner_intro": "../components/planner/README.html",
+    "planner/README": "../components/planner/README.html",
+    "planner/planner_guide": "../components/planner/planner_guide.html",
+    "planner/planner_examples": "../components/planner/planner_examples.html",
+    "planner/sla_planner_quickstart": "../components/planner/planner_guide.html",
+    "planner/sla_planner": "../components/planner/planner_guide.html",
+    "planner/load_planner": "../components/planner/README.html",
+    "kvbm/kvbm_intro": "../components/kvbm/README.html",
+    "kvbm/README": "../components/kvbm/README.html",
+    "kvbm/kvbm_guide": "../components/kvbm/kvbm_guide.html",
+    "kvbm/kvbm_design": "../design_docs/kvbm_design.html",
     # Frontend migration
     "frontends/kserve": "../components/frontend/frontend_guide.html",
     # Profiler consolidation

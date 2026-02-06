@@ -19,5 +19,5 @@ limitations under the License.
 
 SLA-driven autoscaling controller for Dynamo inference graphs.
 
-- **User docs**: [docs/planner/](/docs/planner/) (deployment, configuration, examples)
+- **User docs**: [docs/planner/](/docs/components/planner/) (deployment, configuration, examples)
 - **Design docs**: [docs/design_docs/planner_design.md](/docs/design_docs/planner_design.md) (architecture, algorithms)

@@ -37,10 +37,10 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|------|-------|
 | [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
-| [**KVBM**](../../../docs/kvbm/README.md) | ✅ |  |
+| [**KV-Aware Routing**](../../../docs/components/router/router_guide.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/components/planner/planner_guide.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/components/planner/README.md) | 🚧 | WIP |
+| [**KVBM**](../../../docs/components/kvbm/README.md) | ✅ |  |
 | [**LMCache**](../../integrations/lmcache_integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
@@ -179,7 +179,7 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [KV Cache Routing](../../../docs/router/kv_cache_routing.md) on deterministic event IDs.
+See the high-level notes in [KV Cache Routing](../../../docs/components/router/router_guide.md) on deterministic event IDs.
 
 ## Request Migration
 

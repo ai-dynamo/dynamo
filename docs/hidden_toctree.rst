@@ -40,7 +40,12 @@
    agents/tool-calling.md
    development/jail_stream.md
 
-   planner/load_planner.md
+   components/planner/README.md
+   components/planner/planner_guide.md
+   components/planner/planner_examples.md
+   components/kvbm/README.md
+   components/kvbm/kvbm_guide.md
+   components/router/README.md
    fault_tolerance/README.md
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md

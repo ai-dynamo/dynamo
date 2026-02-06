@@ -52,9 +52,9 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 |---|:----:|:----------:|:--:|
 | **Best For** | High-throughput serving | Maximum performance | Broadest feature coverage |
 | [**Disaggregated Serving**](docs/design_docs/disagg_serving.md) | ✅ | ✅ | ✅ |
-| [**KV-Aware Routing**](docs/router/kv_cache_routing.md) | ✅ | ✅ | ✅ |
-| [**SLA-Based Planner**](docs/planner/sla_planner.md) | ✅ | ✅ | ✅ |
-| [**KVBM**](docs/kvbm/README.md) | 🚧 | ✅ | ✅ |
+| [**KV-Aware Routing**](docs/components/router/README.md) | ✅ | ✅ | ✅ |
+| [**SLA-Based Planner**](docs/components/planner/README.md) | ✅ | ✅ | ✅ |
+| [**KVBM**](docs/components/kvbm/README.md) | 🚧 | ✅ | ✅ |
 | [**Multimodal**](docs/features/multimodal/README.md) | ✅ | ✅ | ✅ |
 | [**Tool Calling**](docs/agents/tool-calling.md) | ✅ | ✅ | ✅ |
 
@@ -347,7 +347,7 @@ python3 -m dynamo.frontend
 Dynamo provides comprehensive benchmarking tools:
 
 - **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
-- **[SLA-Driven Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize deployments to meet SLA requirements
+- **[SLA-Driven Deployments](docs/components/planner/planner_guide.md)** – Optimize deployments to meet SLA requirements
 
 ## Frontend OpenAPI Specification
 
@@ -388,9 +388,9 @@ See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LL
 
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/router/kv_cache_routing.md
-[planner]: docs/planner/sla_planner.md
-[kvbm]: docs/kvbm/README.md
+[kv-routing]: docs/components/router/README.md
+[planner]: docs/components/planner/README.md
+[kvbm]: docs/components/kvbm/README.md
 [mm]: examples/multimodal/
 [migration]: docs/fault_tolerance/request_migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md

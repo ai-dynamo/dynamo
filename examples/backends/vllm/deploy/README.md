@@ -247,9 +247,9 @@ args:
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation_guide.md)
-- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/planner/sla_planner_quickstart.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/components/router/router_guide.md)
 
 ## Troubleshooting
 
