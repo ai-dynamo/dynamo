@@ -65,8 +65,8 @@ Quickstart
    Multimodality Support <features/multimodal/README.md>
    Tool Calling <agents/tool-calling.md>
    LoRA Adapters <features/lora/README.md>
-   Observability (Local) <_sections/observability>
-   Fault Tolerance <_sections/fault_tolerance>
+   Observability (Local) <observability/README>
+   Fault Tolerance <fault_tolerance/README>
    Writing Python Workers in Dynamo <development/backend-guide.md>
 
 .. toctree::
@@ -85,8 +85,8 @@ Quickstart
    :caption: Integrations
 
    LMCache <integrations/lmcache_integration.md>
-   FlexKV <integrations/flexkv_integration.md>
    SGLang HiCache <integrations/sglang_hicache.md>
+   FlexKV <integrations/flexkv_integration.md>
    KV Events for Custom Engines <integrations/kv_events_custom_engines.md>
 
 .. toctree::
