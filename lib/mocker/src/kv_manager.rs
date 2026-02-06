@@ -41,16 +41,20 @@ use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
+use dynamo_runtime::config::environment_names::mocker;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Env var to enable structured KV cache allocation/eviction trace logs.
-/// Set to "1" or "true" (case-insensitive) to enable. Default: off.
-const ENV_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
+/// Check the env var to enable KV cache allocation/eviction trace logs.
+static KV_CACHE_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
+    env::var(mocker::DYN_MOCKER_KV_CACHE_TRACE)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+});
 
 #[derive(Getters)]
 pub struct KvManager {
@@ -103,12 +107,6 @@ impl KvManager {
         }
     }
 
-    fn kv_cache_trace_enabled() -> bool {
-        env::var(ENV_KV_CACHE_TRACE)
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    }
-
     /// Converts stored/removed blocks into KvCacheEventData and publishes if sink is available.
     fn publish_kv_event(
         &mut self,
@@ -125,7 +123,7 @@ impl KvManager {
             return;
         };
 
-        if Self::kv_cache_trace_enabled() {
+        if *KV_CACHE_TRACE_ENABLED {
             let timestamp_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -301,19 +299,13 @@ impl KvManager {
                     "uuid_block {uuid_block:?} should exist and be unique with ref_count=1"
                 );
 
-                let (hash_ref_count, need_publish_stored) =
-                    if let Some(ref_count) = self.active_blocks.get(&hash_block) {
-                        (*ref_count, false)
-                    } else if self.inactive_blocks.remove(&hash_block) {
-                        (0, false)
-                    } else {
-                        (0, true)
-                    };
+                let hash_ref_count = self.active_blocks.get(&hash_block).copied();
+                let is_new = hash_ref_count.is_none() && !self.inactive_blocks.remove(&hash_block);
 
                 self.active_blocks
-                    .insert(hash_block.clone(), hash_ref_count + 1);
+                    .insert(hash_block.clone(), hash_ref_count.unwrap_or(0) + 1);
 
-                if need_publish_stored {
+                if is_new {
                     self.publish_kv_event(vec![*hash], &[*local_hash], *parent_hash, true);
                 }
             }
