@@ -531,10 +531,15 @@ class ManagedDeployment:
                 self._logger.info("Attempting in-cluster kubernetes config")
                 config.load_incluster_config()
                 self._in_cluster = True
-                self._logger.info("Successfully loaded in-cluster kubernetes config")
-            except Exception:
+                self._logger.info(
+                    "In-cluster config not available, using default kubeconfig (~/.kube/config)"
+                )
+            except Exception as e:
                 # Fallback to default kube config file (for local development)
-                self._logger.info("In-cluster config not available, using default kubeconfig (~/.kube/config)")
+                self._logger.warning(
+                    f"In-cluster config failed ({type(e).__name__}: {e}), "
+                    f"falling back to default kubeconfig (~/.kube/config)"
+                )
                 await config.load_kube_config()
                 self._in_cluster = False
                 self._logger.info("Successfully loaded default kubeconfig")

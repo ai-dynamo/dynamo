@@ -68,6 +68,7 @@ runs:
           --image="${IMAGE}" \
           --namespace="${NAMESPACE}" \
           -v -s \
+          --durations=10 \
           --junitxml=test-results/pytest_deploy_${FRAMEWORK}_${PROFILE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
           --log-cli-level=INFO
 

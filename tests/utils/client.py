@@ -187,7 +187,7 @@ def wait_for_model_availability(
             }
 
             timeout_val = attempt_timeouts[min(attempt, len(attempt_timeouts) - 1)]
-            logger.info(
+            logger.debug(
                 f"Testing model availability at {test_url} (attempt {attempt+1}/{max_attempts}, timeout={timeout_val}s)"
             )
             response = requests.post(test_url, json=test_payload, timeout=timeout_val)
