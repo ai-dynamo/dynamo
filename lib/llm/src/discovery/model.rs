@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! A Model represents a named model (e.g., "llama-3-70b") that may be served by
-//! one or more WorkerSets. Each WorkerSet corresponds to a namespace (deployment version).
+//! one or more WorkerSets. Each WorkerSet corresponds to a namespace.
 //!
-//! During steady state, a Model has exactly one WorkerSet. During rolling updates,
-//! it may have multiple WorkerSets with different configurations. Requests are routed
-//! to a WorkerSet selected by weighted random (proportional to worker count).
+//! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
 
 use std::sync::Arc;
 
