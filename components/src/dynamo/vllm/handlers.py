@@ -1350,8 +1350,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logger.debug(
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
-
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
 
         trace_headers = build_trace_headers(context)
 
@@ -1395,7 +1394,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params
         )
 
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1565,7 +1564,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
             )
 
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
 
         trace_headers = build_trace_headers(context)
 
