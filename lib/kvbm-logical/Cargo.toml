@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-kvbm-logical"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dynamo-tokens = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = "0.3"
+bytes = "1.10"
+bincode = { version = "2.0.1", features = ["serde", "derive"] }
+dashmap = { workspace = true }
+derive_builder = { workspace = true }
+futures = { workspace = true }
+lru = "0.16"
+parking_lot = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[features]
+testing = []
+
+[dev-dependencies]
+proptest = "1.5.0"
+rand = { workspace = true }
+rand_chacha = "0.9"
+rstest = "0.26"
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true }
