@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 from jinja2 import Environment, FileSystemLoader
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Renders dynamo Dockerfiles from templates"
@@ -44,6 +45,7 @@ def parse_args():
 def validate_args(args):
     # TODO: Add validation logic
     return
+
 
 def render(args, context, script_dir):
     env = Environment(
