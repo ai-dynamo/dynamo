@@ -87,7 +87,6 @@ redirects = {
     "guides/dynamo_run": "../reference/cli.html",
     "dynamo_glossary": "../reference/glossary.html",
     "support_matrix": "../reference/support-matrix.html",
-    "components/router/README": "../router/README.html",
     # Multimodal documentation consolidation (all redirect to features/multimodal/)
     "backends/vllm/multimodal": "../../features/multimodal/multimodal_vllm.html",
     "backends/vllm/multimodal_vllm_guide": "../../features/multimodal/multimodal_vllm.html",
