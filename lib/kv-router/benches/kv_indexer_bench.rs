@@ -827,16 +827,6 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
     // Phase 3: Pre-generate Lookup Sequences
     println!("\nPhase 3: Pre-generating Lookup Sequences");
     let expected_requests = (args.arrival_rate * args.duration as f64).ceil() as usize + 100;
-    let lookup_sequences: Vec<Vec<LocalBlockHash>> = (0..expected_requests)
-        .map(|i| {
-            let seq = &sequences[i % sequences.len()];
-            seq.local_hashes.clone()
-        })
-        .collect();
-    println!(
-        "  Pre-generated {} lookup sequences",
-        lookup_sequences.len()
-    );
 
     // Phase 4: Stress Test
     println!("\nPhase 4: Stress Test");
@@ -852,8 +842,7 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
     let mut interval = interval(Duration::from_secs_f64(1.0 / args.arrival_rate));
 
     while start.elapsed() < Duration::from_secs(args.duration) {
-        let submit_time = Instant::now();
-        let seq = lookup_sequences[request_id as usize].clone();
+        let seq = sequences[request_id as usize % sequences.len()].local_hashes.clone();
 
         // Track in-flight
         let current = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
@@ -866,6 +855,7 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
         let verbose = args.common.verbose;
 
         tokio::spawn(async move {
+            let submit_time = Instant::now();
             let result = indexer.find_matches(seq).await;
             let complete_time = Instant::now();
             in_flight_clone.fetch_sub(1, Ordering::Relaxed);
@@ -1390,6 +1380,7 @@ async fn run_stress_mode(args: StressArgs) {
 
 #[tokio::main]
 async fn main() {
+
     let cli = Cli::parse();
 
     match cli.command {
