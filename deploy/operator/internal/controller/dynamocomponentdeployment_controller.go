@@ -41,6 +41,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
+	"github.com/go-logr/logr"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -348,37 +349,16 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	logger := log.FromContext(ctx)
-
-	// desiredReplicas variable logic removed as it's handled inside generateLeaderWorkerSet via spec
-
 	anyModified := false
 
-	// We now create a SINGLE LeaderWorkerSet with Replicas = desiredReplicas
-	// instead of N LeaderWorkerSets with Replicas = 1.
-
-	// Note: We are no longer manually generating Volcano PodGroups here.
-	// We rely on the LeaderWorkerSet (and its integration with Volcano/Scheduler) to manage scheduling groups.
-	// If explicit PodGroup management is needed, it should be done via LWS features or a single aggregate PG.
-	// For this refactor, we assume one LWS is sufficient.
-
-	// Use a nil instanceID to indicate "default" / single resource mode if needed,
-	// or we just pass 0 and rely on the generator to NOT append suffix if not in a loop?
-	// Actually, let's modify generateLeaderWorkerSet to handle the "single LWS" case cleanly.
-	// We'll pass instanceID=0 but we need to ensure the name doesn't imply it's just the '0th' of many.
-	// But `generateLeaderWorkerSet` currently appends `-%d`. We should probably keep the name simple.
-
-	// Let's modify the generator call to NOT use an instance ID for the LWS name itself,
-	// or we accept that the single LWS might handle all replicas.
-
+	// Create a single LeaderWorkerSet with native replica scaling.
+	// Pass nil instanceID to indicate we want a single LWS without an index suffix.
 	leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
 			dynamoComponentDeployment:               dynamoComponentDeployment,
 			isStealingTrafficDebugModeEnabled:       false,
 			containsStealingTrafficDebugModeEnabled: false,
-			// We pass nil or a specific flag to indicate "native scaling" if we changed the signature.
-			// For now, we'll reuse the struct but maybe ignore instanceID in generator or pass 0.
-			// Let's pass 0, but we will CHANGE generateLeaderWorkerSet to NOT append 0 if we are in this mode.
-			instanceID: nil,
+			instanceID:                              nil, // nil = native scaling mode
 		})
 	})
 	if err != nil {
@@ -389,52 +369,16 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		anyModified = true
 	}
 
-	// Clean up any legacy per-replica LeaderWorkerSets (e.g. name-0, name-1...)
-	// AND legacy PodGroups.
-	baseKubeName := r.getKubeName(dynamoComponentDeployment, false)
-	// We used to create names like `baseKubeName-0`, `baseKubeName-1`.
-	// The new SINGLE LWS will likely be named `baseKubeName` (if we change the name generation).
-	// If the new name conflicts with the old `baseKubeName-0`, we need to be careful.
-	// `getKubeName` usually returns just the component name.
-	// The old loop did `fmt.Sprintf("%s-%d", kubeName, i)`.
-	// If we change generator to just use `kubeName`, we are fine, provided we delete the old ones.
-
-	// We should try to delete `baseKubeName-0`, `baseKubeName-1`, etc.
-	// Be careful not to delete the NEW one if it happens to use one of those names (unlikely if we drop suffix).
-
-	// List all LWS in namespace preventing us from guessing indices?
-	// Or just try to clean up known index-based ones.
-	// Since we are moving to native scaling, let's assume we want to clean up 0..N from PREVIOUS deployment.
-	// But wait, if we transitioned from N replicas to Native, we have `base-0`...`base-N`.
-	// We want to delete ALL of them and replace with `base`.
-	// OR we reuse `base-0` as the primary? No, `base` is cleaner.
-
-	// Let's iterate and delete old indexed ones.
-	// (Assuming reasonable max old replicas to check, e.g. 100?)
-	for i := 0; i < 100; i++ {
-		legacyName := fmt.Sprintf("%s-%d", baseKubeName, i)
-		lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
-		err := r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dynamoComponentDeployment.Namespace}, lwsToDelete)
-		if err == nil {
-			logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacyName)
-			if err := r.Delete(ctx, lwsToDelete); err != nil {
-				logger.Error(err, "Failed to delete legacy LeaderWorkerSet", "name", legacyName)
-			}
-			anyModified = true
-		} else if !k8serrors.IsNotFound(err) {
-			logger.Error(err, "Failed to check legacy LeaderWorkerSet", "name", legacyName)
-		}
-
-		// Also delete legacy PodGroups
-		pgToDelete := &volcanov1beta1.PodGroup{}
-		err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dynamoComponentDeployment.Namespace}, pgToDelete)
-		if err == nil {
-			logger.Info("Deleting legacy PodGroup", "name", legacyName)
-			if err := r.Delete(ctx, pgToDelete); err != nil {
-				logger.Error(err, "Failed to delete legacy PodGroup", "name", legacyName)
-			}
-			anyModified = true
-		}
+	// Clean up legacy per-replica LeaderWorkerSets and PodGroups created by previous versions.
+	// Legacy naming pattern: <baseName>-0, <baseName>-1, etc.
+	// New naming pattern: <baseName> (no suffix)
+	cleanupModified, err := r.cleanupLegacyLWSResources(ctx, dynamoComponentDeployment, logger)
+	if err != nil {
+		logger.Error(err, "Failed to cleanup legacy LWS resources")
+		// Don't fail the reconciliation, just log the error
+	}
+	if cleanupModified {
+		anyModified = true
 	}
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
@@ -455,7 +399,70 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		message:              "LeaderWorkerSet is not ready",
 		serviceReplicaStatus: &lwsReplicaStatus,
 	}, nil
+}
 
+// cleanupLegacyLWSResources removes legacy indexed LeaderWorkerSet and PodGroup resources
+// that were created before the native scaling refactor.
+func (r *DynamoComponentDeploymentReconciler) cleanupLegacyLWSResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, logger logr.Logger) (bool, error) {
+	baseKubeName := r.getKubeName(dynamoComponentDeployment, false)
+	newLWSName := baseKubeName // The new LWS uses the base name without suffix
+	anyModified := false
+	
+	// List all LeaderWorkerSets in the namespace with our labels
+	lwsList := &leaderworkersetv1.LeaderWorkerSetList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(dynamoComponentDeployment.Namespace),
+		client.MatchingLabels(r.getKubeLabels(dynamoComponentDeployment)),
+	}
+	
+	if err := r.List(ctx, lwsList, listOpts...); err != nil {
+		return false, fmt.Errorf("failed to list LeaderWorkerSets: %w", err)
+	}
+	
+	// Delete legacy indexed LeaderWorkerSets (e.g., name-0, name-1, ...)
+	// Only delete if the name matches the legacy pattern: baseName-<number>
+	for _, lws := range lwsList.Items {
+		// Skip the new LWS
+		if lws.Name == newLWSName {
+			continue
+		}
+		
+		// Check if it matches legacy naming pattern: baseName-<number>
+		if len(lws.Name) > len(baseKubeName)+1 && 
+		   lws.Name[:len(baseKubeName)] == baseKubeName && 
+		   lws.Name[len(baseKubeName)] == '-' {
+			// Verify the suffix is numeric
+			suffix := lws.Name[len(baseKubeName)+1:]
+			isNumeric := true
+			for _, ch := range suffix {
+				if ch < '0' || ch > '9' {
+					isNumeric = false
+					break
+				}
+			}
+			
+			if isNumeric {
+				logger.Info("Deleting legacy LeaderWorkerSet", "name", lws.Name)
+				if err := r.Delete(ctx, &lws); err != nil && !k8serrors.IsNotFound(err) {
+					logger.Error(err, "Failed to delete legacy LeaderWorkerSet", "name", lws.Name)
+				} else {
+					anyModified = true
+				}
+				
+				// Also delete corresponding PodGroup
+				pgName := lws.Name
+				pg := &volcanov1beta1.PodGroup{}
+				if err := r.Get(ctx, types.NamespacedName{Name: pgName, Namespace: dynamoComponentDeployment.Namespace}, pg); err == nil {
+					logger.Info("Deleting legacy PodGroup", "name", pgName)
+					if err := r.Delete(ctx, pg); err != nil && !k8serrors.IsNotFound(err) {
+						logger.Error(err, "Failed to delete legacy PodGroup", "name", pgName)
+					}
+				}
+			}
+		}
+	}
+	
+	return anyModified, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
@@ -688,11 +695,21 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	return workerPodTemplateSpec, nil
 }
 
-// generateLeaderWorkerSet creates a LeaderWorkerSet resource from the DynamoComponentDeployment
+// generateLeaderWorkerSet creates a LeaderWorkerSet resource from the DynamoComponentDeployment.
+//
+// Native Scaling Mode (instanceID == nil):
+// Creates a single LeaderWorkerSet with Spec.Replicas set to the desired replica count.
+// This allows LWS to natively manage multiple replicas of the leader-worker groups.
+// Resource name: <componentName>
+//
+// Legacy Mode (instanceID != nil):
+// Creates individual LeaderWorkerSets for backward compatibility or specific use cases.
+// Resource name: <componentName>-<instanceID>
 func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx context.Context, opt generateResourceOption) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 	logs := log.FromContext(ctx)
 	logs.Info("Generating LeaderWorkerSet")
 
+	// Determine the instance ID for labeling and naming
 	var instanceID int
 	if opt.instanceID != nil {
 		instanceID = *opt.instanceID
@@ -700,13 +717,14 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 			return nil, false, fmt.Errorf("generateLeaderWorkerSet: instanceID cannot be negative, got %d", instanceID)
 		}
 	} else {
+		// Native scaling mode: default to 0 for consistent labeling
 		instanceID = 0
 	}
 
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.isStealingTrafficDebugModeEnabled)
 
-	// If instanceID is provided, we might append it, but we are moving away from per-replica LWS.
-	// If instanceID is nil (from my new call), we skip appending.
+	// In legacy mode, append the instance ID suffix to the name
+	// In native scaling mode (opt.instanceID == nil), use the base name without suffix
 	if opt.instanceID != nil {
 		kubeName = fmt.Sprintf("%s-%d", kubeName, *opt.instanceID)
 	}
@@ -745,14 +763,15 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate worker pod template")
 	}
 
-	// Each individual LeaderWorkerSet always has exactly 1 replica
-	// singleReplica := int32(1)
-
+	// Set the replica count from the DynamoComponentDeployment spec
+	// In native scaling mode, this creates one LWS with N replicas
+	// In legacy mode, this would typically be 1, but we honor the spec value
 	desiredReplicas := int32(1)
 	if opt.dynamoComponentDeployment.Spec.Replicas != nil {
 		desiredReplicas = *opt.dynamoComponentDeployment.Spec.Replicas
 	}
 
+	// Size is the number of pods per leader-worker group (1 leader + N workers)
 	groupSize := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
 	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{

@@ -1427,7 +1427,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	name := "test-component"
-	namespace := defaultNamespace
+	namespace := "default"
 
 	// Create DynamoComponentDeployment
 	replicaCount := int32(3)
@@ -1514,7 +1514,9 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 		name                         string
 		replicas                     int32
 		existingLeaderWorkerSets     []*leaderworkersetv1.LeaderWorkerSet
+		existingPodGroups            []*volcanov1beta1.PodGroup
 		wantComponentReconcileResult ComponentReconcileResult
+		wantLegacyResourcesDeleted   bool
 	}{
 		{
 			name:     "singular LWS (1 replica) - native scaling",
@@ -1554,6 +1556,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 					Replicas:        1,
 				},
 			},
+			wantLegacyResourcesDeleted: false,
 		},
 
 		{
@@ -1594,6 +1597,91 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 					Replicas:        3,
 				},
 			},
+			wantLegacyResourcesDeleted: false,
+		},
+
+		{
+			name:     "legacy cleanup - removes indexed LWS resources",
+			replicas: 2,
+			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
+				// New native scaling LWS
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component",
+						Namespace: "default",
+						Labels: map[string]string{
+							"instance-id": "0",
+						},
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(2)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   2,
+						Replicas:        2,
+						UpdatedReplicas: 2,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+				// Legacy indexed LWS resources to be deleted
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							"instance-id": "0",
+						},
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							"instance-id": "1",
+						},
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			existingPodGroups: []*volcanov1beta1.PodGroup{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-0",
+						Namespace: "default",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-1",
+						Namespace: "default",
+					},
+				},
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionTrue,
+				reason:   "LeaderWorkerSetReady",
+				message:  "LeaderWorkerSet is ready",
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+					ComponentName:   "test-component",
+					ReadyReplicas:   ptr.To(int32(2)),
+					UpdatedReplicas: 2,
+					Replicas:        2,
+				},
+			},
+			wantLegacyResourcesDeleted: true,
 		},
 
 
@@ -1651,6 +1739,9 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			for _, lws := range tt.existingLeaderWorkerSets {
 				objects = append(objects, lws)
 			}
+			for _, pg := range tt.existingPodGroups {
+				objects = append(objects, pg)
+			}
 			// Add a mock ServiceAccount that the generateLeaderWorkerSet function needs
 			objects = append(objects, &corev1.ServiceAccount{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1689,6 +1780,32 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
+
+			// Verify legacy resources were deleted if expected
+			if tt.wantLegacyResourcesDeleted {
+				// Check that legacy LWS resources are deleted
+				legacyLWS0 := &leaderworkersetv1.LeaderWorkerSet{}
+				err := fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-0", Namespace: "default"}, legacyLWS0)
+				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy LWS test-component-0 should be deleted")
+
+				legacyLWS1 := &leaderworkersetv1.LeaderWorkerSet{}
+				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-1", Namespace: "default"}, legacyLWS1)
+				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy LWS test-component-1 should be deleted")
+
+				// Check that new native-scaling LWS still exists
+				newLWS := &leaderworkersetv1.LeaderWorkerSet{}
+				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component", Namespace: "default"}, newLWS)
+				g.Expect(err).NotTo(gomega.HaveOccurred(), "New native-scaling LWS should still exist")
+
+				// Check that legacy PodGroups are deleted
+				legacyPG0 := &volcanov1beta1.PodGroup{}
+				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-0", Namespace: "default"}, legacyPG0)
+				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy PodGroup test-component-0 should be deleted")
+
+				legacyPG1 := &volcanov1beta1.PodGroup{}
+				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-1", Namespace: "default"}, legacyPG1)
+				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy PodGroup test-component-1 should be deleted")
+			}
 		})
 	}
 }
