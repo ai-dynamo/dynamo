@@ -396,7 +396,7 @@ def cmd_line_args():
 
     # Diffusion-specific options (only used when modality is video_diffusion or image_diffusion)
     diffusion_group = parser.add_argument_group(
-        "Diffusion Options",
+        "Diffusion Options [Experimental]",
         "Options for video_diffusion modality",
     )
     diffusion_group.add_argument(
