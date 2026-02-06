@@ -657,79 +657,6 @@ class ApproxKvIndexer:
         ...
 
 
-class KvRecorder:
-    """
-    A recorder for KV Router events.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        component: Component,
-        output_path: Optional[str] = None,
-        max_lines_per_file: Optional[int] = None,
-        max_count: Optional[int] = None,
-        max_time: Optional[float] = None,
-    ) -> None:
-        """
-        Create a new KvRecorder instance.
-
-        Args:
-            component: The component to associate with this recorder
-            output_path: Path to the JSONL file to write events to
-            max_lines_per_file: Maximum number of lines per file before rotating to a new file
-            max_count: Maximum number of events to record before shutting down
-            max_time: Maximum duration in seconds to record before shutting down
-        """
-        ...
-
-    def event_count(self) -> int:
-        """
-        Get the count of recorded events.
-
-        Returns:
-            The number of events recorded
-        """
-        ...
-
-    def elapsed_time(self) -> float:
-        """
-        Get the elapsed time since the recorder was started.
-
-        Returns:
-            The elapsed time in seconds as a float
-        """
-        ...
-
-    def replay_events(
-        self,
-        indexer: KvIndexer,
-        timed: bool = False,
-        max_count: Optional[int] = None,
-        max_time: Optional[float] = None,
-    ) -> int:
-        """
-        Populate an indexer with the recorded events.
-
-        Args:
-            indexer: The KvIndexer to populate with events
-            timed: If true, events will be sent according to their recorded timestamps.
-                If false, events will be sent without any delay in between.
-            max_count: Maximum number of events to send before stopping
-            max_time: Maximum duration in seconds to send events before stopping
-
-        Returns:
-            The number of events sent to the indexer
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """
-        Shutdown the recorder.
-        """
-        ...
-
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -738,17 +665,30 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
+        self,
+        component: Component,
+        worker_id: int = 0,
+        kv_block_size: int = 0,
+        dp_rank: int = 0,
+        enable_local_indexer: bool = False,
+        zmq_config: Optional[ZmqKvEventPublisherConfig] = None,
     ) -> None:
         """
-        Create a `KvEventPublisher` object
+        Create a `KvEventPublisher` object.
+
+        When zmq_config is provided, the publisher subscribes to a ZMQ socket for
+        incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
+        The zmq_config fields override kv_block_size, dp_rank, and enable_local_indexer.
+
+        When zmq_config is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
             component: The component to publish events for
-            worker_id: The worker ID
-            kv_block_size: The KV block size (must be > 0)
-            dp_rank: The data parallel rank (defaults to 0)
-            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
+            worker_id: The worker ID (unused, inferred from component)
+            kv_block_size: The KV block size (must be > 0; ignored if zmq_config is set)
+            dp_rank: The data parallel rank (defaults to 0; ignored if zmq_config is set)
+            enable_local_indexer: Enable worker-local KV indexer (ignored if zmq_config is set)
+            zmq_config: Optional ZMQ configuration for relay mode
         """
 
     def publish_stored(
@@ -784,6 +724,12 @@ class KvEventPublisher:
         """
         ...
 
+    def shutdown(self) -> None:
+        """
+        Shuts down the event publisher, stopping any background tasks.
+        """
+        ...
+
 class ZmqKvEventPublisherConfig:
     def __init__(
         self,
@@ -795,7 +741,7 @@ class ZmqKvEventPublisherConfig:
         dp_rank: int = 0
     ) -> None:
         """
-        Configuration for the ZmqKvEventPublisher.
+        ZMQ configuration for KvEventPublisher relay mode.
 
         :param worker_id: The worker ID.
         :param kv_block_size: The block size for the key-value store.
@@ -803,22 +749,6 @@ class ZmqKvEventPublisherConfig:
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
         :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
         :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
-        """
-        ...
-
-class ZmqKvEventPublisher:
-    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
-        """
-        Initializes a new ZmqKvEventPublisher instance.
-
-        :param component: The component to be used.
-        :param config: Configuration for the event publisher.
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """
-        Shuts down the event publisher, stopping any background tasks.
         """
         ...
 

@@ -37,7 +37,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             router_mode="round-robin",
             extra_args=extra_args if extra_args else None,
             extra_env=extra_env,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             display_name="frontend",
         )
 

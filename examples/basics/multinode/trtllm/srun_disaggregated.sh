@@ -44,6 +44,7 @@ fi
 # the stdout/stderr to files.
 echo "Launching frontend services in background."
 srun \
+  --mpi pmix \
   --overlap \
   --container-image "${IMAGE}" \
   --container-mounts "${MOUNTS}" \

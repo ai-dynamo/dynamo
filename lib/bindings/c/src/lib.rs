@@ -1335,6 +1335,7 @@ pub async fn create_worker_selection_pipeline_chat(
     >,
     Option<Arc<dynamo_llm::kv_router::KvRouter>>,
 )> {
+    use dynamo_llm::discovery::WORKER_TYPE_DECODE;
     use dynamo_llm::kv_router::PrefillRouter;
 
     // Use the global DRT singleton - initialize if not already done
@@ -1401,7 +1402,12 @@ pub async fn create_worker_selection_pipeline_chat(
     let chooser = if router_mode == RouterMode::KV {
         Some(
             model_manager
-                .kv_chooser_for(&endpoint, card.kv_cache_block_size, kv_router_config)
+                .kv_chooser_for(
+                    &endpoint,
+                    card.kv_cache_block_size,
+                    kv_router_config,
+                    WORKER_TYPE_DECODE,
+                )
                 .await?,
         )
     } else {
@@ -1425,6 +1431,7 @@ pub async fn create_worker_selection_pipeline_chat(
                 card.kv_cache_block_size,
                 Some(prefill_config),
                 enforce_disagg,
+                model_name.to_string(),
             )
         });
 

@@ -226,7 +226,7 @@ class VLLMProcess:
                 health_check_ports=[],
                 health_check_urls=[],
                 log_dir=request.node.name,
-                terminate_existing=False,
+                terminate_all_matching_process_names=False,
             )
             self.worker_processes.append(process)
             if data_parallel_size is not None:
@@ -268,7 +268,7 @@ class VLLMProcess:
                 if process.data_dir:
                     process._remove_directory(process.data_dir)
 
-                process._terminate_existing()
+                process._terminate_all_matching_process_names()
                 logger.info(
                     f"[VLLMProcess] Launching process {i} (pid will be assigned)..."
                 )
