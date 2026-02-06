@@ -11,8 +11,8 @@ export DEV_REPO="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 export PATH=${DEV_REPO}/bin_bin:$PATH
 export MINIKUBE_HOME=${DEV_REPO}/minikube_home
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=0.7.0
-export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}.post2
+export RELEASE_VERSION=0.8.1
+export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
 export MODEL_CONFIG_FILE=${SCRIPT_DIR}/${CONFIG_TYPE}.yaml
 # deepseek-ai/DeepSeek-R1-Distill-Llama-8B, Qwen/Qwen3-0.6B
 export MODEL_NAME="Qwen/Qwen3-0.6B"

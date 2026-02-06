@@ -138,7 +138,10 @@ cd ${DEV_REPO}
 
 # Create temporary Dockerfile
 cat > /tmp/Dockerfile.planner-custom <<'EOF'
-FROM nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post2
+FROM nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+
+# Install filterpy dependency (required by KalmanPredictor in load_predictor.py)
+RUN pip install --no-cache-dir filterpy
 
 # Copy updated planner code with power-aware features
 COPY components/src/dynamo/planner /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/planner
@@ -221,7 +224,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
 
     Planner:
       dynamoNamespace: vllm-disagg
@@ -278,7 +281,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3
@@ -300,7 +303,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3
