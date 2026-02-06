@@ -41,8 +41,18 @@
    agents/tool-calling.md
    development/jail_stream.md
 
-   router/router_examples.md
-   planner/load_planner.md
+   components/planner/README.md
+   components/planner/planner_guide.md
+   components/planner/planner_examples.md
+   components/kvbm/README.md
+   components/kvbm/kvbm_guide.md
+   components/router/README.md
+   components/router/router_guide.md
+   components/router/router_examples.md
+   components/frontend/frontend_guide.md
+   design_docs/kvbm_design.md
+   integrations/flexkv_integration.md
+   integrations/sglang_hicache.md
    fault_tolerance/README.md
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md
@@ -63,7 +73,6 @@
    backends/sglang/gpt-oss.md
    backends/sglang/diffusion-lm.md
    backends/sglang/profiling.md
-   backends/sglang/sgl-hicache-example.md
    backends/sglang/sglang-disaggregation.md
    backends/sglang/prometheus.md
 
@@ -79,7 +88,6 @@
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
    backends/vllm/prompt-embeddings.md
-   backends/vllm/speculative_decoding.md
 
    features/speculative_decoding/README.md
    features/speculative_decoding/speculative_decoding_vllm.md
@@ -88,15 +96,5 @@
 
    mocker/mocker.md
 
-   multimodal/index.md
-   multimodal/vllm.md
-   multimodal/sglang.md
-   multimodal/trtllm.md
-
-   frontends/kserve.md
-   _sections/frontends.rst
-
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md
      have some outdated names/references and need a refresh.
-..   TODO: Add an OpenAI frontend doc to complement the KServe GRPC doc
-     in the Frontends section.

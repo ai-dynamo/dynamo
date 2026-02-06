@@ -36,10 +36,10 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|--------|-------|
 | [**Disaggregated Serving**](../../design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| [**KV-Aware Routing**](../../router/README.md) | ✅ |  |
-| [**SLA-Based Planner**](../../planner/sla_planner.md) | ✅ |  |
-| [**Multimodal Support**](../../multimodal/sglang.md) | ✅ |  |
-| [**KVBM**](../../kvbm/README.md) | ❌ | Planned |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../components/planner/planner_guide.md) | ✅ |  |
+| [**Multimodal Support**](../../features/multimodal/multimodal_sglang.md) | ✅ |  |
+| [**KVBM**](../../components/kvbm/README.md) | ❌ | Planned |
 
 
 ## Dynamo SGLang Integration

@@ -5,7 +5,7 @@ This example demonstrates running Dynamo across multiple nodes with **KV-aware r
 For more information about the core concepts, see:
 
 - [Dynamo Disaggregated Serving](../../../docs/design_docs/disagg_serving.md)
-- [KV Cache Routing](../../../docs/router/README.md)
+- [KV Cache Routing](../../../docs/components/router/README.md)
 
 ## Architecture Overview
 
@@ -65,7 +65,7 @@ This is particularly beneficial for:
 - **Similar queries**: Common prefixes are computed once and reused
 - **Batch processing**: Related requests can be routed to workers with shared context
 
-For detailed technical information about how KV routing works, see the [Router Guide](../../../docs/router/router_guide.md).
+For detailed technical information about how KV routing works, see the [Router Guide](../../../docs/components/router/router_guide.md).
 
 ## Prerequisites
 
@@ -475,7 +475,7 @@ python -m dynamo.frontend \
     --router-temperature 0.0     # Temperature for probabilistic routing (0 = deterministic)
 ```
 
-For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [Router Guide](../../../docs/router/router_guide.md).
+For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [Router Guide](../../../docs/components/router/router_guide.md).
 
 ## Cleanup
 

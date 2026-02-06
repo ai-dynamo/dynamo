@@ -19,7 +19,7 @@ limitations under the License.
 
 The Planner monitors system performance and automatically scales prefill/decode workers to meet latency SLAs. It runs as a component inside the Dynamo inference graph on Kubernetes.
 
-> **New to the Planner?** Start with the [SLA Planner Quick Start Guide](sla_planner_quickstart.md) for a complete workflow including profiling and deployment.
+> **New to the Planner?** Start with the [SLA Planner Quick Start Guide](planner_guide.md) for a complete workflow including profiling and deployment.
 
 ## Feature Matrix
 
@@ -47,7 +47,7 @@ The Planner monitors system performance and automatically scales prefill/decode 
 
 - Dynamo platform installed on Kubernetes ([Installation Guide](/docs/kubernetes/installation_guide.md))
 - kube-prometheus-stack installed ([Metrics Setup](/docs/kubernetes/observability/metrics.md))
-- Pre-deployment profiling completed ([Profiling Guide](/docs/benchmarks/sla_driven_profiling.md))
+- Pre-deployment profiling completed ([Profiling Guide](/docs/components/profiler/profiler_guide.md))
 
 ### Deploy with DGDR (Recommended)
 
@@ -57,7 +57,7 @@ The fastest path to a planner-enabled deployment is through a DynamoGraphDeploym
 kubectl apply -f benchmarks/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
 ```
 
-This automatically profiles your model and deploys with the SLA planner. See [SLA Planner Quick Start](sla_planner_quickstart.md) for the full workflow.
+This automatically profiles your model and deploys with the SLA planner. See [SLA Planner Guide](planner_guide.md) for the full workflow.
 
 ### Deploy with DGD (Manual)
 
@@ -74,10 +74,10 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 |----------|-------------|
 | [Planner Guide](planner_guide.md) | Deployment, configuration, integration, troubleshooting |
 | [Planner Examples](planner_examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
-| [SLA Planner Quick Start](sla_planner_quickstart.md) | End-to-end DGDR workflow: define SLAs, profile, deploy, monitor |
-| [SLA-based Planner](sla_planner.md) | Scaling algorithm, correction factors, load prediction details |
-| [Load-based Planner](load_planner.md) | Legacy load-based scaling (deprecated) |
-| [SLA-Driven Profiling](/docs/benchmarks/sla_driven_profiling.md) | Pre-deployment profiling process and configuration |
+| [SLA Planner Guide](planner_guide.md) | End-to-end DGDR workflow: define SLAs, profile, deploy, monitor |
+| [SLA-based Planner](planner_guide.md) | Scaling algorithm, correction factors, load prediction details |
+| [Load-based Planner](README.md) | Legacy load-based scaling (deprecated) |
+| [SLA-Driven Profiling](/docs/components/profiler/profiler_guide.md) | Pre-deployment profiling process and configuration |
 | [Planner Design](/docs/design_docs/planner_design.md) | Architecture deep-dive for contributors |
 
 ## Configuration Reference

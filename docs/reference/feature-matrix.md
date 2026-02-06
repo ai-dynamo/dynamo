@@ -119,19 +119,19 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 <!-- Design Docs -->
 [disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/router/README.md
-[planner]: docs/planner/planner_intro.rst
-[kvbm]: docs/kvbm/kvbm_intro.rst
+[kv-routing]: docs/components/router/router_guide.md
+[planner]: docs/components/planner/README.md
+[kvbm]: docs/components/kvbm/README.md
 [migration]: docs/fault_tolerance/request_migration.md
 [tools]: docs/agents/tool-calling.md
 
 <!-- Multimodal -->
-[mm]: docs/multimodal/index.md
-[mm-vllm]: docs/multimodal/vllm.md
-[mm-trtllm]: docs/multimodal/trtllm.md
-[mm-sglang]: docs/multimodal/sglang.md
+[mm]: docs/features/multimodal/README.md
+[mm-vllm]: docs/features/multimodal/multimodal_vllm.md
+[mm-trtllm]: docs/features/multimodal/multimodal_trtllm.md
+[mm-sglang]: docs/features/multimodal/multimodal_sglang.md
 
 <!-- Feature-specific -->
 [lora]: docs/kubernetes/deployment/dynamomodel-guide.md
-[vllm-spec]: docs/backends/vllm/speculative_decoding.md
+[vllm-spec]: docs/features/speculative_decoding/speculative_decoding_vllm.md
 [trtllm-eagle]: docs/backends/trtllm/llama4_plus_eagle.md

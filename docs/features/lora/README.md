@@ -311,4 +311,4 @@ kubectl logs deployment/my-worker | grep -i lora
 - [Feature Matrix](../../reference/feature-matrix.md) - Backend compatibility overview
 - [vLLM Backend](../../backends/vllm/README.md) - vLLM-specific configuration
 - [Dynamo Operator](../../kubernetes/dynamo_operator.md) - Kubernetes operator overview
-- [KV-Aware Routing](../../router/router_guide.md) - LoRA-aware request routing
+- [KV-Aware Routing](../../components/router/router_guide.md) - LoRA-aware request routing

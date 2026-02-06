@@ -58,8 +58,8 @@ Quickstart
    :hidden:
    :caption: User Guides
 
-   KV Cache Offloading <kvbm/kvbm_guide.md>
-   KV Aware Routing <router/router_guide.md>
+   KV Cache Offloading <components/kvbm/kvbm_guide.md>
+   KV Aware Routing <components/router/router_guide.md>
    Tool Calling <agents/tool-calling.md>
    Multimodality Support <features/multimodal/README.md>
    LoRA Adapters <features/lora/README.md>
@@ -76,11 +76,11 @@ Quickstart
    :caption: Components
 
    Backends <_sections/backends>
-   Frontends <_sections/frontends>
-   Router <router/README>
-   Planner <planner/planner_intro>
+   Frontend <components/frontend/README>
+   Router <components/router/README>
+   Planner <components/planner/README>
    Profiler <components/profiler/README>
-   KVBM <kvbm/kvbm_intro>
+   KVBM <components/kvbm/README>
 
 .. toctree::
    :hidden:

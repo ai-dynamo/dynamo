@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
+All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Planner Examples
 
 Practical examples for deploying the SLA Planner with different configurations. For deployment concepts, see the [Planner Guide](planner_guide.md). For a quick overview, see the [Planner README](README.md).
@@ -229,7 +235,7 @@ Profiling runs against the real backend (via GPUs or AIC). The mocker deployment
 
 For large models, use a pre-populated PVC instead of downloading from HuggingFace:
 
-See [SLA-Driven Profiling](/docs/benchmarks/sla_driven_profiling.md) for configuration details.
+See [SLA-Driven Profiling](/docs/components/profiler/profiler_guide.md) for configuration details.
 
 ## Advanced Examples
 
@@ -374,5 +380,5 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 - [Planner README](README.md) -- Overview and quick start
 - [Planner Guide](planner_guide.md) -- Deployment, configuration, integration
 - [Planner Design](/docs/design_docs/planner_design.md) -- Architecture deep-dive
-- [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference)
-- [SLA-Driven Profiling](/docs/benchmarks/sla_driven_profiling.md)
+- [DGDR Configuration Reference](/docs/components/profiler/profiler_guide.md#dgdr-configuration-reference)
+- [SLA-Driven Profiling](/docs/components/profiler/profiler_guide.md)

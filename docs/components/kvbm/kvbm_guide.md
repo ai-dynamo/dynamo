@@ -43,11 +43,11 @@ KVBM can be used independently without using the rest of the Dynamo stack:
 pip install kvbm
 ```
 
-See the [support matrix](../reference/support-matrix.md) for version compatibility.
+See the [support matrix](../../reference/support-matrix.md) for version compatibility.
 
 ### Build from Source
 
-To build KVBM from source, see the detailed instructions in the [KVBM bindings README](../../lib/bindings/kvbm/README.md#build-from-source).
+To build KVBM from source, see the detailed instructions in the [KVBM bindings README](../../../lib/bindings/kvbm/README.md#build-from-source).
 
 ## Run KVBM in Dynamo with vLLM
 
@@ -189,7 +189,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-> **Learn more:** See the [SGLang HiCache Integration Guide](../integrations/sglang_hicache.md) for detailed configuration, deployment examples, and troubleshooting.
+> **Learn more:** See the [SGLang HiCache Integration Guide](../../integrations/sglang_hicache.md) for detailed configuration, deployment examples, and troubleshooting.
 
 ## Disaggregated Serving with KVBM
 
@@ -369,7 +369,7 @@ trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --ex
 
 **Solution:** Enable KVBM metrics and check the Grafana dashboard for `Onboard Blocks - Host to Device` and `Onboard Blocks - Disk to Device`. Large numbers of onboarded KV blocks indicate good cache reuse:
 
-![Grafana Example](../images/kvbm_metrics_grafana.png)
+![Grafana Example](../../images/kvbm_metrics_grafana.png)
 
 ### KVBM Worker Initialization Timeout
 
@@ -413,7 +413,7 @@ uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 ## See Also
 
 - [KVBM Overview](README.md)
-- [KVBM Design](kvbm_design.md)
-- [LMCache Integration](../integrations/lmcache_integration.md)
-- [FlexKV Integration](../integrations/flexkv_integration.md)
-- [SGLang HiCache](../integrations/sglang_hicache.md)
+- [KVBM Design](../../design_docs/kvbm_design.md)
+- [LMCache Integration](../../integrations/lmcache_integration.md)
+- [FlexKV Integration](../../integrations/flexkv_integration.md)
+- [SGLang HiCache](../../integrations/sglang_hicache.md)

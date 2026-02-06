@@ -55,10 +55,10 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|--------------|-------|
 | [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../router/README.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | Planned |
-| [**KVBM**](../../../docs/kvbm/README.md) | ✅ | |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/components/planner/planner_guide.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/components/planner/README.md) | 🚧 | Planned |
+| [**KVBM**](../../../docs/components/kvbm/README.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
@@ -114,7 +114,7 @@ apt-get update && apt-get -y install git git-lfs
 > [!IMPORTANT]
 > Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
-For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../router/router_guide.md).
+For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../components/router/router_guide.md).
 
 ### Aggregated
 ```bash
@@ -231,7 +231,7 @@ To benchmark your deployment with AIPerf, see this utility script, configuring t
 
 ## Multimodal support
 
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../multimodal/trtllm.md).
+Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../features/multimodal/multimodal_trtllm.md).
 
 ## Logits Processing
 
@@ -327,7 +327,7 @@ For detailed instructions on running comprehensive performance sweeps across bot
 
 Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
 
-Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/kvbm/kvbm_guide.md#run-kvbm-in-dynamo-with-tensorrt-llm) .
+Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/components/kvbm/kvbm_guide.md#run-kvbm-in-dynamo-with-tensorrt-llm) .
 
 ## Known Issues and Mitigations
 

@@ -1,6 +1,12 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
+All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Planner Design
 
-> **Tier 3 design documentation** for contributors and architects. For user-facing docs, see [docs/planner/](/docs/planner/).
+> **Tier 3 design documentation** for contributors and architects. For user-facing docs, see [docs/components/planner/](/docs/components/planner/).
 
 ## Overview
 

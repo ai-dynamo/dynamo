@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
+All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Planner Guide
 
 Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README.md). For architecture internals, see [Planner Design](/docs/design_docs/planner_design.md).
@@ -162,7 +168,7 @@ sla:
 - **ITL**: Token generation latency target (lower = more GPUs needed)
 - **Trade-offs**: Tighter SLAs require more GPU resources
 
-For comprehensive documentation of all configuration options, see the [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference).
+For comprehensive documentation of all configuration options, see the [DGDR Configuration Reference](/docs/components/profiler/profiler_guide.md#dgdr-configuration-reference).
 
 ### Profiling Methods
 
@@ -181,7 +187,7 @@ sweep:
   aicBackendVersion: "0.20.0"
 ```
 
-For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-methods).
+For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/components/profiler/profiler_guide.md#profiling-methods).
 
 ### Load Predictors
 
@@ -440,7 +446,7 @@ kubectl logs -l job-name=profile-sla-aic -n $NAMESPACE
 | **DGD not deployed** | Verify `autoApply: true` in DGDR spec |
 | **Prometheus errors** | Ensure `PROMETHEUS_ENDPOINT` env var points to your Prometheus service |
 
-For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](/docs/benchmarks/sla_driven_profiling.md#troubleshooting).
+For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](/docs/components/profiler/profiler_guide.md#troubleshooting).
 
 ## Related Documentation
 
@@ -448,5 +454,5 @@ For comprehensive troubleshooting including AI Configurator constraints, perform
 - [Planner Examples](planner_examples.md) -- DGDR YAML examples and sample configurations
 - [Planner Design](/docs/design_docs/planner_design.md) -- Architecture deep-dive for contributors
 - [DGDR API Reference](/docs/kubernetes/api_reference.md)
-- [Pre-Deployment Profiling](/docs/benchmarks/sla_driven_profiling.md)
+- [Pre-Deployment Profiling](/docs/components/profiler/profiler_guide.md)
 - [Dynamo Operator Guide](/docs/kubernetes/dynamo_operator.md)

@@ -220,7 +220,7 @@ Common Vars for Routing Configuration:
   - Set `DYNAMO_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
   - Set `DYNAMO_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
   - Set `DYNAMO_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing
-  - See the [Router Guide](../../docs/router/router_guide.md) for details.
+  - See the [Router Guide](../../docs/components/router/router_guide.md) for details.
 
 
 Stand-Alone installation only:
