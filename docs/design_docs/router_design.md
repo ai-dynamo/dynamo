@@ -304,7 +304,7 @@ This dual-layer approach—persistent global KV cache state via JetStream and ep
 
 ## See Also
 
-- **[Router README](../router/README.md)**: Quick start guide for the KV Router
-- **[Router Guide](../router/router_guide.md)**: Configuration, tuning, and production setup
-- **[Router Examples](../router/router_examples.md)**: Python API usage and custom routing patterns
+- **[Router README](../components/router/README.md)**: Quick start guide for the KV Router
+- **[Router Guide](../components/router/router_guide.md)**: Configuration, tuning, and production setup
+- **[Router Examples](../components/router/router_examples.md)**: Python API usage and custom routing patterns
 - **[KV Event Publishing for Custom Engines](../integrations/kv_events_custom_engines.md)**: Integrate custom inference engines with KV-aware routing

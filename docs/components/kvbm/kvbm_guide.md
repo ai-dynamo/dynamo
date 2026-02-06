@@ -413,7 +413,7 @@ uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 ## See Also
 
 - [KVBM Overview](README.md)
-- [KVBM Design](kvbm_design.md)
+- [KVBM Design](../../design_docs/kvbm_design.md)
 - [LMCache Integration](../../integrations/lmcache_integration.md)
 - [FlexKV Integration](../../integrations/flexkv_integration.md)
 - [SGLang HiCache](../../integrations/sglang_hicache.md)
