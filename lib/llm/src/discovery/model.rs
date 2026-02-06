@@ -246,7 +246,9 @@ impl Model {
                 .and_then(|entry| extract(entry.value()));
         }
 
-        // Collect eligible sets with their worker counts, skipping sets with no workers
+        // Collect eligible sets with their worker counts, skipping sets with no workers.
+        // In-process models (no discovery watcher) return count=1, so they always participate.
+        // Discovery models with count=0 have no available workers and are skipped.
         let eligible: Vec<(T, usize)> = self
             .worker_sets
             .iter()
