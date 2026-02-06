@@ -176,6 +176,7 @@ python test_router.py -v
 - `DYNAMO_DEBUG=1`: Enable debug file dumps to `/tmp/debug_*.txt`
 - `LOGLEVEL=DEBUG`: Set logging level (DEBUG, INFO, WARNING, ERROR)
 - `TRANSFORMERS_ATTN_IMPLEMENTATION=eager`: Disable FlashAttention (set automatically)
+- `TRTLLM_MAX_NUM_TOKENS`: Set max token length
 
 ### Port Assignment
 
@@ -244,5 +245,4 @@ When processing multimodal requests:
 
 ## See Also
 
-- [vLLM Router Standalone](../router_standalone/) - Original vLLM version
 - [TensorRT-LLM KV Event Documentation](https://nvidia.github.io/TensorRT-LLM/0.21.0/examples/llm_inference_kv_events.html)

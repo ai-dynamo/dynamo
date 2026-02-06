@@ -22,6 +22,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        generate_endpoint=None,
     ) -> None:
         """Initialize prefill worker handler.
 
@@ -30,10 +31,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: The SGLang publisher instance.
+            generate_endpoint: The endpoint handle for discovery registration.
         """
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(component, engine, config, publisher)
+        super().__init__(component, engine, config, publisher, generate_endpoint)
         self._consume_tasks = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
@@ -47,9 +49,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 task.cancel()
         self._consume_tasks.clear()
 
+        super().cleanup()
         self.engine.shutdown()
         logging.info("Prefill engine shutdown")
-        super().cleanup()
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -96,11 +98,24 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room = self._generate_bootstrap_room()
             logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
 
+        bootstrap_info = {
+            "bootstrap_host": self.bootstrap_host,
+            "bootstrap_port": self.bootstrap_port,
+            "bootstrap_room": bootstrap_room,
+        }
+
+        # Yield bootstrap_info for PrefillRouter - required for async generator contract
+        # and Rust-side expects disaggregated_params in first output
+        yield {
+            "token_ids": [],
+            "text": None,
+            "finish_reason": None,
+            "disaggregated_params": bootstrap_info,
+        }
+
         input_param = self._get_input_param(inner_request)
 
-        # Propagate trace context to SGLang
-        if self.enable_trace:
-            self._propagate_trace_context_to_sglang(context, bootstrap_room)
+        trace_header = self._get_trace_header(context) if self.enable_trace else None
 
         results = await self.engine.async_generate(
             **input_param,
@@ -109,6 +124,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_host=self.bootstrap_host,
             bootstrap_port=self.bootstrap_port,
             bootstrap_room=bootstrap_room,
+            external_trace_header=trace_header,
             rid=trace_id,
         )
 

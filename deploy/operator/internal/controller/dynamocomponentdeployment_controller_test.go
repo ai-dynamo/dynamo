@@ -94,6 +94,26 @@ func TestIsDeploymentReady(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "not ready (surging)",
+			args: args{
+				deployment: &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Generation: 1,
+					},
+					Spec: appsv1.DeploymentSpec{
+						Replicas: &[]int32{2}[0],
+					},
+					Status: appsv1.DeploymentStatus{
+						ObservedGeneration: 1,
+						UpdatedReplicas:    1,
+						AvailableReplicas:  1,
+						Replicas:           2,
+					},
+				},
+			},
+			want: false,
+		},
+		{
 			name: "ready",
 			args: args{
 				deployment: &appsv1.Deployment{
@@ -107,6 +127,7 @@ func TestIsDeploymentReady(t *testing.T) {
 						ObservedGeneration: 1,
 						UpdatedReplicas:    1,
 						AvailableReplicas:  1,
+						Replicas:           1,
 						Conditions: []appsv1.DeploymentCondition{
 							{
 								Type:   appsv1.DeploymentAvailable,
@@ -178,6 +199,7 @@ func (m *mockEtcdStorage) DeleteKeys(ctx context.Context, prefix string) error {
 func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 	type fields struct {
 		EtcdStorage etcdStorage
+		Config      controller_common.Config
 	}
 	type args struct {
 		ctx                       context.Context
@@ -200,6 +222,7 @@ func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 						return fmt.Errorf("invalid prefix: %s", prefix)
 					},
 				},
+				Config: controller_common.Config{DiscoveryBackend: "etcd"},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -222,6 +245,7 @@ func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 						return fmt.Errorf("invalid prefix: %s", prefix)
 					},
 				},
+				Config: controller_common.Config{DiscoveryBackend: "etcd"},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -241,6 +265,7 @@ func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &DynamoComponentDeploymentReconciler{
 				EtcdStorage: tt.fields.EtcdStorage,
+				Config:      tt.fields.Config,
 			}
 			if err := r.FinalizeResource(tt.args.ctx, tt.args.dynamoComponentDeployment); (err != nil) != tt.wantErr {
 				t.Errorf("DynamoComponentDeploymentReconciler.FinalizeResource() error = %v, wantErr %v", err, tt.wantErr)
@@ -830,7 +855,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
-											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
+											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
@@ -965,7 +990,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
-											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
+											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
@@ -1853,6 +1878,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 		componentReconcileResult ComponentReconcileResult
 		wantConditions           []metav1.Condition
 		wantServiceReplicaStatus *v1alpha1.ServiceReplicaStatus
+		wantObservedGeneration   int64
 	}{
 		{
 			name: "deployment backed DCD that is unready",
@@ -2018,10 +2044,12 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Create DynamoComponentDeployment
+			generation := int64(5)
 			dcd := &v1alpha1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-component",
-					Namespace: "default",
+					Name:       "test-component",
+					Namespace:  "default",
+					Generation: generation,
 				},
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -2076,6 +2104,9 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			g.Expect(actualConditions).To(gomega.ConsistOf(tt.wantConditions))
 			// Assert the service replica status
 			g.Expect(updatedDCD.Status.Service).To(gomega.Equal(tt.wantServiceReplicaStatus))
+
+			// Assert the observed generation
+			g.Expect(updatedDCD.Status.ObservedGeneration).To(gomega.Equal(generation))
 		})
 	}
 }

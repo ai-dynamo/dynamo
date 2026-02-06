@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
 from tests.utils.payloads import (
+    CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
     CompletionPayload,
@@ -16,6 +17,17 @@ from tests.utils.payloads import (
 
 # Common default text prompt used across tests
 TEXT_PROMPT = "Tell me a knock knock joke about AI."
+
+# Longer prompt for prefix caching tests - needs to be > 64 tokens (typical block size)
+# to ensure at least one full block gets cached
+LONG_PROMPT_FOR_CACHING = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
+lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the \
+shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled \
+curiosity and courage, who has stumbled upon an ancient map hinting at the city's location. The map suggests that \
+Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey \
+will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. \
+Your Task: Character Background: Develop a detailed background for your character. Describe their motivations \
+for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends."""
 
 
 def chat_payload_default(
@@ -43,6 +55,54 @@ def chat_payload_default(
         # Accept any of these keywords in the response (case-insensitive)
         expected_response=expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def cached_tokens_chat_payload(
+    repeat_count: int = 3,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+    min_cached_tokens: int = 64,
+) -> CachedTokensChatPayload:
+    """Create a chat payload that validates cached tokens in usage field.
+
+    This is useful for testing KV router cache-aware routing where repeated
+    identical prompts should result in cached tokens being reported.
+
+    Uses a longer prompt (~196 tokens) to ensure at least one full block (64 tokens)
+    gets cached. vLLM only caches complete blocks, so short prompts won't trigger
+    the cached_tokens field in the response.
+
+    Args:
+        repeat_count: Number of times to repeat the request (>1 needed to see caching)
+        expected_response: List of expected strings in response
+        expected_log: List of expected log patterns
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature
+        min_cached_tokens: Minimum cached tokens expected after first request (default: 64, one block)
+
+    Returns:
+        CachedTokensChatPayload configured for testing prefix caching
+    """
+    return CachedTokensChatPayload(
+        body={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": LONG_PROMPT_FOR_CACHING,
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
+        min_cached_tokens=min_cached_tokens,
     )
 
 

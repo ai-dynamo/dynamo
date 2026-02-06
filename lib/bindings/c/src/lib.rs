@@ -13,6 +13,7 @@ use dynamo_llm::{
     discovery::{KvWorkerMonitor, ModelWatcher},
     kv_router::{protocols::*, publisher::KvEventPublisher},
 };
+use dynamo_runtime::discovery::DiscoveryQuery;
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
@@ -56,6 +57,35 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
+// Wait for the discovery daemon to sync indefinitely and return at least one instance.
+// This is because the Model info is registered by workers and it may take up to 30 min for the model weights to load and for the worker to register itself.
+// The waiting timeout is implemented in the Kubernetes StartupProbe. The EPP waiting loops runs indefinitely, the Probe is a single source of truth with when to kill the EPP if discovery fails.
+// If workers are not found within the probe's failureThreshold × periodSeconds, the pod will be killed and restarted.
+// Users can adjust the StartupProbe waiting timed in the DGD for large models.
+async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
+    tracing::info!(
+        "Waiting for discovery to sync (no timeout - controlled by K8s StartupProbe)..."
+    );
+    let discovery = drt.discovery();
+
+    loop {
+        match discovery.list(DiscoveryQuery::AllModels).await {
+            Ok(instances) if !instances.is_empty() => {
+                return instances.len();
+            }
+            Ok(_) => {
+                tracing::debug!("No instances yet, waiting...");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                // Log and continue - transient errors shouldn't stop the wait
+                tracing::warn!("Discovery list error: {}, retrying...", e);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
@@ -80,7 +110,15 @@ pub unsafe extern "C" fn dynamo_llm_init(
             .get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(drt) => {
+                // Wait for discovery to sync before returning.
+                // This is needed because dynamo_create_worker_selection_pipeline() is called
+                // immediately after, and it needs discovery.list() to return data.
+                // The discovery daemon takes time to query K8s and returns async, so we need to wait.
+                // Note: This waits indefinitely - the K8s StartupProbe is the timeout mechanism.
+                wait_for_discovery_sync(drt).await;
+                Ok(())
+            }
             Err(e) => {
                 tracing::error!(error = ?e, "Failed to initialize distributed runtime");
                 Err(DynamoLlmResult::ERR)
@@ -354,7 +392,7 @@ use std::pin::Pin;
 const GENERATE_ENDPOINT: &str = "generate";
 
 use anyhow::Context;
-use dynamo_runtime::{Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider};
+use dynamo_runtime::{Runtime, traits::DistributedRuntimeProvider};
 
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::entrypoint::build_routed_pipeline;
@@ -459,18 +497,13 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         };
 
         let kv_router_config = if use_kv_routing {
-            Some(KvRouterConfig::new(
-                (overlap_score_weight >= 0.0).then_some(overlap_score_weight),
-                (router_temperature >= 0.0).then_some(router_temperature),
-                Some(use_kv_events),
-                Some(router_replica_sync),
-                None, // track_active_blocks
-                None, // router_snapshot_threshold
-                None, // router_reset_states
-                None, // router_ttl_secs
-                None, // router_max_tree_size
-                None, // router_prune_target_ratio
-            ))
+            Some(KvRouterConfig {
+                overlap_score_weight,
+                router_temperature,
+                use_kv_events,
+                router_replica_sync,
+                ..KvRouterConfig::default()
+            })
         } else {
             None
         };
@@ -881,7 +914,14 @@ pub unsafe extern "C" fn dynamo_router_add_request(
         };
 
         kv_router
-            .add_request(request_id_clone.clone(), &tokens, overlap_blocks, worker)
+            .add_request(
+                request_id_clone.clone(),
+                &tokens,
+                overlap_blocks,
+                None,
+                worker,
+                None, // lora_name not exposed in C API yet
+            )
             .await;
 
         tracing::debug!(
@@ -896,7 +936,7 @@ pub unsafe extern "C" fn dynamo_router_add_request(
 }
 
 /// Mark prefill as completed for a request.
-/// Call this from GAIE hook when the first token is generated.
+/// Call this from the EPP extension point when the first token is generated.
 ///
 /// # Safety
 /// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
@@ -1076,76 +1116,14 @@ pub fn add_query_instance_id(
     set_kv_annotation(request, "query_instance_id".to_string(), "")
 }
 
-/// Set worker IDs directly on the NvExt fields for GAIE Stage 2
-///
-/// For disaggregated mode: sets `prefill_worker_id` and `decode_worker_id`
-/// For aggregated mode: sets `backend_instance_id` (when both IDs are the same)
-///
-/// Also sets `enable_local_updates: false` since the external caller (EPP/GAIE)
-/// will handle bookkeeping via C FFI functions.
-pub fn set_worker_ids_for_stage2(
-    request: &mut NvCreateChatCompletionRequest,
-    decode_worker_id: Option<i64>,
-    prefill_worker_id: Option<i64>,
-) -> &mut NvCreateChatCompletionRequest {
-    let nvext = request.nvext.get_or_insert_with(|| {
-        NvExt::builder()
-            .build()
-            .expect("NvExt builder should not fail")
-    });
-
-    // Disable local updates - external caller handles bookkeeping via C FFI
-    nvext.enable_local_updates = Some(false);
-
-    // Check if this is aggregated mode (same worker for both)
-    let is_aggregated = prefill_worker_id == decode_worker_id;
-
-    if is_aggregated {
-        // Aggregated: use backend_instance_id for direct routing
-        if let Some(id) = decode_worker_id {
-            nvext.backend_instance_id = Some(id as u64);
-            tracing::debug!(
-                backend_instance_id = id,
-                "GAIE Stage 2 Aggregated: Setting backend_instance_id"
-            );
-        }
-    } else {
-        // Disaggregated: use separate prefill and decode worker IDs
-        if let Some(id) = prefill_worker_id {
-            nvext.prefill_worker_id = Some(id as u64);
-        }
-        if let Some(id) = decode_worker_id {
-            nvext.decode_worker_id = Some(id as u64);
-        }
-        tracing::debug!(
-            prefill_worker_id = ?prefill_worker_id,
-            decode_worker_id = ?decode_worker_id,
-            "GAIE Stage 2 Disaggregated: Setting prefill and decode worker IDs"
-        );
-    }
-
-    request
-}
-
-/// Set token_data directly on the NvExt field for GAIE Stage 2
-pub fn set_token_data_for_stage2<'a>(
-    request: &'a mut NvCreateChatCompletionRequest,
-    tokens: &[u32],
-) -> &'a mut NvCreateChatCompletionRequest {
-    let nvext = request.nvext.get_or_insert_with(|| {
-        NvExt::builder()
-            .build()
-            .expect("NvExt builder should not fail")
-    });
-
-    nvext.token_data = Some(tokens.to_vec());
-    tracing::debug!(
-        token_count = tokens.len(),
-        "GAIE Stage 2: Setting token_data"
-    );
-
-    request
-}
+// Note: set_worker_ids_for_stage2 and set_token_data_for_stage2 have been removed.
+// The EPP now handles routing configuration via HTTP headers:
+// - `x-worker-instance-id`: decode worker ID
+// - `x-prefill-instance-id`: prefill worker ID (disaggregated mode only)
+// - `x-enable-local-updates`: set to "false" to disable router bookkeeping
+//
+// Body modifications are NOT sent to the inference engine (only headers are forwarded),
+// so these functions were ineffective.
 
 /// Ensure `nvext` exists and return a mutable slice of annotations.
 fn ensure_annotations(request: &mut NvCreateChatCompletionRequest) -> &mut Vec<String> {
@@ -1171,30 +1149,34 @@ fn set_kv_annotation(
     request
 }
 
-/// Wrapper function that queries worker selection and prepares the request for GAIE Stage 2
+/// Wrapper function that queries worker selection for GAIE Stage 1
 ///
 /// This function performs the complete GAIE Stage 1 flow:
 /// 1. Clones the original request and adds "query_instance_id:" (empty) annotation
 /// 2. Calls engine.generate() with the modified request
 /// 3. Extracts worker_id info and tokens from the response stream
-/// 4. Sets the appropriate NvExt fields on the original request for Stage 2:
-///    - Disaggregated: prefill_worker_id, decode_worker_id, token_data
-///    - Aggregated: backend_instance_id, token_data
-/// 5. Returns WorkerSelectionResult and the modified request ready for Stage 2
+/// 4. Returns WorkerSelectionResult and the original request
+///
+/// Note: The EPP (caller) is responsible for setting HTTP headers for Stage 2:
+/// - `x-worker-instance-id`: decode worker ID
+/// - `x-prefill-instance-id`: prefill worker ID (disaggregated mode only)
+/// - `x-enable-local-updates`: "false" to disable router bookkeeping
+///
+/// Body modifications are NOT forwarded to the inference engine, so this function
+/// does not modify the request body.
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
 /// - `original_request`: The original OpenAI request to process
 ///
 /// # Returns
-/// A tuple containing (WorkerSelectionResult, modified_original_request)
-/// where the modified_original_request is ready for GAIE Stage 2 execution
+/// A tuple containing (WorkerSelectionResult, original_request)
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
-    mut original_request: NvCreateChatCompletionRequest,
+    original_request: NvCreateChatCompletionRequest,
 ) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
     // GAIE Stage 1: Query for worker selection
     let mut query_request = original_request.clone();
@@ -1203,14 +1185,9 @@ pub async fn query_worker_selection_and_annotate(
     let response_stream = engine.generate(single_in).await?;
     let result = extract_worker_selection_from_stream(response_stream).await?;
 
-    // Prepare request for GAIE Stage 2: Set NvExt fields directly
-    set_worker_ids_for_stage2(
-        &mut original_request,
-        result.decode_worker_id,
-        result.prefill_worker_id,
-    );
-    set_token_data_for_stage2(&mut original_request, &result.tokens);
-
+    // Return the original request unchanged.
+    // The EPP sets routing headers (worker IDs, enable_local_updates) which the
+    // Dynamo frontend reads via apply_header_routing_overrides().
     Ok((result, original_request))
 }
 
@@ -1306,12 +1283,12 @@ fn spawn_prefill_watcher(
                         }
                     }
                 }
-                DiscoveryEvent::Removed(instance_id) => {
+                DiscoveryEvent::Removed(id) => {
                     // Log removal for observability
                     // Note: The PrefillRouter remains active - worker availability
                     // is handled dynamically by the underlying Client's instance tracking
                     tracing::debug!(
-                        instance_id = instance_id,
+                        instance_id = id.instance_id(),
                         "Prefill worker instance removed from discovery"
                     );
                 }
@@ -1351,12 +1328,27 @@ pub async fn create_worker_selection_pipeline_chat(
     >,
     Option<Arc<dynamo_llm::kv_router::KvRouter>>,
 )> {
+    use dynamo_llm::discovery::WORKER_TYPE_DECODE;
     use dynamo_llm::kv_router::PrefillRouter;
 
-    let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings();
-    let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
-    let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
+    // Use the global DRT singleton - initialize if not already done
+    // Check if already initialized (by dynamo_llm_init) to avoid redundant sync wait
+    let needs_sync = DRT.get().is_none();
+
+    let distributed_runtime = DRT
+        .get_or_try_init(async {
+            tracing::debug!("Initializing DistributedRuntime singleton (standalone mode)");
+            DistributedRuntime::from_settings(Runtime::from_settings()?).await
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize DistributedRuntime: {}", e))?;
+
+    // Only wait for discovery sync if we just initialized the DRT
+    // (dynamo_llm_init already does this when it initializes)
+    // Note: This waits indefinitely - the K8s StartupProbe is the timeout mechanism.
+    if needs_sync {
+        wait_for_discovery_sync(distributed_runtime).await;
+    }
 
     let component = distributed_runtime
         .namespace(namespace)?
@@ -1372,8 +1364,11 @@ pub async fn create_worker_selection_pipeline_chat(
     let router_config = dynamo_llm::entrypoint::RouterConfig {
         router_mode,
         kv_router_config: kv_router_config.unwrap_or_default(),
-        active_decode_blocks_threshold: busy_threshold,
-        active_prefill_tokens_threshold: None,
+        load_threshold_config: dynamo_llm::discovery::LoadThresholdConfig {
+            active_decode_blocks_threshold: busy_threshold,
+            active_prefill_tokens_threshold: None,
+            active_prefill_tokens_threshold_frac: None,
+        },
         enforce_disagg,
     };
     // Create metrics for migration tracking (not exposed via /metrics in C bindings)
@@ -1382,6 +1377,7 @@ pub async fn create_worker_selection_pipeline_chat(
         component.drt().clone(),
         model_manager.clone(),
         router_config,
+        0, // migration_limit - default to 0 for C bindings
         None,
         metrics.clone(),
     );
@@ -1400,7 +1396,12 @@ pub async fn create_worker_selection_pipeline_chat(
     let chooser = if router_mode == RouterMode::KV {
         Some(
             model_manager
-                .kv_chooser_for(&endpoint, card.kv_cache_block_size, kv_router_config)
+                .kv_chooser_for(
+                    &endpoint,
+                    card.kv_cache_block_size,
+                    kv_router_config,
+                    WORKER_TYPE_DECODE,
+                )
                 .await?,
         )
     } else {
@@ -1424,6 +1425,7 @@ pub async fn create_worker_selection_pipeline_chat(
                 card.kv_cache_block_size,
                 Some(prefill_config),
                 enforce_disagg,
+                model_name.to_string(),
             )
         });
 
@@ -1470,7 +1472,16 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Create worker monitor if busy_threshold is set
     // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
-    let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t, 1000000));
+    let worker_monitor = busy_threshold.map(|t| {
+        KvWorkerMonitor::new(
+            client.clone(),
+            dynamo_llm::discovery::LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(t),
+                active_prefill_tokens_threshold: None,
+                active_prefill_tokens_threshold_frac: None,
+            },
+        )
+    });
 
     // Clone chooser before passing to build_routed_pipeline (which takes ownership)
     let kv_router = chooser.clone();
@@ -1488,6 +1499,7 @@ pub async fn create_worker_selection_pipeline_chat(
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        0, // migration_limit - default to 0 for C bindings
         metrics,
     )
     .await?;

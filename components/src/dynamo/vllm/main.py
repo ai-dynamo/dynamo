@@ -19,33 +19,106 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     fetch_llm,
     register_llm,
 )
+
+# Optional imports for frontend decoding support
+try:
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    MEDIA_DECODER_AVAILABLE = True
+except ImportError:
+    MediaDecoder = None
+    MediaFetcher = None
+    MEDIA_DECODER_AVAILABLE = False
+
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
+    ECProcessorHandler,
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
-    ProcessorHandler,
+    PreprocessedHandler,
+    VLLMEncodeWorkerHandler,
 )
+from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .health_check import (
+    VllmHealthCheckPayload,
+    VllmOmniHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def graceful_shutdown(runtime):
+async def _handle_non_leader_node(dp_rank: int) -> None:
+    """
+    Handle non-leader node (data_parallel_rank >= 1) in multi-node deployments.
+    Non-leader nodes run vLLM workers but don't serve Dynamo endpoints.
+    """
+    logger.info(
+        f"Non-leader node detected (data_parallel_rank={dp_rank}). "
+        "Skipping endpoint serving."
+    )
+    # Wait indefinitely - process terminated via signal handlers
+    await asyncio.Event().wait()
+
+
+async def await_checkpoint_and_was_restored(signal_file: str) -> bool:
+    """
+    Wait for checkpoint signal file OR restore marker file.
+
+    In checkpoint creation mode, poll until either:
+    1. The signal file exists (checkpoint complete, should exit)
+    2. The restore marker file exists (restored by CRIU, should proceed)
+
+    The restore marker file is created by the restore-entrypoint before CRIU restore,
+    so the restored process can detect it was restored even though os.environ is
+    restored from the checkpoint and doesn't contain new container env vars.
+
+    Args:
+        signal_file: Path to the checkpoint signal file
+
+    Returns:
+        True if restored (should proceed with registration)
+        False if signal file detected (should exit)
+    """
+    # Get restore marker file path (created by restore entrypoint before CRIU restore)
+    restore_marker = os.environ.get("DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored")
+
+    logger.info(
+        f"CHECKPOINT_READY: Model loaded, ready for container checkpoint. Waiting for signal file: {signal_file} or restore marker file: {restore_marker}"
+    )
+
+    while True:
+        # Check if we've been restored (marker file created by restore entrypoint)
+        if os.path.exists(restore_marker):
+            logger.info(
+                f"Detected restore from checkpoint (marker file exists: {restore_marker})"
+            )
+            return True  # Restored - proceed with registration
+
+        # Check if checkpoint is complete (signal file exists)
+        if os.path.exists(signal_file):
+            logger.info(f"Checkpoint signal file detected: {signal_file}")
+            return False  # Checkpoint done - exit
+
+        await asyncio.sleep(1)
+
+
+async def graceful_shutdown(runtime, shutdown_event):
     """
     Shutdown dynamo distributed runtime.
     The endpoints will be immediately invalidated so no new requests will be accepted.
@@ -53,6 +126,7 @@ async def graceful_shutdown(runtime):
     For endpoints served with graceful_shutdown=False, the serving function will return immediately.
     """
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    shutdown_event.set()
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
 
@@ -61,48 +135,148 @@ async def worker():
     config = parse_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
-
     overwrite_args(config)
+    dump_config(config.dump_config_to, config)
+
+    # Name the model. Use either the full path (vllm and sglang do the same),
+    # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
+    if not config.served_model_name:
+        config.served_model_name = config.engine_args.served_model_name = config.model
+
+    # Check checkpoint-related environment variables EARLY
+    signal_file = os.environ.get("DYN_CHECKPOINT_SIGNAL_FILE")
+    ready_file = os.environ.get("DYN_CHECKPOINT_READY_FILE")
+
+    is_checkpoint_mode = signal_file is not None
+
+    # EARLY EXIT: Check if checkpoint already exists (before downloading model!)
+    if is_checkpoint_mode:
+        storage_type = os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE")
+        checkpoint_location = os.environ.get("DYN_CHECKPOINT_LOCATION")
+
+        if storage_type == "pvc" and checkpoint_location:
+            done_marker = f"{checkpoint_location}/checkpoint.done"
+
+            if os.path.exists(done_marker):
+                logger.info(
+                    f"Found existing checkpoint at {checkpoint_location}. Storage type: {storage_type}"
+                )
+                return
+            else:
+                logger.info(
+                    f"Checkpoint not found at: {checkpoint_location}. creating new checkpoint"
+                )
+
+    # Download the model if necessary using modelexpress.
+    # We want it on disk before we start vllm to avoid downloading from HuggingFace.
+    #
+    # We don't set `config.engine_args.model` to the local path fetch_llm returns
+    # because vllm will send that name to its Ray pipeline-parallel workers, which
+    # may not have the local path.
+    # vllm will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
+    if not os.path.exists(config.model):
+        await fetch_llm(config.model)
+
+    # CHECKPOINT MODE: Load engine BEFORE runtime creation
+    # This allows checkpointing GPU state before runtime connections are established
+    pre_created_engine = None
+    is_restored = False
+    if is_checkpoint_mode:
+        logger.info(
+            f"Checkpoint mode enabled (DYN_CHECKPOINT_SIGNAL_FILE={signal_file})"
+        )
+
+        # CHECKPOINT MODE: Load model, sleep, wait for signal file or restore
+        pre_created_engine = setup_vllm_engine(config)
+        engine_client = pre_created_engine[0]
+
+        # Put model to sleep before checkpoint (if sleep mode enabled)
+        if config.engine_args.enable_sleep_mode:
+            logger.info(f"Putting model to sleep (level={config.sleep_mode_level})")
+            await engine_client.sleep(level=config.sleep_mode_level)
+
+        # Write ready file to signal that we're ready for checkpointing
+        if ready_file:
+            with open(ready_file, "w") as f:
+                f.write("ready")
+            logger.info(f"Wrote checkpoint ready file: {ready_file}")
+
+        # Wait for checkpoint signal file OR restore detection
+        is_restored = await await_checkpoint_and_was_restored(signal_file)
+
+        if is_restored:
+            # Wake up model and proceed with registration
+            if config.engine_args.enable_sleep_mode:
+                logger.info("Waking up model after checkpoint restore")
+                await engine_client.wake_up()
+            logger.info("Proceeding with endpoint registration after restore")
+        else:
+            # Checkpoint complete, exit
+            logger.info("Exiting after checkpoint completion")
+            return
+
+    # Create shutdown event
+    shutdown_event = asyncio.Event()
+
+    # Set DYN_EVENT_PLANE environment variable based on config
+    os.environ["DYN_EVENT_PLANE"] = config.event_plane
+
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND use_kv_events is True
+    enable_nats = config.request_plane == "nats" or (
+        config.event_plane == "nats" and config.use_kv_events
+    )
+
+    runtime = DistributedRuntime(
+        loop, config.store_kv, config.request_plane, enable_nats
+    )
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
+        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
     logging.debug("Signal handlers set up for graceful shutdown")
 
-    dump_config(config.dump_config_to, config)
-
-    # Download the model if necessary.
-    # register_llm would do this for us, but we want it on disk before we start vllm.
-    # Ensure the original HF name (e.g. "Qwen/Qwen3-0.6B") is used as the served_model_name.
-    if not config.served_model_name:
-        config.served_model_name = config.engine_args.served_model_name = config.model
-    if not os.path.exists(config.model):
-        config.model = config.engine_args.model = await fetch_llm(config.model)
-
     # Route to appropriate initialization based on config flags
-    if config.multimodal_processor:
-        await init_multimodal_processor(runtime, config)
+    if config.vllm_native_encoder_worker:
+        await init_vllm_native_encoder(runtime, config, shutdown_event)
+        logger.debug("init_vllm_native_encoder completed")
+    elif config.ec_processor:
+        await init_ec_processor(runtime, config, shutdown_event)
+        logger.debug("init_ec_processor completed")
+    elif config.multimodal_processor:
+        await init_multimodal_processor(runtime, config, shutdown_event)
         logger.debug("init_multimodal_processor completed")
     elif config.multimodal_encode_worker:
-        await init_multimodal_encode_worker(runtime, config)
+        await init_multimodal_encode_worker(runtime, config, shutdown_event)
         logger.debug("init_multimodal_encode_worker completed")
     elif (
         config.multimodal_worker
         or config.multimodal_decode_worker
         or config.multimodal_encode_prefill_worker
     ):
-        await init_multimodal_worker(runtime, config)
+        await init_multimodal_worker(
+            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+        )
         logger.debug("init_multimodal_worker completed")
+    elif config.omni:
+        await init_omni(runtime, config, shutdown_event)
+        logger.debug("init_omni completed")
     elif config.is_prefill_worker:
-        await init_prefill(runtime, config)
+        await init_prefill(
+            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+        )
         logger.debug("init_prefill completed")
     else:
-        await init(runtime, config)
+        await init(
+            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+        )
         logger.debug("init completed")
 
     logger.debug("Worker function completed, exiting...")
@@ -173,7 +347,7 @@ def setup_kv_event_publisher(
     vllm_config,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
-) -> Optional[ZmqKvEventPublisher]:
+) -> Optional[KvEventPublisher]:
     """
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
@@ -186,7 +360,7 @@ def setup_kv_event_publisher(
         consolidator_port: Port where kv event consolidator publishes (default: 5558)
 
     Returns:
-        List of ZmqKvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
+        List of KvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
     """
     if not config.engine_args.enable_prefix_caching:
         return None
@@ -197,6 +371,13 @@ def setup_kv_event_publisher(
         return None
 
     if config.engine_args.kv_events_config is None:
+        return None
+
+    # Check if kv_cache_events are explicitly disabled
+    if not config.engine_args.kv_events_config.enable_kv_cache_events:
+        logger.info(
+            "KV event publishing skipped: enable_kv_cache_events=False in kv_events_config"
+        )
         return None
 
     # Get data_parallel_size to create publishers for all dp_ranks
@@ -225,8 +406,9 @@ def setup_kv_event_publisher(
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
             enable_local_indexer=config.enable_local_indexer,
+            dp_rank=dp_rank,
         )
-        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+        kv_publisher = KvEventPublisher(component=component, zmq_config=zmq_config)
         kv_publishers.append(kv_publisher)
 
         logger.info(
@@ -263,6 +445,10 @@ def setup_vllm_engine(config, stat_logger=None):
             os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
         if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
             os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
+
+    if engine_args.load_format == "gms":
+        engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -313,7 +499,6 @@ async def register_vllm_model(
     config: Config,
     engine_client: AsyncLLM,
     vllm_config,
-    migration_limit: int,
 ):
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -325,7 +510,6 @@ async def register_vllm_model(
         config: Configuration object
         engine_client: vLLM engine client
         vllm_config: vLLM configuration
-        migration_limit: Migration limit for the model
     """
     runtime_config = ModelRuntimeConfig()
 
@@ -348,6 +532,24 @@ async def register_vllm_model(
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
     runtime_config.data_parallel_size = data_parallel_size
 
+    # Configure media decoder for frontend image decoding when enabled
+    # This enables frontend to decode images and transfer via NIXL RDMA
+    media_decoder = None
+    media_fetcher = None
+    if config.frontend_decoding:
+        if not MEDIA_DECODER_AVAILABLE:
+            raise RuntimeError(
+                "--frontend-decoding requires MediaDecoder support. "
+                "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+            )
+        media_decoder = MediaDecoder()
+        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+        # media_decoder.enable_video({})
+
+        media_fetcher = MediaFetcher()
+        media_fetcher.timeout_ms(30000)
+        media_fetcher.allow_direct_port(True)
+
     await register_llm(
         model_input,
         model_type,
@@ -355,13 +557,19 @@ async def register_vllm_model(
         config.model,
         config.served_model_name,
         kv_cache_block_size=config.engine_args.block_size,
-        migration_limit=migration_limit,
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
+        media_decoder=media_decoder,
+        media_fetcher=media_fetcher,
     )
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config):
+async def init_prefill(
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    pre_created_engine=None,
+):
     """
     Instantiate and serve
     """
@@ -370,12 +578,21 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    (
-        engine_client,
-        vllm_config,
-        default_sampling_params,
-        prometheus_temp_dir,
-    ) = setup_vllm_engine(config)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = pre_created_engine
+    else:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
         runtime,
@@ -387,6 +604,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         generate_endpoint=generate_endpoint,
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
+        shutdown_event=shutdown_event,
+        enable_frontend_decoding=config.frontend_decoding,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -419,20 +638,26 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
+    # Register sleep/wake_up engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake_up", handler.wake_up)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
     # Register prefill model with ModelType.Prefill
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-        await register_vllm_model(
-            model_input,
-            ModelType.Prefill,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            migration_limit=0,  # Prefill doesn't support migration
-        )
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+    await register_vllm_model(
+        model_input,
+        ModelType.Prefill,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+    )
 
     health_check_payload = VllmPrefillHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
@@ -466,7 +691,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    pre_created_engine=None,
+):
     """
     Instantiate and serve
     """
@@ -484,16 +714,25 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.engine_args.data_parallel_rank or 0,
         metrics_labels=[("model", config.served_model_name or config.model)],
     )
-    (
-        engine_client,
-        vllm_config,
-        default_sampling_params,
-        prometheus_temp_dir,
-    ) = setup_vllm_engine(config, factory)
+
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = pre_created_engine
+    else:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = setup_vllm_engine(config, factory)
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
-    factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
 
     handler = DecodeWorkerHandler(
@@ -506,6 +745,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         generate_endpoint=generate_endpoint,
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
+        shutdown_event=shutdown_event,
+        enable_frontend_decoding=config.frontend_decoding,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -538,33 +779,37 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        # Parse endpoint types from --dyn-endpoint-types flag
-        model_type = parse_endpoint_types(config.dyn_endpoint_types)
-        logger.info(
-            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
+    # Register sleep/wake_up engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake_up", handler.wake_up)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
+    # Parse endpoint types from --dyn-endpoint-types flag
+    model_type = parse_endpoint_types(config.dyn_endpoint_types)
+    logger.info(f"Registering model with endpoint types: {config.dyn_endpoint_types}")
+
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+
+    # Warn if custom template provided but chat endpoint not enabled
+    if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+        logger.warning(
+            "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+            "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-
-        # Warn if custom template provided but chat endpoint not enabled
-        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
-            logger.warning(
-                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
-                "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
-            )
-
-        await register_vllm_model(
-            model_input,
-            model_type,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            migration_limit=config.migration_limit,
-        )
+    await register_vllm_model(
+        model_input,
+        model_type,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+    )
 
     health_check_payload = VllmHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
@@ -577,7 +822,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown=config.migration_limit <= 0,
+                graceful_shutdown=True,
                 metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
@@ -634,7 +879,9 @@ def get_engine_cache_info(engine: AsyncLLM):
         raise
 
 
-async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_processor(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal processor component"""
     component = runtime.namespace(config.namespace).component(config.component)
 
@@ -648,13 +895,17 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         .client()
     )
 
-    # Get prompt template from args (must be passed via environment or command line)
-    mm_prompt_template = config.mm_prompt_template
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
 
-    handler = ProcessorHandler(
+    handler = PreprocessedHandler(
         config.engine_args,
         encode_worker_client,
-        mm_prompt_template,
+        pd_worker_client,
     )
 
     logger.info("Waiting for Encoder Worker Instances ...")
@@ -662,7 +913,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 
     # Register the endpoint as entrypoint to a model
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,
         ModelType.Chat,
         generate_endpoint,
         config.model,
@@ -685,7 +936,9 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         handler.cleanup()
 
 
-async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_encode_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal encode worker component"""
     component = runtime.namespace(config.namespace).component(config.component)
 
@@ -717,13 +970,153 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
             ),
         )
     except Exception as e:
-        logger.error(f"Failed to serve endpoints: {e}")
+        logger.error(f"Failed to serve encode worker endpoint: {e}")
         raise
     finally:
         handler.cleanup()
 
 
-async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+async def init_vllm_native_encoder(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
+    """
+    Initialize vLLM-native encoder worker component (ECConnector mode).
+    In this mode, vLLM handles encoder execution, caching, and storage automatically.
+    """
+    # Create component and endpoint
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Configure ECTransferConfig for producer role
+    instance_id = 0
+    engine_id = f"{config.namespace}.{config.component}.encoder.{instance_id}"
+
+    # Configure encoder with producer role, it will be responsible for creating embeddings and storing them in the shared storage
+    ec_transfer_config = create_ec_transfer_config(
+        engine_id=engine_id,
+        ec_role="ec_producer",
+        ec_connector_backend=config.ec_connector_backend,
+        ec_storage_path=config.ec_storage_path,
+        ec_extra_config=config.ec_extra_config,
+    )
+
+    # Set ECTransferConfig on engine args
+    config.engine_args.ec_transfer_config = ec_transfer_config
+
+    # Setup vLLM engine
+    (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        prometheus_temp_dir,
+    ) = setup_vllm_engine(config)
+
+    # Initialize vLLM Native Encoder Worker Handler
+    handler = VLLMEncodeWorkerHandler(
+        runtime,
+        component,
+        engine_client,
+        config,
+    )
+    handler.add_temp_dir(prometheus_temp_dir)
+
+    # 5. No async init needed - vLLM handles everything
+    # await handler.async_init(runtime)  # Not needed for ECConnector mode
+
+    logger.info("Starting to serve vLLM-native encoder endpoint...")
+
+    # 6. Serve endpoint
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve vLLM-native encoder endpoint: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_ec_processor(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
+    """
+    Initialize ECConnector processor component.
+
+    Simple processor that routes multimodal requests using ECConnector pattern:
+    1. Preprocess request (same as regular processor)
+    2. Send multimodal items to encoder workers (stores to shared storage)
+    3. Forward preprocessed request to PD worker (loads from shared storage)
+    4. Stream response back to client
+    """
+    # Create component and endpoint
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Get encoder worker client
+    encoder_client = (
+        await runtime.namespace(config.namespace)
+        .component("encoder")
+        .endpoint("generate")
+        .client()
+    )
+
+    # Get PD worker client
+    pd_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
+
+    # Get prompt template from args (must be passed via environment or command line)
+    mm_prompt_template = config.mm_prompt_template
+
+    # Create EC processor handler (with preprocessing like regular processor)
+    handler = ECProcessorHandler(
+        config.engine_args,
+        encoder_worker_client=encoder_client,
+        pd_worker_client=pd_client,
+        prompt_template=mm_prompt_template,
+    )
+
+    logger.info("Waiting for encoder and PD worker instances...")
+    await encoder_client.wait_for_instances()
+    await pd_client.wait_for_instances()
+
+    # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
+    await register_llm(
+        ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info("Starting to serve EC processor endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve EC processor endpoint: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_worker(
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    pre_created_engine=None,
+):
     """
     Initialize multimodal worker component.
 
@@ -732,18 +1125,49 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     2. --multimodal-encode-prefill-worker: Handles inline encoding (e.g., Llama 4)
 
     Both can operate in aggregated (P+D) or disaggregated (P→D) mode.
+
+    When --ec-consumer-mode is enabled, configures as ECConnector consumer
+    to load encoder embeddings from shared storage.
     """
     component = runtime.namespace(config.namespace).component(config.component)
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    (
-        engine_client,
-        vllm_config,
-        default_sampling_params,
-        prometheus_temp_dir,
-    ) = setup_vllm_engine(config)
+    # Configure ECConnector consumer mode if enabled
+    if config.ec_consumer_mode:
+        logger.info("Configuring as ECConnector consumer for encoder embeddings")
+        instance_id = 0
+        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
+
+        # The PD Worker just load the embeddings from the shared storage, so it is a consumer
+        ec_transfer_config = create_ec_transfer_config(
+            engine_id=engine_id,
+            ec_role="ec_consumer",
+            ec_connector_backend=config.ec_connector_backend,
+            ec_storage_path=config.ec_storage_path,
+            ec_extra_config=config.ec_extra_config,
+        )
+
+        # Set ECTransferConfig on engine args
+        config.engine_args.ec_transfer_config = ec_transfer_config
+        logger.info(f"Configured as ECConnector consumer with engine_id={engine_id}")
+
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = pre_created_engine
+    else:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = setup_vllm_engine(config)
 
     # Set up decode worker client for disaggregated mode
     decode_worker_client = None
@@ -761,11 +1185,16 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     # Choose handler based on worker type
     if config.multimodal_decode_worker:
         handler = MultimodalDecodeWorkerHandler(
-            runtime, component, engine_client, config
+            runtime, component, engine_client, config, shutdown_event
         )
     else:
         handler = MultimodalPDWorkerHandler(
-            runtime, component, engine_client, config, decode_worker_client
+            runtime,
+            component,
+            engine_client,
+            config,
+            decode_worker_client,
+            shutdown_event,
         )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -794,6 +1223,80 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        handler.cleanup()
+
+
+async def init_omni(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
+    """
+    Initialize Omni worker for text-to-text generation using vLLM-Omni orchestrator.
+
+    Uses vLLM-Omni's Omni class for single-stage text generation pipeline.
+    For now, supports text-to-text only (no multimodal).
+    """
+    # Lazy import to avoid loading vllm-omni unless explicitly needed
+    from dynamo.vllm.omni import OmniHandler
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Load default sampling params from model config (same as other workers)
+    default_sampling_params = (
+        config.engine_args.create_model_config().get_diff_sampling_param()
+    )
+    logger.info(f"Loaded default sampling params: {default_sampling_params}")
+
+    # Initialize OmniHandler with Omni orchestrator
+    handler = OmniHandler(
+        runtime=runtime,
+        component=component,
+        config=config,
+        default_sampling_params=default_sampling_params,
+        shutdown_event=shutdown_event,
+    )
+
+    logger.info(f"Omni worker initialized for model: {config.model}")
+
+    # Set up metrics collection for vLLM and LMCache metrics
+    setup_metrics_collection(config, generate_endpoint, logger)
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
+    # TODO: extend for multi-stage pipelines
+    # Register as Chat endpoint for text-to-text generation
+    # Use Tokens input since we're doing token-based processing
+    await register_llm(
+        ModelInput.Tokens,
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info("Starting to serve Omni worker endpoint...")
+
+    # Create health check payload (extracts BOS token from AsyncOmni)
+    health_check_payload = (
+        await VllmOmniHealthCheckPayload.create(handler.engine_client)
+    ).to_dict()
+
+    try:
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", config.served_model_name or config.model)],
+            health_check_payload=health_check_payload,
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve Omni endpoint: {e}")
+        raise
+    finally:
+        logger.debug("Cleaning up Omni worker")
         handler.cleanup()
 
 

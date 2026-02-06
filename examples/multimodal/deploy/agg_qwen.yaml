@@ -9,7 +9,6 @@ spec:
   backendFramework: vllm
   services:
     Frontend:
-      dynamoNamespace: agg-qwen
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -17,7 +16,6 @@ spec:
           image: my-registry/vllm-runtime:my-tag
     EncodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:
@@ -34,7 +32,6 @@ spec:
             - python3 components/encode_worker.py --model Qwen/Qwen2.5-VL-7B-Instruct
     VLMWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:
@@ -51,7 +48,6 @@ spec:
             - python3 components/worker.py --model Qwen/Qwen2.5-VL-7B-Instruct --worker-type prefill
     Processor:
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:

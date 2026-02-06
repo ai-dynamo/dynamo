@@ -21,6 +21,7 @@ from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    cached_tokens_chat_payload,
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
@@ -31,6 +32,12 @@ from tests.utils.payload_builder import (
 from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
+
+
+def _is_cuda13() -> bool:
+    v = os.environ.get("CUDA_VERSION", "")
+    # handles "13", "13.0", "13.0.1", etc.
+    return v.startswith("13")
 
 
 @dataclass
@@ -110,6 +117,11 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+            pytest.mark.xfail(
+                _is_cuda13(),
+                reason="lmcache does not support CUDA 13 as of v0.3.11",
+                strict=False,
+            ),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -127,6 +139,11 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+            pytest.mark.xfail(
+                _is_cuda13(),
+                reason="lmcache does not support CUDA 13 as of v0.3.11",
+                strict=False,
+            ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -190,6 +207,37 @@ vllm_configs = {
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
         },
     ),
+    "agg-router-approx": VLLMConfig(
+        name="agg-router-approx",
+        directory=vllm_dir,
+        script_name="agg_router_approx.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            # Test approximate KV routing (--no-kv-events mode)
+            # Repeated requests should show cache-aware routing in logs
+            chat_payload_default(
+                repeat_count=3,
+                expected_log=[
+                    # Verify scheduler is selecting workers with cache awareness
+                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    # After first request, should see cached blocks being tracked
+                    r"with \d+ cached blocks",
+                ],
+            ),
+            # Also test with cached tokens payload to verify usage field
+            cached_tokens_chat_payload(
+                repeat_count=3,
+                expected_log=[
+                    # Verify routing decision shows cache hits
+                    r"with \d+ cached blocks",
+                ],
+            ),
+        ],
+        env={
+            "DYN_LOG": "dynamo_llm::kv_router::scheduler=info",
+        },
+    ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
         directory=vllm_dir,
@@ -248,7 +296,40 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["purple"],
+                # With proper prompt templating, the model actually only returns "green",
+                # verified behavior with native vLLM.
+                expected_response=["green"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "multimodal_agg_frontend_decoding": VLLMConfig(
+        name="multimodal_agg_frontend_decoding",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
+        script_args=[
+            "--model",
+            "Qwen/Qwen2-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["green"],
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -526,8 +607,8 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "guided_decoding_json": VLLMConfig(
-        name="guided_decoding_json",
+    "guided_decoding": VLLMConfig(
+        name="guided_decoding",
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
@@ -549,16 +630,7 @@ vllm_configs = {
                         "required": ["name", "age"],
                     }
                 },
-            )
-        ],
-    ),
-    "guided_decoding_regex": VLLMConfig(
-        name="guided_decoding_regex",
-        directory=vllm_dir,
-        script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-        model="Qwen/Qwen3-0.6B",
-        request_payloads=[
+            ),
             chat_payload(
                 "Generate a color name (red, blue, or green)",
                 repeat_count=1,
@@ -566,16 +638,7 @@ vllm_configs = {
                 temperature=0.0,
                 max_tokens=20,
                 extra_body={"guided_regex": r"(red|blue|green)"},
-            )
-        ],
-    ),
-    "guided_decoding_choice": VLLMConfig(
-        name="guided_decoding_choice",
-        directory=vllm_dir,
-        script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-        model="Qwen/Qwen3-0.6B",
-        request_payloads=[
+            ),
             chat_payload(
                 "Generate a color name (red, blue, or green)",
                 repeat_count=1,
@@ -583,7 +646,7 @@ vllm_configs = {
                 temperature=0.0,
                 max_tokens=20,
                 extra_body={"guided_choice": ["red", "blue", "green"]},
-            )
+            ),
         ],
     ),
 }

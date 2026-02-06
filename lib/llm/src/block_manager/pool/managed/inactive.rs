@@ -132,15 +132,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         // If we already have an entry for this sequence hash or the block is reset,
         // we need to move it to the uninitialized set
         match block.state() {
-            BlockState::Reset => {
-                self.uninitialized_set.push_back(block);
-            }
-            BlockState::Partial(_) => {
-                let mut block = block;
-                block.reset();
-                self.uninitialized_set.push_back(block);
-            }
-            BlockState::Complete(_) => {
+            BlockState::Reset | BlockState::Partial(_) | BlockState::Complete(_) => {
                 let mut block = block;
                 block.reset();
                 self.uninitialized_set.push_back(block);
@@ -571,6 +563,14 @@ pub(crate) mod tests {
         fn offload_priority(&self) -> Option<u64> {
             Some(self.priority as u64)
         }
+
+        fn with_priority(&self, priority: u32) -> Self {
+            Self {
+                priority,
+                returned_tick: self.returned_tick,
+                acquired_tick: self.acquired_tick,
+            }
+        }
     }
 
     type TestPriorityKey = PriorityKey<TestMetadata>;
@@ -620,6 +620,42 @@ pub(crate) mod tests {
 
         // Map should now be empty
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_with_priority_updates_priority() {
+        let metadata = TestMetadata {
+            priority: 10,
+            returned_tick: 100,
+            acquired_tick: 50,
+        };
+        let updated = metadata.with_priority(80);
+
+        assert_eq!(updated.priority, 80);
+        assert_eq!(updated.returned_tick, 100); // preserved
+        assert_eq!(updated.acquired_tick, 50); // preserved
+    }
+
+    #[test]
+    fn test_with_priority_immutability() {
+        let original = TestMetadata {
+            priority: 35,
+            returned_tick: 10,
+            acquired_tick: 5,
+        };
+        let updated = original.with_priority(100);
+
+        assert_eq!(original.priority, 35); // unchanged
+        assert_eq!(updated.priority, 100);
+    }
+
+    #[test]
+    fn test_with_priority_boundary_values() {
+        let metadata = TestMetadata::default();
+
+        assert_eq!(metadata.with_priority(0).priority, 0);
+        assert_eq!(metadata.with_priority(100).priority, 100);
+        assert_eq!(metadata.with_priority(u32::MAX).priority, u32::MAX);
     }
 
     // Helper function to create a sequence of tokens
@@ -880,5 +916,145 @@ pub(crate) mod tests {
             pool.available_blocks_counter().load(Ordering::Relaxed),
             pool.available_blocks()
         );
+    }
+
+    /// Test that validates blocks allocated from the pool always have the default
+    /// priority (0), regardless of what priority they had in a previous allocation.
+    ///
+    /// This test exposes a bug where blocks in Reset state that are returned to
+    /// the pool retain their non-default priority when re-acquired, because the
+    /// uninitialized_set path in acquire_free_block() does not call block.reset().
+    #[test]
+    fn test_allocated_blocks_have_default_priority() {
+        let mut pool = create_block_pool(3);
+
+        // Step 1: Acquire blocks (they come from uninitialized_set in Reset state)
+        let mut blocks = pool.acquire_free_blocks(3).unwrap();
+        assert_eq!(blocks.len(), 3);
+
+        // Verify initial priority is 0 (default)
+        for block in &blocks {
+            assert_eq!(
+                block.metadata().offload_priority(),
+                Some(0),
+                "Newly acquired block should have default priority"
+            );
+        }
+
+        // Step 2: Set non-default priority on blocks (keep them in Reset state)
+        for block in &mut blocks {
+            let updated_metadata = block.metadata().with_priority(100);
+            block.update_metadata(updated_metadata);
+            assert_eq!(block.metadata().offload_priority(), Some(100));
+        }
+
+        // Step 3: Return blocks to inactive pool
+        // Since blocks are in Reset state, insert() will put them in uninitialized_set
+        // WITHOUT calling reset()
+        pool.return_blocks(blocks);
+        assert_eq!(pool.available_blocks(), 3);
+
+        // Step 4: Acquire blocks again
+        let reacquired_blocks = pool.acquire_free_blocks(3).unwrap();
+
+        // Step 5: Verify priority is reset to default (0)
+        for (i, block) in reacquired_blocks.iter().enumerate() {
+            assert_eq!(
+                block.metadata().offload_priority(),
+                Some(0),
+                "Block {} should have default priority after reallocation, but has {:?}",
+                i,
+                block.metadata().offload_priority()
+            );
+        }
+    }
+
+    /// Validates that after pool.reset(), all blocks have default priority
+    /// regardless of what priority they had when registered.
+    ///
+    /// This test follows the exact flow described:
+    /// 1. Create a tokens sequence
+    /// 2. Allocate mutable blocks
+    /// 3. Apply the tokens sequence and some non-default priority
+    /// 4. Release them to the inactive pool (they go to priority_set as Registered)
+    /// 5. Reset the inactive pool
+    /// 6. Validate all blocks have default priority
+    ///
+    /// This test should PASS because blocks evicted from priority_set go through
+    /// block.reset() which clears the priority.
+    #[test]
+    fn test_pool_reset_clears_priority_on_registered_blocks() {
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+        const BLOCK_SIZE: u32 = 4;
+
+        let mut pool = create_block_pool(3);
+        assert_eq!(pool.available_blocks(), 3);
+
+        // Step 1 & 2: Create tokens and allocate blocks
+        let tokens = create_token_sequence(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let (mut blocks, _matched) = acquire_blocks(
+            tokens,
+            BLOCK_SIZE,
+            &mut pool,
+            async_runtime.handle().clone(),
+        );
+        assert_eq!(blocks.len(), 3);
+
+        // Verify blocks are in Registered state
+        for block in &blocks {
+            assert!(
+                block.state().is_registered(),
+                "Block should be in Registered state after acquire_blocks"
+            );
+        }
+
+        // Step 3: Set non-default priority on blocks
+        for block in &mut blocks {
+            let updated_metadata = block.metadata().with_priority(100);
+            block.update_metadata(updated_metadata);
+            assert_eq!(
+                block.metadata().offload_priority(),
+                Some(100),
+                "Priority should be set to 100"
+            );
+        }
+
+        // Step 4: Release blocks to inactive pool
+        // Since blocks are Registered, they go to priority_set
+        pool.return_blocks(blocks);
+        assert_eq!(pool.available_blocks(), 3);
+
+        // Verify blocks are in priority_set (not uninitialized_set)
+        let (priority_count, uninit_count) = pool.status();
+        assert_eq!(priority_count, 3, "All blocks should be in priority_set");
+        assert_eq!(uninit_count, 0, "No blocks should be in uninitialized_set");
+
+        // Step 5: Reset the pool
+        // This calls acquire_free_blocks() which evicts from priority_set
+        // and calls block.reset() on each, then returns them
+        pool.reset().expect("Pool reset should succeed");
+
+        // After reset, all blocks should be in uninitialized_set
+        let (priority_count, uninit_count) = pool.status();
+        assert_eq!(
+            priority_count, 0,
+            "priority_set should be empty after reset"
+        );
+        assert_eq!(
+            uninit_count, 3,
+            "All blocks should be in uninitialized_set after reset"
+        );
+
+        // Step 6: Acquire all blocks and verify priority is default (0)
+        let reset_blocks = pool.acquire_free_blocks(3).unwrap();
+        for (i, block) in reset_blocks.iter().enumerate() {
+            assert_eq!(
+                block.metadata().offload_priority(),
+                Some(0),
+                "Block {} should have default priority after pool reset, but has {:?}",
+                i,
+                block.metadata().offload_priority()
+            );
+        }
     }
 }

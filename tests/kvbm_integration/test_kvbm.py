@@ -14,7 +14,7 @@ These tests validate core KVBM functionality:
 import pytest
 import requests
 
-from .common import llm_server_kvbm  # noqa: F401, F811
+from .common import llm_server_kvbm  # noqa: F401
 from .common import DeterminismTester, assert_deterministic, fetch_kvbm_metrics
 
 # Test configuration
@@ -59,11 +59,12 @@ def print_phase(phase_num: int, description: str) -> None:
     print(f"\n=== Phase {phase_num}: {description} ===")
 
 
-def check_kvbm_metrics(phase_name: str) -> dict[str, int]:
+def check_kvbm_metrics(phase_name: str, metrics_port: int) -> dict[str, int]:
     """Fetch and display KVBM metrics.
 
     Args:
         phase_name: Name of the test phase for logging
+        metrics_port: Port number for the KVBM metrics endpoint
 
     Returns:
         Dictionary containing KVBM metrics with keys:
@@ -71,7 +72,7 @@ def check_kvbm_metrics(phase_name: str) -> dict[str, int]:
         - kvbm_onboard_blocks_h2d: Blocks onboarded from CPU to GPU
     """
     print(f"\n--- Checking KVBM metrics after {phase_name} ---")
-    metrics = fetch_kvbm_metrics()
+    metrics = fetch_kvbm_metrics(port=metrics_port)
 
     offload_d2h = metrics.get("kvbm_offload_blocks_d2h", 0)
     onboard_h2d = metrics.get("kvbm_onboard_blocks_h2d", 0)
@@ -96,17 +97,24 @@ def reset_cache(base_url: str) -> None:
         print(f"Warning: Cache reset failed: {e}")
 
 
+# Model used for test_kvbm tests (smaller model for faster CI)
+KVBM_TEST_MODEL = "Qwen/Qwen3-0.6B"
+
+
 # Fixtures
 @pytest.fixture(scope="function")
 def tester(llm_server_kvbm):  # noqa: F811
     """Create tester bound to the KVBM-enabled server."""
     return DeterminismTester(
         base_url=llm_server_kvbm.base_url,
+        model_id=KVBM_TEST_MODEL,
         server_type=llm_server_kvbm.server_type,
     )
 
 
 # Tests
+@pytest.mark.parametrize("llm_server_kvbm", [{"model": KVBM_TEST_MODEL}], indirect=True)
+@pytest.mark.timeout(110)  # 3x measured time (36.31s), rounded up
 def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
     Test offload → cache reset → onboard cycle with determinism verification.
@@ -129,7 +137,7 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     response_1 = tester.make_request(prompt, max_tokens=MAX_TOKENS)
     print(f"Response 1: {response_1}")
 
-    metrics = check_kvbm_metrics("Phase 1")
+    metrics = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
     assert (
         metrics["kvbm_offload_blocks_d2h"] > 0
     ), "Phase 1: No blocks offloaded. KVBM may not be triggering offloads."
@@ -149,7 +157,7 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     response_2 = tester.make_request(prompt, max_tokens=MAX_TOKENS)
     print(f"Response 2: {response_2}")
 
-    metrics = check_kvbm_metrics("Phase 3")
+    metrics = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
     assert (
         metrics["kvbm_onboard_blocks_h2d"] > 0
     ), "Phase 3: No blocks onboarded. Expected CPU→GPU transfer after cache reset."
@@ -169,8 +177,11 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
 
 
 @pytest.mark.parametrize(
-    "llm_server_kvbm", [{"cpu_blocks": 200, "gpu_blocks": 20}], indirect=True
+    "llm_server_kvbm",
+    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
+    indirect=True,
 )
+@pytest.mark.timeout(190)  # 3x measured time (63.39s), rounded up
 def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     """
     Test GPU cache eviction mechanics.
@@ -196,7 +207,7 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
     tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
 
-    metrics_p1 = check_kvbm_metrics("Phase 1")
+    metrics_p1 = check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
     assert metrics_p1["kvbm_offload_blocks_d2h"] >= MIN_OFFLOAD_BLOCKS, (
         f"Phase 1: Expected >= {MIN_OFFLOAD_BLOCKS} blocks offloaded, "
         f"got {metrics_p1['kvbm_offload_blocks_d2h']}"
@@ -212,7 +223,7 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
     tester.make_request(prompt_2, max_tokens=MAX_TOKENS)
 
-    metrics_p2 = check_kvbm_metrics("Phase 2")
+    metrics_p2 = check_kvbm_metrics("Phase 2", llm_server_kvbm.metrics_port)
     assert (
         metrics_p2["kvbm_offload_blocks_d2h"] > metrics_p1["kvbm_offload_blocks_d2h"]
     ), (
@@ -230,7 +241,7 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
     tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
 
-    metrics_p3 = check_kvbm_metrics("Phase 3")
+    metrics_p3 = check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
     assert (
         metrics_p3["kvbm_onboard_blocks_h2d"] > 0
     ), "Phase 3: No blocks onboarded. Expected CPU→GPU retrieval after eviction."
@@ -241,8 +252,11 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
 
 @pytest.mark.parametrize(
-    "llm_server_kvbm", [{"cpu_blocks": 200, "gpu_blocks": 20}], indirect=True
+    "llm_server_kvbm",
+    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
+    indirect=True,
 )
+@pytest.mark.timeout(107)  # 3x measured time (35.40s), rounded up
 def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     """
     Test onboarding determinism under eviction scenario.
@@ -266,41 +280,41 @@ def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     print_phase(1, "Send first request")
     print(f"Prompt 1: {prompt_1[:80]}...")
     tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
-    check_kvbm_metrics("Phase 1")
+    check_kvbm_metrics("Phase 1", llm_server_kvbm.metrics_port)
 
     # Phase 2: Second request (may evict first from GPU)
     print_phase(2, "Send second request (may evict first from GPU)")
     print(f"Prompt 2: {prompt_2[:80]}...")
     tester.make_request(prompt_2, max_tokens=MAX_TOKENS)
-    check_kvbm_metrics("Phase 2")
+    check_kvbm_metrics("Phase 2", llm_server_kvbm.metrics_port)
 
     # Phase 3: Re-request prompt 1 (first onboard cycle)
     print_phase(3, "Re-request Prompt 1 (first onboard cycle)")
     print(f"Re-sending Prompt 1: {prompt_1[:80]}...")
     response_1_first_onboard = tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
     print(f"Response 1 (first onboard): {response_1_first_onboard}")
-    check_kvbm_metrics("Phase 3")
+    check_kvbm_metrics("Phase 3", llm_server_kvbm.metrics_port)
 
     # Phase 4: Re-request prompt 2 (first onboard cycle)
     print_phase(4, "Re-request Prompt 2 (first onboard cycle)")
     print(f"Re-sending Prompt 2: {prompt_2[:80]}...")
     response_2_first_onboard = tester.make_request(prompt_2, max_tokens=MAX_TOKENS)
     print(f"Response 2 (first onboard): {response_2_first_onboard}")
-    check_kvbm_metrics("Phase 4")
+    check_kvbm_metrics("Phase 4", llm_server_kvbm.metrics_port)
 
     # Phase 5: Re-request prompt 1 (second onboard cycle)
     print_phase(5, "Re-request Prompt 1 (second onboard cycle)")
     print(f"Re-sending Prompt 1 (third time): {prompt_1[:80]}...")
     response_1_second_onboard = tester.make_request(prompt_1, max_tokens=MAX_TOKENS)
     print(f"Response 1 (second onboard): {response_1_second_onboard}")
-    check_kvbm_metrics("Phase 5")
+    check_kvbm_metrics("Phase 5", llm_server_kvbm.metrics_port)
 
     # Phase 6: Re-request prompt 2 (second onboard cycle)
     print_phase(6, "Re-request Prompt 2 (second onboard cycle)")
     print(f"Re-sending Prompt 2 (third time): {prompt_2[:80]}...")
     response_2_second_onboard = tester.make_request(prompt_2, max_tokens=MAX_TOKENS)
     print(f"Response 2 (second onboard): {response_2_second_onboard}")
-    check_kvbm_metrics("Phase 6")
+    check_kvbm_metrics("Phase 6", llm_server_kvbm.metrics_port)
 
     # Verify determinism between onboarded requests
     print_test_header("DETERMINISM VERIFICATION")

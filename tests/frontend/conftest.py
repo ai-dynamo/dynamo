@@ -1,8 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared fixtures for frontend tests."""
+"""Shared fixtures for frontend tests.
 
+Handles conditional test collection to prevent import errors when required
+dependencies are not installed in the current environment.
+"""
+
+import importlib.util
 import logging
 import os
 import shutil
@@ -17,6 +22,20 @@ from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Skip collecting test files if required dependencies aren't installed."""
+    filename = collection_path.name
+
+    # Skip prompt_embeds tests if openai or torch aren't available
+    if filename == "test_prompt_embeds.py":
+        if importlib.util.find_spec("openai") is None:
+            return True  # openai not available, skip this file
+        if importlib.util.find_spec("torch") is None:
+            return True  # torch not available, skip this file
+
+    return None
 
 
 @pytest.fixture(scope="function")
@@ -39,7 +58,7 @@ def start_services_with_http(
     with DynamoFrontendProcess(
         request,
         frontend_port=ports.frontend_port,
-        terminate_existing=False,
+        terminate_all_matching_process_names=False,
     ):
         logger.info(f"HTTP Frontend started on port {ports.frontend_port}")
         yield ports.frontend_port, ports.system_ports[0]
@@ -169,7 +188,7 @@ def start_services_with_grpc(
         with DynamoFrontendProcess(
             request,
             frontend_port=ports.frontend_port,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             extra_args=[
                 "--kserve-grpc-server",
                 "--grpc-metrics-port",
@@ -242,7 +261,7 @@ class MockerWorkerProcess(ManagedProcess):
             ],
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.mocker"],
             log_dir=log_dir,

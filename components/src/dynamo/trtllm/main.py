@@ -28,6 +28,7 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.llmapi.llm_args import KvCacheConnectorConfig
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -39,10 +40,10 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
 )
@@ -70,8 +71,9 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 configure_dynamo_logging()
 
 
-async def graceful_shutdown(runtime):
+async def graceful_shutdown(runtime, shutdown_event):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    shutdown_event.set()
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
 
@@ -100,35 +102,66 @@ async def get_engine_runtime_config(
         logging.info(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
         )
-
-        return runtime_config
-
     except Exception as e:
         logging.error(f"Failed to get runtime config from TensorRT-LLM engine: {e}")
-        # Return config with default/None values if retrieval fails
-        return runtime_config
+        # Keep default/None values if retrieval fails
+
+    return runtime_config
+
+
+def build_kv_connector_config(config: Config):
+    if config.connector is not None:
+        if config.connector == "kvbm":
+            return KvCacheConnectorConfig(
+                connector_module="kvbm.trtllm_integration.connector",
+                connector_scheduler_class="DynamoKVBMConnectorLeader",
+                connector_worker_class="DynamoKVBMConnectorWorker",
+            )
+        elif config.connector == "none":
+            return None
+        else:
+            logging.error(f"Invalid connector: {config.connector}")
+            sys.exit(1)
+    return None
 
 
 async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
+    # Create shutdown event
+    shutdown_event = asyncio.Event()
+
+    # Set DYN_EVENT_PLANE environment variable based on config
+    os.environ["DYN_EVENT_PLANE"] = config.event_plane
+
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND use_kv_events is True
+    enable_nats = config.request_plane == "nats" or (
+        config.event_plane == "nats" and config.use_kv_events
+    )
+
+    runtime = DistributedRuntime(
+        loop, config.store_kv, config.request_plane, enable_nats
+    )
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
         # Schedule the shutdown coroutine instead of calling it directly
-        asyncio.create_task(graceful_shutdown(runtime))
+        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    await init(runtime, config)
+    await init(runtime, config, shutdown_event)
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """
     Instantiate and serve
     """
@@ -165,6 +198,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
 
+    if config.connector is not None and "kvbm" in config.connector:
+        kv_cache_config.enable_partial_reuse = False
+
     dynamic_batch_config = DynamicBatchConfig(
         enable_batch_size_tuning=True,
         enable_max_num_tokens_tuning=False,
@@ -174,6 +210,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         capacity_scheduler_policy=CapacitySchedulerPolicy.GUARANTEED_NO_EVICT,
         dynamic_batch_config=dynamic_batch_config,
     )
+    kv_connector_config = build_kv_connector_config(config)
+
     modality = getattr(config, "modality", None) or "text"
     arg_map = {
         "model": model_path,
@@ -181,6 +219,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "tensor_parallel_size": config.tensor_parallel_size,
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
+        "enable_attention_dp": config.enable_attention_dp,
         "backend": Backend.PYTORCH,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
@@ -189,6 +228,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
         "return_perf_metrics": config.publish_events_and_metrics,
+        "kv_connector_config": kv_connector_config,
     }
 
     if config.extra_engine_args != "":
@@ -208,14 +248,14 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
-        # Add it to kv_cache_config while preserving cache_transceiver_config from YAML
+        # Add it to kv_cache_config while preserving all settings from YAML
         current_kv_config = arg_map["kv_cache_config"]
         if isinstance(current_kv_config, KvCacheConfig):
-            # Convert KvCacheConfig object to dict (no cache_transceiver_config to preserve)
-            arg_map["kv_cache_config"] = {
-                "free_gpu_memory_fraction": config.free_gpu_memory_fraction,
-                "event_buffer_max_size": DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
-            }
+            # Convert KvCacheConfig object to dict, preserving ALL existing settings
+            # This ensures YAML overrides are not lost when adding event_buffer_max_size
+            kv_config_dict = current_kv_config.model_dump(exclude_none=True)
+            kv_config_dict["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            arg_map["kv_cache_config"] = kv_config_dict
         elif isinstance(current_kv_config, dict):
             # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
             current_kv_config[
@@ -328,7 +368,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
     )
 
-    async with get_llm_engine(engine_args) as engine:
+    async with get_llm_engine(engine_args, config.disaggregation_mode) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         # should ideally call get_engine_runtime_config
@@ -352,11 +392,17 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
         runtime_config.enable_local_indexer = config.enable_local_indexer
+        # Set data_parallel_size for attention DP mode
+        # This enables the router's scheduler to correctly iterate over all dp_ranks
+        # Need to name ADP as `data_parallel_size` for parity with other frameworks
+        attention_dp_size = engine.get_attention_dp_size()
+        runtime_config.data_parallel_size = attention_dp_size
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
         )
+        logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
 
         # The get_engine_runtime_config function exists but is not called here due to:
         # 1. get_stats_async requires active requests to work properly
@@ -401,6 +447,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
             kv_block_size=config.kv_block_size,
+            shutdown_event=shutdown_event,
+            encoder_cache_capacity_gb=config.encoder_cache_capacity_gb,
         )
 
         # Register the model with runtime config
@@ -414,7 +462,6 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.model_path,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
-                migration_limit=config.migration_limit,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
             )
@@ -443,8 +490,8 @@ async def init(runtime: DistributedRuntime, config: Config):
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",  # Empty topic = all topics
                 )
-                consolidator_publisher = ZmqKvEventPublisher(
-                    component, consolidator_config
+                consolidator_publisher = KvEventPublisher(
+                    component, zmq_config=consolidator_config
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "

@@ -43,7 +43,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Benchmarking](#benchmarking)
 - [Multimodal Support](#multimodal-support)
 - [Logits Processing](#logits-processing)
+- [DP Rank Routing](#dp-rank-routing-attention-data-parallelism)
 - [Performance Sweep](#performance-sweep)
+- [Known Issues and Mitigations](#known-issues-and-mitigations)
 
 ## Feature Support Matrix
 
@@ -53,10 +55,10 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|--------------|-------|
 | [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | Planned |
-| [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ | |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/components/planner/planner_guide.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/components/planner/README.md) | 🚧 | Planned |
+| [**KVBM**](../../../docs/components/kvbm/README.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
@@ -70,13 +72,18 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
-### Start NATS and ETCD in the background
+### Start Infrastructure Services (Local Development Only)
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Build container
 
@@ -107,7 +114,7 @@ apt-get update && apt-get -y install git git-lfs
 > [!IMPORTANT]
 > Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
-For detailed information about the architecture and how KV-aware routing works, see the [KV Cache Routing documentation](../../router/kv_cache_routing.md).
+For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../components/router/router_guide.md).
 
 ### Aggregated
 ```bash
@@ -186,17 +193,7 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
-
-```bash
-# For decode and aggregated workers
-python3 -m dynamo.trtllm ... --migration-limit=3
-```
-
-> [!IMPORTANT]
-> **Prefill workers do not support request migration** and must use `--migration-limit=0` (the default). Prefill workers only process prompts and return KV cache state - they don't maintain long-running generation requests that would benefit from migration.
-
-See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
+Dynamo supports [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for configuration details.
 
 ## Request Cancellation
 
@@ -224,7 +221,7 @@ To benchmark your deployment with AIPerf, see this utility script, configuring t
 
 ## Multimodal support
 
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../multimodal/trtllm.md).
+Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../features/multimodal/multimodal_trtllm.md).
 
 ## Logits Processing
 
@@ -283,6 +280,35 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 - Processors must modify logits in-place and not return a new tensor.
 - If your processor needs tokenization, ensure the tokenizer is initialized (do not skip tokenizer init).
 
+## DP Rank Routing (Attention Data Parallelism)
+
+TensorRT-LLM supports [attention data parallelism](https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models) (attention DP) for models like DeepSeek. When enabled, multiple attention DP ranks run within a single worker, each with its own KV cache. Dynamo can route requests to specific DP ranks based on KV cache state.
+
+### Dynamo vs TRT-LLM Internal Routing
+
+- **Dynamo DP Rank Routing**: The router selects the optimal DP rank based on KV cache overlap and instructs TRT-LLM to use that rank with strict routing (`attention_dp_relax=False`). Use this with `--router-mode kv` for cache-aware routing.
+- **TRT-LLM Internal Routing**: TRT-LLM's scheduler assigns DP ranks internally. Use this with `--router-mode round-robin` or `random` when KV-aware routing isn't needed.
+
+### Enabling DP Rank Routing
+
+```bash
+# Worker with attention DP
+# (TP=2 acts as the "world size", in effect creating 2 attention DP ranks)
+CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.trtllm \
+  --model-path <MODEL_PATH> \
+  --tensor-parallel-size 2 \
+  --enable-attention-dp \
+  --publish-events-and-metrics
+
+# Frontend with KV routing
+python3 -m dynamo.frontend --router-mode kv
+```
+
+The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size` and configures Dynamo to publish KV events per DP rank. The router automatically creates routing targets for each `(worker_id, dp_rank)` combination.
+
+> [!NOTE]
+> Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.
+
 ## Performance Sweep
 
 For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
@@ -291,4 +317,30 @@ For detailed instructions on running comprehensive performance sweeps across bot
 
 Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
 
-Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/kvbm/trtllm-setup.md) .
+Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/components/kvbm/kvbm_guide.md#run-kvbm-in-dynamo-with-tensorrt-llm) .
+
+## Known Issues and Mitigations
+
+### KV Cache Exhaustion Causing Worker Deadlock (Disaggregated Serving)
+
+**Issue:** In disaggregated serving mode, TensorRT-LLM workers can become stuck and unresponsive after sustained high-load traffic. Once in this state, workers require a pod/process restart to recover.
+
+**Symptoms:**
+- Workers function normally initially but hang after heavy load testing
+- Inference requests get stuck and eventually timeout
+- Logs show warnings: `num_fitting_reqs=0 and fitting_disagg_gen_init_requests is empty, may not have enough kvCache`
+- Error logs may contain: `asyncio.exceptions.InvalidStateError: invalid state`
+
+**Root Cause:** When `max_tokens_in_buffer` in the cache transceiver config is smaller than the maximum input sequence length (ISL) being processed, KV cache exhaustion can occur under heavy load. This causes context transfers to timeout, leaving workers stuck waiting for phantom transfers and entering an irrecoverable deadlock state.
+
+**Mitigation:** Ensure `max_tokens_in_buffer` exceeds your maximum expected input sequence length. Update your engine configuration files (e.g., `prefill.yaml` and `decode.yaml`):
+
+```yaml
+cache_transceiver_config:
+  backend: DEFAULT
+  max_tokens_in_buffer: 65536  # Must exceed max ISL
+```
+
+For example, see `examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml`.
+
+**Related Issue:** [#4327](https://github.com/ai-dynamo/dynamo/issues/4327)
