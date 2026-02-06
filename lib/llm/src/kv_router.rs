@@ -53,7 +53,7 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
-        sequence::SequenceError,
+        sequence::{SequenceError, SequenceRequest},
         subscriber::{start_kv_router_background, start_kv_router_background_event_plane},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -585,15 +585,15 @@ impl KvRouter {
 
         if let Err(e) = self
             .scheduler
-            .add_request(
-                request_id.clone(),
-                maybe_seq_hashes,
-                isl_tokens,
-                overlap_blocks,
+            .add_request(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: maybe_seq_hashes,
+                isl: isl_tokens,
+                overlap: overlap_blocks,
                 expected_output_tokens,
                 worker,
                 lora_name,
-            )
+            })
             .await
         {
             tracing::warn!("Failed to add request {request_id}: {e}");

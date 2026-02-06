@@ -21,7 +21,7 @@ use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
+use super::sequence::{ActiveSequencesMultiWorker, SequenceError, SequenceRequest};
 
 use dynamo_tokens::SequenceHash;
 
@@ -450,15 +450,15 @@ impl KvScheduler {
                             };
 
                             if let Err(e) = slots_clone
-                                .add_request(
-                                    request_id.clone(),
-                                    request.token_seq,
-                                    request.isl_tokens,
-                                    selection.overlap_blocks,
-                                    None, // expected_output_tokens not available in scheduler loop
-                                    selection.worker,
-                                    request.lora_name.clone(),
-                                )
+                                .add_request(SequenceRequest {
+                                    request_id: request_id.clone(),
+                                    token_sequence: request.token_seq,
+                                    isl: request.isl_tokens,
+                                    overlap: selection.overlap_blocks,
+                                    expected_output_tokens: None,
+                                    worker: selection.worker,
+                                    lora_name: request.lora_name.clone(),
+                                })
                                 .await
                             {
                                 tracing::warn!("Failed to add request {request_id}: {e}");
@@ -539,28 +539,8 @@ impl KvScheduler {
         Ok(response.best_worker)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn add_request(
-        &self,
-        request_id: String,
-        token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
-        expected_output_tokens: Option<u32>,
-        worker: WorkerWithDpRank,
-        lora_name: Option<String>,
-    ) -> Result<(), SequenceError> {
-        self.slots
-            .add_request(
-                request_id,
-                token_sequence,
-                isl,
-                overlap,
-                expected_output_tokens,
-                worker,
-                lora_name,
-            )
-            .await
+    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        self.slots.add_request(req).await
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
