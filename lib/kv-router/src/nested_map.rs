@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
-    RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
+    RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank, KvCacheStoreData,
 };
 
 use crate::compute_block_hash_for_seq;
@@ -301,54 +301,7 @@ impl PositionalIndexer {
 
         match op {
             KvCacheEventData::Stored(store_data) => {
-                // Determine starting position based on parent_hash
-                let start_pos = match store_data.parent_hash {
-                    Some(parent_hash) => {
-                        // Find parent position from worker_blocks
-
-                        let Some(worker_map) = worker_blocks.get(&worker) else {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                id,
-                                parent_hash = ?parent_hash,
-                            );
-                            return Err(KvCacheEventError::ParentBlockNotFound);
-                        };
-
-                        let worker_map = worker_map.read().unwrap();
-
-                        let Some(entry) = worker_map.get(&parent_hash) else {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                id,
-                                parent_hash = ?parent_hash,
-                            );
-                            return Err(KvCacheEventError::ParentBlockNotFound);
-                        };
-
-                        entry.0 + 1 // parent position + 1
-                    }
-                    None => 0, // Start from position 0
-                };
-
-                for (i, block_data) in store_data.blocks.into_iter().enumerate() {
-                    let position = start_pos + i;
-                    let local_hash = block_data.tokens_hash;
-                    let seq_hash = block_data.block_hash;
-
-                    // Insert into index: position -> local_hash -> seq_hash -> worker
-                    let pos_map = index.entry(position).or_default();
-                    pos_map
-                        .entry(local_hash)
-                        .and_modify(|entry| entry.insert(seq_hash, worker))
-                        .or_insert_with(|| SeqEntry::new(seq_hash, worker));
-
-                    // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
-                    let worker_map = worker_blocks.entry(worker).or_default();
-                    worker_map.write().unwrap().insert(seq_hash, (position, local_hash));
-                }
+                Self::store_blocks_impl(index, worker_blocks, worker, store_data, id)?;
 
                 Ok(())
             }
@@ -363,6 +316,65 @@ impl PositionalIndexer {
         }
     }
 
+    fn store_blocks_impl(
+        index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        worker: WorkerWithDpRank,
+        store_data: KvCacheStoreData,
+        event_id: u64,
+    ) -> Result<(), KvCacheEventError> {
+        // Determine starting position based on parent_hash
+        let start_pos = match store_data.parent_hash {
+            Some(parent_hash) => {
+                // Find parent position from worker_blocks
+
+                let Some(worker_map) = worker_blocks.get(&worker) else {
+                    tracing::warn!(
+                        worker_id = worker.worker_id.to_string(),
+                        dp_rank = worker.dp_rank,
+                        event_id,
+                        parent_hash = ?parent_hash,
+                    );
+                    return Err(KvCacheEventError::ParentBlockNotFound);
+                };
+
+                let worker_map = worker_map.read().unwrap();
+
+                let Some(entry) = worker_map.get(&parent_hash) else {
+                    tracing::warn!(
+                        worker_id = worker.worker_id.to_string(),
+                        dp_rank = worker.dp_rank,
+                        event_id,
+                        parent_hash = ?parent_hash,
+                    );
+                    return Err(KvCacheEventError::ParentBlockNotFound);
+                };
+
+                entry.0 + 1 // parent position + 1
+            }
+            None => 0, // Start from position 0
+        };
+
+        for (i, block_data) in store_data.blocks.into_iter().enumerate() {
+            let position = start_pos + i;
+            let local_hash = block_data.tokens_hash;
+            let seq_hash = block_data.block_hash;
+
+            // Insert into index: position -> local_hash -> seq_hash -> worker
+            let pos_map = index.entry(position).or_default();
+            pos_map
+                .entry(local_hash)
+                .and_modify(|entry| entry.insert(seq_hash, worker))
+                .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+
+            // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
+            let worker_map = worker_blocks.entry(worker).or_default();
+            worker_map.write().unwrap().insert(seq_hash, (position, local_hash));
+        }
+
+        Ok(())
+    }
+
     fn remove_blocks_impl(        
         index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
         worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
@@ -370,7 +382,7 @@ impl PositionalIndexer {
         seq_hashes: &Vec<ExternalSequenceBlockHash>,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let worker_map = worker_blocks.get_mut(&worker).ok_or_else(|| {
+        let worker_map = worker_blocks.get(&worker).ok_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id.to_string(),
                 dp_rank = worker.dp_rank,
