@@ -53,7 +53,7 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 | **Best For** | High-throughput serving | Maximum performance | Broadest feature coverage |
 | [**Disaggregated Serving**](docs/design_docs/disagg_serving.md) | ✅ | ✅ | ✅ |
 | [**KV-Aware Routing**](docs/components/router/README.md) | ✅ | ✅ | ✅ |
-| [**SLA-Based Planner**](docs/components/planner/README.md) | ✅ | ✅ | ✅ |
+| [**SLA-Based Planner**](docs/components/planner/planner_guide.md) | ✅ | ✅ | ✅ |
 | [**KVBM**](docs/components/kvbm/README.md) | 🚧 | ✅ | ✅ |
 | [**Multimodal**](docs/features/multimodal/README.md) | ✅ | ✅ | ✅ |
 | [**Tool Calling**](docs/agents/tool-calling.md) | ✅ | ✅ | ✅ |
@@ -389,7 +389,7 @@ See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LL
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design_docs/disagg_serving.md
 [kv-routing]: docs/components/router/README.md
-[planner]: docs/components/planner/README.md
+[planner]: docs/components/planner/planner_guide.md
 [kvbm]: docs/components/kvbm/README.md
 [mm]: examples/multimodal/
 [migration]: docs/fault_tolerance/request_migration.md

@@ -37,6 +37,7 @@
    kubernetes/README.md
    reference/cli.md
    observability/metrics.md
+   integrations/kv_events_custom_engines.md
    agents/tool-calling.md
    development/jail_stream.md
 
@@ -46,6 +47,8 @@
    components/kvbm/README.md
    components/kvbm/kvbm_guide.md
    components/router/README.md
+   components/router/router_guide.md
+   components/router/router_examples.md
    fault_tolerance/README.md
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md
@@ -77,6 +80,7 @@
 
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
+   integrations/lmcache_integration.md
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
    backends/vllm/prompt-embeddings.md

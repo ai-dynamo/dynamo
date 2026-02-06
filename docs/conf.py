@@ -38,6 +38,8 @@ extensions = [
 
 # Redirects configuration
 redirects = {
+    # Frontend migration
+    "frontends/kserve": "../components/frontend/frontend_guide.html",
     # PR  #3802
     "guides/tool-calling": "../agents/tool-calling.html",  # key format corrected
     "architecture/architecture": "../design_docs/architecture.html",
@@ -117,8 +119,6 @@ redirects = {
     "kvbm/README": "../components/kvbm/README.html",
     "kvbm/kvbm_guide": "../components/kvbm/kvbm_guide.html",
     "kvbm/kvbm_design": "../design_docs/kvbm_design.html",
-    # Frontend migration
-    "frontends/kserve": "../components/frontend/frontend_guide.html",
     # Profiler consolidation
     "benchmarks/sla_driven_profiling": "../components/profiler/profiler_guide.html",
 }

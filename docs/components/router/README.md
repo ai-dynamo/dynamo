@@ -3,11 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# KV Router
+# Router
 
-## Overview
-
-The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks). Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
+The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
 ## Quick Start
 
@@ -24,14 +22,23 @@ This command:
 - Exposes the service on port 8000 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
-Backend workers register themselves using the `register_llm` API, after which the KV Router automatically:
-- Tracks the state of all registered workers
-- Makes routing decisions based on KV cache overlap
-- Balances load across available workers
+Backend workers register themselves using the `register_llm` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
+
+#### CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
+| `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
+| `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
+| `--kv-events` / `--no-kv-events` | `--kv-events` | Enable/disable real-time KV event tracking |
+| `--kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+
+For all available options: `python -m dynamo.frontend --help`
 
 ### Kubernetes Deployment
 
-To enable the KV Router in a Kubernetes deployment, add the `DYN_ROUTER_MODE` environment variable to your frontend service:
+To enable the KV Router in Kubernetes, add the `DYN_ROUTER_MODE` environment variable to your frontend service:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -47,11 +54,6 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv  # Enable KV Smart Router
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
-    Worker:
-      # ... worker configuration ...
 ```
 
 **Key Points:**
@@ -59,258 +61,43 @@ spec:
 - Workers automatically report KV cache events to the router
 - No worker-side configuration changes needed
 
-**Complete K8s Examples:**
-- [TRT-LLM aggregated router example](../../examples/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](../../examples/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](../../examples/backends/sglang/deploy/agg_router.yaml)
-- [Distributed inference tutorial](../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
+#### Environment Variables
 
-**For A/B Testing and Advanced K8s Setup:**
-See the comprehensive [KV Router A/B Benchmarking Guide](../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
+All CLI arguments can be configured via environment variables using the `DYN_` prefix:
 
-## Configuration Options
+| CLI Argument | Environment Variable | Default |
+|--------------|---------------------|---------|
+| `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round_robin` |
+| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` |
+| `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
+| `--no-kv-events` | `DYN_KV_EVENTS=false` | `true` |
+| `--kv-overlap-score-weight` | `DYN_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
 
-### CLI Arguments (Python Deployment)
+For complete K8s examples and advanced configuration, see [K8s Examples](router_examples.md#k8s-examples).
 
-The KV Router supports several key configuration options:
+For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../benchmarks/kv-router-ab-testing.md).
 
-- **`--router-mode kv`**: Enable KV cache-aware routing (required)
-
-- **`--kv-cache-block-size <size>`**: Sets the KV cache block size (default: backend-specific). Larger blocks reduce overlap detection granularity but improve memory efficiency. This should match your backend configuration.
-
-- **`--router-temperature <float>`**: Controls routing randomness (default: 0.0)
-  - `0.0`: Deterministic selection of the best worker
-  - `> 0.0`: Probabilistic selection using softmax sampling
-  - Higher values increase randomness, helping prevent worker saturation
-
-- **`--kv-events` / `--no-kv-events`**: Controls how the router tracks cached blocks (default: `--kv-events`)
-  - `--kv-events`: Uses real-time events from workers for accurate cache tracking
-  - `--no-kv-events`: Uses approximation based on routing decisions (lower overhead, less accurate)
-
-- **`--kv-overlap-score-weight <float>`**: Balance between prefill and decode optimization (default: 1.0)
-  - Higher values (> 1.0): Prioritize reducing prefill cost (better TTFT)
-  - Lower values (< 1.0): Prioritize decode performance (better ITL)
-
-For a complete list of available options:
-```bash
-python -m dynamo.frontend --help
-```
-
-### Kubernetes Environment Variables
-
-All CLI arguments can be configured via environment variables in Kubernetes deployments. Use the `DYN_` prefix with uppercase parameter names:
-
-| CLI Argument | K8s Environment Variable | Default | Description |
-|--------------|-------------------------|---------|-------------|
-| `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round_robin` | Enable KV router |
-| `--router-temperature <float>` | `DYN_ROUTER_TEMPERATURE=<float>` | `0.0` | Routing randomness |
-| `--kv-cache-block-size <size>` | `DYN_KV_CACHE_BLOCK_SIZE=<size>` | Backend-specific | KV cache block size |
-| `--no-kv-events` | `DYN_KV_EVENTS=false` | `true` | Disable KV event tracking |
-| `--kv-overlap-score-weight <float>` | `DYN_KV_OVERLAP_SCORE_WEIGHT=<float>` | `1.0` | Prefill vs decode weight |
-| `--http-port <port>` | `DYN_HTTP_PORT=<port>` | `8000` | HTTP server port |
-
-### Example with Advanced Configuration
-
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-deployment
-spec:
-  services:
-    Frontend:
-      dynamoNamespace: my-namespace
-      componentType: frontend
-      replicas: 1
-      envs:
-        - name: DYN_ROUTER_MODE
-          value: kv
-        - name: DYN_ROUTER_TEMPERATURE
-          value: "0.5"  # Add some randomness to prevent worker saturation
-        - name: DYN_KV_OVERLAP_SCORE_WEIGHT
-          value: "1.5"  # Prioritize TTFT over ITL
-        - name: DYN_KV_CACHE_BLOCK_SIZE
-          value: "16"
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
-```
-
-### Alternative: Using Command Args in K8s
-
-You can also pass CLI arguments directly in the container command:
-
-```yaml
-extraPodSpec:
-  mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
-    command:
-      - /bin/sh
-      - -c
-    args:
-      - "python3 -m dynamo.frontend --router-mode kv --router-temperature 0.5 --http-port 8000"
-```
-
-**Recommendation:** Use environment variables for easier configuration management and consistency with Dynamo's K8s patterns.
-
-## KV Router Architecture
-
-The KV Router tracks two key metrics for each worker:
-
-1. **Potential Active Blocks**: The number of blocks that would be used for decoding if a request is routed to a worker. This includes both existing active blocks and new blocks from the incoming request.
-
-2. **Potential New Prefill Blocks**: The number of tokens that need to be computed from scratch on a worker, calculated as:
-   - New prefill tokens = Total input tokens - (Overlap blocks × Block size)
-   - Potential prefill blocks = New prefill tokens / Block size
-
-### Block Tracking Mechanisms
-
-The router maintains block information through two complementary systems:
-
-- **Active Decoding Blocks**: Tracked locally by the router throughout the request lifecycle:
-  - Incremented when adding a new request
-  - Updated during token generation
-  - Decremented upon request completion
-
-- **Cached Blocks**: Maintained globally by the KvIndexer using a prefix tree built from worker-reported KV events. This provides accurate overlap information for routing decisions.
-
-## Cost Function
-
-The KV Router's routing decision is based on a simple cost function:
-
-```
-logit = kv_overlap_score_weight × potential_prefill_blocks + potential_active_blocks
-```
-
-Where:
-- Lower logit values are better (less computational cost)
-- The router uses softmax sampling with optional temperature to select workers
-
-### Key Parameter: kv-overlap-score-weight
-
-The `kv-overlap-score-weight` parameter (default: 1.0) controls the balance between prefill and decode optimization:
-
-- **Higher values (> 1.0)**: Emphasize reducing prefill cost
-  - Prioritizes routing to workers with better cache hits
-  - Optimizes for Time To First Token (TTFT)
-  - Best for workloads where initial response latency is critical
-
-- **Lower values (< 1.0)**: Emphasize decode performance
-  - Distributes active decoding blocks more evenly
-  - Optimizes for Inter-Token Latency (ITL)
-  - Best for workloads with long generation sequences
-
-## KV Events vs. Approximation Mode
-
-The router uses KV events from workers by default to maintain an accurate global view of cached blocks. You can disable this with the `--no-kv-events` flag:
-
-- **With KV Events (default)**:
-  - Calculates overlap accurately using actual cached blocks
-  - Provides higher accuracy with event processing overhead
-  - Recommended for production deployments
-
-- **Without KV Events (--no-kv-events)**:
-  - Router predicts cache state based on routing decisions with TTL-based expiration and pruning
-  - Tracks blocks from recent requests with configurable time-to-live
-  - Reduces overhead at the cost of routing accuracy
-  - **NATS is not needed** - suitable for simpler deployments without NATS infrastructure
-  - Suitable for testing or when event processing becomes a bottleneck
-
-## Event Transport Modes
-
-The router supports two event transport modes for KV cache state synchronization:
-
-- **JetStream (default)**: Persistent event stream with durable consumers. State persists across router restarts via snapshots in NATS object store. Best for production with multi-replica consistency.
-
-- **NATS Core with Local Indexer** (`--enable-local-indexer` on workers): Fire-and-forget pub/sub where workers maintain local radix trees. Router rebuilds state by querying workers on startup. Lower latency, simpler setup.
-
-See [KV Cache Routing](kv_cache_routing.md#global-kv-cache-state-synchronization) for architecture diagrams and details.
-
-## Disaggregated Serving
-
-Dynamo supports disaggregated serving where prefill and decode are handled by separate worker pools. Register prefill workers with `ModelType.Prefill` and the frontend automatically activates an internal prefill router.
-
-Key points:
-- Prefill router auto-activates when both prefill and decode workers register with the same model name
-- Supports vLLM and TensorRT-LLM backends (SGLang requires separate router setup)
-- Use `--no-track-active-blocks` for prefill-only workers
-
-See [KV Cache Routing - Disaggregated Serving](kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for setup examples.
-
-## Router Replicas and State Persistence
-
-For high availability, run multiple router replicas with `--router-replica-sync` to synchronize active block tracking via NATS.
-
-State persistence options:
-- **JetStream mode**: Automatic persistence via event stream and object store snapshots
-- **Local Indexer mode**: State rebuilds from workers on startup
-- **Reset state**: Use `--router-reset-states` to start fresh (use with caution)
-
-See [KV Cache Routing - Serving Multiple Router Replicas](kv_cache_routing.md#serving-multiple-router-replicas) for details.
-
-## Busy Thresholds
-
-Control worker saturation with busy thresholds:
-- `--active-decode-blocks-threshold <0.0-1.0>`: Mark workers busy when KV cache utilization exceeds threshold
-- `--active-prefill-tokens-threshold <count>`: Mark workers busy when active prefill tokens exceed threshold
-
-Thresholds can be updated at runtime via the `/busy_threshold` HTTP endpoint. See [Dynamic Threshold Configuration](kv_cache_routing.md#dynamic-threshold-configuration).
-
-## Python API
-
-For programmatic routing control, use the `KvPushRouter` class directly:
-
-```python
-from dynamo.llm import DistributedRuntime, KvPushRouter, KvRouterConfig
-
-router = KvPushRouter(endpoint=endpoint, block_size=16, kv_router_config=KvRouterConfig())
-stream = await router.generate(token_ids=tokens, model="model-name")
-```
-
-Key methods: `generate()`, `best_worker()`, `get_potential_loads()`, `mark_prefill_complete()`, `free()`.
-
-See [KV Cache Routing - Python API](kv_cache_routing.md#using-kvpushrouter-python-api) for complete examples.
+For more configuration options and tuning guidelines, see the [Router Guide](router_guide.md).
 
 ## Prerequisites and Limitations
 
-- **Dynamic endpoints only**: KV router requires `register_llm()` with `model_input=ModelInput.Tokens`
-- **No multimodal support**: Currently tracks token-based blocks only
-- **No static endpoints**: Use `--router-mode round-robin` for static endpoint deployments
+**Requirements:**
+- **Dynamic endpoints only**: KV router requires `register_llm()` with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
+- Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../development/backend-guide.md))
+- You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
 
-See [KV Cache Routing - Prerequisites](kv_cache_routing.md#prerequisites-and-limitations) for details.
+**Multimodal Support:**
+- **vLLM and TRT-LLM**: Multimodal routing supported for images via multimodal hashes
+- **SGLang**: Image routing not yet supported
+- **Other modalities** (audio, video, etc.): Not yet supported
 
-## Tuning Guidelines
+**Limitations:**
+- Static endpoints not supported—KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states
 
-### 1. Understand Your Workload Characteristics
+For basic model registration without KV routing, use `--router-mode round-robin` or `--router-mode random` with both static and dynamic endpoints.
 
-- **Prefill-heavy workloads** (long prompts, short generations): Increase `kv-overlap-score-weight`
-- **Decode-heavy workloads** (short prompts, long generations): Decrease `kv-overlap-score-weight`
+## Next Steps
 
-### 2. Monitor Key Metrics
-
-The router logs the cost calculation for each worker:
-```
-Formula for worker_1: 125.3 = 1.0 * 100.5 + 25.0 (cached_blocks: 15)
-```
-
-This shows:
-- Total cost (125.3)
-- Overlap weight × prefill blocks (1.0 × 100.5)
-- Active blocks (25.0)
-- Cached blocks that contribute to overlap (15)
-
-### 3. Temperature-Based Routing
-
-The `router_temperature` parameter controls routing randomness:
-- **0.0 (default)**: Deterministic selection of the best worker
-- **> 0.0**: Probabilistic selection, higher values increase randomness
-- Useful for preventing worker saturation and improving load distribution
-
-### 4. Iterative Optimization
-
-1. Begin with default settings
-2. Monitor TTFT and ITL metrics
-3. Adjust `kv-overlap-score-weight` to meet your performance goals:
-   - To reduce TTFT: Increase the weight
-   - To reduce ITL: Decrease the weight
-4. If you observe severe load imbalance, increase the temperature setting
+- **[Router Guide](router_guide.md)**: Deep dive into KV cache routing, configuration, disaggregated serving, and tuning
+- **[Router Examples](router_examples.md)**: Python API usage, K8s examples, and custom routing patterns
+- **[Router Design](../design_docs/router_design.md)**: Architecture details, algorithms, and event transport modes

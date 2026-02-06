@@ -59,6 +59,7 @@ Quickstart
    :caption: User Guides
 
    KV Cache Offloading <components/kvbm/kvbm_guide.md>
+   KV Aware Routing <components/router/router_guide.md>
    Tool Calling <agents/tool-calling.md>
    Multimodality Support <features/multimodal/README.md>
    LoRA Adapters <features/lora/README.md>
@@ -89,6 +90,7 @@ Quickstart
    Architecture Flow <design_docs/dynamo_flow.md>
    Disaggregated Serving <design_docs/disagg_serving.md>
    Distributed Runtime <design_docs/distributed_runtime.md>
+   Router Design <design_docs/router_design.md>
    Request Plane <design_docs/request_plane.md>
    Event Plane <design_docs/event_plane.md>
    Planner Design <design_docs/planner_design.md>
