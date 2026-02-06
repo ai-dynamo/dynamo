@@ -232,7 +232,7 @@ docker build -t dynamo:latest-vllm-dev -f rendered.Dockerfile .
 # Build a local-dev image. The local-dev image will run as `dynamo` with UID/GID matched to your host user,
 # which is useful when mounting partitions for development.
 python container/render.py --framework=vllm --target=local-dev --short-output
-docker build -t dynamo:latest-vllm-local-dev -f rendered.Dockerfile .
+docker buildx build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
 # Build TensorRT-LLM development image called dynamo:latest-trtllm
 python container/render.py --framework=trtllm --target=runtime --short-output
@@ -424,7 +424,7 @@ See Docker documentation for custom network creation and management.
 ```bash
 # 1. Build local-dev image (builds runtime, then dev as intermediate, then local-dev as final image)
 python container/render.py --framework=vllm --target=local-dev --short-output
-docker build -t dynamo:latest-vllm-local-dev -f rendered.Dockerfile .
+docker buildx build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
 # 2. Run development container using the local-dev image
 # RECOMMENDED: --mount-workspace for live editing in dev and local-dev images
