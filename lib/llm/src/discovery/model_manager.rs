@@ -636,7 +636,9 @@ impl ModelManager {
     // Keyed by "model_name:namespace" so each namespace's decode WorkerSet gets its own
     // prefill router activated by same-namespace prefill workers.
 
-    fn prefill_key(model_name: &str, namespace: &str) -> String {
+    /// Build a key for a (model, namespace) pair. Used for prefill router activators
+    /// and registration guards.
+    pub(crate) fn model_namespace_key(model_name: &str, namespace: &str) -> String {
         format!("{}:{}", model_name, namespace)
     }
 
@@ -648,7 +650,7 @@ impl ModelManager {
         model_name: String,
         namespace: &str,
     ) -> Option<oneshot::Receiver<Endpoint>> {
-        let key = Self::prefill_key(&model_name, namespace);
+        let key = Self::model_namespace_key(&model_name, namespace);
         match self.prefill_router_activators.remove(&key) {
             Some((_, PrefillActivationState::PrefillReady(rx))) => {
                 // Prefill endpoint already arrived - rx will immediately resolve
@@ -695,7 +697,7 @@ impl ModelManager {
         namespace: &str,
         endpoint: Endpoint,
     ) -> anyhow::Result<()> {
-        let key = Self::prefill_key(model_name, namespace);
+        let key = Self::model_namespace_key(model_name, namespace);
         match self.prefill_router_activators.remove(&key) {
             Some((_, PrefillActivationState::DecodeWaiting(sender))) => {
                 sender.send(endpoint).map_err(|_| {
@@ -745,7 +747,7 @@ impl ModelManager {
     /// Remove the prefill router activator for a (model, namespace) pair.
     /// Called when a WorkerSet is removed to prevent stale activators.
     pub fn remove_prefill_activator(&self, model_name: &str, namespace: &str) {
-        let key = Self::prefill_key(model_name, namespace);
+        let key = Self::model_namespace_key(model_name, namespace);
         if self.prefill_router_activators.remove(&key).is_some() {
             tracing::debug!(
                 model_name = %model_name,

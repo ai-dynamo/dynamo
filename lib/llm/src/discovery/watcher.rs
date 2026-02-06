@@ -352,7 +352,7 @@ impl ModelWatcher {
         }
 
         // Guard against concurrent pipeline construction for the same (model, namespace)
-        let registration_key = format!("{}:{}", model_name, namespace);
+        let registration_key = ModelManager::model_namespace_key(&model_name, &namespace);
         if !self.registering_worker_sets.insert(registration_key.clone()) {
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
