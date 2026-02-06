@@ -24,7 +24,7 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    discovery::WORKER_TYPE_DECODE,
+    discovery::{WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
@@ -64,7 +64,8 @@ pub struct ModelWatcher {
     model_update_tx: Option<Sender<ModelUpdate>>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     metrics: Arc<Metrics>,
-    registering_models: DashSet<String>,
+    /// Guards against concurrent pipeline construction for the same (model, namespace).
+    registering_worker_sets: DashSet<String>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -96,7 +97,7 @@ impl ModelWatcher {
             model_update_tx: None,
             chat_engine_factory,
             metrics,
-            registering_models: DashSet::new(),
+            registering_worker_sets: DashSet::new(),
         }
     }
 
@@ -181,25 +182,23 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    // If we already have a worker for this model, and the ModelDeploymentCard
-                    // cards don't match, alert, and don't add the new instance
-                    let can_add =
-                        self.manager
-                            .is_valid_checksum(card.model_type, card.name(), card.mdcsum());
+                    // If we already have a WorkerSet for this (model, namespace) and the
+                    // checksums don't match, reject the new worker. Different namespaces
+                    // may legitimately have different checksums (rolling updates).
+                    let can_add = self.manager.is_valid_checksum(
+                        card.model_type,
+                        card.name(),
+                        &mcid.namespace,
+                        card.mdcsum(),
+                    );
                     if can_add.is_some_and(|is_valid| !is_valid) {
                         tracing::error!(
                             model_name = card.name(),
-                            "Checksum for new model does not match existing model."
+                            namespace = mcid.namespace,
+                            "Checksum for new worker does not match existing WorkerSet in same namespace."
                         );
 
                         // TODO: mark that instance down in clients
-                        // Not obvious how to do that given the current design
-                        // Instances come from an `InstanceSource` in a `Client` in a `PushRouter`.
-                        // Calling `report_instance_down` on the Client should do it (although
-                        // needs more testing).
-                        // The `PushRouter` is in `ModelMananger` (`self.manager` here), but inside
-                        // interface `AsyncEngine` which only has a `generate` method.
-
                         continue;
                     }
 
@@ -253,8 +252,8 @@ impl ModelWatcher {
         }
     }
 
-    /// If the last instance running this model has gone delete it.
-    /// Returns the name of the model we just deleted, if any.
+    /// Handle a worker removal. Cleans up per-namespace WorkerSets and the Model itself
+    /// when no instances remain. Returns the model name if the entire Model was removed.
     async fn handle_delete(
         &self,
         mcid: &ModelCardInstanceId,
@@ -269,90 +268,60 @@ impl ModelWatcher {
             }
         };
         let model_name = card.name().to_string();
+        let worker_namespace = &mcid.namespace;
+
+        // Decrement worker count for this namespace's WorkerSet
+        if let Some(model) = self.manager.get_model(&model_name) {
+            if let Some(ws) = model.get_worker_set(worker_namespace) {
+                let remaining = ws.decrement_workers();
+                tracing::debug!(
+                    model_name,
+                    namespace = %worker_namespace,
+                    remaining_workers = remaining,
+                    "Decremented worker count for WorkerSet"
+                );
+            }
+        }
+
+        // Query discovery for all remaining instances of this model
         let active_instances = self
-            .cards_for_model(&model_name, target_namespace, is_global_namespace)
+            .cards_for_model_with_endpoints(&model_name, target_namespace, is_global_namespace)
             .await
             .with_context(|| model_name.clone())?;
+
+        // Check if any instances remain in this worker's specific namespace
+        let ns_has_instances = active_instances
+            .iter()
+            .any(|(eid, _)| eid.namespace == *worker_namespace);
+
+        if !ns_has_instances {
+            // No more workers in this namespace — remove its WorkerSet and associated state
+            if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, worker_namespace) {
+                self.manager.remove_prefill_activator(&model_name, worker_namespace);
+                tracing::info!(
+                    model_name,
+                    namespace = %worker_namespace,
+                    "Removed WorkerSet (no remaining instances in namespace)"
+                );
+            }
+        }
+
+        // Check if the Model still has instances in any namespace
         if !active_instances.is_empty() {
             tracing::debug!(
                 model_name,
-                target_namespace = ?target_namespace,
                 active_instance_count = active_instances.len(),
-                "Model has other active instances, not removing"
+                "Model has other active instances in other namespaces"
             );
             return Ok(None);
         }
 
-        // Ignore the errors because model could be either type
-        let chat_model_remove_err = self.manager.remove_chat_completions_model(&model_name);
-        let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
-        let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
-        let images_model_remove_err = self.manager.remove_images_model(&model_name);
-        let videos_model_remove_err = self.manager.remove_videos_model(&model_name);
-        let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
-        let prefill_model_remove_err = self.manager.remove_prefill_model(&model_name);
+        // No instances remain anywhere — remove the entire Model
+        let _ = self.manager.remove_model(&model_name);
 
-        let mut chat_model_removed = false;
-        let mut completions_model_removed = false;
-        let mut embeddings_model_removed = false;
-        let mut images_model_removed = false;
-        let mut videos_model_removed = false;
-        let mut tensor_model_removed = false;
-        let mut prefill_model_removed = false;
-
-        if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
-            chat_model_removed = true;
-        }
-        if completions_model_remove_err.is_ok() && self.manager.list_completions_models().is_empty()
-        {
-            completions_model_removed = true;
-        }
-        if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().is_empty() {
-            embeddings_model_removed = true;
-        }
-        if images_model_remove_err.is_ok() && self.manager.list_images_models().is_empty() {
-            images_model_removed = true;
-        }
-        if videos_model_remove_err.is_ok() && self.manager.list_videos_models().is_empty() {
-            videos_model_removed = true;
-        }
-        if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
-            tensor_model_removed = true;
-        }
-        if prefill_model_remove_err.is_ok() && self.manager.list_prefill_models().is_empty() {
-            prefill_model_removed = true;
-        }
-
-        if !chat_model_removed
-            && !completions_model_removed
-            && !embeddings_model_removed
-            && !images_model_removed
-            && !videos_model_removed
-            && !tensor_model_removed
-            && !prefill_model_removed
-        {
-            tracing::debug!(
-                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, images_model_removed: {}, videos_model_removed: {}, tensor_model_removed: {}, prefill_model_removed: {}",
-                model_name,
-                chat_model_removed,
-                completions_model_removed,
-                embeddings_model_removed,
-                images_model_removed,
-                videos_model_removed,
-                tensor_model_removed,
-                prefill_model_removed
-            );
-        } else {
+        if let Some(tx) = &self.model_update_tx {
             for model_type in ALL_MODEL_TYPES {
-                if ((chat_model_removed && *model_type == ModelType::Chat)
-                    || (completions_model_removed && *model_type == ModelType::Completions)
-                    || (embeddings_model_removed && *model_type == ModelType::Embedding)
-                    || (images_model_removed && *model_type == ModelType::Images)
-                    || (videos_model_removed && *model_type == ModelType::Videos)
-                    || (tensor_model_removed && *model_type == ModelType::TensorBased)
-                    || (prefill_model_removed && *model_type == ModelType::Prefill))
-                    && let Some(tx) = &self.model_update_tx
-                {
+                if card.model_type.intersects(*model_type) {
                     tx.send(ModelUpdate::Removed(card.clone())).await.ok();
                 }
             }
@@ -368,54 +337,50 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
-        // Check if model is already registered before downloading config.
-        // This prevents duplicate HuggingFace API calls when multiple workers register
-        // the same model.
-        // Prefill and decode models are tracked separately, so registering one
-        // doesn't block the other (they can arrive in any order).
-        let already_registered = if card.model_type.supports_prefill() {
-            self.manager.has_prefill_model(card.name())
-        } else {
-            self.manager.has_decode_model(card.name())
-        };
+        // Check if this specific (model, namespace) WorkerSet already exists.
+        // If so, this is just another worker joining an existing set — no pipeline build needed.
+        let model_name = card.name().to_string();
+        let namespace = mcid.namespace.clone();
 
-        if already_registered {
+        if let Some(model) = self.manager.get_model(&model_name) {
+            if let Some(ws) = model.get_worker_set(&namespace) {
+                self.manager
+                    .save_model_card(&mcid.to_path(), card.clone())?;
+                let count = ws.increment_workers();
+                tracing::debug!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    worker_count = count,
+                    "Worker joined existing WorkerSet, skipping pipeline build"
+                );
+                return Ok(());
+            }
+        }
+
+        // Guard against concurrent pipeline construction for the same (model, namespace)
+        let registration_key = format!("{}:{}", model_name, namespace);
+        if !self.registering_worker_sets.insert(registration_key.clone()) {
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
             tracing::debug!(
                 model_name = card.name(),
-                namespace = mcid.namespace,
-                model_type = %card.model_type,
-                "Model already registered, skipping config download"
+                namespace = namespace,
+                "WorkerSet registration in progress, skipping"
             );
             return Ok(());
         }
 
-        // Use registering_models set to prevent concurrent registrations.
-        let model_key = card.name().to_string();
-        if !self.registering_models.insert(model_key.clone()) {
-            self.manager
-                .save_model_card(&mcid.to_path(), card.clone())?;
-            tracing::debug!(
-                model_name = card.name(),
-                namespace = mcid.namespace,
-                "Model registration in progress by another worker, skipping"
-            );
-            return Ok(());
-        }
+        let result = self.do_worker_set_registration(mcid, card).await;
 
-        // We acquired the registration lock. Use a helper to ensure cleanup on all exit paths.
-        let result = self.do_model_registration(mcid, card).await;
-
-        // Always remove from registering set, whether success or failure
-        self.registering_models.remove(&model_key);
+        // Always remove from registering set
+        self.registering_worker_sets.remove(&registration_key);
 
         result
     }
 
-    /// Inner function that performs the actual model registration.
-    /// Called by handle_put after acquiring the registration lock.
-    async fn do_model_registration(
+    /// Build a complete WorkerSet with all engines for this (model, namespace)
+    /// and add it to the Model.
+    async fn do_worker_set_registration(
         &self,
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
@@ -428,7 +393,7 @@ impl ModelWatcher {
             .component(&mcid.component)?;
         let endpoint = component.endpoint(&mcid.endpoint);
         let client = endpoint.client().await?;
-        tracing::debug!(model_name = card.name(), "adding model");
+        tracing::debug!(model_name = card.name(), namespace = mcid.namespace, "building worker set pipeline");
         self.manager
             .save_model_card(&mcid.to_path(), card.clone())?;
 
@@ -437,14 +402,19 @@ impl ModelWatcher {
         }
 
         let checksum = card.mdcsum();
+        let namespace = mcid.namespace.clone();
+
+        // Build the WorkerSet with all applicable engines
+        let mut worker_set = WorkerSet::new(
+            namespace.clone(),
+            checksum.to_string(),
+            card.clone(),
+        );
 
         if card.model_input == ModelInput::Tokens
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
         {
             // Case 1: Tokens + (Chat OR Completions OR Both)
-            // A model that expects pre-processed requests meaning it's up to us whether we
-            // handle Chat or Completions requests, so handle whatever the model supports.
-
             let endpoint = component.endpoint(&mcid.endpoint);
             // Create the KV router whenever any local routed pipeline will be built.
             // The chat factory builds its own router, but completions currently always
@@ -461,7 +431,7 @@ impl ModelWatcher {
                             &endpoint,
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config),
-                            WORKER_TYPE_DECODE, // This is the decode router
+                            WORKER_TYPE_DECODE,
                         )
                         .await?,
                 )
@@ -469,17 +439,13 @@ impl ModelWatcher {
                 None
             };
 
-            // This is expensive, we are loading ~10MiB JSON, so only do it once
             let tokenizer_hf = card.tokenizer_hf().context("tokenizer_hf")?;
 
-            // Create prefill chooser once if we're building pipelines
-            // Both chat and completions will share the same prefill chooser instance
             let model_name = card.name().to_string();
             let prefill_chooser = self
                 .manager
-                .register_prefill_router(model_name.clone())
+                .register_prefill_router(model_name.clone(), &namespace)
                 .map(|rx| {
-                    // Create prefill-specific config with track_active_blocks disabled
                     let mut prefill_config = self.router_config.kv_router_config;
                     prefill_config.router_track_active_blocks = false;
 
@@ -490,21 +456,20 @@ impl ModelWatcher {
                         card.kv_cache_block_size,
                         Some(prefill_config),
                         self.router_config.enforce_disagg,
-                        model_name.clone(), // Pass model name for worker monitor lookup
+                        model_name.clone(),
                     )
                 });
 
-            // Get or create the worker monitor for this model.
-            // Always create the monitor for Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
-            // LoadThresholdConfig allows dynamic threshold updates via the ModelManager.
             let worker_monitor = Some(self.manager.get_or_create_worker_monitor(
                 card.name(),
                 client.clone(),
                 self.router_config.load_threshold_config.clone(),
             ));
 
-            // Add chat engine only if the model supports chat
+            // Store KV router and worker monitor on the WorkerSet
+            worker_set.kv_router = kv_chooser.clone();
+            worker_set.worker_monitor = worker_monitor.clone();
+
             if card.model_type.supports_chat() {
                 let factory_engine = if let Some(ref factory) = self.chat_engine_factory {
                     match factory(mcid.clone(), card.clone()).await {
@@ -537,9 +502,7 @@ impl ModelWatcher {
                     .await
                     .context("build_routed_pipeline")?
                 };
-                self.manager
-                    .add_chat_completions_model(card.name(), checksum, chat_engine)
-                    .context("add_chat_completions_model")?;
+                worker_set.chat_engine = Some(chat_engine);
                 tracing::info!("Chat completions is ready");
             }
 
@@ -572,13 +535,10 @@ impl ModelWatcher {
                 )
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;
-                self.manager
-                    .add_completions_model(card.name(), checksum, completions_engine)
-                    .context("add_completions_model")?;
+                worker_set.completions_engine = Some(completions_engine);
                 tracing::info!("Completions is ready");
             }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
-            // Case: Text + Embeddings
             let push_router = PushRouter::<
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
@@ -586,9 +546,7 @@ impl ModelWatcher {
                 client, self.router_config.router_mode, None, None
             )
             .await?;
-            let engine = Arc::new(push_router);
-            self.manager
-                .add_embeddings_model(card.name(), checksum, engine)?;
+            worker_set.embeddings_engine = Some(Arc::new(push_router));
         }
         // Case: Text + (Images, Audio, Videos)
         // Must come before the plain Text+Chat / Text+Completions branches because
@@ -599,8 +557,7 @@ impl ModelWatcher {
                 || card.model_type.supports_audios()
                 || card.model_type.supports_videos())
         {
-            // Image Models can support chat completions (vllm omni way)
-            // So register chat_completions model as well
+            // Image/Audio/Video models can also support chat completions (vLLM omni way)
             if card.model_type.supports_chat() {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
@@ -612,14 +569,9 @@ impl ModelWatcher {
                     None,
                 )
                 .await?;
-                self.manager.add_chat_completions_model(
-                    card.name(),
-                    checksum,
-                    Arc::new(chat_router),
-                )?;
+                worker_set.chat_engine = Some(Arc::new(chat_router));
             }
 
-            // This is ModelType::Images : registers /v1/images/* endpoints
             if card.model_type.supports_images() {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
@@ -628,11 +580,9 @@ impl ModelWatcher {
                     client.clone(), self.router_config.router_mode, None, None
                 )
                 .await?;
-                self.manager
-                    .add_images_model(card.name(), checksum, Arc::new(images_router))?;
+                worker_set.images_engine = Some(Arc::new(images_router));
             }
 
-            // This is ModelType::Videos : registers /v1/videos/* endpoints
             if card.model_type.supports_videos() {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
@@ -641,8 +591,7 @@ impl ModelWatcher {
                     client.clone(), self.router_config.router_mode, None, None
                 )
                 .await?;
-                self.manager
-                    .add_videos_model(card.name(), checksum, Arc::new(videos_router))?;
+                worker_set.videos_engine = Some(Arc::new(videos_router));
             }
 
             // TODO: add audio models support
@@ -655,9 +604,7 @@ impl ModelWatcher {
                 client, self.router_config.router_mode, None, None
             )
             .await?;
-            let engine = Arc::new(push_router);
-            self.manager
-                .add_chat_completions_model(card.name(), checksum, engine)?;
+            worker_set.chat_engine = Some(Arc::new(push_router));
         } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
             // Case: Text + Completions
             let push_router = PushRouter::<
@@ -667,13 +614,8 @@ impl ModelWatcher {
                 client, self.router_config.router_mode, None, None
             )
             .await?;
-            let engine = Arc::new(push_router);
-            self.manager
-                .add_completions_model(card.name(), checksum, engine)?;
+            worker_set.completions_engine = Some(Arc::new(push_router));
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
-            // Case 4: Tokens + Embeddings
-
-            // Create preprocessing pipeline similar to Backend
             let frontend = SegmentSource::<
                 SingleIn<NvCreateEmbeddingRequest>,
                 ManyOut<Annotated<NvCreateEmbeddingResponse>>,
@@ -690,10 +632,8 @@ impl ModelWatcher {
             )
             .await?;
 
-            // Note: Embeddings don't need KV routing complexity or load monitoring
             let service_backend = ServiceBackend::from_engine(Arc::new(router));
 
-            // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
             let embedding_engine = frontend
                 .link(preprocessor.forward_edge())?
                 .link(backend.forward_edge())?
@@ -702,8 +642,7 @@ impl ModelWatcher {
                 .link(preprocessor.backward_edge())?
                 .link(frontend)?;
 
-            self.manager
-                .add_embeddings_model(card.name(), checksum, embedding_engine)?;
+            worker_set.embeddings_engine = Some(embedding_engine);
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
             // Case 6: Tensor + TensorBased (non-LLM)
             // No KV cache concepts - not an LLM model
@@ -714,12 +653,8 @@ impl ModelWatcher {
                 client, self.router_config.router_mode, None, None
             )
             .await?;
-            let engine = Arc::new(push_router);
-            self.manager
-                .add_tensor_model(card.name(), checksum, engine)?;
+            worker_set.tensor_engine = Some(Arc::new(push_router));
         } else if card.model_type.supports_prefill() {
-            // Case 6: Prefill
-            // Guardrail: Verify model_input is Tokens
             if card.model_input != ModelInput::Tokens {
                 anyhow::bail!(
                     "Prefill models must use ModelInput::Tokens, got {}",
@@ -732,13 +667,12 @@ impl ModelWatcher {
                 "Prefill model detected, registering and activating prefill router"
             );
 
-            // Register prefill model for tracking (no engine needed, just lifecycle)
-            self.manager
-                .add_prefill_model(card.name(), checksum)
-                .context("add_prefill_model")?;
+            // Prefill sets have no engines — we add the WorkerSet first for tracking,
+            // then activate the prefill router.
+            worker_set.increment_workers();
+            self.manager.add_worker_set(card.name(), &namespace, worker_set);
 
-            // Activate the prefill router with the endpoint for this prefill model
-            let Ok(()) = self.manager.activate_prefill_router(card.name(), endpoint) else {
+            let Ok(()) = self.manager.activate_prefill_router(card.name(), &namespace, endpoint) else {
                 tracing::warn!(
                     model_name = card.name(),
                     "Failed to activate prefill router - prefill model may already be activated"
@@ -750,8 +684,9 @@ impl ModelWatcher {
                 model_name = card.name(),
                 "Prefill model registered and router activated successfully"
             );
+
+            return Ok(());
         } else {
-            // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
                 Tokens+(Chat|Completions|Prefill), Text+(Chat|Completions|Images), Tokens+Embeddings, Tensor+TensorBased",
@@ -759,6 +694,12 @@ impl ModelWatcher {
                 card.model_input.as_str()
             );
         }
+
+        // Count the first worker that triggered this registration
+        worker_set.increment_workers();
+
+        // Add the completed WorkerSet to the Model
+        self.manager.add_worker_set(card.name(), &namespace, worker_set);
 
         Ok(())
     }
@@ -772,7 +713,6 @@ impl ModelWatcher {
         for instance in instances {
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    // Extract EndpointId from the instance
                     let endpoint_id = match &instance {
                         dynamo_runtime::discovery::DiscoveryInstance::Model {
                             namespace,
@@ -808,6 +748,22 @@ impl ModelWatcher {
         target_namespace: Option<&str>,
         is_global_namespace: bool,
     ) -> anyhow::Result<Vec<ModelDeploymentCard>> {
+        Ok(self
+            .cards_for_model_with_endpoints(model_name, target_namespace, is_global_namespace)
+            .await?
+            .into_iter()
+            .map(|(_, card)| card)
+            .collect())
+    }
+
+    /// Like `cards_for_model` but also returns the EndpointId for each card,
+    /// allowing callers to filter by namespace.
+    async fn cards_for_model_with_endpoints(
+        &self,
+        model_name: &str,
+        target_namespace: Option<&str>,
+        is_global_namespace: bool,
+    ) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
         let mut all = self.all_cards().await?;
         all.retain(|(endpoint_id, card)| {
             let matches_name = card.name() == model_name;
@@ -818,6 +774,6 @@ impl ModelWatcher {
             };
             matches_name && matches_namespace
         });
-        Ok(all.into_iter().map(|(_eid, card)| card).collect())
+        Ok(all)
     }
 }
