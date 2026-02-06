@@ -194,6 +194,29 @@ curl localhost:8000/v1/chat/completions \
 
 ## Disaggregated Serving with KVBM
 
+> [!NOTE]
+> The latest TensorRT-LLM release (1.3.0rc1) is currently experiencing a request hang when running disaggregated serving with KVBM.
+> Please include the TensorRT-LLM commit id `18e611da773026a55d187870ebcfa95ff00c8482` when building the Dynamo TensorRT-LLM runtime image to test the KVBM + disaggregated serving feature.
+
+```bash
+# Build a dynamo TensorRT-LLM container with commit-id 18e611da773026a55d187870ebcfa95ff00c8482
+./container/build.sh --framework trtllm --tensorrtllm-commit 18e611da773026a55d187870ebcfa95ff00c8482 --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git
+
+# Launch the container
+./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
+```
+> Important: After logging into the Dynamo TensorRT-LLM runtime container, copy the Triton kernels into the container’s virtual environment as a separate Python module.
+
+```bash
+# Clone the TensorRT-LLM repo and copy the triton_kernels folder into the container as a Python module.
+git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/TensorRT-LLM && \
+cd /tmp/TensorRT-LLM && \
+git checkout 18e611da773026a55d187870ebcfa95ff00c8482 && \
+cp -r triton_kernels /opt/dynamo/venv/lib/python3.12/site-packages/ && \
+cd /workspace && \
+rm -rf /tmp/TensorRT-LLM
+```
+
 KVBM supports disaggregated serving where prefill and decode operations run on separate workers. KVBM is enabled on the prefill worker to offload KV cache.
 
 ### Disaggregated Serving with vLLM
