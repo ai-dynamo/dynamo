@@ -143,6 +143,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::postprocessor::encode_image, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::postprocessor::encode_base64, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
