@@ -657,79 +657,6 @@ class ApproxKvIndexer:
         ...
 
 
-class KvRecorder:
-    """
-    A recorder for KV Router events.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        component: Component,
-        output_path: Optional[str] = None,
-        max_lines_per_file: Optional[int] = None,
-        max_count: Optional[int] = None,
-        max_time: Optional[float] = None,
-    ) -> None:
-        """
-        Create a new KvRecorder instance.
-
-        Args:
-            component: The component to associate with this recorder
-            output_path: Path to the JSONL file to write events to
-            max_lines_per_file: Maximum number of lines per file before rotating to a new file
-            max_count: Maximum number of events to record before shutting down
-            max_time: Maximum duration in seconds to record before shutting down
-        """
-        ...
-
-    def event_count(self) -> int:
-        """
-        Get the count of recorded events.
-
-        Returns:
-            The number of events recorded
-        """
-        ...
-
-    def elapsed_time(self) -> float:
-        """
-        Get the elapsed time since the recorder was started.
-
-        Returns:
-            The elapsed time in seconds as a float
-        """
-        ...
-
-    def replay_events(
-        self,
-        indexer: KvIndexer,
-        timed: bool = False,
-        max_count: Optional[int] = None,
-        max_time: Optional[float] = None,
-    ) -> int:
-        """
-        Populate an indexer with the recorded events.
-
-        Args:
-            indexer: The KvIndexer to populate with events
-            timed: If true, events will be sent according to their recorded timestamps.
-                If false, events will be sent without any delay in between.
-            max_count: Maximum number of events to send before stopping
-            max_time: Maximum duration in seconds to send events before stopping
-
-        Returns:
-            The number of events sent to the indexer
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """
-        Shutdown the recorder.
-        """
-        ...
-
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -738,22 +665,34 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
+        self,
+        component: Component,
+        worker_id: int = 0,
+        kv_block_size: int = 0,
+        dp_rank: int = 0,
+        enable_local_indexer: bool = False,
+        zmq_config: Optional[ZmqKvEventPublisherConfig] = None,
     ) -> None:
         """
-        Create a `KvEventPublisher` object
+        Create a `KvEventPublisher` object.
+
+        When zmq_config is provided, the publisher subscribes to a ZMQ socket for
+        incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
+        The zmq_config fields override kv_block_size, dp_rank, and enable_local_indexer.
+
+        When zmq_config is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
             component: The component to publish events for
-            worker_id: The worker ID
-            kv_block_size: The KV block size (must be > 0)
-            dp_rank: The data parallel rank (defaults to 0)
-            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
+            worker_id: The worker ID (unused, inferred from component)
+            kv_block_size: The KV block size (must be > 0; ignored if zmq_config is set)
+            dp_rank: The data parallel rank (defaults to 0; ignored if zmq_config is set)
+            enable_local_indexer: Enable worker-local KV indexer (ignored if zmq_config is set)
+            zmq_config: Optional ZMQ configuration for relay mode
         """
 
     def publish_stored(
         self,
-        event_id: int,
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
@@ -764,8 +703,9 @@ class KvEventPublisher:
         """
         Publish a KV stored event.
 
+        Event IDs are managed internally by the publisher using a monotonic counter.
+
         Args:
-            event_id: The event ID
             token_ids: List of token IDs
             num_block_tokens: Number of tokens per block
             block_hashes: List of block hashes (signed 64-bit integers)
@@ -777,13 +717,20 @@ class KvEventPublisher:
         """
         ...
 
-    def publish_removed(self, event_id: int, block_hashes: List[int]) -> None:
+    def publish_removed(self, block_hashes: List[int]) -> None:
         """
         Publish a KV removed event.
 
+        Event IDs are managed internally by the publisher using a monotonic counter.
+
         Args:
-            event_id: The event ID
             block_hashes: List of block hashes to remove (signed 64-bit integers)
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shuts down the event publisher, stopping any background tasks.
         """
         ...
 
@@ -794,32 +741,18 @@ class ZmqKvEventPublisherConfig:
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
         zmq_topic: str = "",
-        enable_local_indexer: bool = False
+        enable_local_indexer: bool = False,
+        dp_rank: int = 0
     ) -> None:
         """
-        Configuration for the ZmqKvEventPublisher.
+        ZMQ configuration for KvEventPublisher relay mode.
 
         :param worker_id: The worker ID.
         :param kv_block_size: The block size for the key-value store.
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
         :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
-        """
-        ...
-
-class ZmqKvEventPublisher:
-    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
-        """
-        Initializes a new ZmqKvEventPublisher instance.
-
-        :param component: The component to be used.
-        :param config: Configuration for the event publisher.
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """
-        Shuts down the event publisher, stopping any background tasks.
+        :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
         """
         ...
 
@@ -984,12 +917,13 @@ class ModelInput:
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images or Prefill"""
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
     Prefill: ModelType
+    Images: ModelType
     ...
 
 class RouterMode:
@@ -1049,7 +983,6 @@ async def register_llm(
     context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
     router_mode: Optional[RouterMode] = None,
-    migration_limit: int = 0,
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
@@ -1085,9 +1018,10 @@ def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
-async def fetch_llm(remote_name: str) -> str:
+async def fetch_llm(remote_name: str, ignore_weights: bool = False) -> str:
     """
     Download a model from Hugging Face, returning it's local path.
+    If `ignore_weights` is True, only fetches tokenizer and config files.
     Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
     """
     ...
@@ -1313,15 +1247,6 @@ class BlockManager:
             List of allocated blocks
         """
         ...
-
-class KvbmCacheManager:
-    """
-    A KV cache manager for VLLM
-    """
-
-    def __init__(self, block_manager: BlockManager) -> None:
-        ...
-
 
 class KvbmRequest:
     """

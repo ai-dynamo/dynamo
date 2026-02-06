@@ -43,10 +43,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from . import __version__
 
 DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
-CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
-    "CUSTOM_BACKEND_METRICS_POLLING_INTERVAL"
-)
-CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -230,6 +226,12 @@ def parse_args():
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
     )
     parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. When > 0, enables request migration on worker disconnect (default: 0).",
+    )
+    parser.add_argument(
         "--active-decode-blocks-threshold",
         type=float,
         default=None,
@@ -240,6 +242,12 @@ def parse_args():
         type=int,
         default=None,
         help="Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.",
+    )
+    parser.add_argument(
+        "--active-prefill-tokens-threshold-frac",
+        type=float,
+        default=None,
+        help="Fraction of max_num_batched_tokens for busy detection. Worker is busy when active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). Uses OR logic with --active-prefill-tokens-threshold.",
     )
     parser.add_argument(
         "--model-name",
@@ -271,22 +279,6 @@ def parse_args():
     )
     add_config_dump_args(parser)
     parser.add_argument(
-        "--custom-backend-metrics-endpoint",
-        type=str,
-        default=os.environ.get(
-            CUSTOM_BACKEND_ENDPOINT_ENV_VAR, "nim.backend.runtime_stats"
-        ),
-        help=f"Custom backend endpoint to poll for metrics in format 'namespace.component.endpoint' (default: 'nim.backend.runtime_stats'). Required if --custom-backend-metrics-polling-interval is specified. All metrics will be prefixed with 'dynamo_component_' in Prometheus. Can be set via {CUSTOM_BACKEND_ENDPOINT_ENV_VAR} env var.",
-    )
-    parser.add_argument(
-        "--custom-backend-metrics-polling-interval",
-        type=float,
-        default=float(
-            os.environ.get(CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR, "0")
-        ),
-        help=f"Interval in seconds for polling custom backend metrics. Set to > 0 to enable polling (default: 0=disabled, suggested: 9.2s which is less than typical Prometheus scrape interval). Can be set via {CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR} env var.",
-    )
-    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -301,6 +293,13 @@ def parse_args():
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
     parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
+    )
+    parser.add_argument(
         "--exp-python-factory",
         action="store_true",
         default=False,
@@ -311,10 +310,8 @@ def parse_args():
 
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
-    if flags.custom_backend_metrics_polling_interval < 0:
-        parser.error(
-            "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
-        )
+    if flags.migration_limit < 0 or flags.migration_limit > 4294967295:
+        parser.error("--migration-limit must be between 0 and 4294967295 (0=disabled)")
 
     return flags
 
@@ -334,7 +331,11 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
-
+    os.environ["DYN_EVENT_PLANE"] = flags.event_plane
+    logger.info(
+        f"Request migration {'enabled' if flags.migration_limit > 0 else 'disabled'} "
+        f"(limit: {flags.migration_limit})"
+    )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
@@ -351,8 +352,14 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
-    # Enable NATS for KV router mode when kv_events are used (when --no-kv-events is not set)
-    enable_nats = (flags.router_mode == "kv") and flags.use_kv_events
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    enable_nats = flags.request_plane == "nats" or (
+        flags.event_plane == "nats"
+        and flags.router_mode == "kv"
+        and (flags.use_kv_events or flags.router_replica_sync)
+    )
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
@@ -395,8 +402,10 @@ async def async_main():
             kv_router_config,
             active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
             active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
             enforce_disagg=flags.enforce_disagg,
         ),
+        "migration_limit": flags.migration_limit,
     }
 
     if flags.model_name:
@@ -411,14 +420,6 @@ async def async_main():
         kwargs["namespace"] = flags.namespace
     if flags.kserve_grpc_server and flags.grpc_metrics_port:
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
-    if flags.custom_backend_metrics_endpoint:
-        kwargs[
-            "custom_backend_metrics_endpoint"
-        ] = flags.custom_backend_metrics_endpoint
-    if flags.custom_backend_metrics_polling_interval:
-        kwargs[
-            "custom_backend_metrics_polling_interval"
-        ] = flags.custom_backend_metrics_polling_interval
 
     if flags.exp_python_factory:
         kwargs["engine_factory"] = engine_factory
