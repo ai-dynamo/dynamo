@@ -361,9 +361,6 @@ get_options() {
         --enable-gpu-memory-service)
             ENABLE_GPU_MEMORY_SERVICE=true
             ;;
-        --enable-media-nixl)
-            ENABLE_MEDIA_NIXL=true
-            ;;
         --enable-media-ffmpeg)
             ENABLE_MEDIA_FFMPEG=true
             ;;
@@ -560,7 +557,6 @@ show_help() {
     echo "  [--make-efa Adds AWS EFA layer on top of the built image (works with any target)]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--enable-gpu-memory-service Enables GPU Memory Service support]"
-    echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
@@ -921,18 +917,6 @@ if [[ ${ENABLE_GPU_MEMORY_SERVICE} == "true" ]]; then
     echo "Enabling GPU Memory Service in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_GPU_MEMORY_SERVICE=${ENABLE_GPU_MEMORY_SERVICE} "
 fi
-
-# ENABLE_MEDIA_NIXL: Enable media processing with NIXL support
-# Used in base Dockerfile for maturin build feature flag.
-# Can be explicitly overridden with --enable-media-nixl flag
-if [ -z "${ENABLE_MEDIA_NIXL}" ]; then
-    if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
-        ENABLE_MEDIA_NIXL=true
-    else
-        ENABLE_MEDIA_NIXL=false
-    fi
-fi
-BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
 # ENABLE_MEDIA_FFMPEG: Enable media processing with FFMPEG support
 # Used in base Dockerfile for maturin build feature flag.

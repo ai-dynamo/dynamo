@@ -28,7 +28,6 @@ ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inferen
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
-ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
@@ -423,15 +422,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    FEATURES=""; \
-    if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
-    fi; \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        FEATURES="$FEATURES media-ffmpeg"; \
-    fi; \
-    if [ -n "$FEATURES" ]; then \
-        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
