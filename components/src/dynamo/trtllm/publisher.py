@@ -28,7 +28,7 @@ import traceback
 import weakref
 from contextlib import asynccontextmanager
 from queue import Queue
-from typing import Awaitable, Callable, Optional, Union
+from typing import Awaitable, Callable, Dict, Optional, Union
 
 import msgpack
 import zmq
@@ -72,6 +72,8 @@ class ZmqKvEventPublisher:
     Event Format: [timestamp, [events], data_parallel_rank]
     Message Format: multipart ZMQ message [topic, sequence, payload] where payload is
     msgpack-serialized batch.
+    When attention DP is enabled for DeepSeek-style models, `data_parallel_rank` is set to the attention DP rank.
+    Otherwise, it defaults to 0.
 
     Usage:
         Used by Publisher class when consolidator is enabled (zmq_endpoint provided).
@@ -94,7 +96,9 @@ class ZmqKvEventPublisher:
         self.socket = self.ctx.socket(zmq.PUB)
         self.socket.bind(zmq_endpoint)
         self.sequence = 0
-        self.data_parallel_rank = 0  # TensorRT-LLM doesn't use DP for now
+        self.data_parallel_rank = (
+            0  # TensorRT-LLM doesn't use DP for now (but does support attention DP)
+        )
         logging.info(
             f"TensorRT-LLM: ZMQ KV event publisher initialized - bound to {zmq_endpoint} "
             f"with topic '{topic}', kv_block_size={kv_block_size}"
@@ -107,6 +111,7 @@ class ZmqKvEventPublisher:
         block_hashes: list[int],
         lora_id: int = 0,
         parent_hash: Optional[int] = None,
+        attention_dp_rank: int = 0,
     ):
         """Publish a BlockStored event.
 
@@ -129,9 +134,9 @@ class ZmqKvEventPublisher:
             "lora_id": lora_id if lora_id != 0 else None,
         }
 
-        self._publish_event(event)
+        self._publish_event(event, attention_dp_rank)
 
-    def publish_removed(self, block_hashes: list[int]):
+    def publish_removed(self, block_hashes: list[int], attention_dp_rank: int = 0):
         """Publish a BlockRemoved event.
 
         Note: event_id is managed internally via self.sequence counter.
@@ -144,22 +149,23 @@ class ZmqKvEventPublisher:
             "block_hashes": block_hashes_signed,
         }
 
-        self._publish_event(event)
+        self._publish_event(event, attention_dp_rank)
 
     def publish_all_cleared(self):
         """Publish an AllBlocksCleared event."""
         event = {"type": "AllBlocksCleared"}
         self._publish_event(event)
 
-    def _publish_event(self, event: dict):
+    def _publish_event(self, event: dict, attention_dp_rank: int = 0):
         """Publish a single event to ZMQ in vLLM batch format."""
         try:
             # Create batch in vLLM format: [timestamp, [events], data_parallel_rank]
+            # The third element (data_parallel_rank) is used by the router for dp_rank routing
             timestamp = time.time()
-            batch = [timestamp, [event], self.data_parallel_rank]
+            batch = [timestamp, [event], attention_dp_rank]
             event_type = event.get("type", "Unknown")
             logging.debug(
-                f"TensorRT-LLM: ZMQ publisher sending {event_type} event to {self.zmq_endpoint}"
+                f"TensorRT-LLM: ZMQ publisher sending {event_type} event (dp_rank={attention_dp_rank}) to {self.zmq_endpoint}"
             )
 
             # Serialize with msgpack (vLLM uses msgpack/rmp_serde compatible format)
@@ -295,6 +301,7 @@ class Publisher:
         self.max_window_size = None
         self.metrics_labels = metrics_labels
         self.enable_local_indexer = enable_local_indexer
+        self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
         # Use these events to capture the max_window_size of the model.
@@ -303,7 +310,9 @@ class Publisher:
 
         # Needed by the events and metrics publishers
         self.metrics_publisher = None
-        self.kv_event_publisher = None
+        self.kv_event_publishers: Optional[
+            Dict[int, KvEventPublisher]
+        ] = None  # One per attention_dp_rank
         self.zmq_kv_event_publisher = None  # ZMQ publisher for consolidator
         self.publish_kv_cache_events_thread: Optional[ManagedThread] = None
         self.publish_stats_thread: Optional[ManagedThread] = None
@@ -355,15 +364,21 @@ class Publisher:
                 "KV Event Consolidator enabled - using ZMQ publisher only. "
                 "Consolidator will publish consolidated events to NATS."
             )
-            self.kv_event_publisher = None
+            self.kv_event_publishers = None
         else:
             # No consolidator: use NATS publisher (router subscribes directly)
-            self.kv_event_publisher = KvEventPublisher(
-                self.kv_listener,
-                self.worker_id,
-                self.kv_block_size,
-                dp_rank=0,
-                enable_local_indexer=self.enable_local_indexer,
+            # Create one KvEventPublisher per attention_dp_rank (similar to vLLM's DP pattern)
+            self.kv_event_publishers = {}
+            for rank in range(self.attention_dp_size):
+                self.kv_event_publishers[rank] = KvEventPublisher(
+                    self.kv_listener,
+                    self.worker_id,
+                    self.kv_block_size,
+                    dp_rank=rank,
+                    enable_local_indexer=self.enable_local_indexer,
+                )
+            logging.info(
+                f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
             )
 
         # Always initialize the thread - it routes to either ZMQ or NATS publisher
@@ -461,7 +476,7 @@ class Publisher:
             return
 
         # Check that at least one publisher is available
-        if self.kv_event_publisher is None and self.zmq_kv_event_publisher is None:
+        if not self.kv_event_publishers and self.zmq_kv_event_publisher is None:
             logging.error("No KV event publisher initialized (neither NATS nor ZMQ)!")
             return
 
@@ -529,8 +544,12 @@ class Publisher:
             # lora_id, we need to verify if this is correct.
             lora_id = data.get("lora_id", 0)
 
+            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
+            # Default to 0 for backwards compatibility with older TRT-LLM versions
+            attention_dp_rank = event.get("attention_dp_rank", 0)
+
             logging.debug(
-                f"publish stored event: engine_event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
+                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
@@ -542,16 +561,25 @@ class Publisher:
                     block_hashes,
                     lora_id,
                     parent_hash,
+                    attention_dp_rank,
                 )
-            elif self.kv_event_publisher:
+            elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
-                self.kv_event_publisher.publish_stored(
-                    token_ids,
-                    num_block_tokens,
-                    block_hashes,
-                    lora_id,
-                    parent_hash,
-                )
+                # Route to correct publisher based on attention_dp_rank
+                publisher = self.kv_event_publishers.get(attention_dp_rank)
+                if publisher:
+                    publisher.publish_stored(
+                        token_ids,
+                        num_block_tokens,
+                        block_hashes,
+                        lora_id,
+                        parent_hash,
+                    )
+                else:
+                    logging.warning(
+                        f"No publisher for attention_dp_rank={attention_dp_rank}, "
+                        f"available ranks: {list(self.kv_event_publishers.keys())}"
+                    )
         elif data["type"] == "removed":
             self.processing_initial_created_events = False
             removed_block_hashes: list[int] = []
@@ -567,17 +595,30 @@ class Publisher:
                     continue
                 removed_block_hashes.append(block_hash)
 
+            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
+            attention_dp_rank = event.get("attention_dp_rank", 0)
+
             logging.debug(
-                f"publish removed event: engine_event_id: {event_id}, block_hashes: {removed_block_hashes}"
+                f"publish removed event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, block_hashes: {removed_block_hashes}"
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
             if self.zmq_kv_event_publisher:
                 # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_removed(removed_block_hashes)
-            elif self.kv_event_publisher:
+                self.zmq_kv_event_publisher.publish_removed(
+                    removed_block_hashes, attention_dp_rank
+                )
+            elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
-                self.kv_event_publisher.publish_removed(removed_block_hashes)
+                # Route to correct publisher based on attention_dp_rank
+                publisher = self.kv_event_publishers.get(attention_dp_rank)
+                if publisher:
+                    publisher.publish_removed(removed_block_hashes)
+                else:
+                    logging.warning(
+                        f"No publisher for attention_dp_rank={attention_dp_rank}, "
+                        f"available ranks: {list(self.kv_event_publishers.keys())}"
+                    )
         elif data["type"] == "created" and self.processing_initial_created_events:
             self.update_max_window_size(event)
 
