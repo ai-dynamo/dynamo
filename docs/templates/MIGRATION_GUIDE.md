@@ -130,6 +130,52 @@ Check `docs/_includes/` for includes:
 
 ---
 
+## Pre-Migration Link Validation
+
+Before migrating, validate source docs to avoid carrying over broken links.
+
+### Pre-flight Broken Link Check
+
+```bash
+# Install lychee (if not available)
+cargo install lychee   # or: brew install lychee
+
+# Check source files (example: migrating kvbm docs)
+lychee docs/kvbm/ --offline --exclude-path docs/_build
+
+# Or use the full check with external URLs
+lychee docs/kvbm/ --exclude-path docs/_build
+```
+
+If lychee is unavailable, use ripgrep to find potentially broken links:
+
+```bash
+# Find all internal markdown links and spot-check targets
+rg -n '\]\([^http][^)]*\.md' docs/kvbm/
+```
+
+### Golden Rule
+
+**Only link to files that exist.** Before adding any link:
+
+1. Verify the target file exists at the expected path
+2. Test the relative path calculation (count `../` correctly)
+3. For cross-section links, consider using the cross-reference path table
+
+### Post-Migration Validation
+
+After moving files, run link check again to catch broken references:
+
+```bash
+# Check all docs after migration
+lychee docs/ --offline --exclude-path docs/_build
+
+# Check specific migrated directory (example: after moving to components/kvbm)
+lychee docs/components/kvbm/ --offline
+```
+
+---
+
 ## Style Editing Guidelines
 
 After migrating content, review for FLOW, STYLE, and CONSISTENCY.
