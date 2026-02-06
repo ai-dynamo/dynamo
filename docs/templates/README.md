@@ -176,24 +176,3 @@ After adding new documentation:
 2. **Fern (future):** Update `fern/docs.yml` with your new pages
 
 See [docs/README.md](../README.md) for documentation build instructions.
-
-## Migrating Existing Docs
-
-For migrating existing documentation to the new structure:
-
-### Quick Reference
-
-- [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) - Comprehensive migration guide with link update checklist
-- [EXAMPLE_SKILL.md](EXAMPLE_SKILL.md) - AI-assisted migration skill (works with Cursor and Claude)
-
-### Using the AI Skill
-
-1. **Cursor IDE:** Copy `EXAMPLE_SKILL.md` to `.cursor/skills/docs-migration/SKILL.md`
-2. **Claude/Other AI:** Copy the skill content into your conversation as context
-3. Follow the phased approach with STOP points for review
-
-### Manual Migration
-
-1. Read [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) for the full process
-2. Use the link update checklist to update Sphinx and Fern navigation
-3. Apply style guidelines for FLOW, STYLE, and CONSISTENCY

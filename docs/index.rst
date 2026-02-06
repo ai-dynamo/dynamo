@@ -50,26 +50,24 @@ Quickstart
    :hidden:
    :caption: Kubernetes Deployment
 
-   Deployment Guide <_sections/k8s_deployment>
-   Observability (K8s) <_sections/k8s_observability>
-   Multinode <_sections/k8s_multinode>
+   Deployment Guide <kubernetes/README>
+   Observability (K8s) <kubernetes/observability/metrics>
+   Multinode <kubernetes/deployment/multinode-deployment>
 
 .. toctree::
    :hidden:
    :caption: User Guides
 
+   KV Cache Aware Routing <components/router/router_guide.md>
+   Disaggregated Serving Guide <features/disaggregated_serving/README.md>
    KV Cache Offloading <components/kvbm/kvbm_guide.md>
-   KV Aware Routing <components/router/router_guide.md>
-   Tool Calling <agents/tool-calling.md>
-   Multimodality Support <features/multimodal/README.md>
-   LoRA Adapters <features/lora/README.md>
-   Finding Best Initial Configs <performance/aiconfigurator.md>
    Benchmarking <benchmarks/benchmarking.md>
-   Tuning Disaggregated Performance <performance/tuning.md>
+   Multimodality Support <features/multimodal/README.md>
+   Tool Calling <agents/tool-calling.md>
+   LoRA Adapters <features/lora/README.md>
+   Observability (Local) <observability/README>
+   Fault Tolerance <fault_tolerance/README>
    Writing Python Workers in Dynamo <development/backend-guide.md>
-   Observability (Local) <_sections/observability>
-   Fault Tolerance <_sections/fault_tolerance>
-   Glossary <reference/glossary.md>
 
 .. toctree::
    :hidden:
@@ -84,13 +82,23 @@ Quickstart
 
 .. toctree::
    :hidden:
+   :caption: Integrations
+
+   LMCache <integrations/lmcache_integration.md>
+   SGLang HiCache <integrations/sglang_hicache.md>
+   FlexKV <integrations/flexkv_integration.md>
+   KV Events for Custom Engines <integrations/kv_events_custom_engines.md>
+
+.. toctree::
+   :hidden:
    :caption: Design Docs
 
    Overall Architecture <design_docs/architecture.md>
    Architecture Flow <design_docs/dynamo_flow.md>
    Disaggregated Serving <design_docs/disagg_serving.md>
    Distributed Runtime <design_docs/distributed_runtime.md>
-   Router Design <design_docs/router_design.md>
    Request Plane <design_docs/request_plane.md>
    Event Plane <design_docs/event_plane.md>
+   Router Design <design_docs/router_design.md>
+   KVBM Design <design_docs/kvbm_design.md>
    Planner Design <design_docs/planner_design.md>
