@@ -3,12 +3,10 @@
 
 import logging
 
-import torch
 from vllm.inputs.data import TokensPrompt
-from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo.runtime import Component, DistributedRuntime
+from dynamo.runtime import DistributedRuntime
 
 from ..args import Config
 from ..handlers import BaseWorkerHandler
