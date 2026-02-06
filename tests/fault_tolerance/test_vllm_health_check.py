@@ -16,6 +16,8 @@ from tests.utils.payloads import check_models_api, completions_response_handler
 
 logger = logging.getLogger(__name__)
 
+pytestmark = pytest.mark.fault_tolerance
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend"""

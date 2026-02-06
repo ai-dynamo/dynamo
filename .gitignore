@@ -122,3 +122,6 @@ package-lock.json
 
 # Compiled static libraries
 *.a
+
+# pytest artifacts
+artifacts/
