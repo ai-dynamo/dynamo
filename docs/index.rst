@@ -50,9 +50,9 @@ Quickstart
    :hidden:
    :caption: Kubernetes Deployment
 
-   Deployment Guide <_sections/k8s_deployment>
-   Observability (K8s) <_sections/k8s_observability>
-   Multinode <_sections/k8s_multinode>
+   Deployment Guide <kubernetes/README>
+   Observability (K8s) <kubernetes/observability/metrics>
+   Multinode <kubernetes/deployment/multinode-deployment>
 
 .. toctree::
    :hidden:

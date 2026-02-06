@@ -28,14 +28,10 @@
 
    kubernetes/api_reference.md
    kubernetes/deployment/create_deployment.md
-   kubernetes/deployment/dynamomodel-guide.md
-   kubernetes/chrek/README.md
    kubernetes/chrek/dynamo.md
    kubernetes/chrek/standalone.md
    kubernetes/fluxcd.md
-   kubernetes/grove.md
    kubernetes/model_caching_with_fluid.md
-   kubernetes/README.md
 
    reference/cli.md
    reference/glossary.md
