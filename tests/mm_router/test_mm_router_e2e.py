@@ -102,16 +102,25 @@ class TRTLLMWorkerProcess(ManagedProcess):
 
         super().__init__(
             command=[
-                "python3", "-m", "dynamo.trtllm",
-                "--model-path", MM_MODEL_NAME,
-                "--served-model-name", f"{MM_MODEL_NAME}__internal",
-                "--endpoint", f"dyn://{NAMESPACE}.trtllm.generate",
-                "--modality", "multimodal",
+                "python3",
+                "-m",
+                "dynamo.trtllm",
+                "--model-path",
+                MM_MODEL_NAME,
+                "--served-model-name",
+                f"{MM_MODEL_NAME}__internal",
+                "--endpoint",
+                f"dyn://{NAMESPACE}.trtllm.generate",
+                "--modality",
+                "multimodal",
                 "--publish-events-and-metrics",
-                "--kv-block-size", str(BLOCK_SIZE),
+                "--kv-block-size",
+                str(BLOCK_SIZE),
             ],
             env=env,
-            health_check_urls=[(f"http://localhost:{system_port}/health", _check_ready)],
+            health_check_urls=[
+                (f"http://localhost:{system_port}/health", _check_ready)
+            ],
             timeout=600,
             display_output=True,
             terminate_existing=False,
@@ -135,18 +144,30 @@ class MMRouterWorkerProcess(ManagedProcess):
 
         super().__init__(
             command=[
-                "python3", "-m", "examples.backends.trtllm.mm_router_worker",
-                "--model", MM_MODEL_NAME,
-                "--model-type", MM_MODEL_TYPE,
-                "--namespace", NAMESPACE,
-                "--component", "mm_router",
-                "--endpoint", "generate",
-                "--downstream-component", "trtllm",
-                "--downstream-endpoint", "generate",
-                "--block-size", str(BLOCK_SIZE),
+                "python3",
+                "-m",
+                "examples.backends.trtllm.mm_router_worker",
+                "--model",
+                MM_MODEL_NAME,
+                "--model-type",
+                MM_MODEL_TYPE,
+                "--namespace",
+                NAMESPACE,
+                "--component",
+                "mm_router",
+                "--endpoint",
+                "generate",
+                "--downstream-component",
+                "trtllm",
+                "--downstream-endpoint",
+                "generate",
+                "--block-size",
+                str(BLOCK_SIZE),
             ],
             env=env,
-            health_check_urls=[(f"http://localhost:{system_port}/health", _check_ready)],
+            health_check_urls=[
+                (f"http://localhost:{system_port}/health", _check_ready)
+            ],
             timeout=120,
             display_output=True,
             terminate_existing=False,
@@ -168,12 +189,18 @@ class MMFrontendProcess(ManagedProcess):
 
         super().__init__(
             command=[
-                "python3", "-m", "dynamo.frontend",
-                "--http-port", str(frontend_port),
-                "--router-mode", "round-robin",
+                "python3",
+                "-m",
+                "dynamo.frontend",
+                "--http-port",
+                str(frontend_port),
+                "--router-mode",
+                "round-robin",
             ],
             env=env,
-            health_check_urls=[(f"http://localhost:{frontend_port}/v1/models", check_models_api)],
+            health_check_urls=[
+                (f"http://localhost:{frontend_port}/v1/models", check_models_api)
+            ],
             timeout=120,
             display_output=True,
             terminate_existing=False,
@@ -208,17 +235,20 @@ def start_mm_services(request, mm_runtime_services) -> Generator[int, None, None
         with MMRouterWorkerProcess(request, system_port=mm_router_port):
             time.sleep(5)
             with MMFrontendProcess(request, frontend_port=frontend_port):
-                logger.info(f"All MM services ready at http://localhost:{frontend_port}")
+                logger.info(
+                    f"All MM services ready at http://localhost:{frontend_port}"
+                )
                 yield frontend_port
 
 
 @pytest.fixture(scope="module")
 def mm_test_tools(mm_runtime_services, start_mm_services):
     """Module-scoped (indexer, tokenizer, processor) for overlap verification."""
-    from dynamo._core import KvIndexer
-    from dynamo.runtime import DistributedRuntime
     from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
     from transformers import AutoProcessor
+
+    from dynamo._core import KvIndexer
+    from dynamo.runtime import DistributedRuntime
 
     loop = asyncio.new_event_loop()
     runtime = DistributedRuntime(loop, "etcd", "nats")
@@ -271,7 +301,6 @@ def _send_and_wait(messages: list[dict], frontend_port: int) -> str:
 def _compute_overlap(messages: list[dict], mm_test_tools) -> int:
     """Compute total block overlap for given messages against the test KvIndexer."""
     from dynamo._core import compute_block_hash_for_seq_py
-
     from examples.backends.trtllm.mm_router_worker.mm_processor import (
         build_block_mm_infos,
         extract_image_urls,
@@ -325,7 +354,9 @@ def _compute_overlap(messages: list[dict], mm_test_tools) -> int:
 
 @pytest.mark.timeout(600)
 @pytest.mark.nightly
-def test_same_single_image_overlap(start_mm_services, mm_test_tools, predownload_models):
+def test_same_single_image_overlap(
+    start_mm_services, mm_test_tools, predownload_models
+):
     """Same single image -> overlap > 0."""
     cyan = get_test_image("cyan")
     messages = _build_mm_messages("What color is this image?", [cyan])
@@ -338,11 +369,15 @@ def test_same_single_image_overlap(start_mm_services, mm_test_tools, predownload
 
 @pytest.mark.timeout(600)
 @pytest.mark.nightly
-def test_same_multiple_images_overlap(start_mm_services, mm_test_tools, predownload_models):
+def test_same_multiple_images_overlap(
+    start_mm_services, mm_test_tools, predownload_models
+):
     """Same two images -> overlap > 0."""
     magenta = get_test_image("magenta")
     yellow = get_test_image("yellow")
-    messages = _build_mm_messages("What colors are these two images?", [magenta, yellow])
+    messages = _build_mm_messages(
+        "What colors are these two images?", [magenta, yellow]
+    )
 
     _send_and_wait(messages, start_mm_services)
 
@@ -352,7 +387,9 @@ def test_same_multiple_images_overlap(start_mm_services, mm_test_tools, predownl
 
 @pytest.mark.timeout(600)
 @pytest.mark.nightly
-def test_different_images_no_overlap(start_mm_services, mm_test_tools, predownload_models):
+def test_different_images_no_overlap(
+    start_mm_services, mm_test_tools, predownload_models
+):
     """Different image -> overlap == 0."""
     orange = get_test_image("orange")
     pink = get_test_image("pink")
@@ -367,7 +404,9 @@ def test_different_images_no_overlap(start_mm_services, mm_test_tools, predownlo
 
 @pytest.mark.timeout(600)
 @pytest.mark.nightly
-def test_swapped_image_order_less_overlap(start_mm_services, mm_test_tools, predownload_models):
+def test_swapped_image_order_less_overlap(
+    start_mm_services, mm_test_tools, predownload_models
+):
     """Swapped image order -> less overlap than identical order."""
     teal = get_test_image("teal")
     maroon = get_test_image("maroon")
@@ -380,9 +419,9 @@ def test_swapped_image_order_less_overlap(start_mm_services, mm_test_tools, pred
 
     swapped = _build_mm_messages("What colors are these two images?", [maroon, teal])
     overlap_swapped = _compute_overlap(swapped, mm_test_tools)
-    assert overlap_swapped < overlap_same, (
-        f"Expected swapped ({overlap_swapped}) < same ({overlap_same})"
-    )
+    assert (
+        overlap_swapped < overlap_same
+    ), f"Expected swapped ({overlap_swapped}) < same ({overlap_same})"
 
 
 if __name__ == "__main__":
