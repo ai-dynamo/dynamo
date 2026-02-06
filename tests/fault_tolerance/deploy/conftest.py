@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import pytest
 
@@ -41,6 +29,34 @@ def pytest_addoption(parser):
         default=False,
         help="Skip restarting NATS and etcd services before deployment. "
         "By default, these services are restarted.",
+    )
+    # Hardware fault injection options
+    parser.addoption(
+        "--enable-hw-faults",
+        action="store_true",
+        default=False,
+        help="Enable hardware fault injection tests (GPU failures, CUDA errors). "
+        "Requires fault injection infrastructure.",
+    )
+    parser.addoption(
+        "--hw-fault-xid",
+        type=int,
+        default=79,
+        choices=[79, 48, 94, 95, 43, 74],
+        help="XID error type for hardware fault injection (default: 79 - GPU fell off bus)",
+    )
+    parser.addoption(
+        "--hw-fault-target-node",
+        type=str,
+        default=None,
+        help="Target node for hardware fault injection (auto-detect if not specified)",
+    )
+    parser.addoption(
+        "--hw-fault-backend",
+        type=str,
+        default="vllm",
+        choices=["vllm", "sglang", "trtllm"],
+        help="Backend runtime for HW fault tests (default: vllm)",
     )
 
 
@@ -122,3 +138,28 @@ def client_type(request):
 def skip_service_restart(request):
     """Get skip restart services flag from command line."""
     return request.config.getoption("--skip-service-restart")
+
+
+@pytest.fixture
+def hw_fault_config(request):
+    """
+    Get hardware fault configuration from command line options.
+
+    Returns None if --enable-hw-faults is not set, allowing tests to skip.
+    Returns a config dict if enabled.
+    """
+    if not request.config.getoption("--enable-hw-faults"):
+        return None
+
+    return {
+        "enabled": True,
+        "xid_type": request.config.getoption("--hw-fault-xid"),
+        "target_node": request.config.getoption("--hw-fault-target-node"),
+        "backend": request.config.getoption("--hw-fault-backend"),
+    }
+
+
+@pytest.fixture
+def hw_fault_backend(request):
+    """Get the backend runtime for HW fault tests."""
+    return request.config.getoption("--hw-fault-backend")
