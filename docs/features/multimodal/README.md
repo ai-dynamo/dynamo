@@ -15,11 +15,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-> [!NOTE]
-> **This content has moved.** The canonical location for this documentation is now
-> [docs/features/multimodal/](../features/multimodal/README.md).
-> This file will be removed in a future release.
-
 # Multimodal Inference in Dynamo
 
 Dynamo supports multimodal inference across multiple LLM backends, enabling models to process images, video, and audio alongside text. This section provides comprehensive documentation for deploying multimodal models.
@@ -35,9 +30,9 @@ Dynamo supports multimodal inference across multiple LLM backends, enabling mode
 ```{toctree}
 :maxdepth: 1
 
-vLLM Multimodal <vllm.md>
-TensorRT-LLM Multimodal <trtllm.md>
-SGLang Multimodal <sglang.md>
+vLLM Multimodal <multimodal_vllm.md>
+TensorRT-LLM Multimodal <multimodal_trtllm.md>
+SGLang Multimodal <multimodal_sglang.md>
 ```
 
 ## Support Matrix
@@ -46,9 +41,9 @@ SGLang Multimodal <sglang.md>
 
 | Stack | E/PD | E/P/D | EP/D | EPD | Image | Video | Audio |
 |-------|------|-------|------|-----|-------|-------|-------|
-| **[vLLM](vllm.md)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
-| **[TRT-LLM](trtllm.md)** | ❌ | 🚧* | ✅ | ✅ | ✅ | ❌ | ❌ |
-| **[SGLang](sglang.md)** | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| **[vLLM](multimodal_vllm.md)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
+| **[TRT-LLM](multimodal_trtllm.md)** | ❌ | 🚧* | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **[SGLang](multimodal_sglang.md)** | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
 \* E/P/D supported in TRT-LLM with pre-computed embeddings only; image URL support is WIP ([PR #4668](https://github.com/ai-dynamo/dynamo/pull/4668))
 
@@ -132,7 +127,7 @@ Response
 Full disaggregation with separate workers for encoding, prefill, and decode.
 There are two variants of this workflow:
 - Prefill-first, used by vLLM
-- Decode-first, used by SGlang
+- Decode-first, used by SGLang
 
 Prefill-first:
 

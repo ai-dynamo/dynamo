@@ -146,6 +146,8 @@ This setup demonstrates how to use Dynamo to create an instance using Eagle-base
 
 **Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
 
+> **See also:** [Speculative Decoding Feature Overview](../../features/speculative_decoding/README.md) for cross-backend documentation.
+
 ### Kubernetes Deployment
 
 For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md)

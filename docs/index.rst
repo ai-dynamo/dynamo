@@ -61,7 +61,8 @@ Quickstart
    KV Cache Offloading <kvbm/kvbm_guide.md>
    KV Aware Routing <router/router_guide.md>
    Tool Calling <agents/tool-calling.md>
-   Multimodality Support <multimodal/index.md>
+   Multimodality Support <features/multimodal/README.md>
+   LoRA Adapters <features/lora/README.md>
    Finding Best Initial Configs <performance/aiconfigurator.md>
    Benchmarking <benchmarks/benchmarking.md>
    Tuning Disaggregated Performance <performance/tuning.md>
@@ -78,6 +79,7 @@ Quickstart
    Frontends <_sections/frontends>
    Router <router/README>
    Planner <planner/planner_intro>
+   Profiler <components/profiler/README>
    KVBM <kvbm/kvbm_intro>
 
 .. toctree::
@@ -91,3 +93,4 @@ Quickstart
    Router Design <design_docs/router_design.md>
    Request Plane <design_docs/request_plane.md>
    Event Plane <design_docs/event_plane.md>
+   Planner Design <design_docs/planner_design.md>

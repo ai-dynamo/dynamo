@@ -3,6 +3,9 @@
 > [!TIP]
 > **New to DGDR and SLA-Driven Profiling?** Start with the [SLA-Driven Profiling and Planner Deployment Quick Start Guide](/docs/planner/sla_planner_quickstart.md) for step-by-step instructions. This document provides deeper technical details about the profiling process.
 
+> [!NOTE]
+> **See also**: [Profiler Component Overview](/docs/components/profiler/README.md) for a quick start guide and feature matrix.
+
 ## Overview
 
 Dynamo provides automated SLA-driven profiling through **DynamoGraphDeploymentRequests (DGDR)**. Instead of manually running profiling scripts, you declare your performance requirements and let the Dynamo Operator handle profiling and deployment automatically.
