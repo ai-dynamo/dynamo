@@ -299,7 +299,7 @@ fn test_immutable_and_weak_block_debug() {
     let manager = testing::create_test_manager::<TestData>(10);
 
     let token_block = testing::create_iota_token_block(300, 4);
-    let seq_hash = crate::KvbmSequenceHashProvider::kvbm_sequence_hash(&token_block);
+    let _seq_hash = crate::KvbmSequenceHashProvider::kvbm_sequence_hash(&token_block);
 
     let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate");
     let complete_block = mutable_blocks

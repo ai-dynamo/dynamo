@@ -41,6 +41,7 @@ pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
 
     fn len(&self) -> usize;
 
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
