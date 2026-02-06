@@ -45,7 +45,7 @@ impl BlockRegistrationHandle {
         )
     }
 
-    pub fn register_mutable_block<T: BlockMetadata + Sync>(
+    pub(crate) fn register_mutable_block<T: BlockMetadata + Sync>(
         &self,
         mutable_block: MutableBlock<T>,
         duplication_policy: BlockDuplicationPolicy,
@@ -192,15 +192,14 @@ fn try_find_existing_block<T: BlockMetadata + Sync>(
         // Try active pool (weak reference)
         if let Some(weak_any) = attachments.weak_blocks.get(&type_id)
             && let Some(weak_block) = weak_any.downcast_ref::<WeakBlockEntry<T>>()
+            && let Some(existing_primary) = weak_block.primary_block.upgrade()
         {
-            if let Some(existing_primary) = weak_block.primary_block.upgrade() {
-                tracing::debug!(
-                    seq_hash = %handle.seq_hash(),
-                    block_id = existing_primary.block_id(),
-                    "try_find_existing_block: found in active pool"
-                );
-                return Some(existing_primary);
-            }
+            tracing::debug!(
+                seq_hash = %handle.seq_hash(),
+                block_id = existing_primary.block_id(),
+                "try_find_existing_block: found in active pool"
+            );
+            return Some(existing_primary);
         }
 
         // Try inactive pool - this acquires the inactive pool lock.

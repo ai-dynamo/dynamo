@@ -8,7 +8,7 @@ use super::*;
 
 use crate::blocks::{
     Block, BlockMetadata, CompleteBlock, PrimaryBlock, RegisteredBlock,
-    state::{Registered, Reset, Staged},
+    state::{Registered, Staged},
 };
 use crate::pools::InactivePool;
 use crate::testing::{
@@ -845,4 +845,59 @@ fn test_touch_callback_receives_correct_hash() {
 
     handle.touch();
     assert_eq!(*received_hash.lock(), Some(seq_hash));
+}
+
+#[test]
+fn test_with_all_mut_no_attachments() {
+    let registry = BlockRegistry::new();
+    let seq_hash = create_test_token_block(&[50, 51, 52, 53]).kvbm_sequence_hash();
+    let handle = registry.register_sequence_hash(seq_hash);
+
+    #[derive(Debug, Clone)]
+    struct UnusedType(i32);
+
+    // Call with_all_mut without attaching anything — exercises the None arm
+    let result = handle.get::<UnusedType>().with_all_mut(|unique, multiple| {
+        assert!(unique.is_none());
+        assert_eq!(multiple.len(), 0);
+        42
+    });
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn test_attachment_error_display() {
+    let err_multiple = AttachmentError::TypeAlreadyRegisteredAsMultiple(TypeId::of::<String>());
+    let display = format!("{}", err_multiple);
+    assert!(
+        display.contains("already registered as multiple"),
+        "Display should describe multiple registration: {}",
+        display
+    );
+
+    let err_unique = AttachmentError::TypeAlreadyRegisteredAsUnique(TypeId::of::<i32>());
+    let display = format!("{}", err_unique);
+    assert!(
+        display.contains("already registered as unique"),
+        "Display should describe unique registration: {}",
+        display
+    );
+}
+
+#[test]
+fn test_is_from_registry() {
+    let registry1 = BlockRegistry::new();
+    let registry2 = BlockRegistry::new();
+
+    let seq_hash = create_test_token_block(&[60, 61, 62, 63]).kvbm_sequence_hash();
+    let handle = registry1.register_sequence_hash(seq_hash);
+
+    assert!(
+        handle.is_from_registry(&registry1),
+        "Handle should be from registry1"
+    );
+    assert!(
+        !handle.is_from_registry(&registry2),
+        "Handle should NOT be from registry2"
+    );
 }

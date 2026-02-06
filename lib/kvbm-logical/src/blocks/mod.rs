@@ -19,8 +19,8 @@ pub use complete::CompleteBlock;
 pub use immutable::{ImmutableBlock, WeakBlock};
 pub use mutable::MutableBlock;
 
-pub mod state;
-pub use registered::{DuplicateBlock, PrimaryBlock, WeakBlockEntry};
+pub(crate) mod state;
+pub(crate) use registered::{DuplicateBlock, PrimaryBlock, WeakBlockEntry};
 
 // Re-export from the new registry module location for backward compatibility
 pub use crate::registry::BlockRegistrationHandle;
@@ -36,15 +36,15 @@ use std::sync::Arc;
 
 /// Return function for blocks transitioning back to Reset state.
 /// Used by MutableBlock, DuplicateBlock, and CompleteBlock drop paths.
-pub type ResetReturnFn<T> = Arc<dyn Fn(Block<T, state::Reset>) + Send + Sync>;
+pub(crate) type ResetReturnFn<T> = Arc<dyn Fn(Block<T, state::Reset>) + Send + Sync>;
 
 /// Return function for registered blocks returning to the inactive pool.
 /// Used by PrimaryBlock drop and pool management.
-pub type RegisteredReturnFn<T> = Arc<dyn Fn(Arc<Block<T, state::Registered>>) + Send + Sync>;
+pub(crate) type RegisteredReturnFn<T> = Arc<dyn Fn(Arc<Block<T, state::Registered>>) + Send + Sync>;
 
 /// Upgrade function for finding/promoting blocks by sequence hash.
 /// Used by ImmutableBlock and WeakBlock upgrade paths.
-pub type UpgradeFn<T> =
+pub(crate) type UpgradeFn<T> =
     Arc<dyn Fn(SequenceHash) -> Option<Arc<dyn RegisteredBlock<T>>> + Send + Sync>;
 
 /// Error type for block operations that returns the block to prevent leaks
@@ -79,7 +79,7 @@ pub enum BlockDuplicationPolicy {
 
 // Generic Block with marker and state markers
 #[derive(Debug)]
-pub struct Block<T, State> {
+pub(crate) struct Block<T, State> {
     block_id: BlockId,
     block_size: usize,
     state: State,
@@ -87,7 +87,7 @@ pub struct Block<T, State> {
 }
 
 /// Trait for types that can be registered and provide block information
-pub trait RegisteredBlock<T>: Send + Sync {
+pub(crate) trait RegisteredBlock<T>: Send + Sync {
     /// Get the block ID
     fn block_id(&self) -> BlockId;
 

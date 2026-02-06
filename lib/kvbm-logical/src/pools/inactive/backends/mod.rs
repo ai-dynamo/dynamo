@@ -18,10 +18,10 @@ mod tests;
 #[allow(unused_imports)]
 pub use fifo::FifoReusePolicy;
 
-pub use hashmap_backend::HashMapBackend;
-pub use lineage::LineageBackend;
+pub(crate) use hashmap_backend::HashMapBackend;
+pub(crate) use lineage::LineageBackend;
 pub(crate) use lru_backend::LruBackend;
-pub use multi_lru_backend::MultiLruBackend; // Not used widely yet
+pub(crate) use multi_lru_backend::MultiLruBackend; // Not used widely yet
 
 pub use reuse_policy::{ReusePolicy, ReusePolicyError};
 

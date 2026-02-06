@@ -24,19 +24,18 @@ pub mod test_config;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+use bincode::{Decode, Encode};
+use serde::{Deserialize, Serialize};
+
 // Re-export common types and traits
 pub use blocks::{
     BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, WeakBlock,
 };
+pub use manager::BlockManager;
 pub use registry::BlockRegistry;
 
-use bincode::{Decode, Encode};
-use serde::{Deserialize, Serialize};
-
-pub use dynamo_tokens::{PositionalLineageHash, SequenceHash as SequenceHashV1};
-
 pub type BlockId = usize;
-pub type SequenceHash = PositionalLineageHash;
+pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
 
 pub trait KvbmSequenceHashProvider {
     fn kvbm_sequence_hash(&self) -> SequenceHash;

@@ -20,9 +20,10 @@ pub mod tests;
 #[cfg(test)]
 mod block_proptest;
 
-pub use active::ActivePool;
-pub use inactive::{InactivePool, InactivePoolBackend, backends};
-pub use reset::ResetPool;
+pub(crate) use active::ActivePool;
+pub(crate) use inactive::backends;
+pub(crate) use inactive::{InactivePool, InactivePoolBackend};
+pub(crate) use reset::ResetPool;
 
 // Re-export RAII guards from guards module
 use crate::blocks::{
@@ -30,9 +31,9 @@ use crate::blocks::{
     state::{Registered, Reset},
 };
 
-pub use crate::SequenceHash;
+pub(crate) use crate::SequenceHash;
 
-pub trait BlockAllocator<T: BlockMetadata> {
+pub(crate) trait BlockAllocator<T: BlockMetadata> {
     // fn new(blocks: Vec<Block<T, Reset>>) -> Arc<Self>
     // where
     //     Self: Sized;
@@ -52,7 +53,8 @@ pub trait BlockAllocator<T: BlockMetadata> {
     }
 }
 
-pub trait BlockMatcher<T: BlockMetadata> {
+#[expect(dead_code)]
+pub(crate) trait BlockMatcher<T: BlockMetadata> {
     fn find_match(&self, seq_hash: SequenceHash) -> Option<ImmutableBlock<T>>;
 }
 

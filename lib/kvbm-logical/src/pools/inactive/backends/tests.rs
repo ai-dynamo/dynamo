@@ -196,4 +196,48 @@ mod backend_tests {
         assert_eq!(allocated.len(), 0);
         assert!(backend.is_empty());
     }
+
+    #[rstest]
+    #[case::hashmap(BackendType::HashMap)]
+    #[case::lru(BackendType::Lru)]
+    #[case::multi_lru(BackendType::MultiLru)]
+    #[case::lineage(BackendType::Lineage)]
+    fn test_scan_matches(#[case] backend_type: BackendType) {
+        let mut backend = create_backend(backend_type);
+
+        let (block1, hash1) = create_registered_block(1, &tokens_for_id(1));
+        let (block2, _hash2) = create_registered_block(2, &tokens_for_id(2));
+        let (block3, hash3) = create_registered_block(3, &tokens_for_id(3));
+        let missing_block = create_complete_block(4, &tokens_for_id(4));
+        let missing_hash = missing_block.sequence_hash();
+
+        backend.insert(block1);
+        // For HashMap backend with FIFO, we need a sleep to ensure different timestamps
+        if matches!(backend_type, BackendType::HashMap) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        backend.insert(block2);
+        if matches!(backend_type, BackendType::HashMap) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        backend.insert(block3);
+
+        assert_eq!(backend.len(), 3);
+
+        // Scan for [hash1, missing_hash, hash3] - should continue past the miss
+        let matches = backend.scan_matches(&[hash1, missing_hash, hash3], true);
+        assert_eq!(
+            matches.len(),
+            2,
+            "scan_matches should find 2 blocks, skipping the miss"
+        );
+
+        // Verify correct hashes were returned
+        let found_hashes: Vec<_> = matches.iter().map(|(h, _)| *h).collect();
+        assert!(found_hashes.contains(&hash1));
+        assert!(found_hashes.contains(&hash3));
+
+        // block2 should still be in the backend (was not scanned for)
+        assert_eq!(backend.len(), 1, "Only block2 should remain");
+    }
 }

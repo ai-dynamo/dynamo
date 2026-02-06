@@ -66,7 +66,7 @@ impl<T: BlockMetadata> MutableBlock<T> {
         }
     }
 
-    pub fn into_parts(mut self) -> (Block<T, Reset>, ResetReturnFn<T>) {
+    pub(crate) fn into_parts(mut self) -> (Block<T, Reset>, ResetReturnFn<T>) {
         (self.take_block(), self.return_fn.clone())
     }
 

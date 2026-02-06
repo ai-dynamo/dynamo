@@ -150,10 +150,10 @@ where
             events: super::protocol::KvCacheEvents::Shutdown,
             instance_id,
         };
-        if let Ok(bytes) = rmp_serde::to_vec(&shutdown_event) {
-            if let Err(e) = publisher.publish(&subject, Bytes::from(bytes)) {
-                tracing::error!("Failed to publish shutdown event: {}", e);
-            }
+        if let Ok(bytes) = rmp_serde::to_vec(&shutdown_event)
+            && let Err(e) = publisher.publish(&subject, Bytes::from(bytes))
+        {
+            tracing::error!("Failed to publish shutdown event: {}", e);
         }
 
         // Flush on stream end
@@ -201,7 +201,7 @@ impl KvbmCacheEventsPublisher {
 
     /// Checks if the publisher task is finished.
     pub fn is_finished(&self) -> bool {
-        self.handle.as_ref().map_or(true, |h| h.is_finished())
+        self.handle.as_ref().is_none_or(|h| h.is_finished())
     }
 }
 

@@ -178,10 +178,10 @@ impl<T: BlockMetadata> LineageBackend<T> {
 
         // 3. Update LRU status for this node
         let node = self.nodes.get(&position).unwrap().get(&fragment).unwrap();
-        if node.is_leaf() {
-            if let LineageNodeData::Real { last_used, .. } = node.data {
-                self.leaf_queue.insert((last_used, position, fragment), ());
-            }
+        if node.is_leaf()
+            && let LineageNodeData::Real { last_used, .. } = node.data
+        {
+            self.leaf_queue.insert((last_used, position, fragment), ());
         }
     }
 
@@ -262,16 +262,16 @@ impl<T: BlockMetadata> LineageBackend<T> {
             let mut should_remove_node = false;
             let mut parent_info = None;
 
-            if let Some(level) = self.nodes.get(&current_pos) {
-                if let Some(node) = level.get(&current_frag) {
-                    let is_ghost = matches!(node.data, LineageNodeData::Ghost);
-                    if node.children.is_empty() && is_ghost {
-                        // It's a ghost leaf (no block, no children). Prune it.
-                        should_remove_node = true;
-                        parent_info = node
-                            .parent_fragment
-                            .map(|pf| (current_pos.saturating_sub(1), pf));
-                    }
+            if let Some(level) = self.nodes.get(&current_pos)
+                && let Some(node) = level.get(&current_frag)
+            {
+                let is_ghost = matches!(node.data, LineageNodeData::Ghost);
+                if node.children.is_empty() && is_ghost {
+                    // It's a ghost leaf (no block, no children). Prune it.
+                    should_remove_node = true;
+                    parent_info = node
+                        .parent_fragment
+                        .map(|pf| (current_pos.saturating_sub(1), pf));
                 }
             }
 
@@ -288,19 +288,19 @@ impl<T: BlockMetadata> LineageBackend<T> {
                     let mut parent_has_block = false;
                     let mut parent_tick = 0;
 
-                    if let Some(level) = self.nodes.get_mut(&p_pos) {
-                        if let Some(parent) = level.get_mut(&p_frag) {
-                            parent.children.remove(&current_frag);
-                            if parent.children.is_empty() {
-                                parent_became_leaf = true;
-                                match &parent.data {
-                                    LineageNodeData::Real { last_used, .. } => {
-                                        parent_has_block = true;
-                                        parent_tick = *last_used;
-                                    }
-                                    LineageNodeData::Ghost => {
-                                        parent_has_block = false;
-                                    }
+                    if let Some(level) = self.nodes.get_mut(&p_pos)
+                        && let Some(parent) = level.get_mut(&p_frag)
+                    {
+                        parent.children.remove(&current_frag);
+                        if parent.children.is_empty() {
+                            parent_became_leaf = true;
+                            match &parent.data {
+                                LineageNodeData::Real { last_used, .. } => {
+                                    parent_has_block = true;
+                                    parent_tick = *last_used;
+                                }
+                                LineageNodeData::Ghost => {
+                                    parent_has_block = false;
                                 }
                             }
                         }

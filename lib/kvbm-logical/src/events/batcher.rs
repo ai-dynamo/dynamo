@@ -128,8 +128,8 @@ impl EventBatcher {
                                 };
 
                                 // Check if we need to flush due to type switch
-                                if let Some(current) = current_type {
-                                    if current != event_type && !current_batch.is_empty() {
+                                if let Some(current) = current_type
+                                    && current != event_type && !current_batch.is_empty() {
                                         // Flush current batch before switching types
                                         let batch = Self::make_batch(
                                             &mut current_batch,
@@ -139,7 +139,6 @@ impl EventBatcher {
                                         yield batch;
                                         deadline = tokio::time::Instant::now() + config.window_duration;
                                     }
-                                }
 
                                 current_type = Some(event_type);
                                 current_batch.push(seq_hash);
@@ -158,8 +157,8 @@ impl EventBatcher {
                             }
                             None => {
                                 // Input stream ended, flush remaining
-                                if let Some(batch_type) = current_type {
-                                    if !current_batch.is_empty() {
+                                if let Some(batch_type) = current_type
+                                    && !current_batch.is_empty() {
                                         let batch = Self::make_batch(
                                             &mut current_batch,
                                             batch_type,
@@ -167,7 +166,6 @@ impl EventBatcher {
                                         );
                                         yield batch;
                                     }
-                                }
                                 break;
                             }
                         }
@@ -175,8 +173,8 @@ impl EventBatcher {
 
                     _ = timeout => {
                         // Timer expired, flush if we have anything
-                        if let Some(batch_type) = current_type {
-                            if !current_batch.is_empty() {
+                        if let Some(batch_type) = current_type
+                            && !current_batch.is_empty() {
                                 let batch = Self::make_batch(
                                     &mut current_batch,
                                     batch_type,
@@ -185,7 +183,6 @@ impl EventBatcher {
                                 yield batch;
                                 current_type = None;
                             }
-                        }
                         deadline = tokio::time::Instant::now() + config.window_duration;
                     }
                 }

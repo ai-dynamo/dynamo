@@ -17,19 +17,19 @@ use super::{
 /// - `raw_block`: catches blocks in the brief window between PrimaryBlock::drop
 ///   (takes Arc out of Option) and return_fn completing (inserts into pool)
 /// - `primary_block`: fast path for upgrading to an existing PrimaryBlock
-pub struct WeakBlockEntry<T: BlockMetadata + Sync> {
+pub(crate) struct WeakBlockEntry<T: BlockMetadata + Sync> {
     pub(crate) raw_block: Weak<Block<T, Registered>>,
     pub(crate) primary_block: Weak<PrimaryBlock<T>>,
 }
 
 /// RAII guard for [`Block<T, Registered>`] that automatically returns to RegisteredPool on drop
-pub struct PrimaryBlock<T: BlockMetadata> {
+pub(crate) struct PrimaryBlock<T: BlockMetadata> {
     pub(crate) block: Option<Arc<Block<T, Registered>>>,
     pub(crate) return_fn: RegisteredReturnFn<T>,
 }
 
 /// RAII guard for duplicate blocks that share the same sequence hash as a primary block
-pub struct DuplicateBlock<T: BlockMetadata> {
+pub(crate) struct DuplicateBlock<T: BlockMetadata> {
     pub(crate) block: Option<Block<T, Registered>>,
     pub(crate) return_fn: ResetReturnFn<T>,
     pub(crate) _primary: Arc<PrimaryBlock<T>>,

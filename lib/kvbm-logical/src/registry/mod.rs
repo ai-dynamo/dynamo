@@ -47,9 +47,9 @@ use std::sync::{Arc, Weak};
 
 use handle::BlockRegistrationHandleInner;
 
-pub use crate::blocks::RegisteredReturnFn;
+pub(crate) use crate::blocks::RegisteredReturnFn;
 
-pub type PositionalRadixTree<V> = dynamo_tokens::PositionalRadixTree<V, SequenceHash>;
+pub(crate) type PositionalRadixTree<V> = dynamo_tokens::PositionalRadixTree<V, SequenceHash>;
 
 /// Builder for [`BlockRegistry`].
 ///
@@ -262,7 +262,7 @@ impl BlockRegistry {
             .prefix(&seq_hash)
             .get(&seq_hash)
             .and_then(|weak| weak.upgrade())
-            .map(|inner| BlockRegistrationHandle::from_inner(inner));
+            .map(BlockRegistrationHandle::from_inner);
 
         if result.is_some() && touch {
             self.touch(seq_hash);

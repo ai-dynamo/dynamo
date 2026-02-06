@@ -22,7 +22,7 @@ use super::{
 // pub(crate) use backends::*;
 
 /// Backend trait for InactivePool storage strategies
-pub trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
+pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
     /// Find blocks matching the given hashes in order, stopping on first miss.
     fn find_matches(&mut self, hashes: &[SequenceHash], touch: bool) -> Vec<Block<T, Registered>>;
 
@@ -64,7 +64,7 @@ use crate::blocks::{RegisteredReturnFn, ResetReturnFn};
 /// RegisteredBlock RAII guards that automatically return to the pool on drop.
 
 #[derive(Clone)]
-pub struct InactivePool<T: BlockMetadata> {
+pub(crate) struct InactivePool<T: BlockMetadata> {
     // Inner state protected by RwLock for thread-safe access from guards
     inner: Arc<RwLock<InactivePoolInner<T>>>,
     // Return function for MutableBlocks to return to ResetPool
@@ -81,7 +81,7 @@ struct InactivePoolInner<T: BlockMetadata> {
 
 impl<T: BlockMetadata + Sync> InactivePool<T> {
     /// Create a new InactivePool with the given backend and reset pool
-    pub fn new(backend: Box<dyn InactivePoolBackend<T>>, reset_pool: &ResetPool<T>) -> Self {
+    pub(crate) fn new(backend: Box<dyn InactivePoolBackend<T>>, reset_pool: &ResetPool<T>) -> Self {
         let inner = Arc::new(RwLock::new(InactivePoolInner { backend }));
 
         let inner_clone = inner.clone();
@@ -116,7 +116,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
     /// Find blocks by sequence hashes and return them as RegisteredBlock guards.
     /// Stops on first miss.
-    pub fn find_blocks(
+    pub(crate) fn find_blocks(
         &self,
         hashes: &[SequenceHash],
         touch: bool,
@@ -136,7 +136,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     /// Scan for all blocks matching the given hashes (doesn't stop on miss).
     /// Acquires/removes found blocks from pool - caller owns until dropped.
     /// Returns RAII guards (PrimaryBlocks) for found blocks.
-    pub fn scan_blocks(
+    pub(crate) fn scan_blocks(
         &self,
         hashes: &[SequenceHash],
         touch: bool,
@@ -155,7 +155,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     }
 
     /// Allocate blocks from registered pool, converting them to MutableBlocks for ResetPool
-    pub fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
+    pub(crate) fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
         if count == 0 {
             return Some(Vec::new());
         }
@@ -185,7 +185,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
     /// Check if a block exists in the pool
     #[allow(dead_code)]
-    pub fn has_block(&self, hash: SequenceHash) -> bool {
+    pub(crate) fn has_block(&self, hash: SequenceHash) -> bool {
         let inner = self.inner.read();
         inner.backend.has_block(hash)
     }
@@ -199,7 +199,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     /// Uses `new_unattached` because this is called from `try_find_existing_block`
     /// while the attachments lock is held. The caller MUST call
     /// `PrimaryBlock::store_weak_refs()` after dropping the attachments lock.
-    pub fn find_block_as_primary(
+    pub(crate) fn find_block_as_primary(
         &self,
         hash: SequenceHash,
         touch: bool,
@@ -213,13 +213,14 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     }
 
     /// Get the number of blocks in the pool
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         let inner = self.inner.read();
         inner.backend.len()
     }
 
     /// Check if the pool is empty
-    pub fn is_empty(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
         let inner = self.inner.read();
         inner.backend.is_empty()
     }
@@ -230,7 +231,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
     /// Allocate all blocks from the pool, converting them to MutableBlocks.
     /// The MutableBlocks will return to the ResetPool when dropped via RAII.
-    pub fn allocate_all_blocks(&self) -> Vec<MutableBlock<T>> {
+    pub(crate) fn allocate_all_blocks(&self) -> Vec<MutableBlock<T>> {
         let mut inner = self.inner.write();
         let blocks = inner.backend.allocate_all();
         blocks
@@ -243,156 +244,205 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     }
 }
 
-// // Create pools
-// let inactive_pool = InactivePool::new(backend, &reset_pool);
+#[cfg(test)]
+mod tests {
+    use super::backends::FifoReusePolicy;
+    use super::*;
+    use crate::testing::{TestMeta, create_registered_block, tokens_for_id};
 
-// #[cfg(test)]
-// mod tests {
-//     use super::backends::FifoReusePolicy;
-//     use super::*;
-//     use crate::pools::test_utils::{TestData, fixtures::*};
+    impl<T: BlockMetadata> InactivePool<T> {
+        fn insert(&self, block: Block<T, Registered>) {
+            let mut inner = self.inner.write();
+            inner.backend.insert(block);
+        }
+    }
 
-//     impl<T: BlockMetadata> InactivePool<T> {
-//         fn insert(&self, block: Block<T, Registered>) {
-//             let mut inner = self.inner.write();
-//             inner.backend.insert(block);
-//         }
-//     }
+    fn create_test_pool() -> (InactivePool<TestMeta>, ResetPool<TestMeta>) {
+        use super::backends::HashMapBackend;
 
-//     fn create_test_pool() -> (InactivePool<TestData>, ResetPool<TestData>) {
-//         use super::backends::hashmap_backend::HashMapBackend;
+        let reuse_policy = Box::new(FifoReusePolicy::new());
+        let backend = Box::new(HashMapBackend::new(reuse_policy));
 
-//         let reuse_policy = Box::new(FifoReusePolicy::new());
-//         let backend = Box::new(HashMapBackend::new(reuse_policy));
+        let reset_blocks: Vec<_> = (0..10_usize).map(|i| Block::new(i, 4)).collect();
+        let reset_pool = ResetPool::new(reset_blocks, 4);
 
-//         let reset_blocks = (0..10).map(|i| Block::new(i, 4)).collect();
-//         let reset_pool = ResetPool::new(reset_blocks, 4);
+        let inactive_pool = InactivePool::new(backend, &reset_pool);
+        (inactive_pool, reset_pool)
+    }
 
-//         let inactive_pool = InactivePool::new(backend, &reset_pool);
-//         (inactive_pool, reset_pool)
-//     }
+    /// Create a sequence hash for a block that doesn't exist in any pool.
+    fn nonexistent_hash() -> SequenceHash {
+        // Create a registered block just to get its sequence hash, then drop it
+        let (_, seq_hash) = create_registered_block::<TestMeta>(999, &[9999, 9998, 9997, 9996]);
+        seq_hash
+    }
 
-//     #[test]
-//     fn test_new_pool_starts_empty() {
-//         let (pool, _reset_pool) = create_test_pool();
-//         assert_eq!(pool.len(), 0);
-//         assert!(pool.is_empty());
-//         assert!(!pool.has_block(100));
-//     }
+    #[test]
+    fn test_new_pool_starts_empty() {
+        let (pool, _reset_pool) = create_test_pool();
+        assert_eq!(pool.len(), 0);
+        assert!(pool.is_empty());
+        assert!(!pool.has_block(nonexistent_hash()));
+    }
 
-//     #[test]
-//     fn test_return_and_find_single_block() {
-//         let (pool, _reset_pool) = create_test_pool();
-//         let (block, seq_hash) = create_registered_block(1, &tokens_for_id(1));
+    #[test]
+    fn test_return_and_find_single_block() {
+        let (pool, _reset_pool) = create_test_pool();
+        let (block, seq_hash) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
 
-//         // Return block directly (simulating manual return)
-//         pool.insert(block);
+        pool.insert(block);
 
-//         assert_eq!(pool.len(), 1);
-//         assert!(pool.has_block(seq_hash));
+        assert_eq!(pool.len(), 1);
+        assert!(pool.has_block(seq_hash));
 
-//         // Find the block
-//         let found_blocks = pool.find_blocks(&[seq_hash], true);
-//         assert_eq!(found_blocks.len(), 1);
-//         assert_eq!(found_blocks[0].block_id(), 1);
-//         assert_eq!(found_blocks[0].sequence_hash(), seq_hash);
+        let found_blocks = pool.find_blocks(&[seq_hash], true);
+        assert_eq!(found_blocks.len(), 1);
+        assert_eq!(found_blocks[0].block_id(), 1);
+        assert_eq!(found_blocks[0].sequence_hash(), seq_hash);
 
-//         // Block should be removed from pool after finding
-//         assert_eq!(pool.len(), 0);
-//         assert!(!pool.has_block(seq_hash));
+        // Block should be removed from pool after finding
+        assert_eq!(pool.len(), 0);
+        assert!(!pool.has_block(seq_hash));
+    }
 
-//         // Blocks will auto-return when dropped at end of scope
-//     }
+    #[test]
+    fn test_find_blocks_stops_on_first_miss() {
+        let (pool, _reset_pool) = create_test_pool();
 
-//     #[test]
-//     fn test_find_blocks_stops_on_first_miss() {
-//         let (pool, _reset_pool) = create_test_pool();
+        let (block1, seq_hash1) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
+        let (block3, seq_hash3) = create_registered_block::<TestMeta>(3, &tokens_for_id(3));
+        pool.insert(block1);
+        pool.insert(block3);
 
-//         // Add blocks with different sequence hashes
-//         let (block1, seq_hash1) = create_registered_block(1, &tokens_for_id(1));
-//         let (block3, seq_hash3) = create_registered_block(3, &tokens_for_id(3));
-//         pool.insert(block1);
-//         pool.insert(block3);
+        assert_eq!(pool.len(), 2);
 
-//         assert_eq!(pool.len(), 2);
+        let missing = nonexistent_hash();
+        let found_blocks = pool.find_blocks(&[seq_hash1, missing, seq_hash3], true);
+        assert_eq!(found_blocks.len(), 1);
+        assert_eq!(found_blocks[0].sequence_hash(), seq_hash1);
 
-//         // Try to find blocks - use a sequence hash that doesn't exist to test first miss behavior
-//         let nonexistent_hash = 99999;
-//         let found_blocks = pool.find_blocks(&[seq_hash1, nonexistent_hash, seq_hash3], true);
-//         assert_eq!(found_blocks.len(), 1); // Only found first block
-//         assert_eq!(found_blocks[0].sequence_hash(), seq_hash1);
+        // Block 3 should still be in pool since search stopped at first miss
+        assert_eq!(pool.len(), 1);
+        assert!(pool.has_block(seq_hash3));
+    }
 
-//         // Block 3 should still be in pool since search stopped at first miss
-//         assert_eq!(pool.len(), 1);
-//         assert!(pool.has_block(seq_hash3));
-//     }
+    #[test]
+    fn test_raii_auto_return() {
+        let (pool, _reset_pool) = create_test_pool();
+        let (block, seq_hash) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
+        pool.insert(block);
 
-//     #[test]
-//     fn test_raii_auto_return() {
-//         let (pool, _reset_pool) = create_test_pool();
-//         let (block, seq_hash) = create_registered_block(1, &tokens_for_id(1));
-//         pool.insert(block);
+        assert_eq!(pool.len(), 1);
 
-//         assert_eq!(pool.len(), 1);
+        {
+            let _found_blocks = pool.find_blocks(&[seq_hash], true);
+            assert_eq!(pool.len(), 0);
+        }
 
-//         {
-//             let _found_blocks = pool.find_blocks(&[seq_hash], true);
-//             assert_eq!(pool.len(), 0);
-//         }
+        assert_eq!(pool.len(), 1);
+        assert!(pool.has_block(seq_hash));
+    }
 
-//         assert_eq!(pool.len(), 1);
-//         assert!(pool.has_block(seq_hash));
-//     }
+    #[test]
+    fn test_allocate_blocks() {
+        let (pool, reset_pool) = create_test_pool();
 
-//     #[test]
-//     fn test_allocate_blocks() {
-//         let (pool, reset_pool) = create_test_pool();
+        let (block1, _) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
+        let (block2, _) = create_registered_block::<TestMeta>(2, &tokens_for_id(2));
+        let (block3, _) = create_registered_block::<TestMeta>(3, &tokens_for_id(3));
+        pool.insert(block1);
+        pool.insert(block2);
+        pool.insert(block3);
 
-//         // Add some registered blocks to the pool
-//         let (block1, _seq_hash1) = create_registered_block(1, &tokens_for_id(1));
-//         let (block2, _seq_hash2) = create_registered_block(2, &tokens_for_id(2));
-//         let (block3, _seq_hash3) = create_registered_block(3, &tokens_for_id(3));
-//         pool.insert(block1);
-//         pool.insert(block2);
-//         pool.insert(block3);
+        assert_eq!(pool.len(), 3);
 
-//         assert_eq!(pool.len(), 3);
+        let mutable_blocks = pool.allocate_blocks(1).expect("Should allocate 1 block");
+        assert_eq!(mutable_blocks.len(), 1);
+        assert_eq!(pool.len(), 2);
 
-//         // Allocate 1 block - should convert to MutableBlocks
-//         // Note: Due to test setup limitations with reuse policy, we can only allocate 1 block
-//         let mutable_blocks = pool.allocate_blocks(1).expect("Should allocate 1 block");
-//         assert_eq!(mutable_blocks.len(), 1);
+        drop(mutable_blocks);
 
-//         // Pool should have one less block
-//         assert_eq!(pool.len(), 2);
+        assert_eq!(pool.len(), 2);
+        assert_eq!(reset_pool.available_blocks(), 11);
+    }
 
-//         // The MutableBlocks should have the correct IDs
-//         let block_ids: Vec<u64> = mutable_blocks.iter().map(|b| b.block_id()).collect();
-//         assert!(block_ids.contains(&1) || block_ids.contains(&2) || block_ids.contains(&3));
+    #[test]
+    fn test_allocate_more_than_available_fails() {
+        let (pool, _reset_pool) = create_test_pool();
 
-//         drop(mutable_blocks);
+        let (block1, _) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
+        let (block2, _) = create_registered_block::<TestMeta>(2, &tokens_for_id(2));
+        pool.insert(block1);
+        pool.insert(block2);
 
-//         assert_eq!(pool.len(), 2);
-//         assert_eq!(reset_pool.available_blocks(), 11);
-//     }
+        assert_eq!(pool.len(), 2);
 
-//     #[test]
-//     fn test_allocate_more_than_available_fails() {
-//         let (pool, _reset_pool) = create_test_pool();
+        let result = pool.allocate_blocks(3);
+        assert!(result.is_none());
 
-//         // Add only 2 blocks
-//         let (block1, _seq_hash1) = create_registered_block(1, &tokens_for_id(1));
-//         let (block2, _seq_hash2) = create_registered_block(2, &tokens_for_id(2));
-//         pool.insert(block1);
-//         pool.insert(block2);
+        assert_eq!(pool.len(), 2);
+    }
 
-//         assert_eq!(pool.len(), 2);
+    #[test]
+    fn test_scan_blocks() {
+        let (pool, _reset_pool) = create_test_pool();
 
-//         // Try to allocate 3 blocks - should fail
-//         let result = pool.allocate_blocks(3);
-//         assert!(result.is_none());
+        let (block1, seq_hash1) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
+        let (block3, seq_hash3) = create_registered_block::<TestMeta>(3, &tokens_for_id(3));
+        pool.insert(block1);
+        // Sleep for FIFO timestamp uniqueness (HashMap backend)
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        pool.insert(block3);
 
-//         // Pool should be unchanged
-//         assert_eq!(pool.len(), 2);
-//     }
-// }
+        assert_eq!(pool.len(), 2);
+
+        let missing = nonexistent_hash();
+
+        // scan_blocks should NOT stop on miss — should find both hash1 and hash3
+        let found = pool.scan_blocks(&[seq_hash1, missing, seq_hash3], true);
+        assert_eq!(
+            found.len(),
+            2,
+            "scan_blocks should find both blocks, skipping the miss"
+        );
+
+        let found_hashes: Vec<_> = found.iter().map(|(h, _)| *h).collect();
+        assert!(found_hashes.contains(&seq_hash1));
+        assert!(found_hashes.contains(&seq_hash3));
+
+        // Both blocks were removed from the pool
+        assert_eq!(pool.len(), 0);
+
+        // RAII return: dropping the found blocks should return them
+        drop(found);
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn test_allocate_all_blocks() {
+        let (pool, reset_pool) = create_test_pool();
+
+        let (block1, _) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
+        let (block2, _) = create_registered_block::<TestMeta>(2, &tokens_for_id(2));
+        let (block3, _) = create_registered_block::<TestMeta>(3, &tokens_for_id(3));
+        pool.insert(block1);
+        pool.insert(block2);
+        pool.insert(block3);
+
+        assert_eq!(pool.len(), 3);
+
+        let mutable_blocks = pool.allocate_all_blocks();
+        assert_eq!(mutable_blocks.len(), 3);
+        assert_eq!(pool.len(), 0);
+
+        // Verify they are MutableBlocks by checking block_id
+        for block in &mutable_blocks {
+            let _id = block.block_id();
+        }
+
+        // Drop them — they should return to the reset pool
+        drop(mutable_blocks);
+        // 10 original reset blocks + 3 returned = 13
+        assert_eq!(reset_pool.available_blocks(), 13);
+    }
+}

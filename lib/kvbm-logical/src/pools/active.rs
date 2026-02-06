@@ -18,14 +18,14 @@ use crate::registry::BlockRegistry;
 ///
 /// This is a simple wrapper around BlockRegistry that encapsulates the logic
 /// for finding blocks that are currently active (have strong references).
-pub struct ActivePool<T: BlockMetadata> {
+pub(crate) struct ActivePool<T: BlockMetadata> {
     block_registry: BlockRegistry,
     return_fn: RegisteredReturnFn<T>,
 }
 
 impl<T: BlockMetadata> ActivePool<T> {
     /// Create a new ActivePool with the given registry and return function.
-    pub fn new(block_registry: BlockRegistry, return_fn: RegisteredReturnFn<T>) -> Self {
+    pub(crate) fn new(block_registry: BlockRegistry, return_fn: RegisteredReturnFn<T>) -> Self {
         Self {
             block_registry,
             return_fn,
@@ -38,7 +38,7 @@ impl<T: BlockMetadata> ActivePool<T> {
     /// RegisteredBlock guards. If any hash is not found or the block cannot
     /// be retrieved, the search stops and returns only the blocks found so far.
     #[inline]
-    pub fn find_matches(
+    pub(crate) fn find_matches(
         &self,
         hashes: &[SequenceHash],
         touch: bool,
@@ -65,7 +65,7 @@ impl<T: BlockMetadata> ActivePool<T> {
     /// Unlike `find_matches`, this continues scanning even when a hash is not found.
     /// Returns all found blocks with their corresponding sequence hashes.
     #[inline]
-    pub fn scan_matches(
+    pub(crate) fn scan_matches(
         &self,
         hashes: &[SequenceHash],
     ) -> Vec<(SequenceHash, Arc<dyn RegisteredBlock<T>>)> {
@@ -83,211 +83,142 @@ impl<T: BlockMetadata> ActivePool<T> {
             .collect()
     }
 
-    /// Find a single block by sequence hash.
-    ///
-    /// Returns the block if found and active, None otherwise.
-    #[inline]
-    pub fn find_match(&self, seq_hash: SequenceHash) -> Option<Arc<dyn RegisteredBlock<T>>> {
-        self.block_registry
-            .match_sequence_hash(seq_hash, true)
-            .and_then(|handle| handle.try_get_block::<T>(self.return_fn.clone()))
-    }
+    // /// Find a single block by sequence hash.
+    // ///
+    // /// Returns the block if found and active, None otherwise.
+    // #[inline]
+    // pub(crate) fn find_match(&self, seq_hash: SequenceHash) -> Option<Arc<dyn RegisteredBlock<T>>> {
+    //     self.block_registry
+    //         .match_sequence_hash(seq_hash, true)
+    //         .and_then(|handle| handle.try_get_block::<T>(self.return_fn.clone()))
+    // }
 
-    /// Check if a block with the given sequence hash is currently active.
-    pub fn has_block(&self, seq_hash: SequenceHash) -> bool {
-        self.find_match(seq_hash).is_some()
-    }
+    // /// Check if a block with the given sequence hash is currently active.
+    // pub(crate) fn has_block(&self, seq_hash: SequenceHash) -> bool {
+    //     self.find_match(seq_hash).is_some()
+    // }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::super::{BlockDuplicationPolicy, CompleteBlock, FifoReusePolicy, Reset};
-//     use super::*;
-//     use crate::pools::test_utils::TestData;
-//     use crate::pools::{
-//         block::Block,
-//         frequency_sketch::TinyLFUTracker,
-//         inactive::{InactivePool, backends::hashmap_backend::HashMapBackend},
-//         registry::BlockRegistry,
-//         reset::ResetPool,
-//     };
-//     use dynamo_tokens::TokenBlockSequence;
-//     use std::sync::Arc;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::{Block, PrimaryBlock, state::Reset};
+    use crate::pools::backends::{FifoReusePolicy, HashMapBackend};
+    use crate::pools::inactive::InactivePool;
+    use crate::pools::reset::ResetPool;
+    use crate::testing::{TestMeta, create_staged_block, tokens_for_id};
 
-//     fn create_test_setup() -> (
-//         ActivePool<TestData>,
-//         InactivePool<TestData>,
-//         BlockRegistry,
-//         ResetPool<TestData>,
-//     ) {
-//         let frequency_tracker = Arc::new(TinyLFUTracker::new(100));
-//         let registry = BlockRegistry::with_frequency_tracker(frequency_tracker);
+    fn create_test_setup() -> (
+        ActivePool<TestMeta>,
+        InactivePool<TestMeta>,
+        BlockRegistry,
+        ResetPool<TestMeta>,
+    ) {
+        let registry = BlockRegistry::new();
 
-//         let reset_blocks: Vec<_> = (0..10).map(|i| Block::new(i, 4)).collect();
-//         let reset_pool = ResetPool::new(reset_blocks, 4);
+        let reset_blocks: Vec<Block<TestMeta, Reset>> =
+            (0..10_usize).map(|i| Block::new(i, 4)).collect();
+        let reset_pool = ResetPool::new(reset_blocks, 4);
 
-//         let reuse_policy = Box::new(FifoReusePolicy::new());
-//         let backend = Box::new(HashMapBackend::new(reuse_policy));
-//         let inactive_pool = InactivePool::new(backend, &reset_pool);
+        let reuse_policy = Box::new(FifoReusePolicy::new());
+        let backend = Box::new(HashMapBackend::new(reuse_policy));
+        let inactive_pool = InactivePool::new(backend, &reset_pool);
 
-//         let active_pool = ActivePool::new(registry.clone(), inactive_pool.return_fn());
+        let active_pool = ActivePool::new(registry.clone(), inactive_pool.return_fn());
 
-//         (active_pool, inactive_pool, registry, reset_pool)
-//     }
+        (active_pool, inactive_pool, registry, reset_pool)
+    }
 
-//     fn create_complete_block(id: u64, tokens: &[u32]) -> (CompleteBlock<TestData>, u64) {
-//         let sequence = TokenBlockSequence::from_slice(tokens, 4, Some(42));
-//         let token_block = if let Some(block) = sequence.blocks().first() {
-//             block.clone()
-//         } else {
-//             let mut partial = sequence.into_parts().1;
-//             partial.commit().expect("Should be able to commit")
-//         };
+    /// Register a staged block and hold a strong reference to make it "active".
+    fn make_active_block(
+        registry: &BlockRegistry,
+        return_fn: &RegisteredReturnFn<TestMeta>,
+        id: usize,
+        tokens: &[u32],
+    ) -> (Arc<PrimaryBlock<TestMeta>>, SequenceHash) {
+        let staged = create_staged_block::<TestMeta>(id, tokens);
+        let seq_hash = staged.sequence_hash();
+        let handle = registry.register_sequence_hash(seq_hash);
+        let registered = staged.register_with_handle(handle);
+        let primary = PrimaryBlock::new_attached(Arc::new(registered), return_fn.clone());
+        (primary, seq_hash)
+    }
 
-//         let seq_hash = token_block.sequence_hash();
-//         let complete_block = Block::new(id, 4)
-//             .complete(token_block)
-//             .expect("Block size should match");
+    #[test]
+    fn test_find_matches() {
+        let (active_pool, inactive_pool, registry, _reset_pool) = create_test_setup();
+        let return_fn = inactive_pool.return_fn();
 
-//         // Create a dummy return function for testing
-//         let return_fn = Arc::new(|_block: Block<TestData, Reset>| {
-//             // In real usage this would return blocks to the reset pool
-//         });
+        let (_hold1, hash1) = make_active_block(&registry, &return_fn, 1, &tokens_for_id(1));
+        let (_hold2, hash2) = make_active_block(&registry, &return_fn, 2, &tokens_for_id(2));
+        let (_hold3, hash3) = make_active_block(&registry, &return_fn, 3, &tokens_for_id(3));
 
-//         let complete_guard = CompleteBlock {
-//             block: Some(complete_block),
-//             return_fn,
-//         };
-//         (complete_guard, seq_hash)
-//     }
+        let found = active_pool.find_matches(&[hash1, hash2, hash3], true);
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0].block_id(), 1);
+        assert_eq!(found[1].block_id(), 2);
+        assert_eq!(found[2].block_id(), 3);
+    }
 
-//     #[test]
-//     fn test_active_pool_find_match() {
-//         let (active_pool, _inactive_pool, registry, _reset_pool) = create_test_setup();
+    #[test]
+    fn test_find_matches_stops_on_miss() {
+        let (active_pool, inactive_pool, registry, _reset_pool) = create_test_setup();
+        let return_fn = inactive_pool.return_fn();
 
-//         let (complete_block, seq_hash) = create_complete_block(1, &[100, 101, 102, 103]);
+        let (_hold1, hash1) = make_active_block(&registry, &return_fn, 1, &tokens_for_id(1));
+        let (_hold3, hash3) = make_active_block(&registry, &return_fn, 3, &tokens_for_id(3));
 
-//         let handle = registry.register_sequence_hash(seq_hash);
-//         let _immutable_block = handle.register_block(
-//             complete_block,
-//             BlockDuplicationPolicy::Allow,
-//             active_pool.return_fn.clone(),
-//         );
+        // Create a hash that's not in the registry
+        let missing_hash = {
+            let staged = create_staged_block::<TestMeta>(999, &[9999, 9998, 9997, 9996]);
+            staged.sequence_hash()
+        };
 
-//         let found_block = active_pool.find_match(seq_hash);
-//         assert!(found_block.is_some());
+        let found = active_pool.find_matches(&[hash1, missing_hash, hash3], true);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].block_id(), 1);
+    }
 
-//         let found_block = found_block.unwrap();
-//         assert_eq!(found_block.block_id(), 1);
-//         assert_eq!(found_block.sequence_hash(), seq_hash);
-//     }
+    #[test]
+    fn test_scan_matches() {
+        let (active_pool, inactive_pool, registry, _reset_pool) = create_test_setup();
+        let return_fn = inactive_pool.return_fn();
 
-//     #[test]
-//     fn test_active_pool_find_matches() {
-//         let (active_pool, _inactive_pool, registry, _reset_pool) = create_test_setup();
+        let (_hold1, hash1) = make_active_block(&registry, &return_fn, 1, &tokens_for_id(1));
+        let (_hold3, hash3) = make_active_block(&registry, &return_fn, 3, &tokens_for_id(3));
 
-//         let (complete_block1, seq_hash1) = create_complete_block(1, &[100, 101, 102, 103]);
-//         let (complete_block2, seq_hash2) = create_complete_block(2, &[200, 201, 202, 203]);
-//         let (complete_block3, seq_hash3) = create_complete_block(3, &[300, 301, 302, 303]);
+        let missing_hash = {
+            let staged = create_staged_block::<TestMeta>(999, &[9999, 9998, 9997, 9996]);
+            staged.sequence_hash()
+        };
 
-//         // Register blocks
-//         let handle1 = registry.register_sequence_hash(seq_hash1);
-//         let _immutable1 = handle1.register_block(
-//             complete_block1,
-//             BlockDuplicationPolicy::Allow,
-//             active_pool.return_fn.clone(),
-//         );
+        // scan_matches doesn't stop on miss — should find both 1 and 3
+        let found = active_pool.scan_matches(&[hash1, missing_hash, hash3]);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].0, hash1);
+        assert_eq!(found[0].1.block_id(), 1);
+        assert_eq!(found[1].0, hash3);
+        assert_eq!(found[1].1.block_id(), 3);
+    }
 
-//         let handle2 = registry.register_sequence_hash(seq_hash2);
-//         let _immutable2 = handle2.register_block(
-//             complete_block2,
-//             BlockDuplicationPolicy::Allow,
-//             active_pool.return_fn.clone(),
-//         );
+    #[test]
+    fn test_find_matches_empty() {
+        let (active_pool, _inactive_pool, _registry, _reset_pool) = create_test_setup();
 
-//         let handle3 = registry.register_sequence_hash(seq_hash3);
-//         let _immutable3 = handle3.register_block(
-//             complete_block3,
-//             BlockDuplicationPolicy::Allow,
-//             active_pool.return_fn.clone(),
-//         );
+        let found = active_pool.find_matches(&[], true);
+        assert!(found.is_empty());
+    }
 
-//         // Find all three blocks
-//         let found_blocks = active_pool.find_matches(&[seq_hash1, seq_hash2, seq_hash3], true);
-//         assert_eq!(found_blocks.len(), 3);
-//         assert_eq!(found_blocks[0].block_id(), 1);
-//         assert_eq!(found_blocks[1].block_id(), 2);
-//         assert_eq!(found_blocks[2].block_id(), 3);
-//     }
+    #[test]
+    fn test_find_matches_no_active_blocks() {
+        let (active_pool, _inactive_pool, _registry, _reset_pool) = create_test_setup();
 
-//     #[test]
-//     fn test_active_pool_find_matches_stops_on_miss() {
-//         let (active_pool, _inactive_pool, registry, _reset_pool) = create_test_setup();
+        let missing_hash = {
+            let staged = create_staged_block::<TestMeta>(999, &[9999, 9998, 9997, 9996]);
+            staged.sequence_hash()
+        };
 
-//         let (complete_block1, seq_hash1) = create_complete_block(1, &[100, 101, 102, 103]);
-//         let (complete_block3, seq_hash3) = create_complete_block(3, &[300, 301, 302, 303]);
-
-//         // Register only blocks 1 and 3
-//         let handle1 = registry.register_sequence_hash(seq_hash1);
-//         let _immutable1 = handle1.register_block(
-//             complete_block1,
-//             BlockDuplicationPolicy::Allow,
-//             active_pool.return_fn.clone(),
-//         );
-
-//         let handle3 = registry.register_sequence_hash(seq_hash3);
-//         let _immutable3 = handle3.register_block(
-//             complete_block3,
-//             BlockDuplicationPolicy::Allow,
-//             active_pool.return_fn.clone(),
-//         );
-
-//         // Try to find blocks 1, 2, 3 - should stop at 2 since it's missing
-//         let missing_hash = 999;
-//         let found_blocks = active_pool.find_matches(&[seq_hash1, missing_hash, seq_hash3], true);
-
-//         // Should only find block 1, then stop on missing hash
-//         assert_eq!(found_blocks.len(), 1);
-//         assert_eq!(found_blocks[0].block_id(), 1);
-//     }
-
-//     #[test]
-//     fn test_active_pool_has_block() {
-//         let (active_pool, _inactive_pool, registry, _reset_pool) = create_test_setup();
-
-//         let (complete_block, seq_hash) = create_complete_block(1, &[100, 101, 102, 103]);
-
-//         // Block should not be found initially
-//         assert!(!active_pool.has_block(seq_hash));
-
-//         // Register the block
-//         let handle = registry.register_sequence_hash(seq_hash);
-//         let _immutable_block = handle.register_block(
-//             complete_block,
-//             BlockDuplicationPolicy::Allow,
-//             active_pool.return_fn.clone(),
-//         );
-
-//         // Now block should be found
-//         assert!(active_pool.has_block(seq_hash));
-
-//         // Drop the immutable block
-//         drop(_immutable_block);
-
-//         // Block should no longer be active (but might still be registered)
-//         // This depends on the exact behavior of the registry
-//     }
-
-//     #[test]
-//     fn test_active_pool_empty_search() {
-//         let (active_pool, _inactive_pool, _registry, _reset_pool) = create_test_setup();
-
-//         let found_blocks = active_pool.find_matches(&[], true);
-//         assert_eq!(found_blocks.len(), 0);
-
-//         let found_block = active_pool.find_match(999);
-//         assert!(found_block.is_none());
-
-//         assert!(!active_pool.has_block(999));
-//     }
-// }
+        let found = active_pool.find_matches(&[missing_hash], true);
+        assert!(found.is_empty());
+    }
+}

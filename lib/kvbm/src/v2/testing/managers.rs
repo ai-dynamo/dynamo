@@ -14,7 +14,7 @@ use crate::{
         events::EventsManager,
         manager::{BlockManager, FrequencyTrackingCapacity},
     },
-    v2::logical::pools::SequenceHash,
+    v2::logical::SequenceHash,
 };
 
 use super::token_blocks;

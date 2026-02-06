@@ -101,13 +101,8 @@ pub struct EventsManager {
 }
 
 /// Builder for [`EventsManager`] that wraps [`EventsManagerSettingsBuilder`].
+#[derive(Default)]
 pub struct EventsManagerBuilder(EventsManagerSettingsBuilder);
-
-impl Default for EventsManagerBuilder {
-    fn default() -> Self {
-        Self(EventsManagerSettingsBuilder::default())
-    }
-}
 
 impl EventsManagerBuilder {
     /// Creates a new builder with default settings.

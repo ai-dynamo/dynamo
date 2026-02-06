@@ -71,9 +71,9 @@ impl<T> Block<T, Reset> {
         }
     }
 
-    pub fn reset(self) -> Block<T, Reset> {
-        self // Already in reset state
-    }
+    // pub fn reset(self) -> Block<T, Reset> {
+    //     self // Already in reset state
+    // }
 }
 
 impl<T: BlockMetadata> Block<T, Reset> {
