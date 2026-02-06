@@ -46,7 +46,9 @@ def validate_args(args):
     return
 
 def render(args, context, script_dir):
-    env = Environment(loader=FileSystemLoader(script_dir),trim_blocks=False,lstrip_blocks=True)
+    env = Environment(
+        loader=FileSystemLoader(script_dir), trim_blocks=False, lstrip_blocks=True
+    )
     template = env.get_template("Dockerfile.template")
     rendered = template.render(
         context=context,

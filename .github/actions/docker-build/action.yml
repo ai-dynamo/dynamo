@@ -87,6 +87,7 @@ runs:
       run: |
         sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
         curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+        . "$HOME/.cargo/env"
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         cargo install cbindgen
 
