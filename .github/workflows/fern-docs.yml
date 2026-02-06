@@ -323,6 +323,30 @@ jobs:
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
 
+      - name: Update GitHub links to 'main' to version tag
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          echo "Updating GitHub links from 'tree/main' to 'tree/$TAG' in fern/pages-$TAG/..."
+
+          # Find all markdown files and replace tree/main with tree/vX.Y.Z
+          find "fern/pages-$TAG" -name "*.md" -o -name "*.mdx" | while read file; do
+            if grep -q "github.com/ai-dynamo/dynamo/tree/main" "$file"; then
+              echo "Updating: $file"
+              sed -i "s|github.com/ai-dynamo/dynamo/tree/main|github.com/ai-dynamo/dynamo/tree/$TAG|g" "$file"
+            fi
+          done
+
+          # Also update blob/main references (for direct file links)
+          find "fern/pages-$TAG" -name "*.md" -o -name "*.mdx" | while read file; do
+            if grep -q "github.com/ai-dynamo/dynamo/blob/main" "$file"; then
+              echo "Updating blob links: $file"
+              sed -i "s|github.com/ai-dynamo/dynamo/blob/main|github.com/ai-dynamo/dynamo/blob/$TAG|g" "$file"
+            fi
+          done
+
+          echo "GitHub link update complete."
+
       - name: Convert GitHub callouts to Fern format
         run: |
           TAG="${{ steps.version.outputs.tag }}"
