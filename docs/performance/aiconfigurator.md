@@ -151,5 +151,5 @@ docker run -it --rm nvcr.io/nvidia/aiconfigurator:latest \
 ## Learn More
 
 - [Dynamo Installation Guide](/docs/kubernetes/installation_guide.md)
-- [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md)
+- [SLA Planner Guide](/docs/components/planner/planner_guide.md)
 - [Benchmarking Guide](/docs/benchmarks/benchmarking.md)
