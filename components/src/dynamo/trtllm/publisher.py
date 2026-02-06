@@ -601,6 +601,7 @@ class Publisher:
                         block_hashes,
                         lora_id,
                         parent_hash,
+                        block_mm_infos,
                     )
                 else:
                     logging.warning(

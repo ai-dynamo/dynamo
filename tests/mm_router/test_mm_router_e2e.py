@@ -123,7 +123,7 @@ class TRTLLMWorkerProcess(ManagedProcess):
             ],
             timeout=600,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             straggler_commands=["-m dynamo.trtllm"],
             log_dir=log_dir,
         )
@@ -170,7 +170,7 @@ class MMRouterWorkerProcess(ManagedProcess):
             ],
             timeout=120,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             straggler_commands=["mm_router_worker"],
             log_dir=log_dir,
         )
@@ -203,7 +203,7 @@ class MMFrontendProcess(ManagedProcess):
             ],
             timeout=120,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             straggler_commands=["-m dynamo.frontend"],
             log_dir=log_dir,
         )
@@ -244,13 +244,19 @@ def start_mm_services(request, mm_runtime_services) -> Generator[int, None, None
 @pytest.fixture(scope="module")
 def mm_test_tools(mm_runtime_services, start_mm_services):
     """Module-scoped (indexer, tokenizer, processor) for overlap verification."""
+    import threading
+
     from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
     from transformers import AutoProcessor
 
     from dynamo._core import KvIndexer
     from dynamo.runtime import DistributedRuntime
 
+    # The event loop must be running for NATS background tasks to work
     loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
+
     runtime = DistributedRuntime(loop, "etcd", "nats")
 
     component = runtime.namespace(NAMESPACE).component("trtllm")
@@ -263,6 +269,8 @@ def mm_test_tools(mm_runtime_services, start_mm_services):
     yield indexer, tokenizer, processor
 
     runtime.shutdown()
+    loop.call_soon_threadsafe(loop.stop)
+    loop_thread.join(timeout=5)
     loop.close()
 
 

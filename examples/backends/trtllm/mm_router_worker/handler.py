@@ -137,7 +137,8 @@ class MMRouterHandler:
 
     async def _find_best_worker(self, local_hashes: list[int]) -> int:
         """
-        Find the worker with the highest KV cache overlap.
+        Find the worker with the highest KV cache ove
+        rlap.
 
         Args:
             local_hashes: Block hashes for the current request
