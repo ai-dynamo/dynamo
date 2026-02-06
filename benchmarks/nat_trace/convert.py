@@ -19,9 +19,8 @@ import re
 from collections import defaultdict
 
 from aiperf.common.tokenizer import Tokenizer
-from tqdm import tqdm
-
 from common import DEFAULT_BLOCK_SIZE, DEFAULT_TOKENIZER, texts_to_hashes_and_lengths
+from tqdm import tqdm
 
 
 def parse_args():
