@@ -85,6 +85,18 @@ class BaseGenerativeHandler(ABC):
             return None
         return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
+    async def _check_cancellation(self, context: Context) -> bool:
+        """Check if the request has been cancelled.
+
+        Args:
+            context: Context object for cancellation handling.
+
+        Returns:
+            True if cancelled, False otherwise.
+        """
+        return context.is_cancelled()
+
+
 
 class BaseWorkerHandler(BaseGenerativeHandler):
     """Abstract base class for SGLang LLM worker handlers.
@@ -93,6 +105,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
     - SGLang Engine integration
     - Tokenization and input parameter management
     - Disaggregated serving support
+    - Engine-based request cancellation
     """
 
     def __init__(
