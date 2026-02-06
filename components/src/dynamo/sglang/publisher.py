@@ -4,18 +4,19 @@
 import asyncio
 import json
 import logging
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
 from prometheus_client import CollectorRegistry
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
 
+if TYPE_CHECKING:
+    from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
+
 from dynamo.common.utils.prometheus import (
-    LLMBackendGauges,
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
@@ -73,7 +74,7 @@ class DynamoSglangPublisher:
         component: Component,
         generate_endpoint: Endpoint,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
-        component_gauges: Optional[LLMBackendGauges] = None,
+        component_gauges: Optional[LLMBackendMetrics] = None,
     ) -> None:
         """Initialize the SGLang publisher for metrics and KV events.
 
@@ -83,7 +84,7 @@ class DynamoSglangPublisher:
             component: The Dynamo runtime component.
             generate_endpoint: The Dynamo endpoint for generation requests.
             metrics_labels: Optional list of label key-value pairs for metrics.
-            component_gauges: Bundle of LLM backend gauges (created via LLMBackendMetrics.create_all()).
+            component_gauges: LLM backend metrics instance (created via LLMBackendMetrics()).
         """
         self.engine = engine
         self.server_args = config.server_args
@@ -347,7 +348,7 @@ async def setup_sgl_metrics(
     setup_prometheus_registry(engine, generate_endpoint)
 
     # Create all Dynamo component gauges using the dedicated registry
-    component_gauges = LLMBackendMetrics.create_all(
+    component_gauges = LLMBackendMetrics(
         registry=DYNAMO_COMPONENT_REGISTRY,
         model_name=engine.server_args.served_model_name,
         component_name=config.dynamo_args.component,
