@@ -505,6 +505,7 @@ impl KvRouter {
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        priority_jump: f64,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         #[cfg(feature = "bench")]
         let start = Instant::now();
@@ -538,6 +539,7 @@ impl KvRouter {
                 router_config_override,
                 update_states,
                 lora_name,
+                priority_jump,
             )
             .await?;
 
@@ -728,7 +730,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = match request {
             RouterRequest::New { tokens } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true, None)
+                    .find_best_match(Some(&context_id), &tokens, None, true, None, 0.0)
                     .await?;
 
                 RouterResponse::New {
@@ -785,8 +787,9 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
 
-        // Extract LORA name from routing hints
+        // Extract LORA name and priority jump from routing hints
         let lora_name = routing.and_then(|r| r.lora_name.clone());
+        let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
         let Some(id) = (match phase {
@@ -808,6 +811,7 @@ impl KvPushRouter {
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,
+                    priority_jump,
                 )
                 .await?;
 

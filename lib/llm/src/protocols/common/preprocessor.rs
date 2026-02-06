@@ -52,6 +52,12 @@ pub struct RoutingHints {
     /// Used for LORA-aware routing and tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_name: Option<String>,
+
+    /// Priority jump in seconds for queue ordering.
+    /// A positive value decreases the effective arrival time, moving the request
+    /// ahead in the scheduler queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_jump: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

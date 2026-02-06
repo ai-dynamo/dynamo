@@ -10,11 +10,10 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
-#[cfg(feature = "bench")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
 use super::KV_HIT_RATE_SUBJECT;
@@ -49,17 +48,48 @@ fn queue_threshold_frac() -> Option<f64> {
     Some(frac)
 }
 
+/// Entry in the priority queue, ordered by effective arrival time (lower = higher priority).
+/// Effective arrival = elapsed time since queue start minus `priority_jump`.
+pub struct QueueEntry {
+    effective_offset: Duration,
+    pub request: SchedulingRequest,
+}
+
+impl Eq for QueueEntry {}
+
+impl PartialEq for QueueEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.effective_offset == other.effective_offset
+    }
+}
+
+impl Ord for QueueEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max-heap; reverse so lower effective_offset = higher priority
+        other.effective_offset.cmp(&self.effective_offset)
+    }
+}
+
+impl PartialOrd for QueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Queue for managing scheduling requests with interior mutability.
 /// Requests are held in `pending` when all workers are busy, and moved to `ready` when capacity frees up.
 /// If queueing is disabled (env var not set), all requests go directly to `ready`.
+/// Requests are ordered by effective arrival time: arrival_offset - priority_jump.
 pub struct SchedulerQueue {
-    pending: Mutex<VecDeque<SchedulingRequest>>,
-    ready: Mutex<VecDeque<SchedulingRequest>>,
+    pending: Mutex<BinaryHeap<QueueEntry>>,
+    ready: Mutex<BinaryHeap<QueueEntry>>,
     slots: Arc<ActiveSequencesMultiWorker>,
     workers_with_configs: Arc<RuntimeConfigs>,
     ready_notify: Arc<Notify>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
+    /// Reference instant for computing arrival offsets.
+    start_time: Instant,
 }
 
 impl SchedulerQueue {
@@ -73,12 +103,24 @@ impl SchedulerQueue {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
         }
         Self {
-            pending: Mutex::new(VecDeque::new()),
-            ready: Mutex::new(VecDeque::new()),
+            pending: Mutex::new(BinaryHeap::new()),
+            ready: Mutex::new(BinaryHeap::new()),
             slots,
             workers_with_configs,
             ready_notify,
             threshold_frac,
+            start_time: Instant::now(),
+        }
+    }
+
+    /// Build a QueueEntry for a request, computing its effective arrival offset.
+    fn make_entry(&self, request: SchedulingRequest) -> QueueEntry {
+        let arrival_offset = self.start_time.elapsed();
+        let jump = Duration::from_secs_f64(request.priority_jump.max(0.0));
+        let effective_offset = arrival_offset.saturating_sub(jump);
+        QueueEntry {
+            effective_offset,
+            request,
         }
     }
 
@@ -86,27 +128,23 @@ impl SchedulerQueue {
     /// If queueing is disabled (env var not set), fast-track to ready.
     /// Otherwise, check busy condition and place in ready or pending.
     pub async fn enqueue(&self, request: SchedulingRequest) {
+        let entry = self.make_entry(request);
         let Some(threshold) = self.threshold_frac else {
-            self.ready.lock().await.push_back(request);
+            self.ready.lock().await.push(entry);
             return;
         };
 
         if self.all_workers_busy(threshold).await {
             tracing::debug!("all workers busy, queueing request");
-            self.pending.lock().await.push_back(request);
+            self.pending.lock().await.push(entry);
         } else {
-            self.ready.lock().await.push_back(request);
+            self.ready.lock().await.push(entry);
         }
     }
 
-    /// Try to dequeue one request from ready queue.
+    /// Try to dequeue the highest-priority request from the ready queue.
     pub async fn try_dequeue(&self) -> Option<SchedulingRequest> {
-        self.ready.lock().await.pop_front()
-    }
-
-    /// Re-enqueue a request at the front of the ready queue (used when scheduling fails temporarily).
-    pub async fn requeue_front(&self, request: SchedulingRequest) {
-        self.ready.lock().await.push_front(request);
+        self.ready.lock().await.pop().map(|e| e.request)
     }
 
     /// Called on prefill_complete/free. Re-checks pending requests and moves eligible to ready.
@@ -118,19 +156,16 @@ impl SchedulerQueue {
 
         let mut moved = false;
         loop {
-            // Check if pending is empty first (short lock)
             if self.pending.lock().await.is_empty() {
                 break;
             }
-            // Check busy condition (no lock held during this check)
             if self.all_workers_busy(threshold).await {
                 break;
             }
-            // Try to move one request
-            let req = self.pending.lock().await.pop_front();
-            if let Some(req) = req {
+            let entry = self.pending.lock().await.pop();
+            if let Some(entry) = entry {
                 tracing::debug!("moving request from pending to ready");
-                self.ready.lock().await.push_back(req);
+                self.ready.lock().await.push(entry);
                 moved = true;
             } else {
                 break;
@@ -215,6 +250,8 @@ pub struct SchedulingRequest {
     pub update_states: bool,
     // LORA adapter name extracted from request.model field
     pub lora_name: Option<String>,
+    /// Priority jump in seconds; decreases effective arrival time in the queue.
+    pub priority_jump: f64,
     // Option to take it out to send the response without moving the struct
     resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
@@ -428,15 +465,10 @@ impl KvScheduler {
                             }
                         }
                         Err(KvSchedulerError::NoEndpoints) => {
-                            tracing::trace!("no endpoints available; waiting for endpoints update");
-                            tokio::time::sleep(Duration::from_millis(5)).await;
-                            // Re-enqueue the request to try again later
-                            queue_clone.requeue_front(request).await;
-                            break; // Exit while let to go back to select!
+                            tracing::trace!("no endpoints available, dropping request");
                         }
                         Err(e) => {
                             tracing::error!("error scheduling request: {:?}", e);
-                            // Don't break the whole loop, just skip this request
                         }
                     }
                 }
@@ -462,6 +494,7 @@ impl KvScheduler {
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        priority_jump: f64,
     ) -> Result<WorkerWithDpRank, KvSchedulerError> {
         #[cfg(feature = "bench")]
         let start = Instant::now();
@@ -477,7 +510,8 @@ impl KvScheduler {
             router_config_override: router_config_override.cloned(),
             update_states,
             lora_name,
-            resp_tx: Some(resp_tx), // Wrap in Some()
+            priority_jump,
+            resp_tx: Some(resp_tx),
         };
 
         self.request_tx
