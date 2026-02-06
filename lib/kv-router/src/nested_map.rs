@@ -18,9 +18,8 @@ use dashmap::DashMap;
 use flume::unbounded;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use std::time::Duration;
 
@@ -102,7 +101,7 @@ impl SeqEntry {
     }
 }
 
-type LevelIndex = DashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>;
+type LevelIndex = RwLock<HashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>>;
 
 pub struct PositionalIndexer {
     index: Arc<DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>>,
@@ -116,14 +115,12 @@ pub struct PositionalIndexer {
     worker_assignment_count: AtomicUsize,
 
     /// Channels to send events to worker threads.
-    worker_event_channels: Arc<Vec<flume::Sender<RouterEvent>>>,
+    worker_event_channels: Arc<Vec<flume::Sender<Option<RouterEvent>>>>,
 
     num_workers: usize,
     kv_block_size: u32,
     jump_size: usize,
 
-    /// Cancellation token to signal worker threads to shut down.
-    cancel_token: CancellationToken,
     /// Handles to worker threads for joining on shutdown.
     thread_handles: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -145,38 +142,25 @@ impl PositionalIndexer {
         let worker_blocks = Arc::new(DashMap::new());
         let mut worker_event_senders = Vec::new();
         let mut thread_handles = Vec::new();
-        let cancel_token = CancellationToken::new();
 
         for _ in 0..num_workers {
-            let (event_sender, event_receiver) = unbounded::<RouterEvent>();
+            let (event_sender, event_receiver) = unbounded::<Option<RouterEvent>>();
             worker_event_senders.push(event_sender);
 
             let index = Arc::clone(&index);
             let worker_blocks = Arc::clone(&worker_blocks);
-            let cancel_token = cancel_token.clone();
 
             let handle = std::thread::spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async move {
-                        loop {
-                            tokio::select! {
-                                biased;
-
-                                _ = cancel_token.cancelled() => {
-                                    break;
-                                }
-
-                                Ok(event) = event_receiver.recv_async() => {
-                                    if let Err(e) = Self::apply_event_impl(&index, &worker_blocks, event) {
-                                        tracing::warn!("Failed to apply event: {:?}", e);
-                                    }
-                                }
-                            }
+                loop {
+                    
+                    if let Ok(Some(event)) = event_receiver.recv() {
+                        if let Err(e) = Self::apply_event_impl(&index, &worker_blocks, event) {
+                            tracing::warn!("Failed to apply event: {:?}", e);
                         }
-                    });
+                    } else {
+                        break;
+                    }
+                }
             });
             thread_handles.push(handle);
         }
@@ -190,7 +174,6 @@ impl PositionalIndexer {
             num_workers,
             kv_block_size,
             jump_size,
-            cancel_token,
             thread_handles: Mutex::new(thread_handles),
         }
     }
@@ -226,7 +209,6 @@ impl KvIndexerInterface for PositionalIndexer {
         Ok(
             self.jump_search_matches(&sequence, false)
         )
-        
     }
 
     async fn find_matches_for_request(
@@ -251,7 +233,7 @@ impl KvIndexerInterface for PositionalIndexer {
         });
 
         // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(event) {
+        if let Err(e) = self.worker_event_channels[thread_idx].send(Some(event)) {
             tracing::error!(
                 "Failed to send event to worker thread {}: {:?}",
                 thread_idx,
@@ -265,8 +247,10 @@ impl KvIndexerInterface for PositionalIndexer {
     }
 
     fn shutdown(&self) {
-        // Signal all worker threads to stop
-        self.cancel_token.cancel();
+
+        for channel in self.worker_event_channels.iter() {
+            channel.send(None).unwrap();
+        }
 
         // Take ownership of thread handles and join them
         let handles = std::mem::take(
@@ -332,6 +316,8 @@ impl PositionalIndexer {
                             return Err(KvCacheEventError::ParentBlockNotFound);
                         };
 
+                        let worker_map = worker_map.read().unwrap();
+
                         let Some(entry) = worker_map.get(&parent_hash) else {
                             tracing::warn!(
                                 worker_id = worker.worker_id.to_string(),
@@ -361,21 +347,14 @@ impl PositionalIndexer {
 
                     // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
                     let worker_map = worker_blocks.entry(worker).or_default();
-                    worker_map.insert(seq_hash, (position, local_hash));
+                    worker_map.write().unwrap().insert(seq_hash, (position, local_hash));
                 }
 
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                let mut first_err: Option<KvCacheEventError> = None;
-                for seq_hash in remove_data.block_hashes {
-                    if let Err(e) =
-                        Self::remove_single_block_impl(index, worker_blocks, worker, seq_hash, id)
-                    {
-                        first_err.get_or_insert(e);
-                    }
-                }
-                first_err.map_or(Ok(()), Err)
+                Self::remove_blocks_impl(index, worker_blocks, worker, &remove_data.block_hashes, id)?;
+                Ok(())
             }
             KvCacheEventData::Cleared => {
                 Self::clear_worker_blocks_impl(index, worker_blocks, worker_id);
@@ -384,43 +363,44 @@ impl PositionalIndexer {
         }
     }
 
-    /// Remove a single block from the index for a given worker.
-    fn remove_single_block_impl(
+    fn remove_blocks_impl(        
         index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
         worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
         worker: WorkerWithDpRank,
-        seq_hash: ExternalSequenceBlockHash,
+        seq_hashes: &Vec<ExternalSequenceBlockHash>,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let worker_map = worker_blocks.get(&worker).ok_or_else(|| {
+        let worker_map = worker_blocks.get_mut(&worker).ok_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id.to_string(),
                 dp_rank = worker.dp_rank,
                 event_id,
-                block_hash = ?seq_hash,
+                block_hashes = ?seq_hashes,
                 "Failed to find worker blocks to remove"
             );
             KvCacheEventError::BlockNotFound
         })?;
 
-        let (_, (position, local_hash)) = worker_map.remove(&seq_hash).ok_or_else(|| {
-            tracing::warn!(
-                worker_id = worker.worker_id.to_string(),
-                dp_rank = worker.dp_rank,
-                event_id,
-                block_hash = ?seq_hash,
-                "Failed to find block to remove; skipping remove operation"
-            );
-            KvCacheEventError::BlockNotFound
-        })?;
-
-        // Remove from index
-        if let Some(pos_map) = index.get(&position)
-            && let Some(mut entry) = pos_map.get_mut(&local_hash)
-            && entry.remove(seq_hash, worker)
-        {
-            drop(entry);
-            pos_map.remove(&local_hash);
+        for seq_hash in seq_hashes {
+            let Some((position, local_hash)) = worker_map.write().unwrap().remove(seq_hash) else {
+                tracing::warn!(
+                    worker_id = worker.worker_id.to_string(),
+                    dp_rank = worker.dp_rank,
+                    event_id,
+                    block_hash = ?seq_hash,
+                    "Failed to find block to remove; skipping remove operation"
+                );
+                return Err(KvCacheEventError::BlockNotFound);
+            };
+    
+            // Remove from index
+            if let Some(pos_map) = index.get(&position)
+                && let Some(mut entry) = pos_map.get_mut(&local_hash)
+                && entry.remove(*seq_hash, worker)
+            {
+                drop(entry);
+                pos_map.remove(&local_hash);
+            }
         }
 
         Ok(())
@@ -465,9 +445,9 @@ impl PositionalIndexer {
         for worker in workers {
             if let Some((_, worker_map)) = worker_blocks.remove(&worker) {
                 // Remove each block from the index
-                for entry in worker_map.iter() {
-                    let seq_hash = *entry.key();
-                    let (position, local_hash) = *entry.value();
+                for entry in worker_map.read().unwrap().iter() {
+                    let seq_hash = *entry.0;
+                    let (position, local_hash) = *entry.1;
 
                     if let Some(pos_map) = index.get(&position)
                         && let Some(mut seq_entry) = pos_map.get_mut(&local_hash)
@@ -482,7 +462,7 @@ impl PositionalIndexer {
 
             if keep_worker {
                 // Re-insert worker with empty map to keep it tracked
-                worker_blocks.insert(worker, DashMap::new());
+                worker_blocks.insert(worker, RwLock::new(HashMap::new()));
             }
         }
     }
@@ -641,9 +621,6 @@ impl PositionalIndexer {
             return scores;
         }
 
-        // Record frequency for position 0
-        scores.add_frequency(active.len());
-
         if early_exit {
             // For early exit, just record that these workers matched at least position 0
             for worker in &active {
@@ -652,6 +629,7 @@ impl PositionalIndexer {
             // Populate tree_sizes
             for worker in scores.scores.keys() {
                 if let Some(worker_map) = self.worker_blocks.get(worker) {
+                    let worker_map = worker_map.read().unwrap();
                     scores.tree_sizes.insert(*worker, worker_map.len());
                 }
             }
@@ -673,19 +651,11 @@ impl PositionalIndexer {
                 local_hashes,
             );
 
-            let still_active_at_next: HashSet<WorkerWithDpRank> = match &workers_at_next {
-                Some(workers) => active.intersection(workers).cloned().collect(),
-                None => HashSet::new(),
-            };
+            let num_workers_at_next = workers_at_next.as_ref().map(|workers| workers.len()).unwrap_or(0);
 
-            if still_active_at_next == active {
-                // All active workers still match at jump destination
-                // Record frequency for skipped positions (we know all active workers match)
-                for _pos in (current_pos + 1)..=next_pos {
-                    scores.add_frequency(active.len());
-                }
+            if num_workers_at_next == active.len() {
                 current_pos = next_pos;
-            } else if still_active_at_next.is_empty() {
+            } else if num_workers_at_next == 0 {
                 // No active workers match at jump destination
                 // Scan the range to find where each worker drained
                 self.linear_scan_drain(
@@ -724,6 +694,7 @@ impl PositionalIndexer {
         // Populate tree_sizes from worker_blocks
         for worker in scores.scores.keys() {
             if let Some(worker_map) = self.worker_blocks.get(worker) {
+                let worker_map = worker_map.read().unwrap();
                 scores.tree_sizes.insert(*worker, worker_map.len());
             }
         }

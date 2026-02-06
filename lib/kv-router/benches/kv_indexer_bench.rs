@@ -1380,15 +1380,6 @@ async fn run_stress_mode(args: StressArgs) {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing subscriber from DYN_LOG or RUST_LOG env var
-    use tracing_subscriber::EnvFilter;
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_env("DYN_LOG")
-                .or_else(|_| EnvFilter::try_from_default_env())
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
 
     let cli = Cli::parse();
 
