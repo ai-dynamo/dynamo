@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "SGLang Multimodal"
 ---
+
+# SGLang Multimodal
 
 This document provides a comprehensive guide for multimodal inference using SGLang backend in Dynamo. SGLang multimodal uses specialized **E/PD or E/P/D** flows with **NIXL (RDMA)** for zero-copy tensor transfer.
 

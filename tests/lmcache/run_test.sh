@@ -22,7 +22,7 @@ cleanup() {
     pkill -f "components/main.py" || true
 
     # Stop docker services
-    docker compose -f ../../deploy/metrics/docker-compose.yml down 2>/dev/null || true
+    docker compose -f ../../deploy/docker-compose.yml down 2>/dev/null || true
 
     # Wait a moment for cleanup
     sleep 2

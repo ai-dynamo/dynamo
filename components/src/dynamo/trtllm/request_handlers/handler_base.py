@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import asyncio
-import copy
+import dataclasses
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -26,6 +26,7 @@ from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -68,6 +69,7 @@ class RequestHandlerConfig:
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
+    encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
 
 
 class HandlerBase:
@@ -172,32 +174,40 @@ class HandlerBase:
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
-    async def _handle_cancellation_and_shutdown(
+    async def _handle_cancellation(
         self, generation_result: GenerationResult, context: Context
     ):
         """
-        Background task to handle cancellation and shutdown by monitoring both signals.
-        Returns 'shutdown' if shutdown was triggered, 'cancelled' if cancelled, None otherwise.
+        Background task to trigger cancellation if request is cancelled or shutdown
+        event is set.
+
+        Raise GeneratorExit if shutdown event is triggered.
         """
         try:
-            cancellation_task = context.async_killed_or_stopped()
-
-            # Build list of futures/tasks to wait for
-            wait_for = [cancellation_task]
+            cancellation_triggers = [
+                context.async_killed_or_stopped(),  # Request cancellation
+            ]
+            # Shutdown cancellation
             shutdown_task = None
-
-            if self.shutdown_event:
-                # Create task for shutdown monitoring and add to wait list
+            if self.shutdown_event is not None:
                 shutdown_task = asyncio.create_task(self.shutdown_event.wait())
-                wait_for.append(shutdown_task)
+                cancellation_triggers.append(shutdown_task)
 
-            # Wait for whichever happens first
+            # Wait for cancellation to be triggered
             done, pending = await asyncio.wait(
-                wait_for,
+                cancellation_triggers,
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Cancel the pending task/future
+            # Abort the generation
+            # Temporary:
+            #   Disable calling abort() on the engine, which may get stuck if a
+            #   sufficiently large number of concurrent requests is cancelled.
+            # Note to restore:
+            #   call `generation_result.abort()`; and then
+            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
+
+            # Clean up any remaining background task
             for task in pending:
                 task.cancel()
                 try:
@@ -205,12 +215,8 @@ class HandlerBase:
                 except asyncio.CancelledError:
                     pass
 
-            # Abort the generation
-            generation_result.abort()
-            logging.debug(f"Aborted Request ID: {context.id()}")
-
-            # Check which event triggered and return the reason
-            if shutdown_task and shutdown_task in done:
+            # Raise GeneratorExit if cancellation is due to shutdown event triggered
+            if shutdown_task in done:
                 raise GeneratorExit("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
@@ -222,31 +228,30 @@ class HandlerBase:
         self, generation_result: GenerationResult, context: Context
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
-        Context manager for monitoring request cancellation and shutdown.
+        Monitor for cancellation triggers and cancel by calling
+        generation_result.abort().
 
-        Automatically creates a background task to monitor for cancellation
-        and shutdown events, cleaning it up when the context exits.
-
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        Raise GeneratorExit if shutdown event is triggered.
 
         Yields:
-            asyncio.Task: The monitoring task
+            asyncio.Task: The cancellation monitoring task
         """
         monitor_task = asyncio.create_task(
-            self._handle_cancellation_and_shutdown(generation_result, context)
+            self._handle_cancellation(generation_result, context)
         )
 
         try:
             yield monitor_task
         finally:
-            # Clean up the background monitoring task
             if not monitor_task.done():
+                # Cancellation not triggered - clean up the background monitoring task
                 monitor_task.cancel()
                 try:
                     await monitor_task
                 except asyncio.CancelledError:
                     pass
             else:
+                # Cancellation triggered - propagate any exceptions
                 monitor_task.result()
 
     def _decode_disaggregated_params_from_prefill(
@@ -613,13 +618,9 @@ class HandlerBase:
 
         num_output_tokens_so_far = 0
 
-        sampling_params = copy.deepcopy(self.default_sampling_params)
-
-        for key, value in request["sampling_options"].items():
-            if not value:
-                continue
-            if hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        sampling_params = self._override_sampling_params(
+            self.default_sampling_params, request
+        )
 
         # Additional sampling params in output options
         output_options = request.get("output_options", {})
@@ -680,6 +681,19 @@ class HandlerBase:
         # Build trace headers for distributed tracing
         trace_headers = build_trace_headers(context)
 
+        # Extract dp_rank from request's routing hints for attention DP routing
+        routing = request.get("routing", {})
+        dp_rank = routing.get("dp_rank") if routing else None
+        scheduling_params = None
+        if dp_rank is not None:
+            scheduling_params = SchedulingParams(
+                attention_dp_rank=dp_rank,
+                attention_dp_relax=False,  # Strict routing - use the rank dynamo router selected
+            )
+            logging.debug(
+                f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
+            )
+
         try:
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
@@ -688,9 +702,10 @@ class HandlerBase:
                 disaggregated_params=disaggregated_params,
                 streaming=streaming,
                 trace_headers=trace_headers,
+                scheduling_params=scheduling_params,
             )
 
-            # Use the context manager to handle cancellation and shutdown monitoring
+            # Monitor for cancellation triggers and cancel by calling generation_result.abort()
             async with self._cancellation_monitor(generation_result, context):
                 async for res in generation_result:
                     # TRTLLM engine needs to start generating tokens first before stats
@@ -816,3 +831,16 @@ class HandlerBase:
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+
+    @staticmethod
+    def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
+        overrides = {
+            key: value
+            for key, value in request["sampling_options"].items()
+            if value is not None
+        }
+
+        # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
+        # 1. it catches unsupported fields / attributes.
+        # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
+        return dataclasses.replace(sampling_params, **overrides)

@@ -43,6 +43,12 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         help="Backend type",
     )
     parser.add_argument(
+        "--mode",
+        default=SLAPlannerDefaults.mode,
+        choices=["disagg", "prefill", "decode"],
+        help="Planner mode: disagg (prefill+decode), prefill-only, or decode-only",
+    )
+    parser.add_argument(
         "--no-operation",
         action="store_true",
         default=SLAPlannerDefaults.no_operation,
@@ -61,7 +67,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         "--max-gpu-budget",
         type=int,
         default=SLAPlannerDefaults.max_gpu_budget,
-        help="Maximum GPU budget",
+        help="Maximum GPU budget (-1 for no budget enforcement)",
     )
     parser.add_argument(
         "--min-endpoint",
@@ -72,14 +78,16 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--decode-engine-num-gpu",
         type=int,
-        default=SLAPlannerDefaults.decode_engine_num_gpu,
-        help="Number of GPUs for decode engine",
+        default=None,
+        help="Number of GPUs per decode engine. In Kubernetes mode, this is auto-detected "
+        "from DGD resources but can be overridden (e.g., for mockers without GPU resources).",
     )
     parser.add_argument(
         "--prefill-engine-num-gpu",
         type=int,
-        default=SLAPlannerDefaults.prefill_engine_num_gpu,
-        help="Number of GPUs for prefill engine",
+        default=None,
+        help="Number of GPUs per prefill engine. In Kubernetes mode, this is auto-detected "
+        "from DGD resources but can be overridden (e.g., for mockers without GPU resources).",
     )
     parser.add_argument(
         "--profile-results-dir",
