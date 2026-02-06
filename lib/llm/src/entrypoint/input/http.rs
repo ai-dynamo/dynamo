@@ -147,7 +147,7 @@ async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
-    target_namespace: Option<String>,
+    namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     engine_factory: Option<EngineFactoryCallback>,

@@ -297,6 +297,7 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
+                namespace_prefix: self.namespace_prefix.clone(),
             });
         }
 
@@ -348,6 +349,7 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
+            namespace_prefix: self.namespace_prefix.clone(),
         })
     }
 }
