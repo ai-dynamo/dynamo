@@ -154,8 +154,8 @@ class TestPrometheusExpositionFormatInjection:
         # Verify python metric is excluded
         assert "python_gc_objects" not in expfmt
 
-    def test_inject_labels_with_add_prefix(self):
-        """Test label injection works with metric prefix filtering"""
+    def test_inject_labels_with_prefix_filter_trtllm(self):
+        """Test label injection works with metric prefix filtering for trtllm"""
         # Create registry with a counter that has trtllm_ prefix
         registry = CollectorRegistry()
         counter = Counter("trtllm_requests", "TensorRT-LLM Requests", registry=registry)
