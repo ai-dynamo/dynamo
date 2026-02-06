@@ -153,12 +153,9 @@ impl DeltaGenerator {
 
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
-        // Create request tracker if tracking is enabled
-        let tracker = if options.enable_tracking {
-            Some(Arc::new(RequestTracker::new()))
-        } else {
-            None
-        };
+        // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
+        // The enable_tracking option only controls whether timing info is included in the response.
+        let tracker = Some(Arc::new(RequestTracker::new()));
 
         Self {
             id: chatcmpl_id,
@@ -381,14 +378,17 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         self.usage.completion_tokens += token_length;
 
-        // If backend provides completion_usage with prompt token details,
-        // propagate the entire details struct to usage tracking
-        if let Some(prompt_details) = delta
-            .completion_usage
-            .as_ref()
-            .and_then(|usage| usage.prompt_tokens_details.as_ref())
-        {
-            self.usage.prompt_tokens_details = Some(prompt_details.clone());
+        // If backend provides completion_usage, use it to update usage stats
+        // This is critical for prompt embeddings where prompt_tokens comes from
+        // the embedding sequence length computed by the worker
+        if let Some(completion_usage) = delta.completion_usage.as_ref() {
+            // Update prompt_tokens from worker if provided (e.g., for embeddings)
+            self.usage.prompt_tokens = completion_usage.prompt_tokens;
+
+            // Propagate prompt token details if provided
+            if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
+                self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
         }
 
         let logprobs = self.create_logprobs(
@@ -500,6 +500,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
     fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
         DeltaGenerator::get_usage(self)
+    }
+
+    fn tracker(&self) -> Option<std::sync::Arc<crate::protocols::common::timing::RequestTracker>> {
+        self.tracker.clone()
     }
 }
 

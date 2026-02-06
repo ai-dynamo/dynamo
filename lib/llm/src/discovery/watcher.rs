@@ -6,11 +6,15 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
+use dashmap::DashSet;
 use futures::StreamExt;
 
 use dynamo_runtime::{
     DistributedRuntime,
-    discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoveryStream},
+    discovery::{
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoveryStream,
+        ModelCardInstanceId,
+    },
     pipeline::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
@@ -20,6 +24,7 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
+    discovery::WORKER_TYPE_DECODE,
     entrypoint::{self, EngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
@@ -34,6 +39,7 @@ use crate::{
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
+            images::{NvCreateImageRequest, NvImagesResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
@@ -56,6 +62,7 @@ pub struct ModelWatcher {
     model_update_tx: Option<Sender<ModelUpdate>>,
     engine_factory: Option<EngineFactoryCallback>,
     metrics: Arc<Metrics>,
+    registering_models: DashSet<String>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -82,6 +89,7 @@ impl ModelWatcher {
             model_update_tx: None,
             engine_factory,
             metrics,
+            registering_models: DashSet::new(),
         }
     }
 
@@ -119,23 +127,26 @@ impl ModelWatcher {
 
             match event {
                 DiscoveryEvent::Added(instance) => {
-                    // Extract EndpointId, instance_id, and card from the discovery instance
-                    let (endpoint_id, instance_id, mut card) = match &instance {
+                    // Extract ModelCardInstanceId and card from the discovery instance
+                    let (mcid, mut card) = match &instance {
                         DiscoveryInstance::Model {
                             namespace,
                             component,
                             endpoint,
                             instance_id,
+                            model_suffix,
                             ..
                         } => {
-                            let eid = EndpointId {
+                            let mcid = ModelCardInstanceId {
                                 namespace: namespace.clone(),
                                 component: component.clone(),
-                                name: endpoint.clone(),
+                                endpoint: endpoint.clone(),
+                                instance_id: *instance_id,
+                                model_suffix: model_suffix.clone(),
                             };
 
                             match instance.deserialize_model::<ModelDeploymentCard>() {
-                                Ok(card) => (eid, *instance_id, card),
+                                Ok(card) => (mcid, card),
                                 Err(err) => {
                                     tracing::error!(%err, instance_id, "Failed to deserialize model card");
                                     continue;
@@ -153,10 +164,10 @@ impl ModelWatcher {
                     // Filter by namespace if target_namespace is specified
                     if !global_namespace
                         && let Some(target_ns) = target_namespace
-                        && endpoint_id.namespace != target_ns
+                        && mcid.namespace != target_ns
                     {
                         tracing::debug!(
-                            model_namespace = endpoint_id.namespace,
+                            model_namespace = mcid.namespace,
                             target_namespace = target_ns,
                             "Skipping model from different namespace"
                         );
@@ -185,14 +196,11 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    // Use instance_id as the HashMap key (simpler and sufficient since keys are opaque)
-                    let key = format!("{:x}", instance_id);
-
-                    match self.handle_put(&key, &endpoint_id, &mut card).await {
+                    match self.handle_put(&mcid, &mut card).await {
                         Ok(()) => {
                             tracing::info!(
                                 model_name = card.name(),
-                                namespace = endpoint_id.namespace,
+                                namespace = mcid.namespace,
                                 "added model"
                             );
                             self.notify_on_model.notify_waiters();
@@ -200,19 +208,27 @@ impl ModelWatcher {
                         Err(err) => {
                             tracing::error!(
                                 model_name = card.name(),
-                                namespace = endpoint_id.namespace,
+                                namespace = mcid.namespace,
                                 error = format!("{err:#}"),
                                 "Error adding model from discovery",
                             );
                         }
                     }
                 }
-                DiscoveryEvent::Removed(instance_id) => {
-                    // Use instance_id hex as the HashMap key (matches what we saved with)
-                    let key = format!("{:x}", instance_id);
+                DiscoveryEvent::Removed(id) => {
+                    // Extract ModelCardInstanceId from the removal event
+                    let model_card_instance_id = match &id {
+                        DiscoveryInstanceId::Model(mcid) => mcid,
+                        DiscoveryInstanceId::Endpoint(_) | DiscoveryInstanceId::EventChannel(_) => {
+                            tracing::error!(
+                                "Unexpected discovery instance type in removal (expected Model)"
+                            );
+                            continue;
+                        }
+                    };
 
                     match self
-                        .handle_delete(&key, target_namespace, global_namespace)
+                        .handle_delete(model_card_instance_id, target_namespace, global_namespace)
                         .await
                     {
                         Ok(Some(model_name)) => {
@@ -234,14 +250,15 @@ impl ModelWatcher {
     /// Returns the name of the model we just deleted, if any.
     async fn handle_delete(
         &self,
-        key: &str,
+        mcid: &ModelCardInstanceId,
         target_namespace: Option<&str>,
         is_global_namespace: bool,
     ) -> anyhow::Result<Option<String>> {
-        let card = match self.manager.remove_model_card(key) {
+        let key = mcid.to_path();
+        let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
-                anyhow::bail!("Missing ModelDeploymentCard for {key}");
+                anyhow::bail!("Missing ModelDeploymentCard for {}", key);
             }
         };
         let model_name = card.name().to_string();
@@ -325,22 +342,12 @@ impl ModelWatcher {
     // models.
     async fn handle_put(
         &self,
-        key: &str,
-        endpoint_id: &EndpointId,
+        mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
-        card.download_config().await?;
-
-        let component = self
-            .drt
-            .namespace(&endpoint_id.namespace)?
-            .component(&endpoint_id.component)?;
-        let endpoint = component.endpoint(&endpoint_id.name);
-        let client = endpoint.client().await?;
-        tracing::debug!(model_name = card.name(), "adding model");
-        self.manager.save_model_card(key, card.clone())?;
-
-        // Skip duplicate registrations based on model type.
+        // Check if model is already registered before downloading config.
+        // This prevents duplicate HuggingFace API calls when multiple workers register
+        // the same model.
         // Prefill and decode models are tracked separately, so registering one
         // doesn't block the other (they can arrive in any order).
         let already_registered = if card.model_type.supports_prefill() {
@@ -350,14 +357,57 @@ impl ModelWatcher {
         };
 
         if already_registered {
+            self.manager
+                .save_model_card(&mcid.to_path(), card.clone())?;
             tracing::debug!(
                 model_name = card.name(),
-                namespace = endpoint_id.namespace,
+                namespace = mcid.namespace,
                 model_type = %card.model_type,
-                "Model already registered, skipping"
+                "Model already registered, skipping config download"
             );
             return Ok(());
         }
+
+        // Use registering_models set to prevent concurrent registrations.
+        let model_key = card.name().to_string();
+        if !self.registering_models.insert(model_key.clone()) {
+            self.manager
+                .save_model_card(&mcid.to_path(), card.clone())?;
+            tracing::debug!(
+                model_name = card.name(),
+                namespace = mcid.namespace,
+                "Model registration in progress by another worker, skipping"
+            );
+            return Ok(());
+        }
+
+        // We acquired the registration lock. Use a helper to ensure cleanup on all exit paths.
+        let result = self.do_model_registration(mcid, card).await;
+
+        // Always remove from registering set, whether success or failure
+        self.registering_models.remove(&model_key);
+
+        result
+    }
+
+    /// Inner function that performs the actual model registration.
+    /// Called by handle_put after acquiring the registration lock.
+    async fn do_model_registration(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &mut ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
+        card.download_config().await?;
+
+        let component = self
+            .drt
+            .namespace(&mcid.namespace)?
+            .component(&mcid.component)?;
+        let endpoint = component.endpoint(&mcid.endpoint);
+        let client = endpoint.client().await?;
+        tracing::debug!(model_name = card.name(), "adding model");
+        self.manager
+            .save_model_card(&mcid.to_path(), card.clone())?;
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
@@ -372,7 +422,7 @@ impl ModelWatcher {
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
-            let endpoint = component.endpoint(&endpoint_id.name);
+            let endpoint = component.endpoint(&mcid.endpoint);
             let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
                 Some(
                     self.manager
@@ -380,6 +430,7 @@ impl ModelWatcher {
                             &endpoint,
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config),
+                            WORKER_TYPE_DECODE, // This is the decode router
                         )
                         .await?,
                 )
@@ -392,9 +443,10 @@ impl ModelWatcher {
 
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
+            let model_name = card.name().to_string();
             let prefill_chooser = self
                 .manager
-                .register_prefill_router(card.name().to_string())
+                .register_prefill_router(model_name.clone())
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
                     let mut prefill_config = self.router_config.kv_router_config;
@@ -407,33 +459,19 @@ impl ModelWatcher {
                         card.kv_cache_block_size,
                         Some(prefill_config),
                         self.router_config.enforce_disagg,
+                        model_name.clone(), // Pass model name for worker monitor lookup
                     )
                 });
 
-            // Get or create the worker monitor for this model
-            // This allows dynamic threshold updates via the ModelManager
-            // Create monitor if either threshold is configured
-            let worker_monitor = if self.router_config.active_decode_blocks_threshold.is_some()
-                || self.router_config.active_prefill_tokens_threshold.is_some()
-            {
-                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
-                let active_decode_blocks = self
-                    .router_config
-                    .active_decode_blocks_threshold
-                    .unwrap_or(1.0);
-                let active_prefill_tokens = self
-                    .router_config
-                    .active_prefill_tokens_threshold
-                    .unwrap_or(1000000);
-                Some(self.manager.get_or_create_worker_monitor(
-                    card.name(),
-                    client.clone(),
-                    active_decode_blocks,
-                    active_prefill_tokens,
-                ))
-            } else {
-                None
-            };
+            // Get or create the worker monitor for this model.
+            // Always create the monitor for Prometheus metrics (active_decode_blocks, active_prefill_tokens,
+            // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
+            // LoadThresholdConfig allows dynamic threshold updates via the ModelManager.
+            let worker_monitor = Some(self.manager.get_or_create_worker_monitor(
+                card.name(),
+                client.clone(),
+                self.router_config.load_threshold_config.clone(),
+            ));
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
@@ -583,6 +621,19 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
+            // Case: Text + Images (diffusion models)
+            // Takes text prompts as input, generates images
+            let push_router = PushRouter::<
+                NvCreateImageRequest,
+                Annotated<NvImagesResponse>,
+            >::from_client_with_threshold(
+                client, self.router_config.router_mode, None, None
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_images_model(card.name(), checksum, engine)?;
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens
@@ -620,7 +671,7 @@ impl ModelWatcher {
             // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions|Prefill), Text+Chat, Text+Completions, Tokens+Embeddings, Tensor+TensorBased",
+                Tokens+(Chat|Completions|Prefill), Text+(Chat|Completions|Images), Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
             );

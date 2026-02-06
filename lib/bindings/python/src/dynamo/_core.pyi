@@ -38,7 +38,25 @@ class DistributedRuntime:
     The runtime object for dynamo applications
     """
 
-    ...
+    def __new__(
+        cls,
+        event_loop: Any,
+        store_kv: str,
+        request_plane: str,
+        enable_nats: Optional[bool] = None,
+    ) -> "DistributedRuntime":
+        """
+        Create a new DistributedRuntime.
+
+        Args:
+            event_loop: The asyncio event loop
+            store_kv: Key-value store backend ("etcd", "file", or "mem")
+            request_plane: Request plane transport ("tcp", "http", or "nats")
+            enable_nats: Whether to enable NATS for KV events. Defaults to True.
+                        If request_plane is "nats", NATS is always enabled.
+                        Pass False to disable NATS initialization (e.g., for approximate routing).
+        """
+        ...
 
     def namespace(self, name: str) -> Namespace:
         """
@@ -111,16 +129,6 @@ class Namespace:
         """
         ...
 
-    @property
-    def metrics(self) -> PyRuntimeMetrics:
-        """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
-
-        Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
-        """
-        ...
-
 class Component:
     """
     A component is a collection of endpoints
@@ -134,15 +142,6 @@ class Component:
         """
         ...
 
-    @property
-    def metrics(self) -> PyRuntimeMetrics:
-        """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
-
-        Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
-        """
-        ...
 
 class Endpoint:
     """
@@ -180,10 +179,30 @@ class Endpoint:
     @property
     def metrics(self) -> PyRuntimeMetrics:
         """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
+        Get a PyRuntimeMetrics helper for registering Prometheus metrics callbacks.
 
         Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
+            A PyRuntimeMetrics object for callback registration
+        """
+        ...
+
+    async def unregister_endpoint_instance(self) -> None:
+        """
+        Unregister this endpoint instance from discovery.
+
+        This removes the endpoint from the instances bucket, preventing the router
+        from sending requests to this worker. Use this when a worker is sleeping
+        and should not receive any requests.
+        """
+        ...
+
+    async def register_endpoint_instance(self) -> None:
+        """
+        Re-register this endpoint instance to discovery.
+
+        This adds the endpoint back to the instances bucket, allowing the router
+        to send requests to this worker again. Use this when a worker wakes up
+        and should start receiving requests.
         """
         ...
 
@@ -359,86 +378,9 @@ class Context:
         """
         ...
 
-class WorkerStats:
-    """
-    Worker stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        request_active_slots: int,
-        request_total_slots: int,
-        num_requests_waiting: int,
-        data_parallel_rank: Optional[int] = None,
-    ) -> None:
-        """
-        Create a `WorkerStats` object.
-        """
-        ...
-
-class KvStats:
-    """
-    KV stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        kv_active_blocks: int,
-        kv_total_blocks: int,
-        gpu_cache_usage_perc: float,
-        gpu_prefix_cache_hit_rate: float,
-    ) -> None:
-        """
-        Create a `KvStats` object.
-        """
-        ...
-
-class SpecDecodeStats:
-    """
-    Speculative decoding stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        num_spec_tokens: int,
-        num_drafts: int,
-        num_draft_tokens: int,
-        num_accepted_tokens: int,
-        num_accepted_tokens_per_pos: List[int],
-    ) -> None:
-        """
-        Create a `SpecDecodeStats` object when running with speculative decoding.
-        """
-        ...
-
-class ForwardPassMetrics:
-    """
-    A collection of metrics for a forward pass.
-    Includes worker stats, KV stats, and speculative decoding stats.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        worker_stats: WorkerStats,
-        kv_stats: KvStats,
-        spec_decode_stats: Optional[SpecDecodeStats] = None,
-    ) -> None:
-        """
-        Create a `ForwardPassMetrics` object
-        """
-        ...
-
 class WorkerMetricsPublisher:
     """
-    A metrics publisher will provide metrics to the router.
+    A metrics publisher will provide metrics to the router for load monitoring.
     """
 
     ...
@@ -448,24 +390,27 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
+    async def create_endpoint(self, component: Component) -> None:
         """
+        Create the NATS endpoint for metrics publishing. Must be awaited.
+
         Only service created through this method will interact with KV router of the same component.
 
         Args:
             component: The component to create the endpoint for
-            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
-
-        .. deprecated::
-            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
         self,
-        metrics: ForwardPassMetrics
+        dp_rank: Optional[int],
+        active_decode_blocks: int,
     ) -> None:
         """
-        Update the metrics being reported.
+        Publish worker metrics for load monitoring.
+
+        Args:
+            dp_rank: Data parallel rank of the worker (None defaults to 0)
+            active_decode_blocks: Number of active KV cache blocks
         """
         ...
 
@@ -498,33 +443,6 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
-        ...
-
-class OAIChatPreprocessor:
-    """
-    A preprocessor for OpenAI chat completions
-    """
-
-    ...
-
-    async def start(self) -> None:
-        """
-        Start the preprocessor
-        """
-        ...
-
-class Backend:
-    """
-    LLM Backend engine manages resources and concurrency for executing inference
-    requests in LLM engines (trtllm, vllm, sglang etc)
-    """
-
-    ...
-
-    async def start(self, handler: RequestHandler) -> None:
-        """
-        Start the backend engine and requests to the downstream LLM engine
-        """
         ...
 
 class OverlapScores:
@@ -835,7 +753,6 @@ class KvEventPublisher:
 
     def publish_stored(
         self,
-        event_id: int,
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
@@ -845,8 +762,9 @@ class KvEventPublisher:
         """
         Publish a KV stored event.
 
+        Event IDs are managed internally by the publisher using a monotonic counter.
+
         Args:
-            event_id: The event ID
             token_ids: List of token IDs
             num_block_tokens: Number of tokens per block
             block_hashes: List of block hashes (signed 64-bit integers)
@@ -855,12 +773,13 @@ class KvEventPublisher:
         """
         ...
 
-    def publish_removed(self, event_id: int, block_hashes: List[int]) -> None:
+    def publish_removed(self, block_hashes: List[int]) -> None:
         """
         Publish a KV removed event.
 
+        Event IDs are managed internally by the publisher using a monotonic counter.
+
         Args:
-            event_id: The event ID
             block_hashes: List of block hashes to remove (signed 64-bit integers)
         """
         ...
@@ -872,7 +791,8 @@ class ZmqKvEventPublisherConfig:
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
         zmq_topic: str = "",
-        enable_local_indexer: bool = False
+        enable_local_indexer: bool = False,
+        dp_rank: int = 0
     ) -> None:
         """
         Configuration for the ZmqKvEventPublisher.
@@ -882,6 +802,7 @@ class ZmqKvEventPublisherConfig:
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
         :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
+        :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
         """
         ...
 
@@ -1062,12 +983,13 @@ class ModelInput:
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images or Prefill"""
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
     Prefill: ModelType
+    Images: ModelType
     ...
 
 class RouterMode:
@@ -1088,6 +1010,8 @@ class KvRouterConfig:
         use_kv_events: bool = True,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
+        router_track_output_blocks: bool = False,
+        router_assume_kv_reuse: bool = True,
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
@@ -1103,6 +1027,11 @@ class KvRouterConfig:
             use_kv_events: Whether to use KV events from workers (default: True)
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
+            router_track_output_blocks: Track output blocks during generation (default: False).
+                When enabled, the router adds placeholder blocks as tokens are generated
+                and applies fractional decay based on progress toward expected_output_tokens.
+            router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
+                When True, computes actual block hashes. When False, generates random hashes.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
@@ -1156,9 +1085,10 @@ def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
-async def fetch_llm(remote_name: str) -> str:
+async def fetch_llm(remote_name: str, ignore_weights: bool = False) -> str:
     """
     Download a model from Hugging Face, returning it's local path.
+    If `ignore_weights` is True, only fetches tokenizer and config files.
     Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
     """
     ...
@@ -1385,15 +1315,6 @@ class BlockManager:
         """
         ...
 
-class KvbmCacheManager:
-    """
-    A KV cache manager for VLLM
-    """
-
-    def __init__(self, block_manager: BlockManager) -> None:
-        ...
-
-
 class KvbmRequest:
     """
     A request for KV cache
@@ -1519,34 +1440,6 @@ class KvPushRouter:
         """
         ...
 
-    async def best_worker_id(
-        self,
-        token_ids: List[int],
-        router_config_override: Optional[JsonLike] = None,
-        request_id: Optional[str] = None,
-    ) -> Tuple[int, int]:
-        """
-        [DEPRECATED] Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks).
-
-        Find the best matching worker for the given tokens.
-
-        Args:
-            token_ids: List of token IDs to find matches for
-            router_config_override: Optional router configuration override
-            request_id: Optional request ID. If provided, router states will be updated
-                       to track this request (active blocks, lifecycle events). If not
-                       provided, this is a query-only operation that doesn't affect state.
-
-        Returns:
-            A tuple of (worker_id, overlap_blocks) where:
-                - worker_id: The ID of the best matching worker
-                - overlap_blocks: The number of overlapping blocks found
-
-        .. deprecated::
-            Use :meth:`best_worker` instead which also returns dp_rank.
-        """
-        ...
-
     async def get_potential_loads(
         self,
         token_ids: List[int],
@@ -1666,13 +1559,11 @@ class VirtualConnectorClient:
         ...
 
 __all__ = [
-    "Backend",
     "Client",
     "Component",
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",
-    "OAIChatPreprocessor",
     "PythonAsyncEngine",
     "prometheus_names",
 ]

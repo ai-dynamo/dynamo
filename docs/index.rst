@@ -41,8 +41,9 @@ Quickstart
    :caption: Getting Started
 
    Quickstart <self>
-   Installation <_sections/installation>
    Support Matrix <reference/support-matrix.md>
+   Feature Matrix <reference/feature-matrix.md>
+   Release Artifacts <reference/release-artifacts.md>
    Examples <_sections/examples>
 
 .. toctree::
@@ -57,13 +58,17 @@ Quickstart
    :hidden:
    :caption: User Guides
 
+   KV Cache Offloading <components/kvbm/kvbm_guide.md>
+   KV Aware Routing <components/router/router_guide.md>
    Tool Calling <agents/tool-calling.md>
-   Multimodality Support <multimodal/index.md>
+   Multimodality Support <features/multimodal/README.md>
+   LoRA Adapters <features/lora/README.md>
    Finding Best Initial Configs <performance/aiconfigurator.md>
    Benchmarking <benchmarks/benchmarking.md>
    Tuning Disaggregated Performance <performance/tuning.md>
    Writing Python Workers in Dynamo <development/backend-guide.md>
    Observability (Local) <_sections/observability>
+   Fault Tolerance <_sections/fault_tolerance>
    Glossary <reference/glossary.md>
 
 .. toctree::
@@ -71,9 +76,11 @@ Quickstart
    :caption: Components
 
    Backends <_sections/backends>
-   Router <router/README>
-   Planner <planner/planner_intro>
-   KVBM <kvbm/kvbm_intro>
+   Frontend <components/frontend/README>
+   Router <components/router/README>
+   Planner <components/planner/README>
+   Profiler <components/profiler/README>
+   KVBM <components/kvbm/README>
 
 .. toctree::
    :hidden:
@@ -83,3 +90,7 @@ Quickstart
    Architecture Flow <design_docs/dynamo_flow.md>
    Disaggregated Serving <design_docs/disagg_serving.md>
    Distributed Runtime <design_docs/distributed_runtime.md>
+   Router Design <design_docs/router_design.md>
+   Request Plane <design_docs/request_plane.md>
+   Event Plane <design_docs/event_plane.md>
+   Planner Design <design_docs/planner_design.md>

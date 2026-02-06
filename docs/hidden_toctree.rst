@@ -27,6 +27,9 @@
    kubernetes/api_reference.md
    kubernetes/deployment/create_deployment.md
    kubernetes/deployment/dynamomodel-guide.md
+   kubernetes/chrek/README.md
+   kubernetes/chrek/dynamo.md
+   kubernetes/chrek/standalone.md
 
    kubernetes/fluxcd.md
    kubernetes/grove.md
@@ -34,16 +37,30 @@
    kubernetes/README.md
    reference/cli.md
    observability/metrics.md
-   kvbm/vllm-setup.md
-   kvbm/trtllm-setup.md
+   integrations/kv_events_custom_engines.md
    agents/tool-calling.md
-   guides/jail_stream_readme.md
-   guides/request_plane.md
+   development/jail_stream.md
 
-   router/kv_cache_routing.md
-   planner/load_planner.md
+   components/planner/README.md
+   components/planner/planner_guide.md
+   components/planner/planner_examples.md
+   components/kvbm/README.md
+   components/kvbm/kvbm_guide.md
+   components/router/README.md
+   components/router/router_guide.md
+   components/router/router_examples.md
+   components/frontend/frontend_guide.md
+   design_docs/kvbm_design.md
+   integrations/flexkv_integration.md
+   integrations/sglang_hicache.md
+   fault_tolerance/README.md
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md
+   fault_tolerance/graceful_shutdown.md
+   fault_tolerance/request_rejection.md
+   fault_tolerance/testing.md
+   design_docs/request_plane.md
+   design_docs/event_plane.md
 
    backends/trtllm/multinode/multinode-examples.md
    backends/trtllm/llama4_plus_eagle.md
@@ -54,8 +71,8 @@
 
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
+   backends/sglang/diffusion-lm.md
    backends/sglang/profiling.md
-   backends/sglang/sgl-hicache-example.md
    backends/sglang/sglang-disaggregation.md
    backends/sglang/prometheus.md
 
@@ -67,17 +84,17 @@
 
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
-   backends/vllm/LMCache_Integration.md
+   integrations/lmcache_integration.md
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
-   backends/vllm/speculative_decoding.md
+   backends/vllm/prompt-embeddings.md
+
+   features/speculative_decoding/README.md
+   features/speculative_decoding/speculative_decoding_vllm.md
 
    benchmarks/kv-router-ab-testing.md
 
-   frontends/kserve.md
-   _sections/frontends.rst
+   mocker/mocker.md
 
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md
      have some outdated names/references and need a refresh.
-..   TODO: Add an OpenAI frontend doc and then add top-level Frontends section
-     to index.rst pointing to both OpenAI HTTP and KServe GRPC docs.

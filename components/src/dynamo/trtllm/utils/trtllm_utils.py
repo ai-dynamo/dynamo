@@ -38,6 +38,7 @@ class Config:
         self.tensor_parallel_size: int = 1
         self.pipeline_parallel_size: int = 1
         self.expert_parallel_size: Optional[int] = None
+        self.enable_attention_dp: bool = False
         self.kv_block_size: int = 32
         self.migration_limit: int = 0
         self.gpus_per_node: Optional[int] = None
@@ -54,6 +55,7 @@ class Config:
         self.modality: str = "text"
         self.allowed_local_media_path: str = ""
         self.max_file_size_mb: int = 50
+        self.encoder_cache_capacity_gb: float = 0
         self.reasoning_parser: Optional[str] = None
         self.tool_call_parser: Optional[str] = None
         self.dump_config_to: Optional[str] = None
@@ -61,7 +63,10 @@ class Config:
         self.dyn_endpoint_types: str = "chat,completions"
         self.store_kv: str = ""
         self.request_plane: str = ""
+        self.event_plane: str = ""
         self.enable_local_indexer: bool = False
+        # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
+        self.use_kv_events: bool = False
 
     def __str__(self) -> str:
         return (
@@ -73,6 +78,7 @@ class Config:
             f"tensor_parallel_size={self.tensor_parallel_size}, "
             f"pipeline_parallel_size={self.pipeline_parallel_size}, "
             f"expert_parallel_size={self.expert_parallel_size}, "
+            f"enable_attention_dp={self.enable_attention_dp}, "
             f"kv_block_size={self.kv_block_size}, "
             f"gpus_per_node={self.gpus_per_node}, "
             f"max_batch_size={self.max_batch_size}, "
@@ -89,13 +95,16 @@ class Config:
             f"modality={self.modality}, "
             f"allowed_local_media_path={self.allowed_local_media_path}, "
             f"max_file_size_mb={self.max_file_size_mb}, "
+            f"encoder_cache_capacity_gb={self.encoder_cache_capacity_gb}, "
             f"reasoning_parser={self.reasoning_parser}, "
             f"tool_call_parser={self.tool_call_parser}, "
             f"dump_config_to={self.dump_config_to}, "
             f"custom_jinja_template={self.custom_jinja_template}, "
             f"store_kv={self.store_kv}, "
             f"request_plane={self.request_plane}, "
-            f"enable_local_indexer={self.enable_local_indexer}"
+            f"event_plane={self.event_plane}, "
+            f"enable_local_indexer={self.enable_local_indexer}, "
+            f"use_kv_events={self.use_kv_events}"
         )
 
 
@@ -103,10 +112,23 @@ class Config:
 def _preprocess_for_encode_config(
     obj: Config,
 ) -> dict:  # pyright: ignore[reportUnusedFunction]
+    """Convert Config object to dictionary for encoding."""
     return obj.__dict__
 
 
 def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
+    """Parse a Dynamo endpoint string into its components.
+
+    Args:
+        endpoint: Endpoint string in format 'namespace.component.endpoint'
+            or 'dyn://namespace.component.endpoint'.
+
+    Returns:
+        Tuple of (namespace, component, endpoint_name).
+
+    Raises:
+        ValueError: If endpoint format is invalid.
+    """
     endpoint_str = endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
@@ -119,6 +141,11 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
 
 
 def cmd_line_args():
+    """Parse command-line arguments for the TensorRT-LLM backend.
+
+    Returns:
+        Config: Parsed configuration object.
+    """
     parser = argparse.ArgumentParser(
         description="TensorRT-LLM server integrated with Dynamo LLM."
     )
@@ -157,6 +184,11 @@ def cmd_line_args():
         type=int,
         default=None,
         help="expert parallelism size.",
+    )
+    parser.add_argument(
+        "--enable-attention-dp",
+        action="store_true",
+        help="Enable attention data parallelism. When enabled, attention_dp_size equals tensor_parallel_size.",
     )
 
     # IMPORTANT: We should ideally not expose this to users. We should be able to
@@ -263,6 +295,12 @@ def cmd_line_args():
         default=50,
         help="Maximum size of downloadable embedding files/Image URLs. Default: 50MB",
     )
+    parser.add_argument(
+        "--dyn-encoder-cache-capacity-gb",
+        type=float,
+        default=0,
+        help="Capacity of the encoder cache in GB for multimodal embeddings. Default: 0",
+    )
     # To avoid name conflicts with different backends, adoped prefix "dyn-" for dynamo specific args
     parser.add_argument(
         "--dyn-tool-call-parser",
@@ -277,6 +315,13 @@ def cmd_line_args():
         default=None,
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
+    )
+    parser.add_argument(
+        "--connector",
+        type=str,
+        default="none",
+        choices=["none", "kvbm"],
+        help="Connector to use for the model.",
     )
     add_config_dump_args(parser)
     parser.add_argument(
@@ -296,7 +341,7 @@ def cmd_line_args():
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -304,6 +349,13 @@ def cmd_line_args():
         choices=["nats", "http", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
         "--enable-local-indexer",
@@ -347,12 +399,14 @@ def cmd_line_args():
     config.encode_endpoint = args.encode_endpoint
     config.allowed_local_media_path = args.allowed_local_media_path
     config.max_file_size_mb = args.max_file_size_mb
+    config.encoder_cache_capacity_gb = args.dyn_encoder_cache_capacity_gb
 
     config.tensor_parallel_size = args.tensor_parallel_size
     if args.pipeline_parallel_size is not None:
         config.pipeline_parallel_size = args.pipeline_parallel_size
     if args.expert_parallel_size is not None:
         config.expert_parallel_size = args.expert_parallel_size
+    config.enable_attention_dp = args.enable_attention_dp
     if args.gpus_per_node is not None:
         config.gpus_per_node = args.gpus_per_node
     if args.free_gpu_memory_fraction is not None:
@@ -374,7 +428,11 @@ def cmd_line_args():
     config.dyn_endpoint_types = args.dyn_endpoint_types
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.event_plane = args.event_plane
     config.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
+    # Derive use_kv_events from publish_events_and_metrics
+    config.use_kv_events = config.publish_events_and_metrics
+    config.connector = args.connector
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:

@@ -7,7 +7,7 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_llm`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin (TODO: Add flags to enable KV routing).
+# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -43,10 +43,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from . import __version__
 
 DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
-CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
-    "CUSTOM_BACKEND_METRICS_POLLING_INTERVAL"
-)
-CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -86,6 +82,11 @@ def validate_model_path(value):
 
 
 def parse_args():
+    """Parse command-line arguments for the Dynamo frontend.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
@@ -146,11 +147,13 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
-        "--no-kv-events",
-        action="store_false",
+        "--kv-events",
+        action=argparse.BooleanOptionalAction,
         dest="use_kv_events",
-        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
-        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
+        default=(
+            os.environ.get("DYN_KV_EVENTS", "true").lower() == "true"
+        ),  # default is true
+        help="KV Router: Enable/disable KV events. Use --kv-events to enable (default, router receives cache state events from workers) or --no-kv-events to disable (router predicts cache state based on routing decisions).",
     )
     parser.add_argument(
         "--router-ttl",
@@ -203,6 +206,20 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
     )
     parser.add_argument(
+        "--no-assume-kv-reuse",
+        action="store_false",
+        dest="router_assume_kv_reuse",
+        default=True,
+        help="KV Router: When tracking active blocks, do not assume KV cache reuse (generate random hashes instead of computing actual block hashes). Useful when KV cache reuse is not expected. By default, KV cache reuse is assumed.",
+    )
+    parser.add_argument(
+        "--track-output-blocks",
+        action="store_true",
+        dest="router_track_output_blocks",
+        default=False,
+        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
+    )
+    parser.add_argument(
         "--enforce-disagg",
         action="store_true",
         default=False,
@@ -221,6 +238,12 @@ def parse_args():
         help="Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.",
     )
     parser.add_argument(
+        "--active-prefill-tokens-threshold-frac",
+        type=float,
+        default=None,
+        help="Fraction of max_num_batched_tokens for busy detection. Worker is busy when active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). Uses OR logic with --active-prefill-tokens-threshold.",
+    )
+    parser.add_argument(
         "--model-name",
         type=validate_model_name,
         help="Model name as a string (e.g., 'Llama-3.2-1B-Instruct')",
@@ -228,7 +251,7 @@ def parse_args():
     parser.add_argument(
         "--model-path",
         type=validate_model_path,
-        help="Path to model directory on disk (e.g., /tmp/model_cache/lama3.2_1B/)",
+        help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
     )
     parser.add_argument(
         "--metrics-prefix",
@@ -250,27 +273,11 @@ def parse_args():
     )
     add_config_dump_args(parser)
     parser.add_argument(
-        "--custom-backend-metrics-endpoint",
-        type=str,
-        default=os.environ.get(
-            CUSTOM_BACKEND_ENDPOINT_ENV_VAR, "nim.backend.runtime_stats"
-        ),
-        help=f"Custom backend endpoint to poll for metrics in format 'namespace.component.endpoint' (default: 'nim.backend.runtime_stats'). Required if --custom-backend-metrics-polling-interval is specified. All metrics will be prefixed with 'dynamo_component_' in Prometheus. Can be set via {CUSTOM_BACKEND_ENDPOINT_ENV_VAR} env var.",
-    )
-    parser.add_argument(
-        "--custom-backend-metrics-polling-interval",
-        type=float,
-        default=float(
-            os.environ.get(CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR, "0")
-        ),
-        help=f"Interval in seconds for polling custom backend metrics. Set to > 0 to enable polling (default: 0=disabled, suggested: 9.2s which is less than typical Prometheus scrape interval). Can be set via {CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR} env var.",
-    )
-    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -278,6 +285,13 @@ def parse_args():
         choices=["nats", "http", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
+        help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
         "--exp-python-factory",
@@ -290,15 +304,16 @@ def parse_args():
 
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
-    if flags.custom_backend_metrics_polling_interval < 0:
-        parser.error(
-            "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
-        )
 
     return flags
 
 
 async def async_main():
+    """Main async entry point for the Dynamo frontend.
+
+    Initializes the distributed runtime, configures routing, and starts
+    the HTTP server or interactive mode based on command-line arguments.
+    """
     # The system status server port is a worker concern.
     #
     # Serve tests set DYN_SYSTEM_PORT for the worker, but aggregated launch scripts
@@ -308,7 +323,7 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
-
+    os.environ["DYN_EVENT_PLANE"] = flags.event_plane
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
@@ -325,8 +340,17 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    enable_nats = flags.request_plane == "nats" or (
+        flags.event_plane == "nats"
+        and flags.router_mode == "kv"
+        and (flags.use_kv_events or flags.router_replica_sync)
+    )
+
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane)
+    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -341,9 +365,11 @@ async def async_main():
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
             router_replica_sync=flags.router_replica_sync,
+            router_track_active_blocks=flags.router_track_active_blocks,
+            router_track_output_blocks=flags.router_track_output_blocks,
+            router_assume_kv_reuse=flags.router_assume_kv_reuse,
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,
-            router_track_active_blocks=flags.router_track_active_blocks,
             router_ttl_secs=flags.router_ttl,
             router_max_tree_size=flags.router_max_tree_size,
             router_prune_target_ratio=flags.router_prune_target_ratio,
@@ -364,6 +390,7 @@ async def async_main():
             kv_router_config,
             active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
             active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
             enforce_disagg=flags.enforce_disagg,
         ),
     }
@@ -380,14 +407,6 @@ async def async_main():
         kwargs["namespace"] = flags.namespace
     if flags.kserve_grpc_server and flags.grpc_metrics_port:
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
-    if flags.custom_backend_metrics_endpoint:
-        kwargs[
-            "custom_backend_metrics_endpoint"
-        ] = flags.custom_backend_metrics_endpoint
-    if flags.custom_backend_metrics_polling_interval:
-        kwargs[
-            "custom_backend_metrics_polling_interval"
-        ] = flags.custom_backend_metrics_polling_interval
 
     if flags.exp_python_factory:
         kwargs["engine_factory"] = engine_factory
@@ -407,10 +426,16 @@ async def async_main():
 
 
 async def graceful_shutdown(runtime):
+    """Handle graceful shutdown of the distributed runtime.
+
+    Args:
+        runtime: The DistributedRuntime instance to shut down.
+    """
     runtime.shutdown()
 
 
 def main():
+    """Entry point for the Dynamo frontend CLI."""
     uvloop.run(async_main())
 
 

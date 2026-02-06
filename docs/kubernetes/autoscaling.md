@@ -115,9 +115,9 @@ kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"re
 #        use 'kubectl scale dgdsa/sglang-agg-decode --replicas=3' or update the DynamoGraphDeploymentScalingAdapter instead
 ```
 
-## Disabling DGDSA for a Service
+## Enabling DGDSA for a Service
 
-If you want to manage replicas directly in the DGD (without autoscaling), you can disable the scaling adapter per service:
+By default, no DGDSA is created for services, allowing direct replica management via the DGD. To enable autoscaling via HPA, KEDA, or Planner, explicitly enable the scaling adapter:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -127,23 +127,23 @@ metadata:
 spec:
   services:
     Frontend:
-      replicas: 2
-      scalingAdapter:
-        disable: true    # ← No DGDSA created, direct edits allowed
+      replicas: 2        # ← No DGDSA by default, direct edits allowed
 
     decode:
-      replicas: 1        # ← DGDSA created by default, managed via adapter
+      replicas: 1
+      scalingAdapter:
+        enabled: true    # ← DGDSA created, managed via adapter
 ```
 
-**When to disable DGDSA:**
-- You want simple, manual replica management
-- You don't need autoscaling for that service
-- You prefer direct DGD edits over adapter-based scaling
-
-**When to keep DGDSA enabled (default):**
+**When to enable DGDSA:**
 - You want to use HPA, KEDA, or Planner for autoscaling
 - You want a clear separation between "desired scale" (adapter) and "deployment config" (DGD)
 - You want protection against accidental direct replica edits
+
+**When to keep DGDSA disabled (default):**
+- You want simple, manual replica management
+- You don't need autoscaling for that service
+- You prefer direct DGD edits over adapter-based scaling
 
 ## Autoscaling with Dynamo Planner
 
@@ -163,14 +163,14 @@ Planner is deployed as a service component within your DGD. It:
 
 **Deployment:**
 
-The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../planner/sla_planner_quickstart.md) for complete instructions.
+The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../components/planner/planner_guide.md) for complete instructions.
 
 Example configurations with Planner:
 - `examples/backends/vllm/deploy/disagg_planner.yaml`
 - `examples/backends/sglang/deploy/disagg_planner.yaml`
 - `examples/backends/trtllm/deploy/disagg_planner.yaml`
 
-For more details, see the [SLA Planner documentation](../planner/sla_planner.md).
+For more details, see the [SLA Planner documentation](../components/planner/planner_guide.md).
 
 ## Autoscaling with Kubernetes HPA
 
@@ -227,7 +227,6 @@ Dynamo exports several metrics useful for autoscaling. These are available at th
 | `dynamo_frontend_time_to_first_token_seconds` | Histogram | TTFT latency | ✅ Workers |
 | `dynamo_frontend_inter_token_latency_seconds` | Histogram | ITL latency | ✅ Decode |
 | `dynamo_frontend_request_duration_seconds` | Histogram | Total request duration | ⚠️ General |
-| `kvstats_gpu_cache_usage_percent` | Gauge | GPU KV cache usage (0-1) | ✅ Decode |
 
 #### Metric Labels
 
@@ -612,15 +611,14 @@ If you've disabled the scaling adapter for a service, edit the DGD directly:
 kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"replicas":3}}}}'
 ```
 
-Or edit the YAML:
+Or edit the YAML (no `scalingAdapter.enabled: true` means direct edits are allowed):
 
 ```yaml
 spec:
   services:
     decode:
       replicas: 3
-      scalingAdapter:
-        disable: true
+      # No scalingAdapter.enabled means replicas can be edited directly
 ```
 
 ## Best Practices
@@ -642,7 +640,7 @@ Avoid configuring multiple autoscalers for the same service:
 |--------------|---------------------|---------------|
 | Frontend | CPU utilization, request rate | `dynamo_frontend_requests_total` |
 | Prefill | Queue depth, TTFT | `dynamo_frontend_queued_requests`, `dynamo_frontend_time_to_first_token_seconds` |
-| Decode | KV cache utilization, ITL | `kvstats_gpu_cache_usage_percent`, `dynamo_frontend_inter_token_latency_seconds` |
+| Decode | ITL | `dynamo_frontend_inter_token_latency_seconds` |
 
 ### 3. Configure Stabilization Windows
 
@@ -727,7 +725,7 @@ If you see unstable scaling:
 - [Kubernetes HPA Documentation](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)
 - [KEDA Documentation](https://keda.sh/)
 - [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
-- [Planner Documentation](../planner/sla_planner.md)
+- [Planner Documentation](../components/planner/planner_guide.md)
 - [Dynamo Metrics Reference](../observability/metrics.md)
 - [Prometheus and Grafana Setup](../observability/prometheus-grafana.md)
 

@@ -69,7 +69,7 @@ struct ApiDoc;
 /// Generate OpenAPI specification from route documentation
 ///
 /// This is the core helper used both by the embedded Swagger UI and by
-/// external tools (for example CI or NIM) which need to materialize the
+/// external tools (for example CI) which need to materialize the
 /// same frontend OpenAPI specification without running the HTTP service.
 pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
     let mut openapi = ApiDoc::openapi();

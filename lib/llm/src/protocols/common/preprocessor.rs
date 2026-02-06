@@ -47,6 +47,11 @@ pub struct RoutingHints {
     /// Used as a hint for routing decisions to estimate resource requirements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_output_tokens: Option<u32>,
+
+    /// LORA adapter name for this request.
+    /// Used for LORA-aware routing and tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -89,6 +94,12 @@ pub struct PreprocessedRequest {
 
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
+
+    /// Base64-encoded PyTorch tensor containing pre-computed embeddings
+    /// If provided, this takes precedence over token_ids for inference
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_embeds: Option<String>,
 
     // Multimodal data
     #[builder(default)]

@@ -14,13 +14,20 @@
 # limitations under the License.
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoModel
+from vllm import LLM
+from vllm.utils.system_utils import update_environment_variables
 
 logger = logging.getLogger(__name__)
+
+# [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
+# should be removed once there is proper way to extract vLLM encoder.
+VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
 class SupportedModels:
@@ -28,7 +35,9 @@ class SupportedModels:
 
     LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
     QWEN_2_VL_2B = "Qwen/Qwen2-VL-2B-Instruct"
+    QWEN_2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
     QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
+    QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
@@ -104,7 +113,9 @@ def is_model_supported(model_name: str, supported_model: str) -> bool:
 # List of all Qwen VL model variants for easy extension
 QWEN_VL_MODELS = [
     SupportedModels.QWEN_2_VL_2B,
+    SupportedModels.QWEN_2_5_VL_3B,
     SupportedModels.QWEN_2_5_VL_7B,
+    SupportedModels.QWEN_2_5_VL_32B,
 ]
 
 
@@ -127,10 +138,52 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
     """
-    model = AutoModel.from_pretrained(
+    if VLLM_ENCODER and is_qwen_vl_model(model_id):
+        # Disable to get ViT from the same process
+        update_environment_variables(
+            {
+                "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+            }
+        )
+        # Load only the vision model via vLLM on encoder workers to avoid loading the full LLM weights, significantly reducing memory usage.
+        # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/30242.
+        # Model needs the class method get_language_model_spec to be defined for this to work.
+
+        # TODO(gluo/dsocek): Remove this monkey patch once vLLM upstream adds
+        # get_language_model_spec to Qwen VL model classes.
+        # Monkey patch to vLLM's Qwen 2 VL and Qwen 2.5 VL classes to add get_language_model_spec
+        from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+        from vllm.model_executor.models.qwen2_5_vl import (
+            Qwen2_5_VLForConditionalGeneration,
+        )
+        from vllm.model_executor.models.qwen2_vl import Qwen2VLForConditionalGeneration
+
+        @classmethod
+        def get_language_model_spec(cls):
+            return (Qwen2ForCausalLM, "language_model")
+
+        Qwen2_5_VLForConditionalGeneration.get_language_model_spec = (
+            get_language_model_spec
+        )
+        Qwen2VLForConditionalGeneration.get_language_model_spec = (
+            get_language_model_spec
+        )
+
+        # Load only the vision model via vLLM
+        vllm_model = LLM(
+            model=model_id,
+            enforce_eager=True,
+            gpu_memory_utilization=0.4,
+            max_model_len=10,
+            convert="mm_encoder_only",
+            enable_prefix_caching=False,
+        )
+        return (
+            vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
+        )
+    return AutoModel.from_pretrained(
         model_id, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True
     )
-    return model
 
 
 def construct_mm_data(
@@ -175,5 +228,63 @@ def _construct_qwen_image_data(
         "image": {
             "image_embeds": image_embeds.squeeze(0),
             "image_grid_thw": grid_thw_tensor,
+        }
+    }
+
+
+def construct_qwen_decode_mm_data(
+    image_grid_thw: Optional[List[Any]],
+    embeddings_shape: Optional[Any],
+    request_id: str,
+    *,
+    dtype: torch.dtype = torch.float16,
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    """Construct schema-valid Qwen multimodal data for vLLM v1 disagg decode.
+
+    This is a WORKAROUND (WAR) for vLLM's disaggregated multimodal decode limitations.
+
+    Notes:
+    - vLLM parses multimodal inputs and builds `mm_features` from `multi_modal_data`.
+    - For Qwen VL models, the parser enforces that image data contains BOTH
+      `image_embeds` and `image_grid_thw` keys.
+    - In disaggregated decode, the KV cache already includes the vision context
+      from prefill; decode still needs `mm_features` for mRoPE initialization.
+
+    WAR Details:
+    - We generate unique placeholder embeddings based on request_id to prevent
+      incorrect prefix cache matches between different images with same dimensions.
+    - Without this, zero embeddings + same image_grid_thw would create identical
+      cache signatures, causing decode to incorrectly reuse cached KV from
+      different images.
+
+    Caching Caveat:
+    - This WAR disables prefix cache reuse on the DECODE worker (each request
+      has unique placeholder embeddings).
+    - Prefix caching still works correctly on the PREFILL worker, which uses
+      actual image embeddings. This is where the caching benefit matters since
+      prefill does the heavy computation.
+    - Decode receives KV blocks from prefill via NIXL transfer anyway, so
+      decode-side prefix caching provides minimal benefit in disaggregated setup.
+    """
+    if image_grid_thw is None or len(image_grid_thw) == 0:
+        raise ValueError("No image grid provided for Qwen model.")
+    if embeddings_shape is None:
+        raise ValueError("embeddings_shape is required for Qwen decode mm data.")
+
+    # WAR: Use request_id hash as seed for unique placeholder values.
+    # This prevents prefix cache from incorrectly matching different images
+    # that happen to have the same dimensions (same image_grid_thw).
+    seed = hash(request_id) & 0xFFFFFFFF  # Convert to positive 32-bit int
+    generator = torch.Generator().manual_seed(seed)
+    image_embeds = torch.randn(
+        embeddings_shape, dtype=dtype, device="cpu", generator=generator
+    )
+    if image_embeds.ndim == 3:
+        image_embeds = image_embeds.squeeze(0)
+
+    return {
+        "image": {
+            "image_embeds": image_embeds,
+            "image_grid_thw": torch.tensor(image_grid_thw),
         }
     }
