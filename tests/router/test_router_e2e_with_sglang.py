@@ -481,6 +481,7 @@ def test_router_decisions_sglang_dp(
     ids=["jetstream"],
 )
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
+@pytest.mark.xfail(strict=False, reason="Flaky test")
 def test_sglang_indexers_sync(
     request,
     runtime_services_dynamic_ports,

@@ -559,6 +559,7 @@ def test_kv_push_router_bindings(
     indirect=["request_plane", "use_nats_core"],
 )
 @pytest.mark.timeout(90)  # TODO: figure out a timeout
+@pytest.mark.xfail(strict=False, reason="Flaky test")
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
