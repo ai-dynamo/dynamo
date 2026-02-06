@@ -47,7 +47,7 @@ use crate::{
 };
 
 use super::ModelManager;
-use crate::namespace::is_global_namespace;
+use crate::namespace::{is_global_namespace, NamespaceFilter};
 
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
@@ -120,10 +120,8 @@ impl ModelWatcher {
     pub async fn watch(
         &self,
         mut discovery_stream: DiscoveryStream,
-        target_namespace: Option<&str>,
+        namespace_filter: NamespaceFilter,
     ) {
-        let global_namespace = target_namespace.is_none_or(is_global_namespace);
-
         while let Some(result) = discovery_stream.next().await {
             let event = match result {
                 Ok(event) => event,
@@ -169,15 +167,12 @@ impl ModelWatcher {
                         }
                     };
 
-                    // Filter by namespace if target_namespace is specified
-                    if !global_namespace
-                        && let Some(target_ns) = target_namespace
-                        && mcid.namespace != target_ns
-                    {
+                    // Filter by namespace using the configured filter
+                    if !namespace_filter.matches(&mcid.namespace) {
                         tracing::debug!(
                             model_namespace = mcid.namespace,
-                            target_namespace = target_ns,
-                            "Skipping model from different namespace"
+                            namespace_filter = ?namespace_filter,
+                            "Skipping model due to namespace filter"
                         );
                         continue;
                     }
@@ -234,7 +229,7 @@ impl ModelWatcher {
                     };
 
                     match self
-                        .handle_delete(model_card_instance_id, target_namespace, global_namespace)
+                        .handle_delete(model_card_instance_id, &namespace_filter)
                         .await
                     {
                         Ok(Some(model_name)) => {
@@ -257,8 +252,7 @@ impl ModelWatcher {
     async fn handle_delete(
         &self,
         mcid: &ModelCardInstanceId,
-        target_namespace: Option<&str>,
-        is_global_namespace: bool,
+        namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<String>> {
         let key = mcid.to_path();
         let card = match self.manager.remove_model_card(&key) {
@@ -285,7 +279,7 @@ impl ModelWatcher {
 
         // Query discovery for all remaining instances of this model
         let active_instances = self
-            .cards_for_model_with_endpoints(&model_name, target_namespace, is_global_namespace)
+            .cards_for_model_with_endpoints(&model_name, namespace_filter)
             .await
             .with_context(|| model_name.clone())?;
 
@@ -745,11 +739,10 @@ impl ModelWatcher {
     pub async fn cards_for_model(
         &self,
         model_name: &str,
-        target_namespace: Option<&str>,
-        is_global_namespace: bool,
+        namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Vec<ModelDeploymentCard>> {
         Ok(self
-            .cards_for_model_with_endpoints(model_name, target_namespace, is_global_namespace)
+            .cards_for_model_with_endpoints(model_name, namespace_filter)
             .await?
             .into_iter()
             .map(|(_, card)| card)
@@ -761,17 +754,12 @@ impl ModelWatcher {
     async fn cards_for_model_with_endpoints(
         &self,
         model_name: &str,
-        target_namespace: Option<&str>,
-        is_global_namespace: bool,
+        namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
         let mut all = self.all_cards().await?;
         all.retain(|(endpoint_id, card)| {
             let matches_name = card.name() == model_name;
-            let matches_namespace = match (is_global_namespace, target_namespace) {
-                (true, _) => true,
-                (false, None) => true,
-                (false, Some(target_ns)) => endpoint_id.namespace == target_ns,
-            };
+            let matches_namespace = namespace_filter.matches(&endpoint_id.namespace);
             matches_name && matches_namespace
         });
         Ok(all)
