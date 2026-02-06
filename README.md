@@ -55,7 +55,7 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 | [**KV-Aware Routing**](docs/router/kv_cache_routing.md) | ✅ | ✅ | ✅ |
 | [**SLA-Based Planner**](docs/planner/sla_planner.md) | ✅ | ✅ | ✅ |
 | [**KVBM**](docs/kvbm/README.md) | 🚧 | ✅ | ✅ |
-| [**Multimodal**](docs/multimodal/index.md) | ✅ | ✅ | ✅ |
+| [**Multimodal**](docs/features/multimodal/README.md) | ✅ | ✅ | ✅ |
 | [**Tool Calling**](docs/agents/tool-calling.md) | ✅ | ✅ | ✅ |
 
 > **[Full Feature Matrix →](docs/reference/feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
