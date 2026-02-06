@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -46,8 +47,13 @@ type RestoreConfig struct {
 	// RestoreTrigger is the path to the trigger file that signals restore should start.
 	RestoreTrigger string `yaml:"restoreTrigger"`
 
-	// WaitTimeout is the maximum time to wait for a checkpoint to become available.
-	WaitTimeout time.Duration `yaml:"waitTimeout"`
+	// WaitTimeoutRaw is the raw string from YAML config (e.g., "300s", "5m").
+	// Parsed into WaitTimeout during config loading.
+	WaitTimeoutRaw string `yaml:"waitTimeout"`
+
+	// WaitTimeout is the parsed maximum time to wait for a checkpoint.
+	// Zero means wait indefinitely.
+	WaitTimeout time.Duration `yaml:"-"`
 
 	// DefaultCmd is the command to run if no checkpoint is available.
 	DefaultCmd string `yaml:"defaultCmd"`
@@ -80,6 +86,13 @@ func (c *RestoreConfig) LoadRestoreEnvOverrides() {
 
 	c.Debug = os.Getenv("DEBUG") == "1"
 	c.WaitForCheckpoint = os.Getenv("WAIT_FOR_CHECKPOINT") == "1"
+
+	// Parse WaitTimeout from YAML raw string (e.g., "300s", "5m")
+	if c.WaitTimeoutRaw != "" && c.WaitTimeout == 0 {
+		if d, err := time.ParseDuration(c.WaitTimeoutRaw); err == nil {
+			c.WaitTimeout = d
+		}
+	}
 }
 
 // LoadRestoreConfig creates a RestoreConfig from ConfigMap and environment variables.
@@ -160,7 +173,7 @@ func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
 	if cfg.RestoreTrigger != "" {
 		data, err := os.ReadFile(cfg.RestoreTrigger)
 		if err == nil {
-			checkpointPath := string(data)
+			checkpointPath := strings.TrimSpace(string(data))
 			if checkpointPath != "" {
 				donePath := checkpointPath + "/checkpoint.done"
 				if _, err := os.Stat(donePath); err == nil {
@@ -175,10 +188,15 @@ func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
 }
 
 // WaitForCheckpoint waits for a checkpoint to become available.
+// If cfg.WaitTimeout is zero, waits indefinitely (until ctx is cancelled).
 func WaitForCheckpoint(ctx context.Context, cfg *RestoreConfig, log *logrus.Entry) (string, error) {
-	log.WithField("timeout", cfg.WaitTimeout).Info("Waiting for checkpoint")
+	if cfg.WaitTimeout > 0 {
+		log.WithField("timeout", cfg.WaitTimeout).Info("Waiting for checkpoint")
+	} else {
+		log.Info("Waiting for checkpoint indefinitely")
+	}
 
-	deadline := time.Now().Add(cfg.WaitTimeout)
+	startTime := time.Now()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -195,13 +213,14 @@ func WaitForCheckpoint(ctx context.Context, cfg *RestoreConfig, log *logrus.Entr
 
 			// Log progress every 30 seconds
 			if time.Since(lastLog) >= 30*time.Second {
-				elapsed := time.Since(deadline.Add(-cfg.WaitTimeout))
+				elapsed := time.Since(startTime)
 				log.WithField("elapsed", elapsed).Info("Still waiting for checkpoint...")
 				lastLog = time.Now()
 			}
 
-			if time.Now().After(deadline) {
-				return "", context.DeadlineExceeded
+			// Only enforce deadline if WaitTimeout is set (non-zero)
+			if cfg.WaitTimeout > 0 && time.Since(startTime) >= cfg.WaitTimeout {
+				return "", fmt.Errorf("timed out waiting for checkpoint after %s", cfg.WaitTimeout)
 			}
 		}
 	}

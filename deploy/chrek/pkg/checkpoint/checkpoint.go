@@ -67,6 +67,9 @@ func (c *Checkpointer) WithK8sClient(client *checkpointk8s.K8sClient) *Checkpoin
 
 // Checkpoint performs a CRIU dump of a container
 func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, cfg *config.CheckpointConfig) (*Result, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("checkpoint config is required")
+	}
 	checkpointStart := time.Now()
 	c.log.Info("=== Starting checkpoint operation ===")
 
@@ -166,7 +169,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	}
 
 	// 9. Build checkpoint data with config and container state
-	metaCfg := MetadataBuilderConfig{
+	metaCfg := CheckpointDataBuilderConfig{
 		CheckpointID:  params.CheckpointID,
 		NodeName:      params.NodeName,
 		ContainerID:   params.ContainerID,
@@ -179,10 +182,6 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	if upperDir != "" {
 		data.UpperDir = upperDir
 	}
-
-	// Populate external mounts from CRIU options (computed by ConfigureExternalNamespaces)
-	// These are needed for restore to use the exact same external mount mappings
-	data.CRIU.ExternalMounts = cfg.CRIU.ExternalMounts
 
 	if err := config.SaveCheckpointData(checkpointDir, data); err != nil {
 		return nil, fmt.Errorf("failed to save checkpoint data: %w", err)

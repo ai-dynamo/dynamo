@@ -22,13 +22,17 @@ import (
 // LogGPUDiagnostics logs nvidia-smi and /dev/nvidia* for debugging GPU visibility.
 func LogGPUDiagnostics(label string, log *logrus.Entry) {
 	log.Infof("=== GPU DIAGNOSTICS [%s] ===", label)
-	if out, err := exec.Command("nvidia-smi", "-L").CombinedOutput(); err != nil {
+	diagCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(diagCtx, "nvidia-smi", "-L").CombinedOutput(); err != nil {
 		log.Infof("nvidia-smi -L: error: %v", err)
 	} else {
 		log.Infof("nvidia-smi -L:\n%s", string(out))
 	}
 	// Also log memory usage per GPU to detect OOM conditions
-	if out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total,memory.free", "--format=csv,noheader").CombinedOutput(); err != nil {
+	diagCtx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+	if out, err := exec.CommandContext(diagCtx2, "nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total,memory.free", "--format=csv,noheader").CombinedOutput(); err != nil {
 		log.Infof("nvidia-smi memory query: error: %v", err)
 	} else {
 		log.Infof("nvidia-smi memory:\n%s", string(out))
@@ -289,14 +293,13 @@ func Restore(ctx context.Context, checkpointPath string, data *config.Checkpoint
 		configContent := strings.Join(configLines, "\n") + "\n"
 
 		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
-			log.WithError(err).Warn("Failed to write CRIU config file for restore")
-		} else {
-			criuOpts.ConfigFile = proto.String(configPath)
-			log.WithFields(logrus.Fields{
-				"config_path": configPath,
-				"lib_dir":     data.CRIU.LibDir,
-			}).Info("Created CRIU config file with libdir for CUDA plugin")
+			return 0, fmt.Errorf("failed to write CRIU config file for CUDA plugin: %w", err)
 		}
+		criuOpts.ConfigFile = proto.String(configPath)
+		log.WithFields(logrus.Fields{
+			"config_path": configPath,
+			"lib_dir":     data.CRIU.LibDir,
+		}).Info("Created CRIU config file with libdir for CUDA plugin")
 	}
 
 	// 7. Execute CRIU restore
@@ -458,7 +461,7 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	// The files must exist before CRIU tries to restore file descriptors pointing to them
 	shmRestoreStart := time.Now()
 	if err := RestoreDevShm(checkpointPath, log); err != nil {
-		log.WithError(err).Warn("Failed to restore /dev/shm contents")
+		log.WithError(err).Error("Failed to restore /dev/shm contents - CRIU restore may fail with missing FD errors")
 	}
 	log.WithField("duration", time.Since(shmRestoreStart)).Info("RestoreDevShm completed")
 

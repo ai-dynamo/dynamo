@@ -99,8 +99,10 @@ func main() {
 		if err := podWatcher.Start(ctx); err != nil {
 			log.Printf("Pod watcher error: %v", err)
 		}
+
+	default:
+		log.Fatalf("Unknown signal source: %s", cfg.Agent.SignalSource)
 	}
-	// Note: No default case needed - cfg.Agent.Validate() ensures SignalSource is valid
 
 	log.Println("Agent stopped")
 }

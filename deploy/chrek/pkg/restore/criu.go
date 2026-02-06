@@ -40,13 +40,13 @@ type CRIURestoreConfig struct {
 // OpenImageDir opens a checkpoint directory and clears CLOEXEC for CRIU.
 // Returns the opened file and its FD. Caller must close the file when done.
 func OpenImageDir(checkpointPath string) (*os.File, int32, error) {
-	return common.OpenDirForCRIU(checkpointPath)
+	return common.OpenPathForCRIU(checkpointPath)
 }
 
 // OpenNetworkNamespace opens the target network namespace for restore.
 // Returns the opened file and its FD. Caller must close the file when done.
 func OpenNetworkNamespace(nsPath string) (*os.File, int32, error) {
-	return common.OpenDirForCRIU(nsPath)
+	return common.OpenPathForCRIU(nsPath)
 }
 
 // OpenWorkDir opens a work directory for CRIU and clears CLOEXEC.
@@ -88,8 +88,20 @@ func OpenWorkDir(workDir string, log *logrus.Entry) (*os.File, int32) {
 //   - MntnsCompatMode: cross-container restore
 //   - EvasiveDevices, ForceIrmap: device/inode handling
 func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
-	// Currently only "ignore" mode is supported - K8s manages cgroups
-	cgMode := criurpc.CriuCgMode_IGNORE
+	// Map cgroup management mode from config
+	var cgMode criurpc.CriuCgMode
+	switch cfg.ManageCgroupsMode {
+	case "soft":
+		cgMode = criurpc.CriuCgMode_SOFT
+	case "full":
+		cgMode = criurpc.CriuCgMode_FULL
+	case "strict":
+		cgMode = criurpc.CriuCgMode_STRICT
+	case "ignore", "":
+		cgMode = criurpc.CriuCgMode_IGNORE
+	default:
+		cgMode = criurpc.CriuCgMode_IGNORE
+	}
 
 	criuOpts := &criurpc.CriuOpts{
 		ImagesDirFd: proto.Int32(cfg.ImageDirFD),

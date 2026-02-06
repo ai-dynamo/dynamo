@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -100,7 +101,7 @@ func SaveCheckpointData(checkpointDir string, data *CheckpointData) error {
 	}
 
 	metadataPath := filepath.Join(checkpointDir, CheckpointDataFilename)
-	if err := os.WriteFile(metadataPath, content, 0644); err != nil {
+	if err := os.WriteFile(metadataPath, content, 0600); err != nil {
 		return fmt.Errorf("failed to write metadata file: %w", err)
 	}
 
@@ -193,5 +194,11 @@ func GetCheckpointInfo(baseDir, checkpointID string) (*CheckpointData, error) {
 // DeleteCheckpoint removes a checkpoint directory.
 func DeleteCheckpoint(baseDir, checkpointID string) error {
 	checkpointDir := GetCheckpointDir(baseDir, checkpointID)
+	// Ensure resolved path is within baseDir to prevent path traversal
+	absBase, _ := filepath.Abs(baseDir)
+	absDir, _ := filepath.Abs(checkpointDir)
+	if !strings.HasPrefix(absDir, absBase+string(filepath.Separator)) && absDir != absBase {
+		return fmt.Errorf("invalid checkpoint ID: resolved path %s is outside base directory %s", absDir, absBase)
+	}
 	return os.RemoveAll(checkpointDir)
 }

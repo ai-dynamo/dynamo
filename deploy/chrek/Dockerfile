@@ -172,7 +172,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf-c1 \
-    libgnutls30 \
+    libgnutls30t64 \
     libnftables1 \
     iproute2 \
     iptables \

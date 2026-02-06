@@ -58,8 +58,10 @@ func logGPUDiagnostics(label string) {
 }
 
 func main() {
-	// Log GPU diagnostics BEFORE anything else
-	logGPUDiagnostics("PRE-RESTORE")
+	// Log GPU diagnostics BEFORE anything else (gated on DEBUG for production quietness)
+	if os.Getenv("DEBUG") == "1" {
+		logGPUDiagnostics("PRE-RESTORE")
+	}
 
 	// Set up logging
 	log := logrus.New()
@@ -73,7 +75,10 @@ func main() {
 	cfg, err := config.LoadRestoreConfig(config.ConfigMapPath)
 	if err != nil {
 		log.WithError(err).Warn("Could not load config from ConfigMap, using defaults and env vars")
-		cfg, _ = config.LoadRestoreConfig("")
+		cfg, err = config.LoadRestoreConfig("")
+		if err != nil {
+			log.WithError(err).Fatal("Could not load config from defaults/env vars either")
+		}
 	}
 
 	// Set log level based on DEBUG flag

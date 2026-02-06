@@ -64,9 +64,9 @@ func CreateLinkRemapStubs(checkpointPath string, log *logrus.Entry) error {
 		// Fall back to files.img (newer format)
 		fileMap, parseErr = parseFilesImgWithMode(filesPath)
 		if parseErr != nil {
-			// Neither file could be parsed - this is OK, might just mean no link_remap stubs needed
-			log.WithError(parseErr).Debug("Could not parse files.img either, no link_remap stubs needed")
-			return nil
+			log.WithError(parseErr).WithField("remap_count", len(remaps)).Warn(
+				"Found remap entries but could not parse reg-files.img or files.img — link_remap stubs will not be created")
+			return fmt.Errorf("found %d remap entries but could not build file map: %w", len(remaps), parseErr)
 		}
 	}
 
@@ -186,8 +186,8 @@ func parseRemapFpath(path string) ([]remapEntry, error) {
 
 	for {
 		// Read entry size
-		n, err := f.Read(sizeBuf)
-		if err == io.EOF || n == 0 {
+		_, err := io.ReadFull(f, sizeBuf)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
@@ -238,8 +238,8 @@ func parseRegFilesWithMode(path string) (map[uint32]fileInfo, error) {
 
 	for {
 		// Read entry size
-		n, err := f.Read(sizeBuf)
-		if err == io.EOF || n == 0 {
+		_, err := io.ReadFull(f, sizeBuf)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
@@ -297,8 +297,8 @@ func parseFilesImgWithMode(path string) (map[uint32]fileInfo, error) {
 
 	for {
 		// Read entry size
-		n, err := f.Read(sizeBuf)
-		if err == io.EOF || n == 0 {
+		_, err := io.ReadFull(f, sizeBuf)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
@@ -341,7 +341,7 @@ func parseFilesImgWithMode(path string) (map[uint32]fileInfo, error) {
 func createLinkRemapStub(path string, mode os.FileMode) error {
 	// Ensure parent directory exists
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0777); err != nil {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 

@@ -11,8 +11,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
-// MetadataBuilderConfig holds configuration for building checkpoint data.
-type MetadataBuilderConfig struct {
+// CheckpointDataBuilderConfig holds per-checkpoint identifiers for building checkpoint data.
+type CheckpointDataBuilderConfig struct {
 	CheckpointID  string
 	NodeName      string
 	ContainerID   string
@@ -27,7 +27,7 @@ type MetadataBuilderConfig struct {
 // Dynamic fields are populated from container introspection.
 func BuildCheckpointData(
 	ctx context.Context,
-	cfg MetadataBuilderConfig,
+	cfg CheckpointDataBuilderConfig,
 	checkpointCfg *config.CheckpointConfig,
 	containerInfo *checkpointk8s.ContainerInfo,
 	mounts []MountMapping,
@@ -50,6 +50,10 @@ func BuildCheckpointData(
 	data.PodName = cfg.PodName
 	data.PodNamespace = cfg.PodNamespace
 	data.PID = cfg.PID
+
+	if containerInfo == nil {
+		return data
+	}
 	data.Image = containerInfo.Image
 
 	// Populate OCI spec derived paths
@@ -94,7 +98,7 @@ func buildOCIMountLookup(containerInfo *checkpointk8s.ContainerInfo, data *confi
 }
 
 // getK8sVolumes fetches volume types from K8s API if available.
-func getK8sVolumes(ctx context.Context, k8sClient *checkpointk8s.K8sClient, cfg MetadataBuilderConfig, log *logrus.Entry) map[string]*checkpointk8s.VolumeInfo {
+func getK8sVolumes(ctx context.Context, k8sClient *checkpointk8s.K8sClient, cfg CheckpointDataBuilderConfig, log *logrus.Entry) map[string]*checkpointk8s.VolumeInfo {
 	if k8sClient == nil || cfg.PodNamespace == "" || cfg.PodName == "" || cfg.ContainerName == "" {
 		return nil
 	}

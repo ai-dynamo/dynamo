@@ -25,7 +25,7 @@ type CRIUDumpParams struct {
 // Returns the opened file and its FD. The caller must close the file when done.
 // The file descriptor has CLOEXEC cleared so it can be inherited by CRIU.
 func OpenImageDir(checkpointDir string) (*os.File, int32, error) {
-	return common.OpenDirForCRIU(checkpointDir)
+	return common.OpenPathForCRIU(checkpointDir)
 }
 
 // BuildCRIUOpts creates CRIU options from config and per-checkpoint parameters.
@@ -58,13 +58,18 @@ func BuildCRIUOpts(cfg *config.CRIUConfig, params CRIUDumpParams) *criurpc.CriuO
 
 	// Cgroup management mode
 	criuOpts.ManageCgroups = proto.Bool(true)
-	cgMode := criurpc.CriuCgMode_IGNORE
-	if cfg.ManageCgroupsMode == "soft" {
+	var cgMode criurpc.CriuCgMode
+	switch cfg.ManageCgroupsMode {
+	case "soft":
 		cgMode = criurpc.CriuCgMode_SOFT
-	} else if cfg.ManageCgroupsMode == "full" {
+	case "full":
 		cgMode = criurpc.CriuCgMode_FULL
-	} else if cfg.ManageCgroupsMode == "strict" {
+	case "strict":
 		cgMode = criurpc.CriuCgMode_STRICT
+	case "ignore", "":
+		cgMode = criurpc.CriuCgMode_IGNORE
+	default:
+		cgMode = criurpc.CriuCgMode_IGNORE
 	}
 	criuOpts.ManageCgroupsMode = &cgMode
 
