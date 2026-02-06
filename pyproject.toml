@@ -263,6 +263,15 @@ indent-width = 4
 "icp/tests/**/test_*.py" = ["F811", "F401"]
 "*_inc.py" = ["F821"]
 
+# This is IDE (e.g. Cursor's default Python language server)
+# Configure it so that developers can use "go-to-definition", "hover types" and other
+# features.
+[tool.basedpyright]
+extraPaths = ["components/src", "lib/bindings/python/src"]
+# This is for external dependencies.
+venvPath = "."
+venv = ".venv"
+
 [tool.mypy]
 
 # --disable-error-code: WAR large set of errors due to mypy not being run

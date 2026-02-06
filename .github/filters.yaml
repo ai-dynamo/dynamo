@@ -8,6 +8,7 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build
+#   fern     -> fern docs lint, sync, and version release
 #
 # Filters for coverage only (no CI triggered):
 #   docs, examples, ignore, planner
@@ -17,7 +18,6 @@ all:
 
 docs:
   - 'docs/**'
-  - 'fern/**'
   - '**/*.md'
   - '**/*.rst'
   - '**/*.txt'
@@ -26,6 +26,9 @@ docs:
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
+
+fern:
+  - 'fern/**'
 
 examples:
   - 'recipes/**'
