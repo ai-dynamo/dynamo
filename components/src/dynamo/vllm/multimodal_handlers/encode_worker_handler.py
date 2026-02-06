@@ -6,9 +6,11 @@ import logging
 import os
 import shutil
 import time
+from dataclasses import dataclass
 from typing import AsyncGenerator, AsyncIterator
 
 import safetensors
+import torch
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import TokensPrompt
@@ -48,6 +50,13 @@ except ImportError as e:
 CACHE_SIZE_MAXIMUM = 8
 
 TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
+
+
+@dataclass
+class EmbeddingItem:
+    key: str
+    image_grid_thw: list
+    embeddings_cpu: torch.Tensor
 
 
 class EncodeWorkerHandler:
@@ -114,6 +123,7 @@ class EncodeWorkerHandler:
         try:
             time_start = time.perf_counter()
             # Before batch process images, check cache first
+            need_encode_indexes = []
             embedding_lists = [None] * len(request.multimodal_inputs)
             for idx in range(len(request.multimodal_inputs)):
                 if not request.multimodal_inputs[idx].multimodal_input.image_url:
@@ -126,25 +136,21 @@ class EncodeWorkerHandler:
                     (image_grid_thw, embeddings_cpu) = self.embedding_cache.get(
                         embedding_key
                     )
-                    embedding_lists[idx] = [
-                        embedding_key,
-                        image_grid_thw,
-                        embeddings_cpu,
-                        None,
-                    ]
+                    embedding_lists[idx] = EmbeddingItem(
+                        embedding_key, image_grid_thw, embeddings_cpu
+                    )
                 # compute
                 else:
-                    embedding_lists[idx] = [embedding_key, None, None, image_url]
+                    # keep track of key to avoid recompute of it
+                    need_encode_indexes.append((idx, embedding_key))
 
             # Load and generate image tensors
             image_futures = []
             image_to_load = []
-            for idx in range(len(embedding_lists)):
-                if embedding_lists[idx][3] is not None:
-                    image_futures.append(
-                        self.image_loader.load_image(embedding_lists[idx][3])
-                    )
-                    image_to_load.append(embedding_lists[idx][3])
+            for idx, _ in need_encode_indexes:
+                url = request.multimodal_inputs[idx].multimodal_input.image_url
+                image_futures.append(self.image_loader.load_image(url))
+                image_to_load.append(url)
             results = await asyncio.gather(*image_futures, return_exceptions=True)
             loaded_images = []
             collective_exceptions = ""
@@ -186,11 +192,14 @@ class EncodeWorkerHandler:
                         // merge_size
                     ).tolist()
                     splitted_embeddings = embeddings.cpu().squeeze(0).split(sizes)
-                    logger.info(
+                    logger.debug(
                         f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
                     )
                 else:
-                    logger.info(f"Single image embedding shape: {embeddings.shape}")
+                    # Validated on llava (NOTE need to double check on other models) that the
+                    # embeddings already has batch dimension for images, so we can directly
+                    # split by batch dimension
+                    logger.debug(f"image embedding shape: {embeddings.shape}")
                     splitted_embeddings = embeddings.cpu()
 
                 image_grid_thw = (
@@ -199,47 +208,50 @@ class EncodeWorkerHandler:
                     else None
                 )
 
-            # cache
-            splitted_idx = 0
-            for idx in range(len(embedding_lists)):
-                if embedding_lists[idx][3] is not None:
-                    embedding_lists[idx][1] = (
-                        [image_grid_thw[splitted_idx]] if image_grid_thw else None
-                    )
-                    embedding_lists[idx][2] = splitted_embeddings[
-                        splitted_idx
-                    ].unsqueeze(0)
-                    splitted_idx += 1
-                    self.embedding_cache.set(
-                        embedding_lists[idx][0],
-                        (embedding_lists[idx][1], embedding_lists[idx][2]),
-                    )
+            # fill in the embedding_lists with new computed embeddings and cache them
+            for split_idx, (list_idx, key) in enumerate(need_encode_indexes):
+                embedding_lists[list_idx] = EmbeddingItem(
+                    key,
+                    [image_grid_thw[split_idx]] if image_grid_thw else None,
+                    splitted_embeddings[split_idx].unsqueeze(0),
+                )
+                # Cache the computed value for future use
+                self.embedding_cache.set(
+                    embedding_lists[list_idx].key,
+                    (
+                        embedding_lists[list_idx].image_grid_thw,
+                        embedding_lists[list_idx].embeddings_cpu,
+                    ),
+                )
 
+            for idx, embedding_item in enumerate(embedding_lists):
                 # Update request for transfer metadata
                 request.multimodal_inputs[idx].multimodal_input.image_url = None
-                request.multimodal_inputs[idx].image_grid_thw = embedding_lists[idx][1]
+                request.multimodal_inputs[
+                    idx
+                ].image_grid_thw = embedding_item.image_grid_thw
                 request.multimodal_inputs[idx].embeddings_shape = tuple(
-                    embedding_lists[idx][2].shape
+                    embedding_item.embeddings_cpu.shape
                 )
 
                 # Prepare transfer
                 if TRANSFER_LOCAL:
                     logger.debug(
-                        f"ENCODER: saving local safetensors file with key {embedding_lists[idx][0]}, {embedding_lists[idx][2].numel()} * {embedding_lists[idx][2].element_size()} bytes"
+                        f"ENCODER: saving local safetensors file with key {embedding_item.key}, {embedding_item.embeddings_cpu.numel()} * {embedding_item.embeddings_cpu.element_size()} bytes"
                     )
-                    tensors = {"ec_cache": embedding_lists[idx][2]}
+                    tensors = {"ec_cache": embedding_item.embeddings_cpu}
                     safetensors.torch.save_file(
                         tensors,
-                        f"/tmp/encoder_cache.{embedding_lists[idx][0]}.safetensors",
+                        f"/tmp/encoder_cache.{embedding_item.key}.safetensors",
                     )
                     # [gluo FIXME] need mechanism to clean up local files
                     request.multimodal_inputs[
                         idx
                     ].serialized_request = (
-                        f"/tmp/encoder_cache.{embedding_lists[idx][0]}.safetensors"
+                        f"/tmp/encoder_cache.{embedding_item.key}.safetensors"
                     )
                 else:
-                    descriptor = connect.Descriptor(embedding_lists[idx][2])
+                    descriptor = connect.Descriptor(embedding_item.embeddings_cpu)
                     self.readables.append(
                         await self._connector.create_readable(descriptor)
                     )

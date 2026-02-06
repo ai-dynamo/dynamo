@@ -113,7 +113,8 @@ class PreprocessedHandler(ProcessMixIn):
             raise RuntimeError(
                 "No encode workers available to process multimodal input"
             )
-        encode_batch_size = max(1, len(multimodal_inputs) // self.encode_worker_count)
+        total_items = sum(len(urls) for urls in multimodal_inputs.values())
+        encode_batch_size = max(1, total_items // self.encode_worker_count)
         encode_res_gen = []
         for mm_type, urls in multimodal_inputs.items():
             for url in urls:
