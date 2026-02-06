@@ -12,30 +12,54 @@ import argparse
 import asyncio
 import math
 import os
-
-# Mock dependencies before importing planner modules
 import sys
-
-# We'll import the actual Planner class to test its calculation logic
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-# Create mock modules for dependencies that might not be available in test environment
-mock_prometheus = MagicMock()
-mock_prometheus.Gauge = MagicMock()
-mock_prometheus.start_http_server = MagicMock()
 
-mock_runtime = MagicMock()
-mock_runtime.logging = MagicMock()
-mock_runtime.logging.configure_dynamo_logging = MagicMock()
+@pytest.fixture(scope="session", autouse=True)
+def mock_planner_dependencies():
+    """Mock prometheus_client and dynamo.runtime for planner unit tests.
 
-# Patch them into sys.modules before importing
-sys.modules["prometheus_client"] = mock_prometheus
-sys.modules["dynamo.runtime"] = mock_runtime
-sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
+    Historical issue: This file was patching sys.modules at module level,
+    causing test_prometheus_exposition_format_injection.py to receive mocks
+    instead of real prometheus_client (tests passed individually, failed serially).
 
-# Now import after mocking
+    Now uses fixture with try/finally for guaranteed cleanup.
+    """
+    # Save originals
+    original_modules = {
+        "prometheus_client": sys.modules.get("prometheus_client"),
+        "dynamo.runtime": sys.modules.get("dynamo.runtime"),
+        "dynamo.runtime.logging": sys.modules.get("dynamo.runtime.logging"),
+    }
+
+    try:
+        # Create and inject mocks
+        mock_prometheus = MagicMock()
+        mock_prometheus.Gauge = MagicMock()
+        mock_prometheus.start_http_server = MagicMock()
+
+        mock_runtime = MagicMock()
+        mock_runtime.logging = MagicMock()
+        mock_runtime.logging.configure_dynamo_logging = MagicMock()
+
+        sys.modules["prometheus_client"] = mock_prometheus
+        sys.modules["dynamo.runtime"] = mock_runtime
+        sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
+
+        yield
+    finally:
+        # Always restore originals
+        for module_name, original_module in original_modules.items():
+            if original_module is not None:
+                sys.modules[module_name] = original_module
+            elif module_name in sys.modules:
+                del sys.modules[module_name]
+
+
+# Import after mocking (happens after fixture is set up)
 from dynamo.planner.utils.planner_core import (  # noqa: E402
     DecodePlanner,
     Metrics,

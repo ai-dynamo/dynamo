@@ -155,13 +155,13 @@ class TestPrometheusExpositionFormatInjection:
         assert "python_gc_objects" not in expfmt
 
     def test_inject_labels_with_add_prefix(self):
-        """Test label injection works with metric name prefixing"""
-        # Create registry with a counter
+        """Test label injection works with metric prefix filtering"""
+        # Create registry with a counter that has trtllm_ prefix
         registry = CollectorRegistry()
-        counter = Counter("requests", "Requests", registry=registry)
+        counter = Counter("trtllm_requests", "TensorRT-LLM Requests", registry=registry)
         counter.inc(5)
 
-        # Get exposition format with prefix addition and label injection
+        # Get exposition format filtering for trtllm metrics and inject labels
         labels_to_inject = {
             prometheus_names.labels.NAMESPACE: "prod",
             prometheus_names.labels.MODEL: "qwen-32b",
@@ -172,13 +172,10 @@ class TestPrometheusExpositionFormatInjection:
             inject_custom_labels=labels_to_inject,
         )
 
-        # Verify metric has prefix and injected labels
+        # Verify metric is present with injected labels
         assert "trtllm_requests" in expfmt
         assert f'{prometheus_names.labels.NAMESPACE}="prod"' in expfmt
         assert f'{prometheus_names.labels.MODEL}="qwen-32b"' in expfmt
-
-        # Verify original metric name is not present
-        assert "requests_total{" not in expfmt or "trtllm_requests" in expfmt
 
     def test_inject_labels_with_existing_labels(self):
         """Test label injection merges with existing metric labels"""
