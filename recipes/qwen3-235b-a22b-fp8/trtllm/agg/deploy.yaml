@@ -13,10 +13,6 @@ data:
     moe_tensor_parallel_size: 1
     enable_attention_dp: false
     enable_chunked_prefill: true
-    build_config:
-      max_batch_size: 128
-      max_num_tokens: 8192
-      max_seq_len: 8192
     kv_cache_config:
       enable_block_reuse: true
       free_gpu_memory_fraction: 0.8
@@ -91,6 +87,9 @@ spec:
               python3 -m dynamo.trtllm \
               --model-path "${MODEL_PATH}" \
               --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+              --max-batch-size 128 \
+              --max-num-tokens 8192 \
+              --max-seq-len 8192 \
               --extra-engine-args "${ENGINE_ARGS}"
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           workingDir: /workspace/components/backends/trtllm

@@ -262,7 +262,8 @@ impl
 
                 None => None,
             }
-        });
+        })
+        .fuse();
 
         // convert stream of processed Annotated<LLMEngineOutput> to Annotated<BackendOutput>
         //let mdcsum = self.mdcsum.clone();

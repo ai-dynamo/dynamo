@@ -547,6 +547,10 @@ def tester(llm_server):
 class TestDeterminismDisagg(BaseTestDeterminism):
     """Test class for determinism validation."""
 
+    @pytest.mark.skipif(
+        check_module_available("tensorrt_llm"),
+        reason="Skipping test until the TRT-LLM disagg hang issue is fixed. (https://github.com/NVIDIA/TensorRT-LLM/pull/11247)",
+    )
     @pytest.mark.parametrize(
         "llm_server",
         [

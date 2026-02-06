@@ -38,7 +38,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             migration_limit=migration_limit,
             extra_args=extra_args if extra_args else None,
             extra_env=extra_env,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             display_name="frontend",
         )
 

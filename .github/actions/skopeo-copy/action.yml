@@ -1,0 +1,111 @@
+name: 'Skopeo Copy'
+description: 'Copy container images between registries using skopeo'
+
+inputs:
+  source_registry:
+    description: 'Source registry hostname (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com)'
+    required: true
+  source_image:
+    description: 'Source image name (e.g., ai-dynamo/dynamo)'
+    required: true
+  source_tag:
+    description: 'Source image tag'
+    required: true
+  target_registry:
+    description: 'Target registry hostname'
+    required: true
+  target_image:
+    description: 'Target image name (defaults to source_image if not specified)'
+    required: false
+  target_tag:
+    description: 'Target image tag (defaults to source_tag if not specified)'
+    required: false
+
+  # Skopeo Login inputs for source registry
+  source_aws_default_region:
+    description: 'AWS Default Region for source ECR'
+    required: false
+  source_aws_account_id:
+    description: 'AWS Account ID for source ECR'
+    required: false
+  source_azure_acr_hostname:
+    description: 'Azure ACR hostname for source registry'
+    required: false
+  source_azure_acr_user:
+    description: 'Azure ACR user for source registry'
+    required: false
+  source_azure_acr_password:
+    description: 'Azure ACR password for source registry'
+    required: false
+  # Skopeo Login inputs for target registry
+  target_aws_default_region:
+    description: 'AWS Default Region for target ECR'
+    required: false
+  target_aws_account_id:
+    description: 'AWS Account ID for target ECR'
+    required: false
+  target_azure_acr_hostname:
+    description: 'Azure ACR hostname for target registry'
+    required: false
+  target_azure_acr_user:
+    description: 'Azure ACR user for target registry'
+    required: false
+  target_azure_acr_password:
+    description: 'Azure ACR password for target registry'
+    required: false
+
+outputs:
+  target_image_ref:
+    description: 'Full target image reference'
+    value: ${{ steps.copy.outputs.target_image_ref }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Login to Source Registry
+      uses: ./.github/actions/skopeo-login
+      with:
+        aws_default_region: ${{ inputs.source_aws_default_region }}
+        aws_account_id: ${{ inputs.source_aws_account_id }}
+        azure_acr_hostname: ${{ inputs.source_azure_acr_hostname }}
+        azure_acr_user: ${{ inputs.source_azure_acr_user }}
+        azure_acr_password: ${{ inputs.source_azure_acr_password }}
+
+    - name: Login to Target Registry
+      uses: ./.github/actions/skopeo-login
+      with:
+        aws_default_region: ${{ inputs.target_aws_default_region }}
+        aws_account_id: ${{ inputs.target_aws_account_id }}
+        azure_acr_hostname: ${{ inputs.target_azure_acr_hostname }}
+        azure_acr_user: ${{ inputs.target_azure_acr_user }}
+        azure_acr_password: ${{ inputs.target_azure_acr_password }}
+
+    - name: Copy Image
+      id: copy
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        SOURCE_REF="docker://${{ inputs.source_registry }}/${{ inputs.source_image }}:${{ inputs.source_tag }}"
+
+        # Use source values as defaults if target not specified
+        TARGET_IMAGE="${{ inputs.target_image }}"
+        if [ -z "$TARGET_IMAGE" ]; then
+          TARGET_IMAGE="${{ inputs.source_image }}"
+        fi
+
+        TARGET_TAG="${{ inputs.target_tag }}"
+        if [ -z "$TARGET_TAG" ]; then
+          TARGET_TAG="${{ inputs.source_tag }}"
+        fi
+
+        TARGET_REF="docker://${{ inputs.target_registry }}/${TARGET_IMAGE}:${TARGET_TAG}"
+
+        echo "Copying image:"
+        echo "  Source: ${SOURCE_REF}"
+        echo "  Target: ${TARGET_REF}"
+
+        skopeo copy --all "${SOURCE_REF}" "${TARGET_REF}"
+
+        echo "target_image_ref=${{ inputs.target_registry }}/${TARGET_IMAGE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
+        echo "✅ Image copied successfully"

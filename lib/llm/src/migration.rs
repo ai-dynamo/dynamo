@@ -77,7 +77,8 @@ impl
                 .next()
                 .await
                 .map(|response| (response, retry_manager))
-        });
+        })
+        .fuse();
         Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx_))
     }
 }

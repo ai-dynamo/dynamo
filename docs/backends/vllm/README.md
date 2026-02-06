@@ -37,11 +37,11 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|------|-------|
 | [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
-| [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ |  |
-| [**LMCache**](./LMCache_Integration.md) | ✅ |  |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/components/planner/planner_guide.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/components/planner/README.md) | 🚧 | WIP |
+| [**KVBM**](../../../docs/components/kvbm/README.md) | ✅ |  |
+| [**LMCache**](../../integrations/lmcache_integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
@@ -144,7 +144,9 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
 This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
 
-**Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
+**Guide:** [Speculative Decoding Quickstart](../../features/speculative_decoding/speculative_decoding_vllm.md)
+
+> **See also:** [Speculative Decoding Feature Overview](../../features/speculative_decoding/README.md) for cross-backend documentation.
 
 ### Kubernetes Deployment
 
@@ -177,7 +179,7 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [KV Cache Routing](../../../docs/router/kv_cache_routing.md) on deterministic event IDs.
+See the high-level notes in [Router Design](../../design_docs/router_design.md#deterministic-event-ids) on deterministic event IDs.
 
 ## Request Migration
 

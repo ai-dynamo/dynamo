@@ -94,7 +94,7 @@ class KVRouterProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
             ],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         self.port = frontend_port
 
@@ -1222,7 +1222,7 @@ def _test_router_overload_503(
                 )
             ],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         kv_router.__enter__()
 
