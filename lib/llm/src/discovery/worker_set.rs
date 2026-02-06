@@ -187,4 +187,55 @@ mod tests {
         assert!(ws.is_prefill_set());
     }
 
+    #[test]
+    fn test_worker_count_without_watcher() {
+        // In-process models have no discovery watcher; worker_count defaults to 1
+        let ws = make_worker_set("ns1", "abc");
+        assert_eq!(ws.worker_count(), 1);
+    }
+
+    #[test]
+    fn test_worker_count_with_watcher() {
+        let mut ws = make_worker_set("ns1", "abc");
+
+        // Simulate a discovery watcher with 3 workers
+        let (tx, rx) = watch::channel(vec![1, 2, 3]);
+        ws.set_instance_watcher(rx);
+        assert_eq!(ws.worker_count(), 3);
+
+        // Workers leave → count drops
+        tx.send(vec![1]).unwrap();
+        assert_eq!(ws.worker_count(), 1);
+
+        // All workers gone → count is 0
+        tx.send(vec![]).unwrap();
+        assert_eq!(ws.worker_count(), 0);
+    }
+
+    #[test]
+    fn test_worker_count_with_empty_watcher() {
+        // Discovery watcher starts empty (no workers have joined yet)
+        let mut ws = make_worker_set("ns1", "abc");
+        let (_tx, rx) = watch::channel::<Vec<u64>>(vec![]);
+        ws.set_instance_watcher(rx);
+        assert_eq!(ws.worker_count(), 0);
+    }
+
+    #[test]
+    fn test_worker_count_updates_on_join() {
+        let mut ws = make_worker_set("ns1", "abc");
+        let (tx, rx) = watch::channel::<Vec<u64>>(vec![]);
+        ws.set_instance_watcher(rx);
+        assert_eq!(ws.worker_count(), 0);
+
+        // Workers join one by one
+        tx.send(vec![100]).unwrap();
+        assert_eq!(ws.worker_count(), 1);
+
+        tx.send(vec![100, 200]).unwrap();
+        assert_eq!(ws.worker_count(), 2);
+
+        tx.send(vec![100, 200, 300]).unwrap();
+        assert_eq!(ws.worker_count(), 3);
+    }
 }
