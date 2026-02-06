@@ -521,17 +521,23 @@ class ManagedDeployment:
 
         if kubeconfig_path and os.path.exists(kubeconfig_path):
             # Explicit kubeconfig provided (CI scenario) - use it first
+            self._logger.info(f"Loading kubeconfig from KUBECONFIG: {kubeconfig_path}")
             await config.load_kube_config(config_file=kubeconfig_path)
             self._in_cluster = False
+            self._logger.info("Successfully loaded kubeconfig from KUBECONFIG")
         else:
             try:
                 # Try in-cluster config (for pods without explicit kubeconfig)
+                self._logger.info("Attempting in-cluster kubernetes config")
                 config.load_incluster_config()
                 self._in_cluster = True
+                self._logger.info("Successfully loaded in-cluster kubernetes config")
             except Exception:
                 # Fallback to default kube config file (for local development)
+                self._logger.info("In-cluster config not available, using default kubeconfig (~/.kube/config)")
                 await config.load_kube_config()
                 self._in_cluster = False
+                self._logger.info("Successfully loaded default kubeconfig")
 
         k8s_client = client.ApiClient()
         self._custom_api = client.CustomObjectsApi(k8s_client)
