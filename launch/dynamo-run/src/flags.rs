@@ -230,6 +230,10 @@ pub enum RouterMode {
     Random,
     #[value(name = "kv")]
     KV,
+    /// Direct routing - reads worker ID from each request's routing hints.
+    /// Used when an external orchestrator (e.g., EPP) handles worker selection.
+    #[value(name = "direct")]
+    Direct,
 }
 
 impl From<RouterMode> for RuntimeRouterMode {
@@ -238,6 +242,7 @@ impl From<RouterMode> for RuntimeRouterMode {
             RouterMode::RoundRobin => RuntimeRouterMode::RoundRobin,
             RouterMode::Random => RuntimeRouterMode::Random,
             RouterMode::KV => RuntimeRouterMode::KV,
+            RouterMode::Direct => RuntimeRouterMode::Direct,
         }
     }
 }

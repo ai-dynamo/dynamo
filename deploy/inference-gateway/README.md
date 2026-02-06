@@ -63,26 +63,6 @@ kubectl get gateway inference-gateway
 
 ### 3. Setup secrets ###
 
-Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
-Make sure to enable kv-routing by adding the env var in the FrontEnd.
-```bash
-    mainContainer:
-      image: ...
-      env:
-        - name: DYN_ROUTER_MODE
-          value: "kv"
-```
-
-Sample commands to deploy model:
-
-```bash
-cd <dynamo-source-root>
-cd examples/backends/vllm/deploy
-kubectl apply -f agg.yaml -n my-model
-```
-
-Take a note of or change the DYNAMO_IMAGE in the model deployment file.
-
 Do not forget docker registry secret if needed.
 
 ```bash
@@ -93,7 +73,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --namespace=$NAMESPACE
 ```
 
-Do not forget to include the HuggingFace token if required.
+Do not forget to include the HuggingFace token.
 
 ```bash
 export HF_TOKEN=your_hf_token
@@ -139,12 +119,33 @@ make info # Check image tag
 We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
 you could deploy it as a standalone pod
 
-#### 5.a. Deploy as a DGD component
+#### 5.a. Deploy as a DGD component (recommended)
+
+We provide an example for llama-3-70b vLLM below.
 
 ```bash
-kubectl apply -f operator-managed/examples/agg.yaml -n ${NAMESPACE}
-kubectl apply -f operator-managed/examples/http-route.yaml -n ${NAMESPACE}
+# Deploy PVC, first Update `storageClassName` in recipes/llama-3-70b/model-cache/model-cache.yaml to match your cluster before deploying
+kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml
+kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml
+# Deploy your model
+kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
+# Deploy the GAIE http-route CR.
+kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 ```
+
+-When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
+-You must enable the `--direct-route` flag in the FrontEnd cli.
+```bash
+    command:
+      - python3
+    args:
+      - -m
+      - dynamo.frontend
+      - --router-mode
+      - direct
+```
+-The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
+-The flag assures the routing respects this selection.
 
 **Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
 If your model takes longer to load, increase the `failureThreshold` in the EPP's `startupProbe`. For example,
@@ -166,6 +167,18 @@ If you installed it into a different namespace, you need to adjust the HttpRoute
 
 ##### 5.b.1 Deploy Your Model ###
 
+We provide an example for Qwen vLLM below.
+Before deploying you must enable the `--direct-route` flag in the FrontEnd cli in your Dynamo Graph.
+```bash
+    command:
+      - python3
+    args:
+      - -m
+      - dynamo.frontend
+      - --router-mode
+      - direct
+```
+```
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
 Sample commands to deploy model:
@@ -175,10 +188,6 @@ cd <dynamo-source-root>
 cd examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
-
-Take a note of or change the DYNAMO_IMAGE in the model deployment file.
-
-Do not forget docker registry secret if needed.
 
 ##### 5.b.2 Install Dynamo GIE helm chart ###
 
@@ -216,7 +225,6 @@ Common Vars for Routing Configuration:
 - Set `DYN_ENFORCE_DISAGG=true` if you want to enforce every request being served in the disaggregated manner. By default it is false meaning if the the prefill worker is not available the request will be served in the aggregated manner.
 - By default the Dynamo plugin uses KV routing. You can expose `DYN_USE_KV_ROUTING=false` in your [values.yaml](standalone/helm/dynamo-gaie/values.yaml) if you prefer to route in the round-robin fashion.
 - If using kv-routing:
-  - Overwrite the `DYN_KV_BLOCK_SIZE` in your [values.yaml](standalone/helm/dynamo-gaie/values.yaml) to match your model's block size. The `DYN_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
   - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
   - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
   - Set `DYN_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing
@@ -272,7 +280,7 @@ b. use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n my-model
+kubectl port-forward svc/inference-gateway 8000:80 -n kgateway-system
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
@@ -357,6 +365,14 @@ Sample inference output:
     "total_tokens": 225
   }
 }
+```
+
+***If you have ore than one HttpRoute running on the cluster***
+Add the host to your HttpRoute.yaml and add the header `curl -H "Host: llama3-70b-agg.example.com" ... ` to every request.
+```bash
+spec:
+  hostnames:
+    - llama3-70b-agg.example.com
 ```
 
 ### 8. Deleting the installation ###

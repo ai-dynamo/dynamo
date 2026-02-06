@@ -130,7 +130,7 @@ def parse_args():
     parser.add_argument(
         "--router-mode",
         type=str,
-        choices=["round-robin", "random", "kv"],
+        choices=["round-robin", "random", "kv", "direct"],
         default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
         help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
     )
@@ -376,6 +376,9 @@ async def async_main():
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random
+        kv_router_config = None
+    elif flags.router_mode == "direct":
+        router_mode = RouterMode.Direct
         kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
