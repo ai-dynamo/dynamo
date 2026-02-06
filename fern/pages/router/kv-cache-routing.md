@@ -24,19 +24,25 @@ The main KV-aware routing arguments:
 
 - `--no-kv-events`: Disables KV event tracking. By default (when this flag is not provided), the router uses KV events to monitor block creation and deletion from workers. When disabled with this flag, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Use this flag if your backend doesn't support KV events (or you are not confident in the accuracy or responsiveness of the events).
 
-- `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - those are synchronized through JetStream events
+- `--durable-kv-events`: Enables JetStream mode for KV event transport. Must be specified on **both** the frontend **and** all workers. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane.
 
-- `--router-reset-states`: When specified, resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting with a fresh state. By default (when this flag is not provided), the router persists state across restarts, downloading any available snapshot from NATS object store and continuing to consume events from where it left off. This enables routers to maintain KV cache awareness across restarts. **Warning**: Using `--router-reset-states` can bring existing router replicas into an inconsistent state. Only use this flag when launching the first router replica in a component, or consider using a different namespace/component for a clean slate.
+- `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - in JetStream mode those are synchronized through JetStream events; in local indexer mode (default) each router queries workers directly.
 
-- `--router-snapshot-threshold`: Sets the number of messages in the JetStream before triggering a snapshot. When the message count exceeds this threshold, a router will attempt to purge acknowledged messages from the stream and create a snapshot of the current radix tree state in NATs object store. Defaults to 1000000. This helps manage stream size and provides faster initialization for routers that restart.
+- `--router-reset-states`: Only applies in JetStream mode (`--durable-kv-events`). When specified, resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting with a fresh state. **Warning**: Using `--router-reset-states` can bring existing router replicas into an inconsistent state. Only use this flag when launching the first router replica in a component, or consider using a different namespace/component for a clean slate.
+
+- `--router-snapshot-threshold`: Only applies in JetStream mode (`--durable-kv-events`). Sets the number of messages in the JetStream before triggering a snapshot. When the message count exceeds this threshold, a router will attempt to purge acknowledged messages from the stream and create a snapshot of the current radix tree state in NATS object store. Defaults to 1000000. This helps manage stream size and provides faster initialization for routers that restart.
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
 - `--no-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. By default (`router_assume_kv_reuse=true`), the router computes actual block hashes for sequence tracking to deduplicate blocks and optimize load balancing. When disabled via this flag, the router generates random hashes for sequence blocks, treating each request's blocks as unique. This is useful in disaggregated setups where prefill transfers blocks to decode workers that may already have those blocks cached, but the engine cannot coordinate transfers to avoid duplication. Without this flag, the router's load balancing heuristics would undercount decode blocks when duplicates exist.
 
+- `--track-output-blocks`: Enables tracking of output blocks during generation (default: disabled). When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward `expected_output_tokens`. This improves load balancing accuracy for long-running generation requests by accounting for output-side KV cache growth.
+
 - `--active-decode-blocks-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, blocks-based busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines publish load metrics. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
 
 - `--active-prefill-tokens-threshold`: Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.
+
+- `--active-prefill-tokens-threshold-frac`: Fraction of `max_num_batched_tokens` for busy detection. A worker is marked busy when `active_prefill_tokens > frac * max_num_batched_tokens`. Uses OR logic with `--active-prefill-tokens-threshold` (worker is busy if either threshold is exceeded). If not set, fractional busy detection is disabled.
 
 - `--router-ttl`: Time-to-live in seconds for blocks in the router's local cache predictions. Blocks older than this duration will be automatically expired and removed from the router's radix tree. Defaults to 120.0 seconds when `--no-kv-events` is used. This helps manage memory usage by removing stale cache predictions that are unlikely to be accurate.
 
@@ -273,7 +279,7 @@ graph TD
 - When a worker is removed, the router removes all its blocks from the global radix tree
 
 >[!Note]
-> The router automatically selects the transport mode based on worker configuration. If all connected workers have `enable_local_indexer=true`, the router uses NATS Core mode. Otherwise, it uses JetStream mode.
+> By default, all workers have `enable_local_indexer=true`, so the router uses NATS Core / Event Plane mode with local indexer. To use JetStream mode instead, specify `--durable-kv-events` on **both** the frontend and all workers.
 
 ### Local Active Block Management with Replica Sync
 
@@ -374,7 +380,13 @@ Without this flag, each replica maintains its own isolated view of active blocks
 
 Persistence behavior depends on which event transport mode is active:
 
-**JetStream Mode (default):**
+**NATS Core / Event Plane with Local Indexer Mode (default):**
+- State persists on workers—events are fire-and-forget but workers retain their local indexer state
+- On startup, the router queries each worker's local indexer to rebuild state
+- Recovery depends on workers being available; if a worker is down, its blocks cannot be recovered
+- Simpler infrastructure (no JetStream required)
+
+**JetStream Mode** (`--durable-kv-events` on **both** frontend **and** workers)**:**
 - Prefix blocks are stored in NATS JetStream with 1-hour retention
 - Snapshots saved to NATS object store at configurable thresholds
 - New replicas automatically restore this state on startup
@@ -383,12 +395,6 @@ Persistence behavior depends on which event transport mode is active:
 ```bash
 python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync
 ```
-
-**NATS Core with Local Indexer Mode:**
-- State persists on workers—events are fire-and-forget but workers retain their local indexer state
-- On startup, the router queries each worker's local indexer to rebuild state
-- Recovery depends on workers being available; if a worker is down, its blocks cannot be recovered
-- Simpler infrastructure (no JetStream required) but less resilient
 
 >[!Note]
 > If you need to start with a fresh state in JetStream mode, you have two options:
