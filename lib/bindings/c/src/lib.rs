@@ -1418,7 +1418,7 @@ pub async fn create_worker_selection_pipeline_chat(
     // This registers the model and returns a receiver that will be activated
     // when a prefill worker is discovered
     let prefill_chooser = model_manager
-        .register_prefill_router(model_name.to_string())
+        .register_prefill_router(model_name, namespace)
         .map(|rx| {
             // Create prefill-specific config with track_active_blocks disabled
             let mut prefill_config = kv_router_config.unwrap_or_default();
