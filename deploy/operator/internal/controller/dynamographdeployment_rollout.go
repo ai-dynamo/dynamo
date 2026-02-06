@@ -73,22 +73,12 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	return nil
 }
 
-// isUnsupportedRollingUpdatePathway checks if DGD uses unsupported pathways for custom rolling updates.
-// Grove and LWS deployments use different orchestration and don't support the
-// HAProxy-based rolling update strategy.
-func (r *DynamoGraphDeploymentReconciler) isUnsupportedRollingUpdatePathway(
+// isSupportedRollingUpdatePathway checks if DGD uses supported pathways for custom rolling updates.
+// Grove and LWS deployments use different orchestration and don't support the custom rolling update strategy as of now.
+func (r *DynamoGraphDeploymentReconciler) isSupportedRollingUpdatePathway(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) bool {
-	if r.isGrovePathway(dgd) {
-		return true
-	}
-
-	// Check if any service uses multinode (which requires LWS when Grove is disabled)
-	if dgd.HasAnyMultinodeService() {
-		return true
-	}
-
-	return false
+	return !r.isGrovePathway(dgd) && !dgd.HasAnyMultinodeService()
 }
 
 // getCurrentActiveWorkerHash returns the stored worker hash from DGD annotations.
