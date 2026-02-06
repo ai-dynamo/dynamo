@@ -785,7 +785,10 @@ mod tests {
         let result = formatter.render(&request).unwrap();
 
         // Verify both tools are present
-        assert!(result.contains("get_weather"), "Should contain first function");
+        assert!(
+            result.contains("get_weather"),
+            "Should contain first function"
+        );
         assert!(
             result.contains("get_current_time"),
             "Should contain second function"
@@ -833,10 +836,7 @@ mod tests {
             result.contains("json_schema"),
             "Should contain json_schema type"
         );
-        assert!(
-            result.contains("city_info"),
-            "Should contain schema name"
-        );
+        assert!(result.contains("city_info"), "Should contain schema name");
         assert!(
             result.contains("You are a helpful assistant."),
             "Should preserve original system content"
@@ -924,10 +924,7 @@ mod tests {
         let result = formatter.render(&request).unwrap();
 
         // Verify both tools and response format are present
-        assert!(
-            result.contains("## Tools"),
-            "Should contain Tools section"
-        );
+        assert!(result.contains("## Tools"), "Should contain Tools section");
         assert!(
             result.contains("search_database"),
             "Should contain function name"
