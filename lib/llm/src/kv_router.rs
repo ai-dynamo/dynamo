@@ -471,9 +471,8 @@ impl KvRouter {
         #[cfg(feature = "bench")]
         let start = Instant::now();
 
-        // Validate that context_id is provided when update_states is true
         if update_states && context_id.is_none() {
-            panic!("context_id must be provided if update_states is true");
+            anyhow::bail!("context_id must be provided when update_states is true");
         }
 
         let isl_tokens = tokens.len();
@@ -746,12 +745,12 @@ impl KvPushRouter {
         handle_local_updates: bool,
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
-
-        // Extract LORA name from routing hints
         let lora_name = routing.and_then(|r| r.lora_name.clone());
+        let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
+        let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
-        let Some(id) = (match phase {
+        let preselected_id = match phase {
             RequestPhase::Prefill => {
                 routing.and_then(|r| r.prefill_worker_id.or(r.backend_instance_id))
             }
@@ -759,9 +758,9 @@ impl KvPushRouter {
                 routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id))
             }
             RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
-        }) else {
-            // No preselected worker - find the best match
-            // Don't update states if this is a query-only request
+        };
+
+        let Some(id) = preselected_id else {
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -780,8 +779,6 @@ impl KvPushRouter {
             });
         };
 
-        // Route to pre-selected or explicitly specified worker
-        let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         tracing::debug!(
             worker_id = id,
             dp_rank = dp_rank,
@@ -789,20 +786,12 @@ impl KvPushRouter {
             "Routing to specified worker"
         );
 
-        // Compute actual overlap blocks by querying the indexer
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
             .get_overlap_blocks(&request.token_ids, worker)
             .await?;
 
-        // Extract expected_output_tokens from routing hints
-        let expected_output_tokens = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.expected_output_tokens);
-
-        // Perform add_request if this router handles local updates
         if !is_query_only && handle_local_updates {
             self.chooser
                 .add_request(
