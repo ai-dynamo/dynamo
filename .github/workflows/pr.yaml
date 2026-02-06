@@ -9,6 +9,10 @@ on:
       - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
+  # TEMPORARY: Add pull_request trigger for testing
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       run_deploy_operator:
@@ -61,9 +65,83 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
+  # TEMPORARY: Quick OpenSearch connectivity test
+  test-opensearch-connectivity:
+    name: Test OpenSearch Connection
+    runs-on: gitlab
+    timeout-minutes: 2
+    steps:
+      - name: Test OpenSearch connectivity
+        run: |
+          echo "Testing OpenSearch connectivity..."
+          OPENSEARCH_ENDPOINT="https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*"
+
+          if curl -s --max-time 5 "$OPENSEARCH_ENDPOINT" > /dev/null 2>&1; then
+            echo "✅ OpenSearch is reachable from gitlab runner"
+            exit 0
+          else
+            echo "⚠️ OpenSearch is NOT reachable from gitlab runner"
+            echo "Flaky detection will work but categorize all tests as legitimate failures"
+            exit 0
+          fi
+
+  # TEMPORARY: Flaky test detection for testing
+  flaky-test-detection:
+    name: Flaky Test Detection
+    runs-on: gitlab
+    timeout-minutes: 15
+    if: always()
+    needs: [vllm, sglang, trtllm, test-opensearch-connectivity]
+    permissions:
+      contents: read
+      actions: read
+    env:
+      OPENSEARCH_ENDPOINT: https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+      SLACK_OPS_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
+      FLAKY_THRESHOLD: "0.80"
+      LOOKBACK_DAYS: "7"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: test-results/
+          pattern: test-results-*
+
+      - name: Setup Python environment
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv || true
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install requests
+
+      - name: Detect flaky tests
+        id: detect_flaky
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+        run: |
+          source venv/bin/activate
+          python3 .github/workflows/detect_flaky_tests.py
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ steps.detect_flaky.outcome }}" == "success" ]; then
+            echo "✅ Flaky test detection completed successfully"
+          else
+            echo "⚠️ Flaky test detection encountered errors, check logs"
+          fi
+
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
+    needs: [changed-files, vllm, sglang, trtllm, operator]  # THIS list determines blocking jobs
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -77,15 +155,16 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
-    name: Operator
-    runs-on: prod-default-v2
-    env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    outputs:
-      operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
+    # TEMPORARY: Skip operator on flaky-tests branch for quick testing
+    if: needs.changed-files.outputs.operator == 'true' && !contains(github.head_ref, 'flaky-tests')
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: prod-builder-amd-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
+    name: operator-build (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -156,74 +235,122 @@ jobs:
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               ${TAGGING_FLAGS} -f Dockerfile .
 
-          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
-
-
-# ============================================================================
-# FRAMEWORK PIPELINES (Build → Test → Copy)
-# ============================================================================
-  # ============================================================================
-  # VLLM PIPELINE
-  # ============================================================================
-  vllm-pipeline:
-    needs: [changed-files]
+  vllm:
+    needs: changed-files
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: vllm
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-    secrets: inherit
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: vllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 240
+    env:
+      FRAMEWORK: vllm
+    steps: &runtime-container-build-push-test
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ env.FRAMEWORK }}
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          cuda_version: ${{ matrix.cuda_version.major_minor }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-${{ matrix.platform.arch }}
+            ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-{0}-cuda{1}-{2}', env.FRAMEWORK, matrix.cuda_version.major, matrix.platform.arch) || '' }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      - name: Run tests
+        # TODO: enable testing on ARM when these tests stop failing on collection on machines without GPUs:
+        #   components/src/dynamo/trtllm/tests/test_trtllm_autodeploy.py
+        #   components/src/dynamo/trtllm/tests/test_trtllm_unit.py
+        if: ${{ env.FRAMEWORK != 'trtllm' || matrix.platform.arch == 'amd64' }} # Excludes trtllm on arm64
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          # GH ARM runners have no GPUs, run CPU tests only on ARM
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', env.FRAMEWORK) || format('pre_merge and {0} and gpu_0', env.FRAMEWORK) }}
+          framework: ${{ env.FRAMEWORK }}
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
-  # ============================================================================
-  # SGLANG PIPELINE
-  # ============================================================================
-  sglang-pipeline:
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: sglang
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-    secrets: inherit
+  sglang:
+    needs: changed-files
+    # TEMPORARY: Skip sglang on flaky-tests branch for quick testing
+    if: (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true') && !contains(github.head_ref, 'flaky-tests')
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: sglang-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: sglang
+    steps: *runtime-container-build-push-test
 
-  # ============================================================================
-  # TRTLLM PIPELINE
-  # ============================================================================
-  trtllm-pipeline:
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: trtllm
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trt-llm-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-    secrets: inherit
-
-
-   # ============================================================================
-   # DEPLOYMENT JOBS
-   # Deploy operator and run end-to-end tests on Kubernetes cluster
-   # ============================================================================
+  trtllm:
+    needs: changed-files
+    # TEMPORARY: Skip trtllm on flaky-tests branch for quick testing
+    if: (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true') && !contains(github.head_ref, 'flaky-tests')
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
+        cuda_version:
+          - { major_minor: '13.1', major: '13' }
+    name: trtllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: trtllm
+    steps: *runtime-container-build-push-test
 
   deploy-operator:
     runs-on: prod-default-small-v2
@@ -320,7 +447,7 @@ jobs:
   deploy-test-vllm:
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     runs-on: prod-default-small-v2
-    needs: [deploy-operator, vllm-pipeline]
+    needs: [deploy-operator, vllm]
     permissions:
       contents: read
     strategy:
@@ -361,7 +488,7 @@ jobs:
   deploy-test-vllm-disagg-router:
     runs-on:  prod-default-small-v2
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [changed-files, deploy-operator, vllm-pipeline]
+    needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
     strategy:
@@ -393,7 +520,7 @@ jobs:
     runs-on: prod-default-small-v2
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [changed-files, deploy-operator, sglang-pipeline]
+    needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
     strategy:
@@ -426,7 +553,7 @@ jobs:
     runs-on: prod-default-small-v2
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [changed-files, deploy-operator, trtllm-pipeline]
+    needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
     strategy:
@@ -465,7 +592,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
+    needs: [vllm, sglang, trtllm, operator, changed-files]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

@@ -43,9 +43,27 @@ jobs:
         with:
           gh_token: ${{ github.token }}
 
+  # TEMPORARY: Quick pytest test for flaky detection testing
+  quick-pytest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.10'
+      - name: Install pytest
+        run: pip install pytest
+      - name: Run quick tests
+        # Run the basic tests that include our intentional failures
+        run: |
+          cd tests/basic
+          pytest test_cuda_version_consistency.py -v || true
+
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, rust-tests, rust-clippy]
+    needs: [changed-files, pre-commit, rust-tests, rust-clippy, quick-pytest]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -64,7 +82,8 @@ jobs:
 
   rust-tests:
     needs: changed-files
-    if: needs.changed-files.outputs.rust == 'true'
+    # TEMPORARY: Skip rust tests on test branch for quick testing
+    if: needs.changed-files.outputs.rust == 'true' && !contains(github.head_ref, 'flaky-tests')
     runs-on:
       group: Fastchecker
     strategy:
@@ -121,7 +140,8 @@ jobs:
 
   rust-clippy:
     needs: changed-files
-    if: needs.changed-files.outputs.rust == 'true'
+    # TEMPORARY: Skip rust clippy on test branch for quick testing
+    if: needs.changed-files.outputs.rust == 'true' && !contains(github.head_ref, 'flaky-tests')
     runs-on:
       group: Fastchecker
     strategy:

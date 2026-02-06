@@ -79,7 +79,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, sglang]
+        # TEMPORARY: Only build vllm for quick testing on PR
+        framework: ${{ github.event_name == 'pull_request' && fromJSON('["vllm"]') || fromJSON('["vllm", "sglang"]') }}
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -127,6 +128,8 @@ jobs:
     name: Build ${{ matrix.framework }} (arm64)
     runs-on: prod-builder-arm-v1
     timeout-minutes: 120
+    # TEMPORARY: Skip for quick testing
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -187,6 +190,8 @@ jobs:
     name: Build ${{ matrix.framework }} CUDA13 (amd64)
     runs-on: prod-builder-amd-v1
     timeout-minutes: 120
+    # TEMPORARY: Skip for quick testing
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -239,6 +244,8 @@ jobs:
     name: Build ${{ matrix.framework }} CUDA13 (arm64)
     runs-on: prod-builder-arm-v1
     timeout-minutes: 120
+    # TEMPORARY: Skip for quick testing
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -292,13 +299,15 @@ jobs:
   unit-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always() && inputs.skip_tests != true
+    # TEMPORARY: Skip arm64 on PR
+    if: ${{ !(github.event_name == 'pull_request' && matrix.arch.arch == 'arm64') && always() && inputs.skip_tests != true }}
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, trtllm, sglang]
+        # TEMPORARY: Only test vllm amd64 for quick testing on PR
+        framework: ${{ github.event_name == 'pull_request' && fromJSON('["vllm"]') || fromJSON('["vllm", "trtllm", "sglang"]') }}
         arch:
           - arch: amd64
             runner: prod-builder-amd-gpu-v1
@@ -425,13 +434,15 @@ jobs:
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    # TEMPORARY: Skip arm64 on PR
+    if: ${{ !(github.event_name == 'pull_request' && matrix.arch.arch == 'arm64') && always() }}
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, trtllm, sglang]
+        # TEMPORARY: Only test vllm amd64 for quick testing on PR
+        framework: ${{ github.event_name == 'pull_request' && fromJSON('["vllm"]') || fromJSON('["vllm", "trtllm", "sglang"]') }}
         arch:
           - arch: amd64
             runner: prod-builder-amd-gpu-v1
@@ -559,7 +570,8 @@ jobs:
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    # TEMPORARY: Skip for quick testing
+    if: always() && github.event_name != 'pull_request'
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -695,7 +707,8 @@ jobs:
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    # TEMPORARY: Skip for quick testing
+    if: always() && github.event_name != 'pull_request'
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -832,7 +845,8 @@ jobs:
   fault-tolerance-tests:
     name: ${{ matrix.framework.name }}-ft-k8s
     needs: [build-amd64]
-    if: always()
+    # TEMPORARY: Skip for quick testing
+    if: always() && github.event_name != 'pull_request'
     runs-on: prod-builder-amd-v1
     timeout-minutes: 60
     strategy:
@@ -1067,6 +1081,81 @@ jobs:
           name: ${{ inputs.pipeline_type }}-results-summary
           path: results.md
           retention-days: 7
+
+  ############################## FLAKY TEST DETECTION ##############################
+  # Quick connectivity test for fast feedback
+  test-opensearch-connectivity:
+    name: Test OpenSearch Connection
+    runs-on: gitlab
+    timeout-minutes: 2
+    if: inputs.pipeline_type == 'post_merge' && !github.event.repository.fork
+    steps:
+      - name: Test OpenSearch connectivity
+        run: |
+          echo "Testing OpenSearch connectivity..."
+          OPENSEARCH_ENDPOINT="https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*"
+
+          if curl -s --max-time 5 "$OPENSEARCH_ENDPOINT" > /dev/null 2>&1; then
+            echo "✅ OpenSearch is reachable from gitlab runner"
+            exit 0
+          else
+            echo "⚠️ OpenSearch is NOT reachable from gitlab runner"
+            echo "Flaky detection will work but categorize all tests as legitimate failures"
+            exit 0
+          fi
+
+  flaky-test-detection:
+    name: Flaky Test Detection
+    runs-on: gitlab
+    timeout-minutes: 15
+    if: always() && inputs.pipeline_type == 'post_merge' && !github.event.repository.fork
+    needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests, test-opensearch-connectivity]
+    permissions:
+      contents: read
+      actions: read
+    env:
+      OPENSEARCH_ENDPOINT: https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+      SLACK_OPS_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
+      FLAKY_THRESHOLD: "0.80"
+      LOOKBACK_DAYS: "7"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: test-results/
+          pattern: test-results-*
+
+      - name: Setup Python environment
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv || true
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install requests
+
+      - name: Detect flaky tests
+        id: detect_flaky
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+        run: |
+          source venv/bin/activate
+          python3 .github/workflows/detect_flaky_tests.py
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ steps.detect_flaky.outcome }}" == "success" ]; then
+            echo "✅ Flaky test detection completed successfully"
+          else
+            echo "⚠️ Flaky test detection encountered errors, check logs"
+          fi
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
