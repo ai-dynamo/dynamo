@@ -264,19 +264,6 @@ impl ModelWatcher {
         let model_name = card.name().to_string();
         let worker_namespace = &mcid.namespace;
 
-        // Decrement worker count for this namespace's WorkerSet
-        if let Some(model) = self.manager.get_model(&model_name) {
-            if let Some(ws) = model.get_worker_set(worker_namespace) {
-                let remaining = ws.decrement_workers();
-                tracing::debug!(
-                    model_name,
-                    namespace = %worker_namespace,
-                    remaining_workers = remaining,
-                    "Decremented worker count for WorkerSet"
-                );
-            }
-        }
-
         // Query discovery for all remaining instances of this model
         let active_instances = self
             .cards_for_model_with_endpoints(&model_name, namespace_filter)
@@ -337,14 +324,12 @@ impl ModelWatcher {
         let namespace = mcid.namespace.clone();
 
         if let Some(model) = self.manager.get_model(&model_name) {
-            if let Some(ws) = model.get_worker_set(&namespace) {
+            if model.has_worker_set(&namespace) {
                 self.manager
                     .save_model_card(&mcid.to_path(), card.clone())?;
-                let count = ws.increment_workers();
                 tracing::debug!(
                     model_name = card.name(),
                     namespace = namespace,
-                    worker_count = count,
                     "Worker joined existing WorkerSet, skipping pipeline build"
                 );
                 return Ok(());
@@ -387,6 +372,7 @@ impl ModelWatcher {
             .component(&mcid.component)?;
         let endpoint = component.endpoint(&mcid.endpoint);
         let client = endpoint.client().await?;
+        let instance_watcher = client.instance_avail_watcher();
         tracing::debug!(model_name = card.name(), namespace = mcid.namespace, "building worker set pipeline");
         self.manager
             .save_model_card(&mcid.to_path(), card.clone())?;
@@ -404,6 +390,7 @@ impl ModelWatcher {
             checksum.to_string(),
             card.clone(),
         );
+        worker_set.set_instance_watcher(instance_watcher);
 
         if card.model_input == ModelInput::Tokens
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
@@ -663,7 +650,6 @@ impl ModelWatcher {
 
             // Prefill sets have no engines — we add the WorkerSet first for tracking,
             // then activate the prefill router.
-            worker_set.increment_workers();
             self.manager.add_worker_set(card.name(), &namespace, worker_set);
 
             let Ok(()) = self.manager.activate_prefill_router(card.name(), &namespace, endpoint) else {
@@ -688,9 +674,6 @@ impl ModelWatcher {
                 card.model_input.as_str()
             );
         }
-
-        // Count the first worker that triggered this registration
-        worker_set.increment_workers();
 
         // Add the completed WorkerSet to the Model
         self.manager.add_worker_set(card.name(), &namespace, worker_set);

@@ -8,7 +8,9 @@
 //! During rolling updates, multiple WorkerSets coexist under the same Model, each
 //! serving traffic proportional to its worker count.
 
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::Arc;
+
+use tokio::sync::watch;
 
 use crate::{
     discovery::KvWorkerMonitor,
@@ -54,8 +56,9 @@ pub struct WorkerSet {
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
-    /// Number of active workers in this set (for weighted selection)
-    worker_count: AtomicUsize,
+    /// Watcher for available instance IDs (from the Client's discovery watch).
+    /// None for in-process models (http/grpc) which don't have a discovery client.
+    instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
 }
 
 impl WorkerSet {
@@ -77,7 +80,7 @@ impl WorkerSet {
             kv_router: None,
             prefill_router: None,
             worker_monitor: None,
-            worker_count: AtomicUsize::new(0),
+            instance_count_rx: None,
         }
     }
 
@@ -139,33 +142,19 @@ impl WorkerSet {
         )
     }
 
-    /// Number of active workers in this set.
+    /// Number of active workers in this set, derived from the Client's discovery watcher.
+    /// Returns 0 for in-process models (no watcher).
     pub fn worker_count(&self) -> usize {
-        self.worker_count.load(Ordering::Relaxed)
+        self.instance_count_rx
+            .as_ref()
+            .map(|rx| rx.borrow().len())
+            .unwrap_or(0)
     }
 
-    /// Increment worker count (worker joined this set).
-    pub fn increment_workers(&self) -> usize {
-        self.worker_count.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// Decrement worker count (worker left this set). Returns new count.
-    pub fn decrement_workers(&self) -> usize {
-        loop {
-            let current = self.worker_count.load(Ordering::Relaxed);
-            if current == 0 {
-                return 0;
-            }
-            match self.worker_count.compare_exchange_weak(
-                current,
-                current - 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return current - 1,
-                Err(_) => continue,
-            }
-        }
+    /// Store the instance watcher from the Client's discovery system.
+    /// Must be called before the WorkerSet is wrapped in Arc.
+    pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
+        self.instance_count_rx = Some(rx);
     }
 }
 
@@ -201,33 +190,4 @@ mod tests {
         assert!(ws.is_prefill_set());
     }
 
-    #[test]
-    fn test_worker_count_increment() {
-        let ws = make_worker_set("ns1", "abc123");
-        assert_eq!(ws.worker_count(), 0);
-        assert_eq!(ws.increment_workers(), 1);
-        assert_eq!(ws.increment_workers(), 2);
-        assert_eq!(ws.increment_workers(), 3);
-        assert_eq!(ws.worker_count(), 3);
-    }
-
-    #[test]
-    fn test_worker_count_decrement() {
-        let ws = make_worker_set("ns1", "abc123");
-        ws.increment_workers();
-        ws.increment_workers();
-        ws.increment_workers();
-        assert_eq!(ws.decrement_workers(), 2);
-        assert_eq!(ws.decrement_workers(), 1);
-        assert_eq!(ws.decrement_workers(), 0);
-        assert_eq!(ws.worker_count(), 0);
-    }
-
-    #[test]
-    fn test_worker_count_decrement_at_zero() {
-        let ws = make_worker_set("ns1", "abc123");
-        assert_eq!(ws.decrement_workers(), 0);
-        assert_eq!(ws.decrement_workers(), 0);
-        assert_eq!(ws.worker_count(), 0);
-    }
 }
