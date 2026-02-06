@@ -272,21 +272,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_isolation() {
+    async fn test_cross_session_access_within_tenant() {
         let storage = InMemoryResponseStorage::new();
         let response_data = serde_json::json!({"data": "session_1"});
 
         let response_id = storage
-            .store_response("tenant_a", "session_1", None, response_data, None)
+            .store_response("tenant_a", "session_1", None, response_data.clone(), None)
             .await
             .unwrap();
 
-        // Same tenant, different session should not be able to access
+        // Same tenant, different session CAN access (session is metadata, not boundary)
         let result = storage
             .get_response("tenant_a", "session_2", &response_id)
             .await;
 
-        assert!(matches!(result, Err(StorageError::NotFound)));
+        assert!(result.is_ok());
+        let retrieved = result.unwrap();
+        assert_eq!(retrieved.session_id, "session_1"); // Original session metadata preserved
+        assert_eq!(retrieved.response, response_data);
     }
 
     #[tokio::test]

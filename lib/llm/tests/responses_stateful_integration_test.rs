@@ -204,7 +204,7 @@ async fn test_tenant_isolation() {
 }
 
 #[tokio::test]
-async fn test_session_isolation() {
+async fn test_cross_session_access_within_tenant() {
     let storage = InMemoryResponseStorage::new();
 
     // Store response in session 1
@@ -214,14 +214,18 @@ async fn test_session_isolation() {
         .await
         .unwrap();
 
-    // Attempt to retrieve from session 2 (same tenant) - should fail
+    // Cross-session access within same tenant should SUCCEED
+    // (session is metadata, not a security boundary — enables multi-agent workflows)
     let result = storage
         .get_response("tenant_a", "session_2", &response_id)
         .await;
 
-    assert!(matches!(result, Err(StorageError::NotFound)));
+    assert!(result.is_ok());
+    let retrieved = result.unwrap();
+    assert_eq!(retrieved.session_id, "session_1"); // Original session metadata preserved
+    assert_eq!(retrieved.response, response_data);
 
-    // Session 1 should be able to retrieve
+    // Session 1 should also still retrieve
     let retrieved = storage
         .get_response("tenant_a", "session_1", &response_id)
         .await
@@ -407,7 +411,8 @@ async fn test_concurrent_sessions_same_tenant() {
 
     assert_eq!(results.len(), 5);
 
-    // Verify cross-session isolation - session 0 can't access session 1's data
+    // Cross-session access within same tenant should SUCCEED
+    // (session is metadata, not a security boundary — enables multi-agent workflows)
     let (session_0_id, _) = &results[0];
     let (_, session_1_response_id) = &results[1];
 
@@ -415,7 +420,7 @@ async fn test_concurrent_sessions_same_tenant() {
         .get_response(tenant_id, session_0_id, session_1_response_id)
         .await;
 
-    assert!(matches!(cross_access, Err(StorageError::NotFound)));
+    assert!(cross_access.is_ok(), "Cross-session access within same tenant should succeed");
 }
 
 #[tokio::test]
@@ -514,7 +519,7 @@ async fn test_storage_key_pattern() {
         .await
         .unwrap();
 
-    // Each should only be accessible with correct tenant/session combo
+    // Each should be accessible with correct tenant (session is metadata, not boundary)
     let retrieved_1 = storage
         .get_response("tenant1", "session1", &response_id_1)
         .await
@@ -527,19 +532,21 @@ async fn test_storage_key_pattern() {
         .unwrap();
     assert_eq!(retrieved_2.response["data"], 2);
 
-    // Cross-access should fail
+    // Cross-TENANT access should fail (tenant is the hard boundary)
     assert!(
         storage
             .get_response("tenant1", "session1", &response_id_2)
             .await
-            .is_err()
+            .is_err(),
+        "Cross-tenant access should fail"
     );
 
     assert!(
         storage
             .get_response("tenant2", "session2", &response_id_1)
             .await
-            .is_err()
+            .is_err(),
+        "Cross-tenant access should fail"
     );
 }
 
@@ -754,7 +761,7 @@ async fn test_delete_response_not_found() {
 }
 
 #[tokio::test]
-async fn test_delete_response_wrong_session() {
+async fn test_delete_response_cross_session_within_tenant() {
     let storage = InMemoryResponseStorage::new();
 
     // Store for session_1
@@ -763,24 +770,25 @@ async fn test_delete_response_wrong_session() {
             "tenant_a",
             "session_1",
             None,
-            json!({"data": "protected"}),
+            json!({"data": "deletable_cross_session"}),
             None,
         )
         .await
         .unwrap();
 
-    // Try to delete from session_2 - should fail
+    // Delete from session_2 (same tenant) should SUCCEED
+    // (session is metadata, not a security boundary)
     let result = storage
         .delete_response("tenant_a", "session_2", &response_id)
         .await;
 
-    assert!(matches!(result, Err(StorageError::NotFound)));
+    assert!(result.is_ok(), "Cross-session delete within same tenant should succeed");
 
-    // Original should still exist
-    let still_exists = storage
+    // Response should now be gone
+    let after_delete = storage
         .get_response("tenant_a", "session_1", &response_id)
         .await;
-    assert!(still_exists.is_ok());
+    assert!(matches!(after_delete, Err(StorageError::NotFound)));
 }
 
 // ============================================================================

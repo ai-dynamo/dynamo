@@ -1139,14 +1139,64 @@ pub fn validate_completion_fields_generic(
     })
 }
 
-/// OpenAI Responses Request Handler
+/// OpenAI Responses Request Handler (stateless mode)
+///
+/// When `--enable-stateful-responses` is OFF, this handler serves POST /v1/responses
+/// without session middleware. It rejects `store: true` and `previous_response_id`
+/// with a 400 error, making misconfiguration visible to callers.
+async fn handler_responses_stateless(
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateResponse>,
+) -> Result<Response, ErrorResponse> {
+    // Reject stateful features early — make misconfiguration visible
+    if request.inner.store == Some(true) {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "Stateful features require --enable-stateful-responses. \
+                      `store: true` is not available in stateless mode."
+                .to_string(),
+        }));
+    }
+    if request.inner.previous_response_id.is_some() {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "Stateful features require --enable-stateful-responses. \
+                      `previous_response_id` is not available in stateless mode."
+                .to_string(),
+        }));
+    }
+
+    // Delegate to the stateful handler with a default session (no-op storage path)
+    let default_session = RequestSession {
+        tenant_id: "default".to_string(),
+        session_id: "default".to_string(),
+    };
+
+    // Process normally — store is false, so no storage writes will happen
+    handler_responses_inner(state, template, default_session, headers, request).await
+}
+
+/// OpenAI Responses Request Handler (stateful mode)
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
+/// Requires session middleware to extract tenant_id and session_id from headers.
 async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Extension(session): Extension<RequestSession>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateResponse>,
+    Json(request): Json<NvCreateResponse>,
+) -> Result<Response, ErrorResponse> {
+    handler_responses_inner(state, template, session, headers, request).await
+}
+
+/// Shared inner handler for both stateful and stateless response paths
+async fn handler_responses_inner(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    session: RequestSession,
+    headers: HeaderMap,
+    mut request: NvCreateResponse,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -1786,22 +1836,39 @@ async fn handler_delete_response(
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
 /// If not path is provided, the default path is `/v1/responses`
+///
+/// When `stateful` is true: registers POST, GET, DELETE routes with session
+/// middleware that validates x-tenant-id and x-session-id headers.
+///
+/// When `stateful` is false: registers only POST (stateless). No session middleware.
+/// Requests with `store: true` or `previous_response_id` return 400.
 pub fn responses_router(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     path: Option<String>,
+    stateful: bool,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
-    let path_with_id = format!("{}/{{id}}", &path);
-    let router = Router::new()
-        .route(&path, post(handler_responses))
-        .route(&path_with_id, get(handler_get_response))
-        .route(&path_with_id, delete(handler_delete_response))
-        .layer(middleware::from_fn(extract_session_middleware))
-        .layer(middleware::from_fn(smart_json_error_middleware))
-        .with_state((state, template));
-    (vec![doc], router)
+
+    if stateful {
+        let path_with_id = format!("{}/{{id}}", &path);
+        let router = Router::new()
+            .route(&path, post(handler_responses))
+            .route(&path_with_id, get(handler_get_response))
+            .route(&path_with_id, delete(handler_delete_response))
+            .layer(middleware::from_fn(extract_session_middleware))
+            .layer(middleware::from_fn(smart_json_error_middleware))
+            .with_state((state, template));
+        (vec![doc], router)
+    } else {
+        // Stateless mode: POST only, no session middleware, no GET/DELETE
+        let router = Router::new()
+            .route(&path, post(handler_responses_stateless))
+            .layer(middleware::from_fn(smart_json_error_middleware))
+            .with_state((state, template));
+        (vec![doc], router)
+    }
 }
 
 async fn images(
