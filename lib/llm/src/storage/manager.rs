@@ -31,8 +31,8 @@ impl InMemoryResponseStorage {
         }
     }
 
-    fn make_key(tenant_id: &str, session_id: &str, response_id: &str) -> String {
-        format!("{tenant_id}:{session_id}:responses:{response_id}")
+    fn make_key(tenant_id: &str, response_id: &str) -> String {
+        format!("{tenant_id}:responses:{response_id}")
     }
 }
 
@@ -49,7 +49,7 @@ impl ResponseStorage for InMemoryResponseStorage {
         let response_id = response_id
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let key = Self::make_key(tenant_id, session_id, &response_id);
+        let key = Self::make_key(tenant_id, &response_id);
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -75,10 +75,10 @@ impl ResponseStorage for InMemoryResponseStorage {
     async fn get_response(
         &self,
         tenant_id: &str,
-        session_id: &str,
+        _session_id: &str,
         response_id: &str,
     ) -> Result<StoredResponse, StorageError> {
-        let key = Self::make_key(tenant_id, session_id, response_id);
+        let key = Self::make_key(tenant_id, response_id);
 
         let storage = self.storage.read().await;
         let stored = storage.get(&key).ok_or(StorageError::NotFound)?;
@@ -94,12 +94,10 @@ impl ResponseStorage for InMemoryResponseStorage {
             }
         }
 
-        // Validate tenant and session
+        // Validate tenant (hard boundary)
+        // Session is metadata only — cross-session access within a tenant is allowed
         if stored.tenant_id != tenant_id {
             return Err(StorageError::TenantMismatch);
-        }
-        if stored.session_id != session_id {
-            return Err(StorageError::SessionMismatch);
         }
 
         Ok(stored.clone())
@@ -108,20 +106,17 @@ impl ResponseStorage for InMemoryResponseStorage {
     async fn delete_response(
         &self,
         tenant_id: &str,
-        session_id: &str,
+        _session_id: &str,
         response_id: &str,
     ) -> Result<(), StorageError> {
-        let key = Self::make_key(tenant_id, session_id, response_id);
+        let key = Self::make_key(tenant_id, response_id);
 
         let mut storage = self.storage.write().await;
         let stored = storage.get(&key).ok_or(StorageError::NotFound)?;
 
-        // Validate before deletion
+        // Validate tenant (hard boundary)
         if stored.tenant_id != tenant_id {
             return Err(StorageError::TenantMismatch);
-        }
-        if stored.session_id != session_id {
-            return Err(StorageError::SessionMismatch);
         }
 
         storage.remove(&key);
@@ -136,11 +131,12 @@ impl ResponseStorage for InMemoryResponseStorage {
         after: Option<&str>,
     ) -> Result<Vec<StoredResponse>, StorageError> {
         let storage = self.storage.read().await;
-        let prefix = format!("{tenant_id}:{session_id}:responses:");
+        let prefix = format!("{tenant_id}:responses:");
 
         let mut responses: Vec<StoredResponse> = storage
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
+            .filter(|(_, v)| v.session_id == session_id)
             .map(|(_, v)| v.clone())
             .collect();
 
