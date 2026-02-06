@@ -157,11 +157,6 @@ runs:
           EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
         fi
 
-          # --build-arg USE_SCCACHE=true \
-          # --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET} \
-          # --build-arg SCCACHE_REGION=${SCCACHE_REGION} \
-          # --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-          # --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
         docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \

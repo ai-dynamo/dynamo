@@ -6,6 +6,7 @@ name: Post-Merge CI Pipeline
 on:
   push:
     branches:
+      - poc-dockerfile-templating
       - main
       - 'release/*.*.*'
 
