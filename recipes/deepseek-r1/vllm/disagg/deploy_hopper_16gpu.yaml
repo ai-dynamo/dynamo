@@ -68,26 +68,35 @@ spec:
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
-            - /bin/bash
-            - -c
+            - python3
+            - -m
+            - dynamo.vllm
           args:
-            - |
-              exec python3 -m dynamo.vllm \
-                --model /model-cache/deepseek-r1 \
-                --served-model-name deepseek-ai/DeepSeek-R1 \
-                --all2all-backend deepep_low_latency \
-                --data-parallel-hybrid-lb \
-                --tensor-parallel-size 1 \
-                --data-parallel-size 16 \
-                --enable-expert-parallel \
-                --max-model-len 16384 \
-                --enable-dbo \
-                --dbo-decode-token-threshold 32 \
-                --async-scheduling \
-                --enable-eplb \
-                --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
-                --max-num-seqs 512 \
-                --compilation_config '{"pass_config":{"fuse_norm_quant":true,"eliminate_noops":true},"cudagraph_mode":"FULL_DECODE_ONLY"}'
+            - --model
+            - /model-cache/deepseek-r1
+            - --served-model-name
+            - deepseek-ai/DeepSeek-R1
+            - --all2all-backend
+            - deepep_low_latency
+            - --data-parallel-hybrid-lb
+            - --tensor-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "16"
+            - --enable-expert-parallel
+            - --max-model-len
+            - "16384"
+            - --enable-dbo
+            - --dbo-decode-token-threshold
+            - "32"
+            - --async-scheduling
+            - --enable-eplb
+            - --eplb-config
+            - '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}'
+            - --max-num-seqs
+            - "512"
+            - --compilation_config
+            - '{"pass_config":{"fuse_norm_quant":true,"eliminate_noops":true},"cudagraph_mode":"FULL_DECODE_ONLY"}'
     prefill:
       componentType: worker
       subComponentType: prefill
@@ -127,23 +136,31 @@ spec:
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
-            - /bin/bash
-            - -c
+            - python3
+            - -m
+            - dynamo.vllm
           args:
-            - |
-              exec python3 -m dynamo.vllm \
-                --model /model-cache/deepseek-r1 \
-                --is-prefill-worker \
-                --served-model-name deepseek-ai/DeepSeek-R1 \
-                --all2all-backend deepep_high_throughput \
-                --data-parallel-hybrid-lb \
-                --tensor-parallel-size 1 \
-                --data-parallel-size 16 \
-                --enable-expert-parallel \
-                --max-model-len 16384 \
-                --enable-dbo \
-                --dbo-decode-token-threshold 32 \
-                --async-scheduling \
-                --enable-eplb \
-                --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
-                --max-num-seqs 512
+            - --model
+            - /model-cache/deepseek-r1
+            - --is-prefill-worker
+            - --served-model-name
+            - deepseek-ai/DeepSeek-R1
+            - --all2all-backend
+            - deepep_high_throughput
+            - --data-parallel-hybrid-lb
+            - --tensor-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "16"
+            - --enable-expert-parallel
+            - --max-model-len
+            - "16384"
+            - --enable-dbo
+            - --dbo-decode-token-threshold
+            - "32"
+            - --async-scheduling
+            - --enable-eplb
+            - --eplb-config
+            - '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}'
+            - --max-num-seqs
+            - "512"

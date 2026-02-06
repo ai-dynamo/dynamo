@@ -97,3 +97,14 @@ The following configuration files are located in the `deploy/observability/` dir
 - [grafana_dashboards/dcgm-metrics.json](../../deploy/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
 - [grafana_dashboards/kvbm.json](../../deploy/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics
 
+```{toctree}
+:hidden:
+
+Prometheus + Grafana Setup <prometheus-grafana>
+Metrics <metrics>
+Metrics Developer Guide <metrics-developer-guide>
+Health Checks <health-checks>
+Tracing <tracing>
+Logging <logging>
+```
+

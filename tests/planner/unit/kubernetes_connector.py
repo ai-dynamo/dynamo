@@ -888,3 +888,147 @@ def test_get_gpu_counts_service_not_found_raises_error(
         kubernetes_connector.get_gpu_counts()
 
     assert "decode GPU count" in str(exc_info.value)
+
+
+# Tests for get_actual_worker_counts
+
+
+def test_get_actual_worker_counts_stable(kubernetes_connector, mock_kube_api):
+    """Test get_actual_worker_counts when both services are stable"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "prefill-component": {},
+                "decode-component": {},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+
+    (
+        prefill_count,
+        decode_count,
+        is_stable,
+    ) = kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+    )
+
+    assert prefill_count == 2
+    assert decode_count == 4
+    assert is_stable is True
+
+
+def test_get_actual_worker_counts_prefill_rollout_in_progress(
+    kubernetes_connector, mock_kube_api
+):
+    """Test get_actual_worker_counts when prefill has rollout in progress"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "prefill-component": {},
+                "decode-component": {},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, False), (4, True)]
+
+    (
+        prefill_count,
+        decode_count,
+        is_stable,
+    ) = kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+    )
+
+    assert prefill_count == 2
+    assert decode_count == 4
+    assert is_stable is False
+
+
+def test_get_actual_worker_counts_prefill_only(kubernetes_connector, mock_kube_api):
+    """Test get_actual_worker_counts with only prefill component"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "prefill-component": {
+                    "replicas": 2,
+                    "subComponentType": "prefill",
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.return_value = (2, True)
+
+    (
+        prefill_count,
+        decode_count,
+        is_stable,
+    ) = kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name=None,
+    )
+
+    assert prefill_count == 2
+    assert decode_count == 0
+    assert is_stable is True
+
+
+def test_get_actual_worker_counts_decode_only(kubernetes_connector, mock_kube_api):
+    """Test get_actual_worker_counts with only decode component"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "decode-component": {
+                    "replicas": 4,
+                    "subComponentType": "decode",
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.return_value = (4, True)
+
+    (
+        prefill_count,
+        decode_count,
+        is_stable,
+    ) = kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name=None,
+        decode_component_name="decode-component",
+    )
+
+    assert prefill_count == 0
+    assert decode_count == 4
+    assert is_stable is True
+
+
+def test_get_actual_worker_counts_no_components(kubernetes_connector, mock_kube_api):
+    """Test get_actual_worker_counts with no components specified"""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {"services": {}},
+        "status": {"services": {}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    (
+        prefill_count,
+        decode_count,
+        is_stable,
+    ) = kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name=None,
+        decode_component_name=None,
+    )
+
+    assert prefill_count == 0
+    assert decode_count == 0
+    assert is_stable is True

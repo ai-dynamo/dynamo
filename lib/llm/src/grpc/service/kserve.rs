@@ -22,6 +22,49 @@ use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+/// Optional HTTP/2 window size configuration from environment variables.
+///
+/// # Environment Variables
+///
+/// - `DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE`: HTTP/2 connection window size in bytes
+/// - `DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE`: HTTP/2 per-stream window size in bytes
+///
+/// If set, these override tonic defaults. If not set, tonic defaults are used.
+#[derive(Debug, Clone, Default)]
+pub struct GrpcTuningConfig {
+    /// HTTP/2 connection-level flow control window size in bytes.
+    /// If None, uses tonic default.
+    pub initial_connection_window_size: Option<u32>,
+
+    /// HTTP/2 stream-level flow control window size in bytes.
+    /// If None, uses tonic default.
+    pub initial_stream_window_size: Option<u32>,
+}
+
+impl GrpcTuningConfig {
+    /// Create configuration from environment variables.
+    ///
+    /// Reads `DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE` and `DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE`.
+    /// If not set, the values remain None and tonic defaults are used.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(val) = std::env::var("DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE")
+            && let Ok(size) = val.parse::<u32>()
+        {
+            config.initial_connection_window_size = Some(size);
+        }
+
+        if let Ok(val) = std::env::var("DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE")
+            && let Ok(size) = val.parse::<u32>()
+        {
+            config.initial_stream_window_size = Some(size);
+        }
+
+        config
+    }
+}
+
 use crate::grpc::service::openai::completion_response_stream;
 use crate::grpc::service::tensor::{ExtendedNvCreateTensorResponse, tensor_response_stream};
 use std::convert::{TryFrom, TryInto};
@@ -111,6 +154,9 @@ pub struct KserveService {
     port: u16,
     host: String,
     request_template: Option<RequestTemplate>,
+
+    // gRPC server tuning configuration
+    grpc_tuning: GrpcTuningConfig,
 }
 
 #[derive(Clone, Builder)]
@@ -130,6 +176,11 @@ pub struct KserveServiceConfig {
 
     #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
     http_metrics_host: String,
+
+    /// gRPC server tuning configuration.
+    /// Default: GrpcTuningConfig::from_env() - reads from environment variables with fallback to defaults.
+    #[builder(default = "GrpcTuningConfig::from_env()")]
+    grpc_tuning: GrpcTuningConfig,
 }
 
 impl KserveService {
@@ -162,8 +213,32 @@ impl KserveService {
         let address = format!("{}:{}", self.host, self.port);
         tracing::info!(address, "Starting KServe gRPC service on: {address}");
 
+        let tuning = &self.grpc_tuning;
+
+        // Log tuning settings if configured via environment variables
+        if tuning.initial_connection_window_size.is_some()
+            || tuning.initial_stream_window_size.is_some()
+        {
+            tracing::info!(
+                "gRPC tuning: connection_window={:?}, stream_window={:?}",
+                tuning.initial_connection_window_size,
+                tuning.initial_stream_window_size
+            );
+        }
+
         let observer = cancel_token.child_token();
-        Server::builder()
+
+        // Build server - only override window sizes if set via env vars
+        let mut builder = Server::builder();
+
+        if let Some(size) = tuning.initial_connection_window_size {
+            builder = builder.initial_connection_window_size(size);
+        }
+        if let Some(size) = tuning.initial_stream_window_size {
+            builder = builder.initial_stream_window_size(size);
+        }
+
+        builder
             .add_service(GrpcInferenceServiceServer::new(self.clone()))
             .serve_with_shutdown(address.parse()?, observer.cancelled_owned())
             .await
@@ -203,6 +278,7 @@ impl KserveServiceConfigBuilder {
             port: config.port,
             host: config.host,
             request_template: config.request_template,
+            grpc_tuning: config.grpc_tuning,
         })
     }
 

@@ -1,0 +1,333 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build, Test, and Copy Framework Image
+
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework name (vllm, sglang, trtllm)'
+        required: true
+        type: string
+      platform:
+        description: 'Platform to build (amd64 or arm64)'
+        required: true
+        type: string
+      cuda_version:
+        description: 'CUDA version to build (e.g., 12.9, 13.0)'
+        required: true
+        type: string
+      run_tests:
+        description: 'Whether to run pytest'
+        required: false
+        type: boolean
+        default: true
+      copy_to_acr:
+        description: 'Whether to copy images to ACR'
+        required: false
+        type: boolean
+        default: true
+      builder_name:
+        description: 'Buildkit builder name'
+        required: true
+        type: string
+      extra_tags:
+        description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
+        required: false
+        type: string
+        default: ''
+      build_image:
+        description: 'Whether to build image'
+        required: false
+        type: boolean
+        default: true
+      no_cache:
+        description: 'Disable Docker build cache'
+        required: false
+        type: boolean
+        default: false
+      push_image:
+        description: 'Push image to registry'
+        required: false
+        type: boolean
+        default: true
+      no_load:
+        description: 'Do not load the image into docker (you must have dind installed if you want to load the image)'
+        required: false
+        type: boolean
+        default: true
+      show_summary:
+        description: 'Show summary'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      CI_TOKEN:
+        required: false
+      SCCACHE_S3_BUCKET:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      HF_TOKEN:
+        required: false
+    outputs:
+      image_tag:
+        description: 'Image tag in ACR'
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-${{ inputs.platform }}
+
+jobs:
+  # ============================================================================
+  # BUILD
+  # ============================================================================
+  build:
+    if: inputs.build_image
+    name: Build ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    runs-on: prod-builder-v2
+    outputs:
+      target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+
+      - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
+        id: extra-tags
+        shell: bash
+        env:
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          if [ -n "$EXTRA_TAGS" ]; then
+            RESULT=""
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then
+                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-${PLATFORM}"$'\n'
+              fi
+            done <<< "$EXTRA_TAGS"
+            echo "tags<<EOF" >> $GITHUB_OUTPUT
+            echo "$RESULT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "tags=" >> $GITHUB_OUTPUT
+          fi
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
+          DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
+          echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: ${{ inputs.framework }}
+          arch: ${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
+
+      - name: Print Build Container inputs
+        run: |
+          echo "=== Build Container Inputs ==="
+          echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
+          echo "framework: ${{ inputs.framework }}"
+          echo "target: runtime"
+          echo "platform: linux/${{ inputs.platform }}"
+          echo "cuda_version: ${{ inputs.cuda_version }}"
+          echo "no_cache: ${{ inputs.no_cache }}"
+          echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
+          echo "push_image: ${{ inputs.push_image }}"
+          echo "no_load: ${{ inputs.no_load }}"
+
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-remote-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
+          framework: ${{ inputs.framework }}
+          target: runtime
+          platform: linux/${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          no_cache: ${{ inputs.no_cache }}
+          extra_tags: ${{ steps.extra-tags.outputs.tags }}
+          push_image: ${{ inputs.push_image }}
+          no_load: ${{ inputs.no_load }}
+      - name: Show summary
+        shell: bash
+        if: ${{ inputs.push_image && inputs.show_summary }}
+        run: |
+          echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+
+
+  # ============================================================================
+  # TEST
+  # ============================================================================
+  test:
+    if: inputs.run_tests && inputs.build_image
+    needs: [build]
+    name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull relevant images
+        shell: bash
+        run: |
+          start_time=$(date +%s)
+          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          docker pull quay.io/minio/minio
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "⏱️ Image pull duration: ${duration}s"
+
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        run: |
+          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.test_image }}"
+
+          # Run the sanity check script inside the container
+          # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+          export WORKSPACE=/workspace
+
+          set +e
+          docker run --rm "${{ steps.calculate-target-tag.outputs.test_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+      # Run CPU-only tests first (parallelized for speed)
+      # These are unit tests marked with gpu_0 that don't require GPU hardware
+      - name: Run CPU-only tests (parallelized)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ format('pre_merge and {0} and gpu_0', inputs.framework) }}
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge_cpu"
+          platform_arch: ${{ inputs.platform }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'auto'
+          dind_as_sidecar: 'true'
+
+      # Run GPU tests sequentially (only on amd64 runners with GPU)
+      # These are e2e tests marked with gpu_1 that require GPU hardware
+      - name: Run GPU tests (sequential)
+        if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ format('pre_merge and {0} and gpu_1', inputs.framework) }}
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ inputs.platform }}
+          enable_mypy: 'false' # already covered by CPU tests
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+
+# ============================================================================
+# COPY TO ACR
+# ============================================================================
+  copy-to-acr:
+    needs: [build, test]
+    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
+    if: |
+      always() &&
+      inputs.copy_to_acr &&
+      needs.build.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    name: copy ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    runs-on: prod-default-small-v2
+    outputs:
+      target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+
+      - name: Copy image to target registry
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}

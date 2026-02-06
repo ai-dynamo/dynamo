@@ -20,11 +20,7 @@ from benchmarks.profiler.utils.config import (
     validate_and_get_worker_args,
 )
 from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
-from benchmarks.profiler.utils.defaults import (
-    DEFAULT_MODEL_NAME,
-    DYNAMO_RUN_DEFAULT_PORT,
-    EngineType,
-)
+from benchmarks.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
 from dynamo.planner.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
@@ -282,17 +278,10 @@ class SGLangConfigModifier(BaseConfigModifier):
     @classmethod
     def get_model_name(cls, config: dict) -> Tuple[str, str]:
         cfg = Config.model_validate(config)
-        try:
-            worker_service = get_worker_service_from_config(cfg, backend="sglang")
-            args = validate_and_get_worker_args(worker_service, backend="sglang")
-        except (ValueError, KeyError):
-            logger.warning(
-                f"Worker service missing or invalid, using default model name: {DEFAULT_MODEL_NAME}"
-            )
-            return DEFAULT_MODEL_NAME, DEFAULT_MODEL_NAME
-
+        worker_service = get_worker_service_from_config(cfg, backend="sglang")
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
         args = break_arguments(args)
-        return cls._get_model_name_and_path_from_args(args, DEFAULT_MODEL_NAME, logger)
+        return cls._get_model_name_and_path_from_args(args)
 
     @classmethod
     def get_port(cls, config: dict) -> int:

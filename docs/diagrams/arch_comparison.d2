@@ -1,0 +1,93 @@
+direction: right
+
+aggregated: Aggregated {
+  width: 600
+  height: 450
+
+  frontend: Frontend {
+    width: 180
+    height: 60
+    style.font-size: 20
+  }
+  router: Router {
+    width: 180
+    height: 60
+    style.font-size: 20
+  }
+  w1: "W1 (TP2)" {
+    width: 180
+    height: 60
+    style.font-size: 20
+  }
+  w2: "W2 (TP2)" {
+    width: 180
+    height: 60
+    style.font-size: 20
+  }
+  w3: "W3 (TP2)" {
+    width: 180
+    height: 60
+    style.font-size: 20
+  }
+  w4: "W4 (TP2)" {
+    width: 180
+    height: 60
+    style.font-size: 20
+  }
+
+  frontend -> router
+  router -> w1
+  router -> w2
+  router -> w3
+  router -> w4
+
+  note: |md
+    Each worker handles both prefill and decode.
+  |
+  note.style.font-size: 18
+}
+
+disaggregated: Disaggregated {
+  width: 600
+  height: 450
+
+  frontend: Frontend {
+    width: 180
+    height: 60
+    style.font-size: 20
+  }
+  router: Router {
+    width: 180
+    height: 60
+    style.font-size: 20
+  }
+  p1: "Prefill 1 (TP2)" {
+    width: 220
+    height: 60
+    style.font-size: 20
+  }
+  p2: "Prefill 2 (TP2)" {
+    width: 220
+    height: 60
+    style.font-size: 20
+  }
+  decode: "Decode (TP4)" {
+    width: 220
+    height: 60
+    style.font-size: 20
+  }
+
+  frontend -> router
+  router -> p1
+  router -> p2
+  p1 -> decode: "KV Cache via RDMA"
+  p2 -> decode: "KV Cache via RDMA"
+
+  note: |md
+    Prefill and decode on separate workers.
+  |
+  note.style.font-size: 18
+}
+
+aggregated.style.font-size: 24
+disaggregated.style.font-size: 24

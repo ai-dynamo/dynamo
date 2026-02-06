@@ -1,0 +1,45 @@
+direction: right
+
+aic: "AIC Output" {
+  shape: rectangle
+  c1: "concurrency: 56 (=14x4)" {
+    width: 280
+  }
+  c2: "ISL: 4000, OSL: 500" {
+    width: 280
+  }
+  c3: "Model: Qwen3-32B-FP8" {
+    width: 280
+  }
+  c4: "concurrency x ~14" {
+    width: 280
+  }
+  c5: "(best practice)" {
+    width: 280
+  }
+}
+
+aiperf: "AIPerf Argument" {
+  shape: rectangle
+  a1: "--concurrency 56" {
+    width: 320
+  }
+  a2: "--isl 4000 --osl 500" {
+    width: 320
+  }
+  a3: "-m Qwen/Qwen3-32B-FP8" {
+    width: 320
+  }
+  a4: "--num-requests 800" {
+    width: 320
+  }
+  a5: "--extra-inputs \"ignore_eos:true\"" {
+    width: 320
+  }
+}
+
+aic.c1 -> aiperf.a1
+aic.c2 -> aiperf.a2
+aic.c3 -> aiperf.a3
+aic.c4 -> aiperf.a4
+aic.c5 -> aiperf.a5

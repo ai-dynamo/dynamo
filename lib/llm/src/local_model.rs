@@ -56,8 +56,6 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
-    custom_backend_metrics_endpoint: Option<String>,
-    custom_backend_metrics_polling_interval: Option<f64>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
 }
@@ -85,8 +83,6 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
-            custom_backend_metrics_endpoint: Default::default(),
-            custom_backend_metrics_polling_interval: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
         }
@@ -199,16 +195,6 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn custom_backend_metrics_endpoint(&mut self, endpoint: Option<String>) -> &mut Self {
-        self.custom_backend_metrics_endpoint = endpoint;
-        self
-    }
-
-    pub fn custom_backend_metrics_polling_interval(&mut self, interval: Option<f64>) -> &mut Self {
-        self.custom_backend_metrics_polling_interval = interval;
-        self
-    }
-
     pub fn media_decoder(&mut self, media_decoder: Option<MediaDecoder>) -> &mut Self {
         self.media_decoder = media_decoder;
         self
@@ -304,9 +290,6 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
-                custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
-                custom_backend_metrics_polling_interval: self
-                    .custom_backend_metrics_polling_interval,
             });
         }
 
@@ -358,8 +341,6 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
-            custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
-            custom_backend_metrics_polling_interval: self.custom_backend_metrics_polling_interval,
         })
     }
 }
@@ -378,8 +359,6 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
-    custom_backend_metrics_endpoint: Option<String>,
-    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl LocalModel {
@@ -447,14 +426,6 @@ impl LocalModel {
         self.namespace.as_deref()
     }
 
-    pub fn custom_backend_metrics_endpoint(&self) -> Option<&str> {
-        self.custom_backend_metrics_endpoint.as_deref()
-    }
-
-    pub fn custom_backend_metrics_polling_interval(&self) -> Option<f64> {
-        self.custom_backend_metrics_polling_interval
-    }
-
     /// An endpoint to identify this model by.
     pub fn endpoint_id(&self) -> &EndpointId {
         &self.endpoint_id
@@ -476,14 +447,16 @@ impl LocalModel {
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
-        lora_name: Option<&str>,
+        lora_info: Option<crate::model_card::LoraInfo>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
-        self.card.lora_name = lora_name.map(|name| name.to_string());
+        self.card.lora = lora_info.clone();
 
         // Compute model_suffix from lora_name if present
-        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let model_suffix = lora_info
+            .as_ref()
+            .map(|info| Slug::slugify(&info.name).to_string());
 
         let suffix_for_log = model_suffix
             .as_ref()

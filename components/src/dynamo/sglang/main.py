@@ -622,7 +622,12 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
 
 async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
-    """Initialize multimodal worker component for aggregated or decode mode"""
+    """Initialize multimodal worker component.
+
+    This worker is always an internal component that should not register with
+    the Frontend. Public registration is handled by the Processor component
+    (--multimodal-processor). For standalone serving, use init() (default).
+    """
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     component = runtime.namespace(dynamo_args.namespace).component(
@@ -648,35 +653,16 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     await handler.async_init()
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
-    ready_event = asyncio.Event()
 
     try:
-        if config.serving_mode == DisaggregationMode.DECODE:
-            # Decode Worker is an internal component, should not register with Frontend
-            # Only needs to provide internal service endpoint for Processor to call
-            await generate_endpoint.serve_endpoint(
-                handler.generate,
-                metrics_labels=[("model", server_args.served_model_name)],
-                graceful_shutdown=True,
-                health_check_payload=health_check_payload,
-            )
-        else:
-            # In aggregated mode, need to register with Frontend
-            await asyncio.gather(
-                generate_endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=[("model", server_args.served_model_name)],
-                    graceful_shutdown=True,
-                    health_check_payload=health_check_payload,
-                ),
-                register_llm_with_readiness_gate(
-                    engine,
-                    generate_endpoint,
-                    server_args,
-                    dynamo_args,
-                    readiness_gate=ready_event,
-                ),
-            )
+        # Multimodal Worker is an internal component, should not register with Frontend.
+        # Only needs to provide internal service endpoint for Processor to call.
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            metrics_labels=[("model", server_args.served_model_name)],
+            graceful_shutdown=True,
+            health_check_payload=health_check_payload,
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise

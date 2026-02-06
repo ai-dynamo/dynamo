@@ -38,6 +38,7 @@ class Config:
         self.tensor_parallel_size: int = 1
         self.pipeline_parallel_size: int = 1
         self.expert_parallel_size: Optional[int] = None
+        self.enable_attention_dp: bool = False
         self.kv_block_size: int = 32
         self.migration_limit: int = 0
         self.gpus_per_node: Optional[int] = None
@@ -77,6 +78,7 @@ class Config:
             f"tensor_parallel_size={self.tensor_parallel_size}, "
             f"pipeline_parallel_size={self.pipeline_parallel_size}, "
             f"expert_parallel_size={self.expert_parallel_size}, "
+            f"enable_attention_dp={self.enable_attention_dp}, "
             f"kv_block_size={self.kv_block_size}, "
             f"gpus_per_node={self.gpus_per_node}, "
             f"max_batch_size={self.max_batch_size}, "
@@ -182,6 +184,11 @@ def cmd_line_args():
         type=int,
         default=None,
         help="expert parallelism size.",
+    )
+    parser.add_argument(
+        "--enable-attention-dp",
+        action="store_true",
+        help="Enable attention data parallelism. When enabled, attention_dp_size equals tensor_parallel_size.",
     )
 
     # IMPORTANT: We should ideally not expose this to users. We should be able to
@@ -399,6 +406,7 @@ def cmd_line_args():
         config.pipeline_parallel_size = args.pipeline_parallel_size
     if args.expert_parallel_size is not None:
         config.expert_parallel_size = args.expert_parallel_size
+    config.enable_attention_dp = args.enable_attention_dp
     if args.gpus_per_node is not None:
         config.gpus_per_node = args.gpus_per_node
     if args.free_gpu_memory_fraction is not None:

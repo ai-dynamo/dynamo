@@ -140,3 +140,13 @@ See [Fault Tolerance Testing](testing.md) for details.
 - [Observability](../observability/README.md) - Metrics and monitoring
 - [Distributed Runtime](../design_docs/distributed_runtime.md) - Service discovery architecture
 - [Event Plane](../design_docs/event_plane.md) - etcd and NATS coordination
+
+```{toctree}
+:hidden:
+
+Request Migration <request_migration>
+Request Cancellation <request_cancellation>
+Graceful Shutdown <graceful_shutdown>
+Request Rejection <request_rejection>
+Testing <testing>
+```

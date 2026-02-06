@@ -163,14 +163,14 @@ Planner is deployed as a service component within your DGD. It:
 
 **Deployment:**
 
-The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../planner/sla_planner_quickstart.md) for complete instructions.
+The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../components/planner/planner_guide.md) for complete instructions.
 
 Example configurations with Planner:
 - `examples/backends/vllm/deploy/disagg_planner.yaml`
 - `examples/backends/sglang/deploy/disagg_planner.yaml`
 - `examples/backends/trtllm/deploy/disagg_planner.yaml`
 
-For more details, see the [SLA Planner documentation](../planner/sla_planner.md).
+For more details, see the [SLA Planner documentation](../components/planner/planner_guide.md).
 
 ## Autoscaling with Kubernetes HPA
 
@@ -725,7 +725,7 @@ If you see unstable scaling:
 - [Kubernetes HPA Documentation](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)
 - [KEDA Documentation](https://keda.sh/)
 - [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
-- [Planner Documentation](../planner/sla_planner.md)
+- [Planner Documentation](../components/planner/planner_guide.md)
 - [Dynamo Metrics Reference](../observability/metrics.md)
 - [Prometheus and Grafana Setup](../observability/prometheus-grafana.md)
 

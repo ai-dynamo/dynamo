@@ -13,7 +13,6 @@ use crate::Component;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
 use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
-use rs::transports::event_plane::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
@@ -149,34 +148,6 @@ impl ZmqKvEventPublisherConfig {
     }
 }
 
-#[pyclass]
-pub(crate) struct ZmqKvEventPublisher {
-    inner: llm_rs::kv_router::publisher::KvEventPublisher,
-}
-
-#[pymethods]
-impl ZmqKvEventPublisher {
-    #[new]
-    fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component.inner,
-            config.kv_block_size as u32,
-            Some(KvEventSourceConfig::Zmq {
-                endpoint: config.zmq_endpoint,
-                topic: config.zmq_topic,
-            }),
-            config.enable_local_indexer,
-            config.dp_rank,
-        )
-        .map_err(to_pyerr)?;
-        Ok(Self { inner })
-    }
-
-    fn shutdown(&mut self) {
-        self.inner.shutdown()
-    }
-}
-
 /// A ZMQ-based key-value cache event listener that operates independently
 /// of the dynamo runtime or event plane infrastructure.
 #[pyclass]
@@ -261,26 +232,42 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0, enable_local_indexer=false))]
+    #[pyo3(signature = (component, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_config=None))]
     fn new(
         component: Component,
         worker_id: WorkerId,
         kv_block_size: usize,
         dp_rank: DpRank,
         enable_local_indexer: bool,
+        zmq_config: Option<ZmqKvEventPublisherConfig>,
     ) -> PyResult<Self> {
+        // worker_id is not used; connection_id is inferred from the component.
+        let _ = worker_id;
+
+        // When zmq_config is provided, use its fields for kv_block_size/dp_rank/enable_local_indexer
+        let (kv_block_size, dp_rank, enable_local_indexer, source_config) =
+            if let Some(ref cfg) = zmq_config {
+                (
+                    cfg.kv_block_size,
+                    cfg.dp_rank,
+                    cfg.enable_local_indexer,
+                    Some(KvEventSourceConfig::Zmq {
+                        endpoint: cfg.zmq_endpoint.clone(),
+                        topic: cfg.zmq_topic.clone(),
+                    }),
+                )
+            } else {
+                (kv_block_size, dp_rank, enable_local_indexer, None)
+            };
+
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
-        // Note: worker_id parameter matches the Python stub (_core.pyi) signature but is not used.
-        // The actual worker_id is inferred from component's connection_id in the Rust implementation.
-        let _ = worker_id;
-
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
             component.inner,
             kv_block_size as u32,
-            None,
+            source_config,
             enable_local_indexer,
             dp_rank,
         )
@@ -370,6 +357,14 @@ impl KvEventPublisher {
 
             inner.publish(event).map_err(to_pyerr)
         })
+    }
+
+    fn shutdown(&mut self) {
+        // If no other Arc clones exist, shut down eagerly.
+        // Otherwise the Drop impl handles cleanup when the last reference is freed.
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.shutdown();
+        }
     }
 }
 
@@ -860,133 +855,6 @@ impl ApproxKvIndexer {
                 .map_err(to_pyerr)?;
             Ok(())
         })
-    }
-}
-
-#[pyclass]
-pub(crate) struct KvRecorder {
-    inner: Arc<llm_rs::kv_router::recorder::KvRecorder>,
-}
-
-#[pymethods]
-impl KvRecorder {
-    #[new]
-    #[pyo3(signature = (component, output_path=None, max_lines_per_file=None, max_count=None, max_time=None))]
-    fn new(
-        component: Component,
-        output_path: Option<String>,
-        max_lines_per_file: Option<usize>,
-        max_count: Option<usize>,
-        max_time: Option<f64>,
-    ) -> PyResult<Self> {
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let token = component.inner.drt().runtime().child_token();
-
-            // Create a temp path if none provided
-            let path = match output_path {
-                Some(p) => p,
-                None => {
-                    let temp_dir = std::env::temp_dir();
-                    temp_dir
-                        .join("kv_events.jsonl")
-                        .to_string_lossy()
-                        .to_string()
-                }
-            };
-
-            let inner = llm_rs::kv_router::recorder::KvRecorder::new(
-                token.clone(),
-                path,
-                max_lines_per_file,
-                max_count,
-                max_time,
-            )
-            .await
-            .map_err(to_pyerr)?;
-
-            // Subscribe to KV events
-            let mut kv_events_rx = EventSubscriber::for_component(
-                &component.inner,
-                llm_rs::kv_router::KV_EVENT_SUBJECT,
-            )
-            .await
-            .map_err(to_pyerr)?
-            .typed::<llm_rs::kv_router::protocols::RouterEvent>();
-            let event_tx = inner.event_sender();
-
-            // Spawn a task to forward events to the recorder
-            tokio::spawn(async move {
-                while let Some(result) = kv_events_rx.next().await {
-                    let event = match result {
-                        Ok((_envelope, event)) => event,
-                        Err(e) => {
-                            tracing::warn!("KvRecorder failed to decode kv event: {:?}", e);
-                            continue;
-                        }
-                    };
-                    tracing::debug!("KvRecorder received kv event: {:?}", event);
-                    if let Err(e) = event_tx.send(event).await {
-                        tracing::trace!(
-                            "KvRecorder failed to send kv event; shutting down: {:?}",
-                            e
-                        );
-                        break;
-                    }
-                }
-            });
-
-            Ok(Self {
-                inner: Arc::new(inner),
-            })
-        })
-    }
-
-    fn event_count<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let recorder = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let count = recorder.event_count().await;
-            Ok(count)
-        })
-    }
-
-    fn elapsed_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let recorder = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            match recorder.elapsed_time().await {
-                Ok(elapsed) => Ok(elapsed.as_secs_f64()),
-                Err(_) => Ok(0.0), // Return 0.0 when no events have been received yet
-            }
-        })
-    }
-
-    #[pyo3(signature = (indexer, timed=false, max_count=None, max_time=None))]
-    fn replay_events<'py>(
-        &self,
-        py: Python<'py>,
-        indexer: &KvIndexer,
-        timed: bool,
-        max_count: Option<usize>,
-        max_time: Option<f64>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let event_tx = indexer.inner.event_sender();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let count = llm_rs::kv_router::recorder::KvRecorder::send_events(
-                "dummy_path", // This doesn't matter as we'll use the provided event_tx
-                &event_tx,
-                timed,
-                max_count,
-                max_time,
-            )
-            .await
-            .map_err(to_pyerr)?;
-            Ok(count)
-        })
-    }
-
-    fn shutdown(&self) -> PyResult<()> {
-        self.inner.shutdown();
-        Ok(())
     }
 }
 

@@ -1632,6 +1632,7 @@ dependencies = [
  "ahash",
  "aho-corasick",
  "akin",
+ "aligned-vec",
  "anyhow",
  "async-nats",
  "async-stream",
@@ -1648,6 +1649,7 @@ dependencies = [
  "bytes",
  "candle-core",
  "chrono",
+ "cudarc",
  "dashmap 5.5.3",
  "derive-getters",
  "derive_builder",
@@ -1655,6 +1657,7 @@ dependencies = [
  "dynamo-async-openai",
  "dynamo-kv-router",
  "dynamo-memory",
+ "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
  "dynamo-tokens",
@@ -1681,6 +1684,7 @@ dependencies = [
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
+ "nix 0.26.4",
  "nixl-sys",
  "object_store",
  "offset-allocator",
@@ -1737,6 +1741,28 @@ dependencies = [
  "serde",
  "thiserror 2.0.17",
  "tracing",
+]
+
+[[package]]
+name = "dynamo-mocker"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "dashmap 6.1.0",
+ "derive-getters",
+ "derive_builder",
+ "dynamo-kv-router",
+ "dynamo-tokens",
+ "ndarray",
+ "ndarray-interp",
+ "ndarray-npy",
+ "rand 0.9.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3915,6 +3941,15 @@ checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
 
 [[package]]
 name = "memoffset"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5de893c32cde5f383baa4c04c5d6dbdd735cfd4a794b0debdb2bb1b421da5ff4"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
+name = "memoffset"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
@@ -4204,6 +4239,19 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "nix"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "598beaf3cc6fdd9a5dfb1630c2800c7acd31df7aaf0f565796fba2b53ca1af1b"
+dependencies = [
+ "bitflags 1.3.2",
+ "cfg-if 1.0.4",
+ "libc",
+ "memoffset 0.7.1",
+ "pin-utils",
 ]
 
 [[package]]
@@ -5452,7 +5500,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "indoc",
  "libc",
- "memoffset",
+ "memoffset 0.9.1",
  "once_cell",
  "portable-atomic",
  "pyo3-build-config",

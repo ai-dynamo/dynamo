@@ -5,6 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Profiling SGLang Workers in Dynamo
 
+> [!NOTE]
+> **See also**: [Profiler Component Overview](/docs/components/profiler/README.md) for SLA-driven profiling and deployment optimization.
+
 Dynamo exposes profiling endpoints for SGLang workers via the system server's `/engine/*` routes. This allows you to start and stop PyTorch profiling on running inference workers without restarting them.
 
 These endpoints wrap SGLang's internal `TokenizerManager.start_profile()` and `stop_profile()` methods. See SGLang's documentation for the full list of supported parameters.

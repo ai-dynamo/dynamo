@@ -306,3 +306,9 @@ For additional support and examples, see the working multinode configurations in
 - **vLLM**: [examples/backends/vllm/deploy/](../../../examples/backends/vllm/deploy/)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.
+
+```{toctree}
+:hidden:
+
+Grove <../grove>
+```

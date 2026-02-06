@@ -88,8 +88,9 @@ def _build_planners(args, prometheus_client):
 
     async def mock_get_workers_info(require_prefill=True, require_decode=True):
         return (
-            ["prefill-0"] if require_prefill else [],
-            ["decode-0"] if require_decode else [],
+            1 if require_prefill else 0,
+            1 if require_decode else 0,
+            True,  # is_stable
         )
 
     prefill_planner.get_workers_info = mock_get_workers_info

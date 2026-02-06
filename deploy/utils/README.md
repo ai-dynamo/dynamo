@@ -145,7 +145,7 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 
 For complete benchmarking and profiling workflows:
 - **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
-- **Pre-Deployment Profiling**: See [docs/benchmarks/sla_driven_profiling.md](../../docs/benchmarks/sla_driven_profiling.md) for optimizing configurations before deployment
+- **Pre-Deployment Profiling**: See [docs/components/profiler/profiler_guide.md](../../docs/components/profiler/profiler_guide.md) for optimizing configurations before deployment
 
 ## Notes
 
