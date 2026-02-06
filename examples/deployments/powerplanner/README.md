@@ -505,8 +505,8 @@ Before deploying to production:
 ### Documentation
 - [Kubernetes API Reference](../../../docs/kubernetes/api_reference.md) - DynamoGraphDeployment restart mechanism
 - [Multinode Deployment Guide](../../basics/multinode/README.md) - Multi-node setup with KV routing
-- [KV Cache Routing](../../../docs/router/kv_cache_routing.md) - KV-aware routing architecture
-- [Disaggregated Serving](../../../docs/design_docs/disagg_serving.md) - Disaggregation design
+- [KV Cache Routing](../../../docs/pages/components/router/README.md) - KV-aware routing architecture
+- [Disaggregated Serving](../../../docs/pages/design-docs/disagg-serving.md) - Disaggregation design
 
 ### Scripts
 

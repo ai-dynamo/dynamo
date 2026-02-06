@@ -14,9 +14,13 @@ rules:
   resources:
   - dynamocomponentdeployments
   - dynamographdeployments
+  - dynamoworkermetadatas
+  - dynamographdeploymentscalingadapters
+  - dynamographdeploymentscalingadapters/scale
   verbs:
   - get
   - list
+  - watch
   - create
   - update
   - patch
@@ -28,4 +32,12 @@ rules:
   - get
   - list
   - patch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
 
