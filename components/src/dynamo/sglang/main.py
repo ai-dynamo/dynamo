@@ -10,6 +10,7 @@ import sys
 import sglang as sgl
 import uvloop
 
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
@@ -164,7 +165,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+        setup_prometheus_registry(engine, generate_endpoint, config)
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
@@ -251,7 +252,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+        setup_prometheus_registry(engine, generate_endpoint, config)
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
@@ -338,7 +339,7 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
 
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+        setup_prometheus_registry(engine, generate_endpoint, config)
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
@@ -412,7 +413,7 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
 
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+        setup_prometheus_registry(engine, generate_endpoint, config)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -561,11 +562,14 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     await encode_worker_client.wait_for_instances()
 
     try:
-        await asyncio.gather(
+        _ = await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, server_args.served_model_name),
+                    (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+                ],
             ),
             register_llm_with_readiness_gate(
                 None,  # engine
@@ -612,7 +616,10 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         await generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
+            metrics_labels=[
+                (prometheus_names.labels.MODEL, server_args.served_model_name),
+                (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+            ],
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

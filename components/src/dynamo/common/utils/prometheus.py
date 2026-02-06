@@ -17,12 +17,21 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
 from dynamo._core import Endpoint
+from dynamo.prometheus_names import labels
 
 # Import CollectorRegistry only for type hints to avoid importing prometheus_client at module load time.
 # prometheus_client must be imported AFTER set_prometheus_multiproc_dir() is called.
 # See main.py worker() function for detailed explanation.
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
+
+# Auto-label injection control (aligns Python engine metrics with Rust auto-labels)
+# When True, automatically injects dynamo_namespace, dynamo_component, dynamo_endpoint labels
+# into engine metrics based on the endpoint hierarchy.
+#
+# Rust counterpart: lib/runtime/src/metrics.rs USE_AUTO_LABELS constant and create_metric() function (lines 227-266)
+# Label constants defined in: lib/runtime/src/metrics/prometheus_names.rs labels module (lines 73-83)
+USE_AUTO_LABELS = True
 
 
 def register_engine_metrics_callback(
@@ -31,6 +40,11 @@ def register_engine_metrics_callback(
     metric_prefix_filters: Optional[list[str]] = None,
     exclude_prefixes: Optional[list[str]] = None,
     add_prefix: Optional[str] = None,
+    inject_custom_labels: Optional[dict[str, str]] = None,
+    namespace_name: Optional[str] = None,
+    component_name: Optional[str] = None,
+    endpoint_name: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> None:
     """
     Register a callback to expose engine Prometheus metrics via Dynamo's metrics endpoint.
@@ -38,17 +52,41 @@ def register_engine_metrics_callback(
     This registers a callback that is invoked when /metrics is scraped, passing through
     engine-specific metrics alongside Dynamo runtime metrics.
 
+    When USE_AUTO_LABELS is True, automatically injects dynamo_namespace, dynamo_component,
+    dynamo_endpoint, model, and model_name labels. These can be provided explicitly via
+    namespace_name/component_name/endpoint_name/model_name parameters.
+
+    Label Precedence (highest to lowest):
+    1. Existing labels from source metrics - never changed, never overwritten
+    2. Auto-injected labels (dynamo_*, model*) - added by Dynamo when USE_AUTO_LABELS=True
+    3. Custom labels (inject_custom_labels) - user-provided, lowest precedence
+
+    If inject_custom_labels contains keys that conflict with auto-injected labels,
+    a warning is logged and the auto-injected value takes precedence.
+
     Args:
         endpoint: Dynamo endpoint object with metrics.register_prometheus_expfmt_callback()
         registry: Prometheus registry to collect from (e.g., REGISTRY or CollectorRegistry)
         metric_prefix_filters: List of prefixes to filter metrics (e.g., ["vllm:"], ["vllm:", "lmcache:"], or None for no filtering)
         exclude_prefixes: List of metric name prefixes to exclude (e.g., ["python_", "process_"])
         add_prefix: Prefix to add to remaining metrics (e.g., "trtllm_")
+        inject_custom_labels: Optional dict of custom labels to inject (e.g. {"gpu_type": "H100"}).
+                      Injected at collection time without modifying source metrics.
+                      Reserved labels (le, quantile) will raise ValueError.
+                      When USE_AUTO_LABELS is True, auto-labels (dynamo_namespace, dynamo_component,
+                      dynamo_endpoint, model, model_name) are added automatically and should not be in inject_custom_labels.
+        namespace_name: Explicit namespace name for auto-labels (from config.namespace)
+        component_name: Explicit component name for auto-labels (from config.component)
+        endpoint_name: Explicit endpoint name for auto-labels (from config.endpoint, defaults to "generate")
+        model_name: Model name/path for auto-labels (from config.model, injected as both 'model' and 'model_name')
 
     Example:
         from prometheus_client import REGISTRY
+        # Auto-labels enabled (USE_AUTO_LABELS=True): automatically adds hierarchy labels
         register_engine_metrics_callback(
-            generate_endpoint, REGISTRY, metric_prefix_filters=["vllm:"]
+            generate_endpoint, REGISTRY,
+            metric_prefix_filters=["vllm:"],
+            namespace_name="prod", component_name="vllm-worker", endpoint_name="generate"
         )
 
         # Include multiple metric prefixes
@@ -60,9 +98,60 @@ def register_engine_metrics_callback(
         register_engine_metrics_callback(
             generate_endpoint, REGISTRY,
             exclude_prefixes=["python_", "process_"],
-            add_prefix="trtllm_"
+            metric_prefix_filters=["trtllm_"],
+        )
+
+        # Inject additional labels (auto-labels are added automatically if USE_AUTO_LABELS=True)
+        register_engine_metrics_callback(
+            generate_endpoint, REGISTRY,
+            metric_prefix_filters=["vllm:"],
+            inject_custom_labels={"gpu_type": "H100", "region": "us-west-2"}
         )
     """
+
+    # Auto-inject hierarchy labels if enabled
+    final_inject_labels = inject_custom_labels.copy() if inject_custom_labels else {}
+
+    if USE_AUTO_LABELS and (namespace_name and component_name):
+        # Extract hierarchy information
+        # Mirrors Rust auto-label injection in lib/runtime/src/metrics.rs create_metric() (lines 227-266)
+        endpoint_name_final = endpoint_name or "generate"
+
+        # Add auto-labels using constants from prometheus_names.labels
+        # These align with Rust auto-labels defined in lib/runtime/src/metrics/prometheus_names.rs
+        auto_labels = {
+            labels.NAMESPACE: namespace_name,  # "dynamo_namespace"
+            labels.COMPONENT: component_name,  # "dynamo_component"
+            labels.ENDPOINT: endpoint_name_final,  # "dynamo_endpoint"
+        }
+
+        # Add model labels if model_name is provided
+        if model_name:
+            auto_labels[labels.MODEL] = model_name  # "model" (OpenAI standard)
+            auto_labels[
+                labels.MODEL_NAME
+            ] = model_name  # "model_name" (engine-native compatibility)
+
+        # Validate that user didn't provide conflicting auto-labels
+        # Warn but don't error - custom labels have lower precedence than auto-labels
+        if inject_custom_labels:
+            for key in auto_labels:
+                if key in inject_custom_labels:
+                    logging.warning(
+                        f"Custom label '{key}' conflicts with auto-injected label (USE_AUTO_LABELS=True). "
+                        f"Auto-injected value will take precedence. Custom value '{inject_custom_labels[key]}' will be ignored."
+                    )
+
+        # Merge labels with correct precedence:
+        # 1. Existing labels (from source metrics) - never overwritten
+        # 2. Auto-labels (dynamo_*, model*) - injected by Dynamo
+        # 3. Custom labels (inject_custom_labels) - user-provided, lowest precedence
+        # Put custom labels first, then overwrite with auto-labels (higher precedence)
+        final_inject_labels = {**final_inject_labels, **auto_labels}
+        logging.debug(
+            f"Auto-injecting labels: "
+            f"namespace={namespace_name}, component={component_name}, endpoint={endpoint_name_final}, model={model_name}"
+        )
 
     def get_expfmt() -> str:
         """Callback to return engine Prometheus metrics in exposition format"""
@@ -71,6 +160,7 @@ def register_engine_metrics_callback(
             metric_prefix_filters=metric_prefix_filters,
             exclude_prefixes=exclude_prefixes,
             add_prefix=add_prefix,
+            inject_custom_labels=final_inject_labels if final_inject_labels else None,
         )
 
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
@@ -110,12 +200,13 @@ def get_prometheus_expfmt(
     metric_prefix_filters: Optional[list[str]] = None,
     exclude_prefixes: Optional[list[str]] = None,
     add_prefix: Optional[str] = None,
+    inject_custom_labels: Optional[dict[str, str]] = None,
 ) -> str:
     """
     Get Prometheus metrics from a registry formatted as text using the standard text encoder.
 
     Collects all metrics from the registry and returns them in Prometheus text exposition format.
-    Optionally filters metrics by prefix, excludes certain prefixes, and adds a prefix.
+    Optionally filters metrics by prefix, excludes certain prefixes, adds a prefix, and injects labels.
 
     IMPORTANT: prometheus_client is imported lazily here because it must be imported AFTER
     set_prometheus_multiproc_dir() is called by SGLang's engine initialization. Importing
@@ -129,7 +220,15 @@ def get_prometheus_expfmt(
         metric_prefix_filters: Optional list of prefixes to filter displayed metrics (e.g., ["vllm:"] or ["vllm:", "lmcache:"]).
                              If None, returns all metrics. Supports single string or list of strings. (default: None)
         exclude_prefixes: List of metric name prefixes to exclude (e.g., ["python_", "process_"])
-        add_prefix: Prefix to add to remaining metrics (e.g., "trtllm_")
+        add_prefix: Prefix to add to remaining metrics (e.g., "custom:")
+        inject_custom_labels: Optional dict of custom labels to inject at collection time.
+                      Example: {"gpu_type": "H100", "region": "us-west-2"}
+                      Reserved labels (le, quantile) will raise ValueError.
+
+                      Label Precedence (highest to lowest):
+                      1. Existing labels from source metrics - never changed
+                      2. Auto-injected labels (via register_engine_metrics_callback)
+                      3. Custom labels (inject_custom_labels) - lowest precedence
 
     Returns:
         Formatted metrics text in Prometheus exposition format. Returns empty string on error.
@@ -138,12 +237,36 @@ def get_prometheus_expfmt(
         # Filter to include only vllm and lmcache metrics
         get_prometheus_expfmt(registry, metric_prefix_filters=["vllm:", "lmcache:"])
 
-        # Filter out python_/process_ metrics and add trtllm_ prefix
-        get_prometheus_expfmt(registry, exclude_prefixes=["python_", "process_"], add_prefix="trtllm_")
+        # Filter out python_/process_ metrics (TRT-LLM natively outputs trtllm_* prefix)
+        get_prometheus_expfmt(registry, metric_prefix_filters=["trtllm_"])
+
+        # Inject labels (custom labels, not auto-injected ones)
+        get_prometheus_expfmt(
+            registry, metric_prefix_filters=["vllm:"],
+            inject_custom_labels={"gpu_type": "H100", "region": "us-west-2"}
+        )
     """
-    from prometheus_client import generate_latest
+    from prometheus_client import CollectorRegistry, generate_latest
 
     try:
+        # If label injection requested, wrap registry with custom collector
+        if inject_custom_labels:
+            # Delayed import: LabelInjectingCollector imports prometheus_client.registry.Collector
+            # at module level. This import must happen AFTER set_prometheus_multiproc_dir() is
+            # called by SGLang's engine initialization. Importing at the top of this file would
+            # trigger prometheus_client initialization too early (before PROMETHEUS_MULTIPROC_DIR
+            # is set), breaking multiprocess metrics collection.
+            from dynamo.common.utils.label_injecting_collector import (
+                LabelInjectingCollector,
+            )
+
+            # Create temporary registry with label-injecting collector
+            temp_registry = CollectorRegistry()
+            temp_registry.register(
+                LabelInjectingCollector(registry, inject_custom_labels)
+            )
+            registry = temp_registry
+
         # Generate metrics in Prometheus text format
         metrics_text = generate_latest(registry).decode("utf-8")
 

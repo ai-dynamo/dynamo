@@ -251,7 +251,7 @@ class DynamoSglangPublisher:
 
 
 def setup_prometheus_registry(
-    engine: sgl.Engine, generate_endpoint: Endpoint
+    engine: sgl.Engine, generate_endpoint: Endpoint, config: Config
 ) -> "CollectorRegistry":
     """Set up Prometheus registry for SGLang metrics collection.
 
@@ -268,6 +268,7 @@ def setup_prometheus_registry(
     Args:
         engine: The SGLang engine instance.
         generate_endpoint: The Dynamo endpoint for generation requests.
+        config: SGLang configuration including dynamo_args with namespace/component/endpoint.
 
     Returns:
         Configured CollectorRegistry with multiprocess support.
@@ -276,10 +277,16 @@ def setup_prometheus_registry(
 
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
+
+    # Auto-label injection (USE_AUTO_LABELS=True): hierarchy labels are added automatically
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
         metric_prefix_filters=["sglang:"],
+        namespace_name=config.dynamo_args.namespace,
+        component_name=config.dynamo_args.component,
+        endpoint_name=config.dynamo_args.endpoint,
+        model_name=engine.server_args.served_model_name,
     )
     return registry
 
