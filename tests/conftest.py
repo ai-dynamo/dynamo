@@ -191,10 +191,17 @@ def predownload_tokenizers(pytestconfig):
 
 @pytest.fixture(autouse=True)
 def logger(request):
-    log_path = os.path.join(request.node.name, "test.log.txt")
+    # If DYN_TEST_OUTPUT_PATH is set, write logs there to keep them out of the git working tree
+    # Otherwise, use the old behavior of writing to CWD/request.node.name
+    log_root = os.environ.get("DYN_TEST_OUTPUT_PATH")
+    if log_root:
+        log_dir = os.path.join(log_root, request.node.name)
+    else:
+        log_dir = request.node.name
+    log_path = os.path.join(log_dir, "test.log.txt")
     logger = logging.getLogger()
-    shutil.rmtree(request.node.name, ignore_errors=True)
-    os.makedirs(request.node.name, exist_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    os.makedirs(log_dir, exist_ok=True)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)

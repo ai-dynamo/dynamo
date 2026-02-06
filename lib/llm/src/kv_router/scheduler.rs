@@ -10,10 +10,9 @@ use dynamo_runtime::transports::event_plane::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
-#[cfg(feature = "bench")]
-use std::time::Instant;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
@@ -105,7 +104,7 @@ impl KvScheduler {
         router_id: u64,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
-        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::new(None)));
 
         // Get initial workers from DashMap for slot initialization.
         // Caller must ensure at least one worker is present (via wait_for_some).
@@ -436,10 +435,12 @@ fn softmax_sample(
         // Find the minimum logit value
         let min_logit = logits.values().fold(f64::INFINITY, |a, &b| a.min(b));
 
-        // Collect all keys with the minimum logit value (to handle ties)
+        // Use epsilon for floating-point comparison to avoid non-deterministic
+        // selection due to tiny arithmetic differences (e.g., 1e-15)
+        const EPSILON: f64 = 1e-5;
         let min_keys: Vec<_> = logits
             .iter()
-            .filter(|&(_, &v)| v == min_logit)
+            .filter(|&(_, &v)| (v - min_logit).abs() < EPSILON)
             .map(|(k, _)| *k)
             .collect();
 
@@ -494,16 +495,123 @@ fn softmax_sample(
     vec![keys[keys.len() - 1]]
 }
 
+/// Cached routing decision for a token sequence prefix.
+/// Tracks which worker was selected for sequences starting with specific token patterns,
+/// enabling sticky routing for related requests (same prefix) even when KV events are delayed.
+#[derive(Debug, Clone)]
+struct PrefixRoute {
+    worker: WorkerWithDpRank,
+    timestamp: Instant,
+    prefix_len: usize,
+}
+
+/// Prefix-based routing cache with bounded size and TTL.
+/// Maps from token prefix hash to recent routing decisions.
+struct PrefixCache {
+    // Token prefix hash → cached route
+    cache: HashMap<u64, PrefixRoute>,
+    max_entries: usize,
+    ttl: Duration,
+}
+
+impl PrefixCache {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            cache: HashMap::with_capacity(max_entries),
+            max_entries,
+            ttl: Duration::from_secs(300), // Fixed 5 minutes TTL
+        }
+    }
+
+    /// Hash token prefix (first N tokens) to create a cache key.
+    /// Uses first min(prefix_len, tokens.len()) tokens.
+    fn hash_prefix(tokens: &[dynamo_tokens::SequenceHash], prefix_len: usize) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let actual_len = prefix_len.min(tokens.len());
+        tokens[..actual_len].hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Find cached route for token sequence.
+    /// Returns worker if a matching prefix is found and the route is still fresh.
+    fn get(&self, tokens: &[dynamo_tokens::SequenceHash], min_prefix_len: usize) -> Option<WorkerWithDpRank> {
+        // Try decreasing prefix lengths (longest match first)
+        for prefix_len in (min_prefix_len..=tokens.len()).rev() {
+            let hash = Self::hash_prefix(tokens, prefix_len);
+
+            if let Some(route) = self.cache.get(&hash) {
+                // Check if route is still fresh (within TTL)
+                if route.timestamp.elapsed() < self.ttl {
+                    tracing::debug!(
+                        "Prefix cache hit: prefix_len={} worker_id={} dp_rank={} age={}ms",
+                        route.prefix_len,
+                        route.worker.worker_id,
+                        route.worker.dp_rank,
+                        route.timestamp.elapsed().as_millis()
+                    );
+                    return Some(route.worker);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Store a routing decision for future prefix matches.
+    fn insert(&mut self, tokens: &[dynamo_tokens::SequenceHash], worker: WorkerWithDpRank, prefix_len: usize) {
+        // Evict oldest entries if cache is full
+        if self.cache.len() >= self.max_entries {
+            // Find oldest entry
+            if let Some(oldest_key) = self.cache.iter()
+                .min_by_key(|(_, route)| route.timestamp)
+                .map(|(k, _)| *k)
+            {
+                self.cache.remove(&oldest_key);
+            }
+        }
+
+        let hash = Self::hash_prefix(tokens, prefix_len);
+        self.cache.insert(hash, PrefixRoute {
+            worker,
+            timestamp: Instant::now(),
+            prefix_len,
+        });
+
+        tracing::debug!(
+            "Prefix cache insert: prefix_len={} worker_id={} dp_rank={}",
+            prefix_len,
+            worker.worker_id,
+            worker.dp_rank
+        );
+    }
+
+    /// Remove stale entries (older than TTL).
+    fn evict_stale(&mut self) {
+        self.cache.retain(|_, route| route.timestamp.elapsed() < self.ttl);
+    }
+}
+
 // Default implementation matching the Python _cost_function
-#[derive(Debug, Clone, Default)]
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
+    prefix_cache: Arc<Mutex<PrefixCache>>,
 }
 
 impl DefaultWorkerSelector {
     pub fn new(kv_router_config: Option<KvRouterConfig>) -> Self {
+        let config = kv_router_config.unwrap_or_default();
+
+        eprintln!(
+            "[RUST] DefaultWorkerSelector: prefix_cache={} size={}",
+            config.router_enable_prefix_cache,
+            config.router_prefix_cache_size
+        );
+
         Self {
-            kv_router_config: kv_router_config.unwrap_or_default(),
+            kv_router_config: config.clone(),
+            prefix_cache: Arc::new(Mutex::new(PrefixCache::new(
+                config.router_prefix_cache_size,
+            ))),
         }
     }
 }
@@ -527,6 +635,60 @@ impl WorkerSelector for DefaultWorkerSelector {
 
         let decode_blocks = &request.decode_blocks;
         let prefill_tokens = &request.prefill_tokens;
+
+        // Check prefix cache if enabled and we have token sequence
+        // Only use prefix cache when:
+        // 1. Feature is enabled via config
+        // 2. We have token_seq (not a bare prompt)
+        // 3. Temperature is 0 (deterministic routing)
+        // 4. Sequence is long enough (min 3 tokens for meaningful prefix)
+        let use_prefix_cache = self.kv_router_config.router_enable_prefix_cache
+            && request.token_seq.is_some();
+
+        if use_prefix_cache {
+            if let Some(ref token_seq) = request.token_seq {
+                if token_seq.len() >= 3 {
+                    // Try to find a cached route for this prefix
+                    let mut cache = self.prefix_cache.lock().unwrap();
+
+                    // Evict stale entries before lookup
+                    cache.evict_stale();
+
+                    if let Some(cached_worker) = cache.get(token_seq, 3) {
+                        // Verify cached worker is still available
+                        let data_parallel_size = workers
+                            .get(&cached_worker.worker_id)
+                            .and_then(|cfg| cfg.as_ref())
+                            .map(|c| c.data_parallel_size)
+                            .unwrap_or(1);
+
+                        if cached_worker.dp_rank < data_parallel_size {
+                            let best_overlap = *overlaps.get(&cached_worker).unwrap_or(&0);
+
+                            tracing::info!(
+                                "Using prefix cached route: worker_id={} dp_rank={} cached_blocks={}",
+                                cached_worker.worker_id,
+                                cached_worker.dp_rank,
+                                best_overlap
+                            );
+
+                            return Ok(WorkerSelectionResult {
+                                worker: cached_worker,
+                                required_blocks: request_blocks as u64,
+                                overlap_blocks: best_overlap,
+                            });
+                        } else {
+                            tracing::debug!(
+                                "Cached worker no longer available: worker_id={} dp_rank={} (max dp_rank={})",
+                                cached_worker.worker_id,
+                                cached_worker.dp_rank,
+                                data_parallel_size - 1
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         let mut worker_logits = HashMap::new();
 
@@ -633,6 +795,17 @@ impl WorkerSelector for DefaultWorkerSelector {
             tree_size,
             total_blocks_info
         );
+
+        // Store routing decision in prefix cache for future requests
+        if use_prefix_cache {
+            if let Some(ref token_seq) = request.token_seq {
+                if token_seq.len() >= 3 {
+                    let mut cache = self.prefix_cache.lock().unwrap();
+                    // Cache the route using the full sequence length as prefix
+                    cache.insert(token_seq, best_worker, token_seq.len());
+                }
+            }
+        }
 
         Ok(WorkerSelectionResult {
             worker: best_worker,
