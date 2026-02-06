@@ -7,7 +7,79 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Overview
 
-For quick start instructions, start with the [Router README](README.md). This guide covers details into further configuration, disaggregated serving setup, and parameter tuning.
+The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
+This guide helps you get started with using the Dynamo router, with further details on configuration, disaggregated serving setup, and parameter tuning.
+
+## Quick start
+
+### Python / CLI Deployment
+
+To launch the Dynamo frontend with the KV Router:
+
+```bash
+python -m dynamo.frontend --router-mode kv --http-port 8000
+```
+
+This command:
+- Launches the Dynamo frontend service with KV routing enabled
+- Exposes the service on port 8000 (configurable)
+- Automatically handles all backend workers registered to the Dynamo endpoint
+
+Backend workers register themselves using the `register_llm` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
+
+#### CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
+| `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
+| `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
+| `--kv-events` / `--no-kv-events` | `--kv-events` | Enable/disable real-time KV event tracking |
+| `--kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+
+For all available options: `python -m dynamo.frontend --help`
+
+For detailed configuration options and tuning parameters, see [Using the KV Cache Router](#using-the-kv-cache-router).
+
+### Kubernetes Deployment
+
+To enable the KV Router in Kubernetes, add the `DYN_ROUTER_MODE` environment variable to your frontend service:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: my-namespace
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv  # Enable KV Smart Router
+```
+
+**Key Points:**
+- Set `DYN_ROUTER_MODE=kv` on the **Frontend** service only
+- Workers automatically report KV cache events to the router
+- No worker-side configuration changes needed
+
+#### Environment Variables
+
+All CLI arguments can be configured via environment variables using the `DYN_` prefix:
+
+| CLI Argument | Environment Variable | Default |
+|--------------|---------------------|---------|
+| `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round_robin` |
+| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` |
+| `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
+| `--no-kv-events` | `DYN_KV_EVENTS=false` | `true` |
+| `--kv-overlap-score-weight` | `DYN_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
+
+For complete K8s examples and advanced configuration, see [K8s Examples](router_examples.md#k8s-examples).
+For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
 ## KV Cache Routing
 
@@ -270,16 +342,16 @@ The KV Router tracks two types of state (see [Router Design](../../design_docs/r
 
 ```bash
 # Router replica 1
-python -m dynamo.frontend --router-mode kv --port 8000 --router-replica-sync
+python -m dynamo.frontend --router-mode kv --http-port 8000 --router-replica-sync
 
 # Router replica 2 (can be started later)
-python -m dynamo.frontend --router-mode kv --port 8001 --router-replica-sync
+python -m dynamo.frontend --router-mode kv --http-port 8001 --router-replica-sync
 ```
 
 The `--router-replica-sync` flag enables active block synchronization between replicas:
 - Active blocks are shared via NATS core messaging (fire-and-forget)
 - Replicas exchange routing decisions to maintain consistent load estimates
-- A new replica start with zero active blocks but quickly converge through request handling, by itself and active syncing with other replicas
+- A new replica start with zero active blocks but quickly converges through request handling, by itself and active syncing with other replicas
 
 Without this flag, each replica maintains its own isolated view of active blocks, potentially leading to suboptimal routing.
 
@@ -294,7 +366,7 @@ Persistence behavior depends on which event transport mode is active:
 - You can launch a third Router replica even if the first two are down, and it will recover the full prefix state
 
 ```bash
-python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync
+python -m dynamo.frontend --router-mode kv --http-port 8002 --router-replica-sync
 ```
 
 **NATS Core with Local Indexer Mode:**
