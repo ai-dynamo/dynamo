@@ -27,6 +27,7 @@ class DynamoRuntimeConfig(ConfigBase):
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
+    multimodal_embedding_cache_capacity_gb: float
 
     def validate(self) -> None:
         # TODO  get a better way for spot fixes like this.
@@ -129,4 +130,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_DUMP_CONFIG_TO",
             default=None,
             help="Dump resolved configuration to the specified file path.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--multimodal-embedding-cache-capacity-gb",
+            env_var="DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB",
+            default=0,
+            arg_type=float,
+            help="Capacity of the multimodal embedding cache in GB. 0 = disabled.",
         )
