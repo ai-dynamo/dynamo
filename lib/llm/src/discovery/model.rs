@@ -298,6 +298,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::watch;
     use crate::model_card::ModelDeploymentCard;
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
@@ -306,6 +307,22 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         ))
+    }
+
+    /// Create a WorkerSet backed by a watch channel so worker_count reflects the vec length.
+    fn make_worker_set_with_count(
+        namespace: &str,
+        mdcsum: &str,
+        worker_ids: Vec<u64>,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let (tx, rx) = watch::channel(worker_ids);
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            mdcsum.to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.set_instance_watcher(rx);
+        (Arc::new(ws), tx)
     }
 
     #[test]
@@ -420,5 +437,77 @@ mod tests {
         // Multiple sets (weighted path)
         model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
         assert!(model.get_chat_engine().is_err()); // Still no engines → all filtered out
+    }
+
+    #[test]
+    fn test_total_workers_no_watcher() {
+        // In-process WorkerSets (no watcher) default to worker_count=1
+        let model = Model::new("llama".to_string());
+        assert_eq!(model.total_workers(), 0); // empty model
+
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        assert_eq!(model.total_workers(), 1);
+
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
+        assert_eq!(model.total_workers(), 2);
+    }
+
+    #[test]
+    fn test_total_workers_with_watcher() {
+        let model = Model::new("llama".to_string());
+
+        let (ws1, _tx1) = make_worker_set_with_count("ns1", "abc", vec![1, 2, 3]);
+        let (ws2, _tx2) = make_worker_set_with_count("ns2", "def", vec![10, 20]);
+        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns2".to_string(), ws2);
+
+        assert_eq!(model.total_workers(), 5); // 3 + 2
+    }
+
+    #[test]
+    fn test_total_workers_updates_dynamically() {
+        let model = Model::new("llama".to_string());
+
+        let (ws1, tx1) = make_worker_set_with_count("ns1", "abc", vec![1, 2]);
+        model.add_worker_set("ns1".to_string(), ws1);
+        assert_eq!(model.total_workers(), 2);
+
+        // Workers leave
+        tx1.send(vec![1]).unwrap();
+        assert_eq!(model.total_workers(), 1);
+
+        // All workers gone
+        tx1.send(vec![]).unwrap();
+        assert_eq!(model.total_workers(), 0);
+    }
+
+    #[test]
+    fn test_zero_worker_single_set_filtered() {
+        // Single WorkerSet with 0 workers should be filtered by select_worker_set_with.
+        // We test via select_worker_set_with's internal behavior: even though the set
+        // exists and is_prefill_set() returns true, engine accessors should fail because
+        // the zero-worker filter runs before the extract closure.
+        let model = Model::new("llama".to_string());
+
+        let (ws, _tx) = make_worker_set_with_count("ns1", "abc", vec![]);
+        model.add_worker_set("ns1".to_string(), ws);
+
+        // WorkerSet exists but has 0 workers → selection filtered out → Err
+        assert!(model.get_chat_engine().is_err());
+        assert!(model.get_completions_engine().is_err());
+    }
+
+    #[test]
+    fn test_zero_worker_multi_set_filtered() {
+        // With multiple sets, only those with workers > 0 participate in selection.
+        let model = Model::new("llama".to_string());
+
+        let (ws1, _tx1) = make_worker_set_with_count("ns1", "abc", vec![]);
+        let (ws2, _tx2) = make_worker_set_with_count("ns2", "def", vec![]);
+        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns2".to_string(), ws2);
+
+        // Both have 0 workers → all filtered → Err
+        assert!(model.get_chat_engine().is_err());
     }
 }

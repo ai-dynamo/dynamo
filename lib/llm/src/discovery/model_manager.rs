@@ -816,3 +816,329 @@ impl ModelManager {
         configs.get(&worker_id)?.disaggregated_endpoint.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_card::ModelDeploymentCard;
+
+    fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
+        WorkerSet::new(
+            namespace.to_string(),
+            mdcsum.to_string(),
+            ModelDeploymentCard::default(),
+        )
+    }
+
+    // -- CRUD delegation tests --
+
+    #[test]
+    fn test_add_and_get_worker_set() {
+        let mm = ModelManager::new();
+        let ws = make_worker_set("ns1", "abc");
+        mm.add_worker_set("llama", "ns1", ws);
+
+        let model = mm.get_model("llama");
+        assert!(model.is_some());
+        let model = model.unwrap();
+        assert!(model.has_worker_set("ns1"));
+        assert_eq!(model.worker_set_count(), 1);
+    }
+
+    #[test]
+    fn test_add_worker_set_creates_model() {
+        let mm = ModelManager::new();
+        assert!(mm.get_model("llama").is_none());
+
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        assert!(mm.get_model("llama").is_some());
+    }
+
+    #[test]
+    fn test_remove_worker_set_removes_empty_model() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        assert!(mm.get_model("llama").is_some());
+
+        let removed = mm.remove_worker_set("llama", "ns1");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().namespace(), "ns1");
+
+        // Model should be auto-removed since it's now empty
+        assert!(mm.get_model("llama").is_none());
+    }
+
+    #[test]
+    fn test_remove_worker_set_keeps_model_with_remaining() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "def"));
+
+        mm.remove_worker_set("llama", "ns1");
+
+        // Model should still exist with ns2
+        let model = mm.get_model("llama").unwrap();
+        assert!(!model.has_worker_set("ns1"));
+        assert!(model.has_worker_set("ns2"));
+        assert_eq!(model.worker_set_count(), 1);
+    }
+
+    #[test]
+    fn test_remove_worker_set_nonexistent_model() {
+        let mm = ModelManager::new();
+        assert!(mm.remove_worker_set("llama", "ns1").is_none());
+    }
+
+    #[test]
+    fn test_remove_worker_set_nonexistent_namespace() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        assert!(mm.remove_worker_set("llama", "ns2").is_none());
+
+        // Model should still exist (ns1 still there)
+        assert!(mm.get_model("llama").is_some());
+    }
+
+    #[test]
+    fn test_remove_model_if_empty_noop_when_not_empty() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+
+        mm.remove_model_if_empty("llama");
+        assert!(mm.get_model("llama").is_some()); // Still has ns1
+    }
+
+    #[test]
+    fn test_remove_model_if_empty_noop_when_missing() {
+        let mm = ModelManager::new();
+        mm.remove_model_if_empty("nonexistent"); // Should not panic
+    }
+
+    #[test]
+    fn test_remove_model() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "def"));
+
+        let removed = mm.remove_model("llama");
+        assert!(removed.is_some());
+        assert!(mm.get_model("llama").is_none());
+    }
+
+    #[test]
+    fn test_get_or_create_model_idempotent() {
+        let mm = ModelManager::new();
+        let m1 = mm.get_or_create_model("llama");
+        let m2 = mm.get_or_create_model("llama");
+        // Both should point to the same Model (same Arc)
+        assert!(Arc::ptr_eq(&m1, &m2));
+    }
+
+    // -- Checksum validation tests --
+
+    #[test]
+    fn test_is_valid_checksum_match() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"));
+
+        assert_eq!(mm.is_valid_checksum("llama", "ns1", "abc123"), Some(true));
+    }
+
+    #[test]
+    fn test_is_valid_checksum_mismatch() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"));
+
+        assert_eq!(mm.is_valid_checksum("llama", "ns1", "wrong"), Some(false));
+    }
+
+    #[test]
+    fn test_is_valid_checksum_missing_namespace() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"));
+
+        // Different namespace → None (new namespace is OK, no conflict)
+        assert_eq!(mm.is_valid_checksum("llama", "ns2", "xyz"), None);
+    }
+
+    #[test]
+    fn test_is_valid_checksum_missing_model() {
+        let mm = ModelManager::new();
+        assert_eq!(mm.is_valid_checksum("nonexistent", "ns1", "abc"), None);
+    }
+
+    #[test]
+    fn test_is_valid_checksum_per_namespace_isolation() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "checksum_a"));
+        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "checksum_b"));
+
+        // Each namespace validates against its own checksum
+        assert_eq!(mm.is_valid_checksum("llama", "ns1", "checksum_a"), Some(true));
+        assert_eq!(mm.is_valid_checksum("llama", "ns1", "checksum_b"), Some(false));
+        assert_eq!(mm.is_valid_checksum("llama", "ns2", "checksum_b"), Some(true));
+        assert_eq!(mm.is_valid_checksum("llama", "ns2", "checksum_a"), Some(false));
+    }
+
+    // -- Model listing and filtering tests --
+
+    #[test]
+    fn test_has_decode_model() {
+        let mm = ModelManager::new();
+
+        // No model → false
+        assert!(!mm.has_decode_model("llama"));
+
+        // Prefill-only set (no engines) → false
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        assert!(!mm.has_decode_model("llama"));
+    }
+
+    #[test]
+    fn test_has_prefill_model() {
+        let mm = ModelManager::new();
+
+        // Prefill set = no engines
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        assert!(mm.has_prefill_model("llama"));
+    }
+
+    #[test]
+    fn test_has_model_any() {
+        let mm = ModelManager::new();
+        assert!(!mm.has_model_any("llama"));
+
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        assert!(mm.has_model_any("llama")); // has prefill
+    }
+
+    #[test]
+    fn test_model_display_names_includes_prefill() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+
+        let names = mm.model_display_names();
+        assert!(names.contains("llama"));
+    }
+
+    #[test]
+    fn test_model_display_names_empty() {
+        let mm = ModelManager::new();
+        assert!(mm.model_display_names().is_empty());
+    }
+
+    #[test]
+    fn test_list_prefill_models() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("gpt", "ns1", make_worker_set("ns1", "def"));
+
+        let prefill = mm.list_prefill_models();
+        assert_eq!(prefill.len(), 2);
+        assert!(prefill.contains(&"llama".to_string()));
+        assert!(prefill.contains(&"gpt".to_string()));
+    }
+
+    // -- Model card tests --
+
+    #[test]
+    fn test_save_and_remove_model_card() {
+        let mm = ModelManager::new();
+        let card = ModelDeploymentCard::default();
+        mm.save_model_card("instance/key/1", card.clone()).unwrap();
+
+        let cards = mm.get_model_cards();
+        assert_eq!(cards.len(), 1);
+
+        let removed = mm.remove_model_card("instance/key/1");
+        assert!(removed.is_some());
+        assert!(mm.get_model_cards().is_empty());
+    }
+
+    #[test]
+    fn test_remove_model_card_nonexistent() {
+        let mm = ModelManager::new();
+        assert!(mm.remove_model_card("nonexistent").is_none());
+    }
+
+    // -- Prefill router rendezvous tests --
+    // Note: activate_prefill_router requires an Endpoint (needs DistributedRuntime),
+    // so we test the registration state machine and cleanup only.
+
+    #[test]
+    fn test_prefill_router_register_new() {
+        let mm = ModelManager::new();
+
+        // First registration for a (model, namespace) returns Some(rx)
+        let rx = mm.register_prefill_router("llama", "ns1");
+        assert!(rx.is_some());
+    }
+
+    #[test]
+    fn test_prefill_router_double_register_returns_none() {
+        let mm = ModelManager::new();
+
+        let rx1 = mm.register_prefill_router("llama", "ns1");
+        assert!(rx1.is_some());
+
+        // Second registration for the same (model, namespace) returns None
+        let rx2 = mm.register_prefill_router("llama", "ns1");
+        assert!(rx2.is_none());
+    }
+
+    #[test]
+    fn test_prefill_router_different_namespaces_independent() {
+        let mm = ModelManager::new();
+
+        // Different namespaces should be independent
+        let rx1 = mm.register_prefill_router("llama", "ns1");
+        let rx2 = mm.register_prefill_router("llama", "ns2");
+        assert!(rx1.is_some());
+        assert!(rx2.is_some());
+    }
+
+    #[test]
+    fn test_prefill_router_different_models_independent() {
+        let mm = ModelManager::new();
+
+        // Different models should be independent
+        let rx1 = mm.register_prefill_router("llama", "ns1");
+        let rx2 = mm.register_prefill_router("gpt", "ns1");
+        assert!(rx1.is_some());
+        assert!(rx2.is_some());
+    }
+
+    #[test]
+    fn test_prefill_router_remove_allows_reregister() {
+        let mm = ModelManager::new();
+
+        let rx = mm.register_prefill_router("llama", "ns1");
+        assert!(rx.is_some());
+
+        // Remove the activator
+        mm.remove_prefill_activator("llama", "ns1");
+
+        // Should be able to register again
+        let rx2 = mm.register_prefill_router("llama", "ns1");
+        assert!(rx2.is_some());
+    }
+
+    #[test]
+    fn test_prefill_router_remove_nonexistent_noop() {
+        let mm = ModelManager::new();
+        // Should not panic
+        mm.remove_prefill_activator("llama", "ns1");
+    }
+
+    #[test]
+    fn test_model_namespace_key_format() {
+        assert_eq!(
+            ModelManager::model_namespace_key("llama", "ns1"),
+            "llama:ns1"
+        );
+        assert_eq!(
+            ModelManager::model_namespace_key("gpt-4", "default-abc"),
+            "gpt-4:default-abc"
+        );
+    }
+}
