@@ -158,15 +158,18 @@ class TestDetectPipelineInfo:
 
     def test_detect_wan_pipeline_single_transformer(self, tmp_path):
         """Test WanPipeline with single transformer -> ditWanPipeline."""
-        model_path = self._make_model_dir(tmp_path, {
-            "_class_name": "WanPipeline",
-            "_diffusers_version": "0.32.2",
-            "scheduler": ["diffusers", "UniPCMultistepScheduler"],
-            "text_encoder": ["transformers", "UMT5EncoderModel"],
-            "tokenizer": ["transformers", "AutoTokenizer"],
-            "transformer": ["diffusers", "WanTransformer3DModel"],
-            "vae": ["diffusers", "AutoencoderKLWan"],
-        })
+        model_path = self._make_model_dir(
+            tmp_path,
+            {
+                "_class_name": "WanPipeline",
+                "_diffusers_version": "0.32.2",
+                "scheduler": ["diffusers", "UniPCMultistepScheduler"],
+                "text_encoder": ["transformers", "UMT5EncoderModel"],
+                "tokenizer": ["transformers", "AutoTokenizer"],
+                "transformer": ["diffusers", "WanTransformer3DModel"],
+                "vae": ["diffusers", "AutoencoderKLWan"],
+            },
+        )
 
         info = DiffusionEngine.detect_pipeline_info(model_path)
 
@@ -177,25 +180,33 @@ class TestDetectPipelineInfo:
 
     def test_detect_wan_pipeline_dual_transformer(self, tmp_path):
         """Test WanPipeline with dual transformer -> Wan 2.2 config."""
-        model_path = self._make_model_dir(tmp_path, {
-            "_class_name": "WanPipeline",
-            "_diffusers_version": "0.32.2",
-            "transformer": ["diffusers", "WanTransformer3DModel"],
-            "transformer_2": ["diffusers", "WanTransformer3DModel"],
-            "vae": ["diffusers", "AutoencoderKLWan"],
-        })
+        model_path = self._make_model_dir(
+            tmp_path,
+            {
+                "_class_name": "WanPipeline",
+                "_diffusers_version": "0.32.2",
+                "transformer": ["diffusers", "WanTransformer3DModel"],
+                "transformer_2": ["diffusers", "WanTransformer3DModel"],
+                "vae": ["diffusers", "AutoencoderKLWan"],
+            },
+        )
 
         info = DiffusionEngine.detect_pipeline_info(model_path)
 
         assert info.class_name == "ditWanPipeline"
         # Dual transformer detected from model_index.json keys
-        assert info.config_overrides["torch_compile_models"] == "transformer,transformer_2"
+        assert (
+            info.config_overrides["torch_compile_models"] == "transformer,transformer_2"
+        )
 
     def test_detect_unknown_class_raises_valueerror(self, tmp_path):
         """Test that unknown _class_name raises ValueError with helpful message."""
-        model_path = self._make_model_dir(tmp_path, {
-            "_class_name": "SomeUnknownPipeline",
-        })
+        model_path = self._make_model_dir(
+            tmp_path,
+            {
+                "_class_name": "SomeUnknownPipeline",
+            },
+        )
 
         with pytest.raises(ValueError) as exc_info:
             DiffusionEngine.detect_pipeline_info(model_path)

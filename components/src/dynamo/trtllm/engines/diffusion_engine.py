@@ -123,9 +123,7 @@ class DiffusionEngine:
         module_path, vg_class, modalities = cls.PIPELINE_REGISTRY[class_name]
 
         # Derive torch_compile_models from transformer* keys in model_index.json
-        transformer_keys = sorted(
-            k for k in model_index if k.startswith("transformer")
-        )
+        transformer_keys = sorted(k for k in model_index if k.startswith("transformer"))
         torch_compile_models = (
             ",".join(transformer_keys) if transformer_keys else "transformer"
         )
