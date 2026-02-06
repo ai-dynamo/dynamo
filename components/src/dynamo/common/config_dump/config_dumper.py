@@ -39,24 +39,6 @@ def _get_sglang_version() -> Optional[str]:
         return None
 
 
-def _get_trtllm_version() -> Optional[str]:
-    """Get TensorRT-LLM version if available.
-
-    Returns:
-        Version string if TensorRT-LLM is installed, None otherwise.
-    """
-    try:
-        import tensorrt_llm
-
-        return tensorrt_llm.__version__
-    except ImportError:
-        logger.debug("TensorRT-LLM not available")
-        return None
-    except AttributeError:
-        logger.warning("TensorRT-LLM installed but version not available")
-        return None
-
-
 def _get_vllm_version() -> Optional[str]:
     """Get vLLM version if available.
 
@@ -151,8 +133,14 @@ def get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) ->
         # Add common versions
         if ver := _get_sglang_version():
             config_dump["sglang_version"] = ver
-        if ver := _get_trtllm_version():
-            config_dump["trtllm_version"] = ver
+
+        # TODO(jothomson, warnold): To check the TRTLLM version, we need to import it.
+        # When imported, TRTLLM has the side effect of initializing MPI.
+        # In a slurm environment, this enforces that --mpi pmix is set on ALL nodes, including the frontend.
+        # Bring this back once we have a way to check the TRTLLM version without initializing MPI.
+        # if ver := _get_trtllm_version():
+        #     config_dump["trtllm_version"] = ver
+
         if ver := _get_vllm_version():
             config_dump["vllm_version"] = ver
 
