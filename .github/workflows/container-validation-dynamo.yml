@@ -83,7 +83,7 @@ jobs:
           docker buildx build \
             --progress=plain \
             --tag ${{ steps.define_image_tag.outputs.image_tag }} \
-            -f ./container/rendered.Dockerfile 
+            -f ./container/rendered.Dockerfile \
             --build-arg ENABLE_MEDIA_FFMPEG=true \
             --build-arg ENABLE_KVBM=true \
             --load .
