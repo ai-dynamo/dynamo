@@ -90,6 +90,14 @@ def download_and_parse_test_artifacts() -> List[Dict]:
 
             framework = parts[0] if len(parts) > 0 else "unknown"
             test_type = parts[1] if len(parts) > 1 else "unknown"
+            arch = parts[2] if len(parts) > 2 else "unknown"
+            job_id = parts[4] if len(parts) > 4 else None
+
+            # Build job name and URL
+            job_name = f"{framework}-{arch}-{test_type}"
+            job_url = None
+            if job_id and GITHUB_REPOSITORY and GITHUB_RUN_ID:
+                job_url = f"https://github.com/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}/job/{job_id}"
 
             # Parse XML
             tree = ET.parse(xml_file)
@@ -113,6 +121,8 @@ def download_and_parse_test_artifacts() -> List[Dict]:
                             "test_classname": test_classname,
                             "framework": framework,
                             "test_type": test_type,
+                            "job_name": job_name,
+                            "job_url": job_url,
                             "status": status,
                         }
                     )
@@ -163,8 +173,8 @@ def find_test_file_and_blame(test_name: str) -> Tuple[Optional[str], Optional[st
                 f"Multiple files found for {test_name}, using first: {file_path}"
             )
 
-        # Get last author who modified this file
-        git_log_cmd = ["git", "log", "-1", "--format=%an", file_path]
+        # Get last author email to extract username
+        git_log_cmd = ["git", "log", "-1", "--format=%ae", file_path]
 
         result = subprocess.run(git_log_cmd, capture_output=True, text=True, timeout=10)
 
@@ -172,10 +182,18 @@ def find_test_file_and_blame(test_name: str) -> Tuple[Optional[str], Optional[st
             logger.warning(f"Git log failed for {file_path}")
             return file_path, None
 
-        author = result.stdout.strip()
+        author_email = result.stdout.strip()
 
-        logger.info(f"Found test {test_name} in {file_path}, last modified by {author}")
-        return file_path, author
+        # Extract username from email (part before @)
+        if author_email and "@" in author_email:
+            author_username = author_email.split("@")[0]
+        else:
+            author_username = author_email if author_email else None
+
+        logger.info(
+            f"Found test {test_name} in {file_path}, last modified by {author_username}"
+        )
+        return file_path, author_username
 
     except subprocess.TimeoutExpired:
         logger.error(f"Timeout while searching for test {test_name}")
@@ -390,13 +408,19 @@ def format_test_entry(test: Dict) -> str:
         Formatted string for Slack
     """
     test_name = test["test_name"]
-    framework = test["framework"]
-    test_type = test["test_type"]
+    job_name = test.get("job_name", "unknown-job")
+    job_url = test.get("job_url")
     author_mention = format_slack_mention(test["author"])
+
+    # Format job link if available
+    if job_url:
+        job_link = f"<{job_url}|{job_name}>"
+    else:
+        job_link = job_name
 
     if test["is_new_test"]:
         return (
-            f"• `{test_name}` ({framework}, {test_type}) - "
+            f"• `{test_name}` ({job_link}) - "
             f"*new test, no history* - last modified by {author_mention}"
         )
     else:
@@ -405,7 +429,7 @@ def format_test_entry(test: Dict) -> str:
         pass_rate = test["pass_rate"]
 
         return (
-            f"• `{test_name}` ({framework}, {test_type}) - "
+            f"• `{test_name}` ({job_link}) - "
             f"*{pass_rate:.0%} pass rate* ({passed_count}/{total_runs} runs) - "
             f"last modified by {author_mention}"
         )
@@ -596,9 +620,11 @@ def main():
         if flaky_tests:
             print("🎲 FLAKY TESTS:")
             for test in flaky_tests:
-                print(
-                    f"  - {test['test_name']} ({test['framework']}, {test['test_type']})"
-                )
+                job_name = test.get("job_name", "unknown-job")
+                job_url = test.get("job_url", "")
+                print(f"  - {test['test_name']} (Job: {job_name})")
+                if job_url:
+                    print(f"    Job URL: {job_url}")
                 print(
                     f"    Pass rate: {test['pass_rate']:.1%} ({test['passed_count']}/{test['total_runs']} runs)"
                 )
@@ -608,9 +634,11 @@ def main():
         if legitimate_failures:
             print("❌ LEGITIMATE FAILURES:")
             for test in legitimate_failures:
-                print(
-                    f"  - {test['test_name']} ({test['framework']}, {test['test_type']})"
-                )
+                job_name = test.get("job_name", "unknown-job")
+                job_url = test.get("job_url", "")
+                print(f"  - {test['test_name']} (Job: {job_name})")
+                if job_url:
+                    print(f"    Job URL: {job_url}")
                 if test["is_new_test"]:
                     print("    New test (no history)")
                 else:
