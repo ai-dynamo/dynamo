@@ -9,10 +9,11 @@ from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
+from dynamo.common.utils.namespace import get_namespace
 from dynamo.trtllm import __version__
 from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 
-DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DYN_NAMESPACE = get_namespace()
 
 # Default endpoints for TensorRT-LLM workers
 DEFAULT_ENDPOINT = (

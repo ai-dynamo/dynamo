@@ -363,7 +363,9 @@ def parse_args() -> Config:
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
-    config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    from dynamo.common.utils.namespace import get_namespace
+
+    config.namespace = get_namespace()
 
     # Check multimodal role exclusivity
     mm_flags = (

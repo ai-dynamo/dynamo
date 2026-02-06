@@ -20,13 +20,15 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
+from dynamo.common.utils.namespace import get_namespace
 from dynamo.llm import fetch_llm
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
 
 configure_dynamo_logging()
 
-DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+
+DYN_NAMESPACE = get_namespace()
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 
 DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
@@ -424,7 +426,7 @@ async def parse_args(args: list[str]) -> Config:
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
     # otherwise fall back to default endpoints
-    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    namespace = get_namespace()
 
     # If --embedding-worker is set, also set SGLang's --is-embedding flag
     if parsed_args.embedding_worker:
