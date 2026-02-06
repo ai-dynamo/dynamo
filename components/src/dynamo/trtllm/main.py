@@ -288,9 +288,9 @@ async def init_llm_worker(
             arg_map["kv_cache_config"] = kv_config_dict
         elif isinstance(current_kv_config, dict):
             # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
-            current_kv_config["event_buffer_max_size"] = (
-                DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
-            )
+            current_kv_config[
+                "event_buffer_max_size"
+            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:

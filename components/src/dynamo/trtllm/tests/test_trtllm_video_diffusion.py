@@ -10,7 +10,6 @@ These tests do NOT require visual_gen or GPU - they test logic only.
 """
 
 import json
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
