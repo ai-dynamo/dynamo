@@ -1,10 +1,3 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
-
-# Webhooks
-
 This document describes the webhook functionality in the Dynamo Operator, including validation webhooks, certificate management, and troubleshooting.
 
 ## Table of Contents

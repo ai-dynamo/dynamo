@@ -1,7 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # Distributed Tracing with Tempo
 
@@ -13,7 +13,7 @@ Dynamo supports OpenTelemetry-based distributed tracing for visualizing request 
 
 This guide covers single GPU demo setup using Docker Compose. For Kubernetes deployments, see [Kubernetes Deployment](#kubernetes-deployment).
 
-**Note:** This section has overlap with [Logging of OpenTelemetry Tracing](logging.md) since OpenTelemetry has aspects of both logging and tracing. The tracing approach documented here is for persistent trace visualization and analysis. For short debugging sessions examining trace context directly in logs, see the [Logging](logging.md) guide.
+**Note:** This section has overlap with [Logging of OpenTelemetry Tracing](logging) since OpenTelemetry has aspects of both logging and tracing. The tracing approach documented here is for persistent trace visualization and analysis. For short debugging sessions examining trace context directly in logs, see the [Logging](logging) guide.
 
 ## Environment Variables
 
@@ -28,7 +28,7 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 
 ### 1. Start Observability Stack
 
-Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
+Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README#getting-started-quickly) for instructions.
 
 ### 2. Set Environment Variables
 
@@ -144,11 +144,11 @@ http://localhost:8000/v1/chat/completions
 
 Below is an example of what a trace looks like in Grafana Tempo:
 
-![Trace Example](../../assets/img/trace.png)
+![Trace Example](trace.png)
 
 ### 6. Stop Services
 
-When done, stop the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for Docker Compose commands.
+When done, stop the observability stack. See [Observability Getting Started](README#getting-started-quickly) for Docker Compose commands.
 
 ---
 

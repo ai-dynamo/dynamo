@@ -1,7 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # Running gpt-oss-120b Disaggregated with TensorRT-LLM
 
@@ -510,7 +510,7 @@ flowchart TD
 
 ## Next Steps
 
-- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/README.md)
+- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../../examples/basics/multinode/README)
 - **Advanced Configuration**: Explore TensorRT-LLM engine building options for further optimization
 - **Monitoring**: Set up Prometheus and Grafana for production monitoring
 - **Performance Benchmarking**: Use AIPerf to measure and optimize your deployment performance

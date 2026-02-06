@@ -1,7 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # Running gpt-oss-120b Disaggregated with vLLM
 
@@ -16,7 +16,7 @@ This deployment uses disaggregated serving in vLLM where:
 
 ## Prerequisites
 
-This guide assumes readers already knows how to deploy Dynamo disaggregated serving with vLLM as illustrated in [README.md](README.md)
+This guide assumes readers already knows how to deploy Dynamo disaggregated serving with vLLM as illustrated in [README.md](/docs/backends/vllm/README)
 
 ## Instructions
 

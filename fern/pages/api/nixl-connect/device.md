@@ -1,7 +1,19 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
 
 # dynamo.nixl_connect.Device
 
@@ -25,9 +37,9 @@ def id(self) -> int:
 
 Gets the identity, or ordinal, of the device.
 
-When the device is the [`HOST`](device-kind.md#host), this value is always `0`.
+When the device is the [`HOST`](device-kind#host), this value is always `0`.
 
-When the device is a [`GPU`](device-kind.md#cuda), this value identifies a specific GPU.
+When the device is a [`GPU`](device-kind#cuda), this value identifies a specific GPU.
 
 ### `kind`
 
@@ -36,16 +48,16 @@ When the device is a [`GPU`](device-kind.md#cuda), this value identifies a speci
 def kind(self) -> DeviceKind:
 ```
 
-Gets the [`DeviceKind`](device-kind.md) of device the instance references.
+Gets the [`DeviceKind`](device-kind) of device the instance references.
 
 
 ## Related Classes
 
-  - [Connector](connector.md)
-  - [Descriptor](descriptor.md)
-  - [OperationStatus](operation-status.md)
-  - [ReadOperation](read-operation.md)
-  - [ReadableOperation](readable-operation.md)
-  - [RdmaMetadata](rdma-metadata.md)
-  - [WritableOperation](writable-operation.md)
-  - [WriteOperation](write-operation.md)
+  - [Connector](connector)
+  - [Descriptor](descriptor)
+  - [OperationStatus](operation-status)
+  - [ReadOperation](read-operation)
+  - [ReadableOperation](readable-operation)
+  - [RdmaMetadata](rdma-metadata)
+  - [WritableOperation](writable-operation)
+  - [WriteOperation](write-operation)

@@ -1,14 +1,26 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
 
 # dynamo.nixl_connect.WriteOperation
 
 An operation which transfers data from the local worker to a remote worker.
 
-To create the operation, NIXL metadata ([RdmaMetadata](rdma-metadata.md)) from a remote worker's [`WritableOperation`](writable-operation.md)
-along with a matching set of local [`Descriptor`](descriptor.md) objects which reference memory to be transferred to the remote worker must be provided.
+To create the operation, NIXL metadata ([RdmaMetadata](rdma-metadata)) from a remote worker's [`WritableOperation`](writable-operation)
+along with a matching set of local [`Descriptor`](descriptor) objects which reference memory to be transferred to the remote worker must be provided.
 The NIXL metadata must be transferred from the remote to the local worker via a secondary channel, most likely HTTP or TCP+NATS.
 
 Once created, data transfer will begin immediately.
@@ -62,16 +74,16 @@ Blocks the caller until all provided buffers have been transferred to the remote
 def status(self) -> OperationStatus:
 ```
 
-Returns [`OperationStatus`](operation-status.md) which provides the current state (aka. status) of the operation.
+Returns [`OperationStatus`](operation-status) which provides the current state (aka. status) of the operation.
 
 
 ## Related Classes
 
-  - [Connector](connector.md)
-  - [Descriptor](descriptor.md)
-  - [Device](device.md)
-  - [OperationStatus](operation-status.md)
-  - [RdmaMetadata](rdma-metadata.md)
-  - [ReadOperation](read-operation.md)
-  - [ReadableOperation](readable-operation.md)
-  - [WritableOperation](writable-operation.md)
+  - [Connector](connector)
+  - [Descriptor](descriptor)
+  - [Device](device)
+  - [OperationStatus](operation-status)
+  - [RdmaMetadata](rdma-metadata)
+  - [ReadOperation](read-operation)
+  - [ReadableOperation](readable-operation)
+  - [WritableOperation](writable-operation)

@@ -1,7 +1,19 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
 
 # Installation Guide for Dynamo Kubernetes Platform
 
@@ -22,7 +34,7 @@ Determine your cluster environment:
 - Can use cluster-wide operator (default)
 
 **Local Development** (Minikube, testing):
-- See [Minikube Setup](deployment/minikube-setup.md) first, then follow installation steps below
+- See [Minikube Setup](deployment/minikube) first, then follow installation steps below
 
 To check if CRDs already exist:
 ```bash
@@ -43,7 +55,7 @@ kubectl get clusterrolebinding -o json | \
 
 ## Installation Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/helm/charts/platform/README).
 
 **Path A: Pre-built Artifacts**
 - Use case: Production deployment, shared or dedicated clusters
@@ -112,9 +124,9 @@ Before proceeding, run the pre-deployment check script to verify your cluster me
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
+This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](../../deploy/pre-deployment/README) for details.
 
-> **No cluster?** See [Minikube Setup](deployment/minikube-setup.md) for local development.
+> **No cluster?** See [Minikube Setup](deployment/minikube) for local development.
 
 **Estimated installation time:** 5-30 minutes depending on path
 
@@ -155,19 +167,23 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 
 > [!TIP]
 > For multinode deployments, you need to install multinode orchestration components:
+>
 > **Option 1 (Recommended): Grove + KAI Scheduler**
 > - Grove and KAI Scheduler can be installed manually or through the dynamo-platform helm install command.
 > - When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags:
+>
 > ```bash
 > --set "grove.enabled=true"
 > --set "kai-scheduler.enabled=true"
 > ```
+>
 > **Option 2: LeaderWorkerSet (LWS) + Volcano**
 > - If using LWS for multinode deployments, you must also install Volcano (required dependency):
-> - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
-> - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
+>   - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+>   - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
 > - These must be installed manually before deploying multinode workloads with LWS.
-> See the [Multinode Deployment Guide](deployment/multinode-deployment.md) for details on orchestrator selection.
+>
+> See the [Multinode Deployment Guide](./deployment/multinode-deployment) for details on orchestrator selection.
 
 > [!TIP]
 > By default, Model Express Server is not used.
@@ -270,13 +286,13 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](../../examples/backends/vllm/deploy/README)
+   - [SGLang Deployments](../../examples/backends/sglang/deploy/README)
+   - [TensorRT-LLM Deployments](../../examples/backends/trtllm/deploy/README)
 
 3. **Optional:**
-   - [Set up Prometheus & Grafana](observability/metrics.md)
-   - [SLA Planner Quickstart Guide](../planner/sla-planner-quickstart.md) (for SLA-aware scheduling and autoscaling)
+   - [Set up Prometheus & Grafana](./observability/metrics)
+   - [SLA Planner Guide](../components/planner/planner-guide) (for SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
 
@@ -363,7 +379,7 @@ kubectl delete crd <crd-name>
 
 ## Advanced Options
 
-- [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md)
-- [Create custom deployments](deployment/create-deployment.md)
-- [Dynamo Operator details](dynamo-operator.md)
+- [Helm Chart Configuration](../../deploy/helm/charts/platform/README)
+- [Create custom deployments](./deployment/create-deployment)
+- [Dynamo Operator details](./dynamo-operator)
 - [Model Express Server details](https://github.com/ai-dynamo/modelexpress)

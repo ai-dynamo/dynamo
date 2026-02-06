@@ -1,10 +1,3 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
-
-# Dynamo Operator Metrics
-
 ## Overview
 
 The Dynamo Operator exposes Prometheus metrics for monitoring its own health and performance. These metrics are separate from application metrics (frontend/worker) and provide visibility into:
@@ -15,12 +8,12 @@ The Dynamo Operator exposes Prometheus metrics for monitoring its own health and
 
 ## Prerequisites
 
-The operator metrics feature requires the same monitoring infrastructure as application metrics. For detailed setup instructions, see the [Kubernetes Metrics Guide](./metrics.md#prerequisites).
+The operator metrics feature requires the same monitoring infrastructure as application metrics. For detailed setup instructions, see the [Kubernetes Metrics Guide](./metrics#prerequisites).
 
 **Quick checklist:**
-- kube-prometheus-stack installed (for ServiceMonitor support)
-- Prometheus and Grafana running
-- Dynamo Operator installed via Helm
+- ✅ kube-prometheus-stack installed (for ServiceMonitor support)
+- ✅ Prometheus and Grafana running
+- ✅ Dynamo Operator installed via Helm
 
 ## Metrics Collection
 
@@ -206,7 +199,7 @@ When "All" is selected for Resource Type, all panels will show data for all five
 
 ## Accessing Metrics Directly
 
-For instructions on accessing Prometheus and Grafana, see the [Kubernetes Metrics Guide](./metrics.md#viewing-the-metrics).
+For instructions on accessing Prometheus and Grafana, see the [Kubernetes Metrics Guide](./metrics#viewing-the-metrics).
 
 Once you have access to Prometheus, you can query operator metrics directly:
 
@@ -266,6 +259,6 @@ kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n moni
 
 ## Related Documentation
 
-- [Kubernetes Metrics Guide](./metrics.md) - Application metrics for frontends and workers
-- [Dynamo Operator Guide](../dynamo-operator.md) - Operator architecture and deployment modes
-- [Operator Webhooks](../webhooks.md) - Webhook validation details
+- [Kubernetes Metrics Guide](./metrics) - Application metrics for frontends and workers
+- [Dynamo Operator Guide](../dynamo-operator) - Operator architecture and deployment modes
+- [Operator Webhooks](../webhooks) - Webhook validation details

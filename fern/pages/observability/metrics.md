@@ -1,7 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # Dynamo Metrics
 
@@ -9,9 +9,9 @@
 
 Dynamo provides built-in metrics capabilities through the Dynamo metrics API, which is automatically available whenever you use the `DistributedRuntime` framework. This document serves as a reference for all available metrics in Dynamo.
 
-**For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](prometheus-grafana.md).
+**For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](prometheus-grafana).
 
-**For creating custom metrics**, see the [Metrics Developer Guide](metrics-developer-guide.md).
+**For creating custom metrics**, see the [Metrics Developer Guide](metrics-developer-guide).
 
 ## Environment Variables
 
@@ -26,7 +26,7 @@ This is a single machine example.
 
 ### Start Observability Stack
 
-For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
+For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](README#getting-started-quickly) for instructions.
 
 
 ### Launch Dynamo Components
@@ -85,7 +85,7 @@ Dynamo exposes several categories of metrics:
 - **Frontend Metrics** (`dynamo_frontend_*`) - Request handling, token processing, and latency measurements
 - **Component Metrics** (`dynamo_component_*`) - Request counts, processing times, byte transfers, and system uptime
 - **Specialized Component Metrics** (e.g., `dynamo_preprocessor_*`) - Component-specific metrics
-- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus.md) (`vllm:*`), [SGLang](../backends/sglang/prometheus.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm_*`)
+- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus) (`vllm:*`), [SGLang](../backends/sglang/prometheus) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus) (`trtllm_*`)
 
 ## Runtime Hierarchy
 
@@ -218,6 +218,6 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
-- [Dynamo Architecture Overview](../design-docs/architecture.md)
-- [Backend Guide](../development/backend-guide.md)
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime)
+- [Dynamo Architecture Overview](../design-docs/architecture)
+- [Backend Guide](../development/backend-guide)

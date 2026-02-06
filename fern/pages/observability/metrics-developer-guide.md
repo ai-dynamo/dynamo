@@ -1,7 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # Metrics Developer Guide
 
@@ -22,13 +22,13 @@ Prometheus Exposition Format text metrics will be available at: `http://localhos
 
 ## Metric Name Constants
 
-The [prometheus_names.rs](https://github.com/ai-dynamo/dynamo/tree/main/lib/runtime/src/metrics/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
+The [prometheus_names.rs](../../lib/runtime/src/metrics/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
 
 ---
 
 ## Metrics API in Rust
 
-The metrics API is accessible through the `.metrics()` method on runtime, namespace, component, and endpoint objects. See [Runtime Hierarchy](metrics.md#runtime-hierarchy) for details on the hierarchical structure.
+The metrics API is accessible through the `.metrics()` method on runtime, namespace, component, and endpoint objects. See [Runtime Hierarchy](metrics#runtime-hierarchy) for details on the hierarchical structure.
 
 ### Available Methods
 
@@ -131,7 +131,7 @@ let counter = endpoint.metrics().create_counter(
 
 ## Related Documentation
 
-- [Metrics Overview](metrics.md)
-- [Prometheus and Grafana Setup](prometheus-grafana.md)
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
+- [Metrics Overview](metrics)
+- [Prometheus and Grafana Setup](prometheus-grafana)
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime)
 

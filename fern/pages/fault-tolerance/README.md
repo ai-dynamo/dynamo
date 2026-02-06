@@ -1,7 +1,19 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
 
 # Fault Tolerance
 
@@ -28,7 +40,7 @@ When a worker fails during request processing, Dynamo can migrate in-progress re
 - Transparently continues generation on a new worker
 - Maintains seamless token flow to clients
 
-See [Request Migration](request-migration.md) for details.
+See [Request Migration](request-migration) for details.
 
 ### Request Cancellation
 
@@ -38,7 +50,7 @@ Dynamo supports canceling in-flight requests to free computational resources:
 - Kill signals for immediate termination
 - Hierarchical cancellation propagation through request chains
 
-See [Request Cancellation](request-cancellation.md) for details.
+See [Request Cancellation](request-cancellation) for details.
 
 ### Graceful Shutdown
 
@@ -48,7 +60,7 @@ Workers handle shutdown signals (SIGTERM/SIGINT) gracefully:
 - Optionally drain in-flight requests before terminating
 - Clean up resources (engines, connections, temp files)
 
-See [Graceful Shutdown](graceful-shutdown.md) for details.
+See [Graceful Shutdown](graceful-shutdown) for details.
 
 ### Request Rejection (Load Shedding)
 
@@ -58,7 +70,7 @@ When workers are overloaded, Dynamo rejects new requests to prevent cascading fa
 - Real-time worker load monitoring
 - HTTP 503 responses with retry guidance
 
-See [Request Rejection](request-rejection.md) for details.
+See [Request Rejection](request-rejection) for details.
 
 ### Health Checks
 
@@ -68,7 +80,7 @@ Dynamo provides multiple health check mechanisms:
 - **Canary Health Checks**: Active monitoring via periodic test requests
 - **Engine Monitoring**: Automatic shutdown on engine failure detection
 
-See [Health Checks](../observability/health-checks.md) for details.
+See [Health Checks](../observability/health-checks) for details.
 
 ## Configuration Quick Reference
 
@@ -121,10 +133,20 @@ Dynamo includes a comprehensive testing framework for validating fault tolerance
 - etcd HA failover tests
 - Hardware fault injection (GPU XID, network partitions)
 
-See [Fault Tolerance Testing](testing.md) for details.
+See [Fault Tolerance Testing](testing) for details.
 
 ## Related Documentation
 
-- [Observability](../observability/README.md) - Metrics and monitoring
-- [Distributed Runtime](../design-docs/distributed-runtime.md) - Service discovery architecture
-- [Event Plane](../design-docs/event-plane.md) - etcd and NATS coordination
+- [Observability](../observability/README) - Metrics and monitoring
+- [Distributed Runtime](../design-docs/distributed-runtime) - Service discovery architecture
+- [Event Plane](../design-docs/event-plane) - etcd and NATS coordination
+
+```{toctree}
+:hidden:
+
+Request Migration <request_migration>
+Request Cancellation <request_cancellation>
+Graceful Shutdown <graceful_shutdown>
+Request Rejection <request_rejection>
+Testing <testing>
+```

@@ -1,7 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # Running SGLang with Dynamo
 
@@ -24,8 +24,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Dynamo SGLang Integration](#dynamo-sglang-integration)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Aggregated Serving](#aggregated-serving)
-- [Disaggregated Serving](#disaggregated-serving)
+- [Single Node Examples](#run-single-node-examples)
+- [Multi-Node and Advanced Examples](#advanced-examples)
 - [Deploy on SLURM or Kubernetes](#deployment)
 
 ## Feature Support Matrix
@@ -34,12 +34,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| [**KV-Aware Routing**](../../router/kv-cache-routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../planner/sla-planner.md) | ✅ |  |
-| [**Multimodal Support**](../../multimodal/sglang.md) | ✅ |  |
-| [**KVBM**](../../kvbm/kvbm-architecture.md) | ❌ | Planned |
+| [**Disaggregated Serving**](../../design-docs/disagg-serving) | ✅ |  |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../components/router/README) | ✅ |  |
+| [**SLA-Based Planner**](../../components/planner/planner-guide) | ✅ |  |
+| [**Multimodal Support**](../../features/multimodal/multimodal-sglang) | ✅ |  |
+| [**KVBM**](../../components/kvbm/README) | ❌ | Planned |
 
 
 ## Dynamo SGLang Integration
@@ -55,7 +55,6 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 | Argument | Description | Default | SGLang Equivalent |
 |----------|-------------|---------|-------------------|
 | `--endpoint` | Dynamo endpoint in `dyn://namespace.component.endpoint` format | Auto-generated based on mode | N/A |
-| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../fault-tolerance/request-migration.md). | `0` (disabled) | N/A |
 | `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
 | `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
 | `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
@@ -83,30 +82,25 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 > [!WARNING]
 > ⚠️ SGLang backend currently does not support cancellation during remote prefill phase in disaggregated mode.
 
-For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
+For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation) documentation.
 
 ## Installation
 
 ### Install latest release
 We suggest using uv to install the latest release of ai-dynamo[sglang]. You can install it with `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-<details>
-<summary>Expand for instructions</summary>
-
+<Accordion title="Expand for instructions">
 ```bash
 # create a virtual env
 uv venv --python 3.12 --seed
 # install the latest release (which comes bundled with a stable sglang version)
 uv pip install "ai-dynamo[sglang]"
 ```
-
-</details>
+</Accordion>
 
 ### Install editable version for development
 
-<details>
-<summary>Expand for instructions</summary>
-
+<Accordion title="Expand for instructions">
 This requires having rust installed. We also recommend having a proper installation of the cuda toolkit as sglang requires `nvcc` to be available.
 
 ```bash
@@ -123,14 +117,11 @@ uv pip install -e .
 # install any sglang version >= 0.5.3.post2
 uv pip install "sglang[all]==0.5.3.post2"
 ```
-
-</details>
+</Accordion>
 
 ### Using docker containers
 
-<details>
-<summary>Expand for instructions</summary>
-
+<Accordion title="Expand for instructions">
 We are in the process of shipping pre-built docker containers that contain installations of DeepEP, DeepGEMM, and NVSHMEM in order to support WideEP and P/D. For now, you can quickly build the container from source with the following command.
 
 ```bash
@@ -156,8 +147,7 @@ docker run \
     --ipc host \
     dynamo-sglang:latest
 ```
-
-</details>
+</Accordion>
 
 ## Quick Start
 
@@ -165,7 +155,7 @@ Below we provide a guide that lets you run all of our common deployment patterns
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -178,6 +168,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 > [!TIP]
 > Each example corresponds to a simple bash script that runs the OpenAI compatible server, processor, and optional router (written in Rust) and LLM engine (written in Python) in a single terminal. You can easily take each command and run them in separate terminals.
+>
 > Additionally - because we use sglang's argument parser, you can pass in any argument that sglang supports to the worker!
 
 
@@ -204,9 +195,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/agg_embed.sh
 ```
 
-<details>
-<summary>Send the following request to verify your deployment:</summary>
-
+<Accordion title="Send the following request to verify your deployment:">
 ```bash
 curl localhost:8000/v1/embeddings \
   -H "Content-Type: application/json" \
@@ -215,12 +204,11 @@ curl localhost:8000/v1/embeddings \
     "input": "Hello, world!"
   }'
 ```
-
-</details>
+</Accordion>
 
 ### Disaggregated serving
 
-See [SGLang Disaggregation](sglang-disaggregation.md) to learn more about how sglang and dynamo handle disaggregated serving.
+See [SGLang Disaggregation](sglang-disaggregation) to learn more about how sglang and dynamo handle disaggregated serving.
 
 
 ```bash
@@ -270,7 +258,7 @@ curl localhost:8000/v1/chat/completions \
 We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)**
+- **[Deploying Dynamo with SGLang on Kubernetes](../../../examples/backends/sglang/deploy/README)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/slurm_jobs/README.md)**
+- **[Deploying Dynamo with SGLang on SLURM](../../../examples/backends/sglang/slurm-jobs/README)**

@@ -1,7 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # Prompt Embeddings
 
@@ -250,5 +250,5 @@ pytest tests/integration/test_prompt_embeds_integration.py -v
 
 ## See Also
 
-- [vLLM Backend](README.md)
-- [vLLM Configuration](README.md#configuration)
+- [vLLM Backend](README)
+- [vLLM Configuration](README#configuration)

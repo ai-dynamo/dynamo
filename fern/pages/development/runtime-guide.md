@@ -1,7 +1,19 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
 
 # Dynamo Runtime
 
@@ -32,7 +44,7 @@ cargo test
 
 The simplest way to deploy the pre-requisite services is using
 [docker-compose](https://docs.docker.com/compose/install/linux/),
-defined in [deploy/docker-compose.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml).
+defined in [deploy/docker-compose.yml](../../deploy/docker-compose.yml).
 
 ```
 # At the root of the repository:
@@ -61,7 +73,7 @@ be operating within your distributed runtime.
 
 The current examples use a hard-coded `namespace`. We will address the `namespace` collisions later.
 
-All examples require the `etcd` and `nats.io` pre-requisites to be running and available.
+Most examples require `etcd` for service discovery. `nats.io` is required for KV-aware routing with event tracking; for approximate mode (`--no-kv-events`), NATS is optional.
 
 #### Rust `hello_world`
 
@@ -98,7 +110,7 @@ Annotated { data: Some("d"), id: None, event: None, comment: None }
 
 #### Python
 
-See the [README.md](https://github.com/ai-dynamo/dynamo/tree/main/lib/runtime/lib/bindings/python/README.md) for details
+See the [README.md](../../lib/runtime/lib/bindings/python/README) for details
 
 The Python and Rust `hello_world` client and server examples are interchangeable,
 so you can start the Python `server.py` and talk to it from the Rust `client`.

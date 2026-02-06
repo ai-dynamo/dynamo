@@ -1,5 +1,3 @@
-# ChReK Standalone Usage Guide
-
 > ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. It requires privileged mode for restore operations, which may not be suitable for all production environments. Review the [security implications](#security-considerations) before deploying.
 
 This guide explains how to use **ChReK** (Checkpoint/Restore for Kubernetes) as a standalone component without deploying the full Dynamo platform. This is useful if you want to add checkpoint/restore capabilities to your own GPU workloads.
@@ -675,8 +673,8 @@ securityContext:
 
 ## Additional Resources
 
-- [ChReK Helm Chart Values](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/values.yaml)
-- [Smart Entrypoint Script](https://github.com/ai-dynamo/dynamo/tree/main/deploy/chrek/scripts/smart-entrypoint.sh)
+- [ChReK Helm Chart Values](../../deploy/helm/charts/chrek/values.yaml)
+- [Smart Entrypoint Script](../../deploy/chrek/scripts/smart-entrypoint.sh)
 - [CRIU Documentation](https://criu.org/Main_Page)
 - [CUDA Checkpoint Plugin](https://docs.nvidia.com/cuda/cuda-checkpoint-plugin/)
 

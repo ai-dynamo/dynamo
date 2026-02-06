@@ -1,13 +1,6 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
-
-# Log Aggregation in Dynamo on Kubernetes
-
 This guide demonstrates how to set up logging for Dynamo in Kubernetes using Grafana Loki and Alloy. This setup provides a simple reference logging setup that can be followed in Kubernetes clusters including Minikube and MicroK8s.
 
-> [!NOTE]
+> [!Note]
 > This setup is intended for development and testing purposes. For production environments, please refer to the official documentation for high-availability configurations.
 
 ## Components Overview
@@ -22,7 +15,7 @@ This guide demonstrates how to set up logging for Dynamo in Kubernetes using Gra
 
 ### 1. Dynamo Kubernetes Platform
 
-This guide assumes you have installed Dynamo Kubernetes Platform. For more information, see [Dynamo Kubernetes Platform](../README.md).
+This guide assumes you have installed Dynamo Kubernetes Platform. For more information, see [Dynamo Kubernetes Platform](../README).
 
 ### 2. Kube-prometheus
 
@@ -131,7 +124,7 @@ envsubst < deploy/observability/k8s/logging/grafana/loki-datasource.yaml | kubec
 kubectl apply -f deploy/observability/k8s/logging/grafana/logging-dashboard.yaml -n $MONITORING_NAMESPACE
 ```
 
-> [!NOTE]
+> [!Note]
 > If using Grafana installed without the Prometheus Operator, you can manually import the Loki datasource and Dynamo Logs dashboard using the Grafana UI.
 
 ### 4. Deploy a DynamoGraphDeployment with JSONL Logging

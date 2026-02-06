@@ -1,7 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # LLM Deployment using vLLM
 
@@ -23,7 +23,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
-- [Quick Start](#vllm-quick-start)
+- [Quick Start](#quick-start)
 - [Single Node Examples](#run-single-node-examples)
 - [Advanced Examples](#advanced-examples)
 - [Deploy on Kubernetes](#kubernetes-deployment)
@@ -35,14 +35,14 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | vLLM | Notes |
 |---------|------|-------|
-| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../router/kv-cache-routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../planner/sla-planner.md) | ✅ |  |
-| [**Load Based Planner**](../../planner/load-planner.md) | 🚧 | WIP |
-| [**KVBM**](../../kvbm/kvbm-architecture.md) | ✅ |  |
-| [**LMCache**](LMCache-Integration.md) | ✅ |  |
-| [**Prompt Embeddings**](prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
+| [**Disaggregated Serving**](../../../docs/design-docs/disagg-serving) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/design-docs/disagg-serving#conditional-disaggregation) | 🚧 | WIP |
+| [**KV-Aware Routing**](../../components/router/README) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/components/planner/planner-guide) | ✅ |  |
+| [**Load Based Planner**](../../../docs/components/planner/README) | 🚧 | WIP |
+| [**KVBM**](../../../docs/components/kvbm/README) | ✅ |  |
+| [**LMCache**](../../integrations/lmcache-integration) | ✅ |  |
+| [**Prompt Embeddings**](./prompt-embeddings) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
 
@@ -58,7 +58,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -87,7 +87,7 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 
 ## Run Single Node Examples
 
-> [!WARNING]
+> [!IMPORTANT]
 > Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
 
 ### Aggregated Serving
@@ -144,11 +144,13 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
 This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
 
-**Guide:** [Speculative Decoding Quickstart](speculative-decoding.md)
+**Guide:** [Speculative Decoding Quickstart](../../features/speculative-decoding/speculative-decoding-vllm)
+
+> **See also:** [Speculative Decoding Feature Overview](../../features/speculative-decoding/README) for cross-backend documentation.
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README)
 
 ## Configuration
 
@@ -177,17 +179,11 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [KV Cache Routing](../../router/kv-cache-routing.md) on deterministic event IDs.
+See the high-level notes in [Router Design](../../design-docs/router-design#deterministic-event-ids) on deterministic event IDs.
 
 ## Request Migration
 
-You can enable [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
-
-```bash
-python3 -m dynamo.vllm ... --migration-limit=3
-```
-
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for details on how this works.
+Dynamo supports [request migration](../../../docs/fault-tolerance/request-migration) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../../docs/fault-tolerance/request-migration) documentation for configuration details.
 
 ## Request Cancellation
 
@@ -200,4 +196,4 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | **Aggregated** | ✅ | ✅ |
 | **Disaggregated** | ✅ | ✅ |
 
-For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
+For more details, see the [Request Cancellation Architecture](../../../docs/fault-tolerance/request-cancellation) documentation.

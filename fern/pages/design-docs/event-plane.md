@@ -1,7 +1,19 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
 
 # Event Plane Architecture
 
@@ -16,8 +28,7 @@ Dynamo's coordination layer adapts to the deployment environment:
 | **Kubernetes** (with operator) | Native K8s (CRDs, EndpointSlices) | NATS (optional) | TCP |
 | **Bare metal / Local** (default) | etcd | NATS (optional) | TCP |
 
-> [!NOTE]
-> The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
+> **Note:** The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -51,8 +62,7 @@ The operator explicitly sets:
 DYN_DISCOVERY_BACKEND=kubernetes
 ```
 
-> [!WARNING]
-> This must be explicitly configured. The runtime defaults to `kv_store` in all environments.
+> **Important:** This must be explicitly configured. The runtime defaults to `kv_store` in all environments.
 
 ### How It Works
 
@@ -460,6 +470,6 @@ This provides KV-aware routing with reduced accuracy but no NATS dependency.
 
 ## Related Documentation
 
-- [Distributed Runtime](distributed-runtime.md) - Runtime architecture
-- [Request Plane](../guides/request-plane.md) - Request transport configuration
-- [Fault Tolerance](../fault-tolerance/request-cancellation.md) - Failure handling
+- [Distributed Runtime](distributed-runtime) - Runtime architecture
+- [Request Plane](request-plane) - Request transport configuration
+- [Fault Tolerance](../fault-tolerance/README) - Failure handling

@@ -1,10 +1,3 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
----
-
-# Multinode Deployment Guide
-
 This guide explains how to deploy Dynamo workloads across multiple nodes. Multinode deployments enable you to scale compute-intensive LLM workloads across multiple physical machines, maximizing GPU utilization and supporting larger models.
 
 ## Overview
@@ -211,7 +204,9 @@ The operator uses Ray for multi-node tensor/pipeline parallel deployments. Ray p
 - **Behavior**: Joins Ray cluster and blocks; vLLM on leader spawns Ray actors to these workers
 - **Probes**: All probes (liveness, readiness, startup) are automatically removed
 
-> **Note**: vLLM's Ray executor automatically creates a placement group and spawns workers across the cluster. The `--nnodes` flag is NOT used with Ray - it's only compatible with the `mp` backend.
+<Note>
+vLLM's Ray executor automatically creates a placement group and spawns workers across the cluster. The `--nnodes` flag is NOT used with Ray - it's only compatible with the `mp` backend.
+</Note>
 
 **2. Data Parallel Mode (Multiple model instances across nodes)**
 - **When used**: When `world_size × data_parallel_size > GPUs_per_node`
@@ -306,8 +301,14 @@ To enable compilation cache, add a volume mount with `useAsCompilationCache: tru
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [examples/backends/sglang/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/)
-- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/)
-- **vLLM**: [examples/backends/vllm/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/)
+- **SGLang**: [examples/backends/sglang/deploy/](../../../examples/backends/sglang/deploy/)
+- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](../../../examples/backends/trtllm/deploy/)
+- **vLLM**: [examples/backends/vllm/deploy/](../../../examples/backends/vllm/deploy/)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.
+
+```{toctree}
+:hidden:
+
+Grove <../grove>
+```

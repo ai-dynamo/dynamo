@@ -1,5 +1,3 @@
-# ChReK: Checkpoint/Restore in Kubernetes
-
 > ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. It requires privileged mode for restore operations, which may not be suitable for all production environments. See [Limitations](#limitations) for details.
 
 **ChReK** (Checkpoint/Restore in Kubernetes) is an experimental infrastructure for fast-starting GPU applications using CRIU (Checkpoint/Restore in User-space). ChReK dramatically reduces cold-start times for large models from minutes to seconds by capturing initialized application state and restoring it on-demand.
@@ -22,7 +20,7 @@ Use ChReK as part of the Dynamo platform for automatic checkpoint management:
 - Seamless integration with DynamoGraphDeployment CRDs
 - Built-in autoscaling with fast restore
 
-📖 **[Read the Dynamo Integration Guide →](dynamo.md)**
+📖 **[Read the Dynamo Integration Guide →](dynamo)**
 
 ### 2. Standalone (Without Dynamo)
 
@@ -31,7 +29,7 @@ Use ChReK independently in your own Kubernetes applications:
 - Build your own restore-enabled container images
 - Full control over checkpoint lifecycle
 
-📖 **[Read the Standalone Usage Guide →](standalone.md)**
+📖 **[Read the Standalone Usage Guide →](standalone)**
 
 ## Architecture
 
@@ -62,8 +60,8 @@ helm install chrek nvidia/chrek \
 
 ### Choose Your Integration Path
 
-- **Using Dynamo Platform?** → Follow the [Dynamo Integration Guide](dynamo.md)
-- **Using standalone?** → Follow the [Standalone Usage Guide](standalone.md)
+- **Using Dynamo Platform?** → Follow the [Dynamo Integration Guide](dynamo)
+- **Using standalone?** → Follow the [Standalone Usage Guide](standalone)
 
 ## Key Features
 
@@ -113,9 +111,9 @@ ChReK is best suited for:
 ## Documentation
 
 ### Getting Started
-- [Dynamo Integration Guide](dynamo.md) - Using ChReK with Dynamo Platform
-- [Standalone Usage Guide](standalone.md) - Using ChReK independently
-- ChReK Helm Chart README - See `deploy/helm/charts/chrek/README.md` in the repository for Helm chart configuration
+- [Dynamo Integration Guide](dynamo) - Using ChReK with Dynamo Platform
+- [Standalone Usage Guide](standalone) - Using ChReK independently
+- [ChReK Helm Chart README](../../../deploy/helm/charts/chrek/README) - Helm chart configuration
 
 ### Related Documentation
 - [CRIU Documentation](https://criu.org/Main_Page) - Upstream CRIU docs
@@ -147,8 +145,8 @@ ChReK is best suited for:
 - Check for `PSM3_DISABLED=1` and `GLOO_SOCKET_IFNAME=lo` environment variables
 
 For detailed troubleshooting, see:
-- [Dynamo Integration Guide - Troubleshooting](dynamo.md#troubleshooting)
-- [Standalone Guide - Troubleshooting](standalone.md#troubleshooting)
+- [Dynamo Integration Guide - Troubleshooting](dynamo#troubleshooting)
+- [Standalone Guide - Troubleshooting](standalone#troubleshooting)
 
 ## Contributing
 
