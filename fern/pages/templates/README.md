@@ -163,7 +163,7 @@ Templates for creating consistent Dynamo documentation.
 2. Create the directory structure shown above
 3. Copy templates to the correct locations with correct filenames
 4. Replace all `<placeholders>` with actual values
-5. Replace `<!-- comments -->` with actual content
+5. Replace `{/* comments */}` with actual content
 6. Remove sections that don't apply
 
 ## Updating Navigation

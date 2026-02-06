@@ -2,12 +2,12 @@
 orphan: true
 ---
 
-<!-- 2-3 sentence overview of this backend integration -->
+{/* 2-3 sentence overview of this backend integration */}
 
 ## Feature Matrix
 
-<!-- Copy actual feature matrix from existing backend docs -->
-<!-- Example pattern (from vLLM README): -->
+{/* Copy actual feature matrix from existing backend docs */}
+{/* Example pattern (from vLLM README): */}
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -21,7 +21,7 @@ orphan: true
 
 ### Prerequisites
 
-- <!-- List prerequisites -->
+- {/* List prerequisites */}
 
 ### Usage
 
@@ -44,16 +44,15 @@ orphan: true
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| <!-- param --> | <!-- default --> | <!-- description --> |
+| {/* param */} | {/* default */} | {/* description */} |
 
-<!-- EXAMPLE: Filled-in Configuration for vLLM would look like:
+{/* EXAMPLE: Filled-in Configuration for vLLM would look like:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--model` | required | Model path or HuggingFace ID |
 | `--tensor-parallel-size` | `1` | Number of GPUs for tensor parallelism |
-| `--max-model-len` | auto | Maximum sequence length |
--->
+| `--max-model-len` | auto | Maximum sequence length | */}
 
 ## Next Steps
 
@@ -62,4 +61,4 @@ orphan: true
 | `<Backend> Guide` | `<backend>_guide.md` | Advanced configuration |
 | Backend Comparison | `../README.md` | Compare backends |
 
-<!-- Convert table rows to markdown links -->
+{/* Convert table rows to markdown links */}

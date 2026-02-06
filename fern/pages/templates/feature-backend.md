@@ -7,7 +7,7 @@ Using <Feature> with the <Backend> backend.
 ## Prerequisites
 
 - <Backend> installed with <feature> support
-- <!-- Other requirements -->
+- {/* Other requirements */}
 
 ## Configuration
 
@@ -15,13 +15,13 @@ Using <Feature> with the <Backend> backend.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| <!-- arg --> | <!-- default --> | <!-- description --> |
+| {/* arg */} | {/* default */} | {/* description */} |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| <!-- var --> | <!-- default --> | <!-- description --> |
+| {/* var */} | {/* default */} | {/* description */} |
 
 ## Examples
 
@@ -39,13 +39,13 @@ Using <Feature> with the <Backend> backend.
 
 ## Limitations
 
-- <!-- Backend-specific limitations -->
+- {/* Backend-specific limitations */}
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| <!-- issue --> | <!-- solution --> |
+| {/* issue */} | {/* solution */} |
 
 ## See Also
 
@@ -54,4 +54,4 @@ Using <Feature> with the <Backend> backend.
 | `<Feature> Overview` | `./README.md` |
 | `<Backend> Guide` | `/docs/backends/<backend>/README.md` |
 
-<!-- Convert to links: [Multimodal Overview](./README.md) -->
+{/* Convert to links: [Multimodal Overview](./README.md) */}

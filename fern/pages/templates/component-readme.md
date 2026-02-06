@@ -2,7 +2,7 @@
 orphan: true
 ---
 
-<!-- 2-3 sentence overview of what this component does and its role in Dynamo -->
+{/* 2-3 sentence overview of what this component does and its role in Dynamo */}
 
 ## Feature Matrix
 
@@ -16,7 +16,7 @@ orphan: true
 
 ### Prerequisites
 
-- <!-- List prerequisites -->
+- {/* List prerequisites */}
 
 ### Usage
 
@@ -40,7 +40,7 @@ orphan: true
 #     ...
 ```
 
-<!-- EXAMPLE: Filled-in Quick Start for Router would look like:
+{/* EXAMPLE: Filled-in Quick Start for Router would look like:
 
 ### Prerequisites
 
@@ -64,14 +64,13 @@ spec:
   graphs:
     - name: frontend
       replicas: 1
-```
--->
+``` */}
 
 ## Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| <!-- param --> | <!-- default --> | <!-- description --> |
+| {/* param */} | {/* default */} | {/* description */} |
 
 ## Next Steps
 
@@ -81,4 +80,4 @@ spec:
 | `<Component> Examples` | `<component>_examples.md` | Usage examples |
 | `<Component> Design` | `/docs/design_docs/<component>_design.md` | Architecture |
 
-<!-- Convert table rows to markdown links -->
+{/* Convert table rows to markdown links */}

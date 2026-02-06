@@ -2,11 +2,11 @@
 orphan: true
 ---
 
-<!-- 2-3 sentence overview of this infrastructure topic. -->
+{/* 2-3 sentence overview of this infrastructure topic. */}
 
 ## Quick Start
 
-<!-- Minimal steps to get started -->
+{/* Minimal steps to get started */}
 
 ## Guides
 
@@ -17,7 +17,7 @@ orphan: true
 
 ## Reference
 
-<!-- Links to reference material -->
+{/* Links to reference material */}
 
 ## See Also
 

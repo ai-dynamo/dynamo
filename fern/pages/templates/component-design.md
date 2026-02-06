@@ -6,7 +6,7 @@ Architecture and design decisions for the <Component>.
 
 ## Overview
 
-<!-- High-level architecture description -->
+{/* High-level architecture description */}
 
 ## Design Goals
 
@@ -18,7 +18,7 @@ Architecture and design decisions for the <Component>.
 
 ### Components
 
-<!-- Description of internal components -->
+{/* Description of internal components */}
 
 ### Data Flow
 
@@ -30,23 +30,23 @@ Architecture and design decisions for the <Component>.
 
 ## Design Decisions
 
-### Decision 1: <!-- Title -->
+### Decision 1: {/* Title */}
 
-**Context:** <!-- What problem were we solving? -->
+**Context:** {/* What problem were we solving? */}
 
 **Options Considered:**
 1. Option A - Pros/Cons
 2. Option B - Pros/Cons
 
-**Decision:** <!-- What we chose and why -->
+**Decision:** {/* What we chose and why */}
 
-**Consequences:** <!-- Trade-offs accepted -->
+**Consequences:** {/* Trade-offs accepted */}
 
 ## Algorithms
 
-### <!-- Algorithm Name -->
+### {/* Algorithm Name */}
 
-<!-- Algorithm description -->
+{/* Algorithm description */}
 
 ```
 Pseudocode or formula
@@ -54,14 +54,14 @@ Pseudocode or formula
 
 ## Performance Considerations
 
-<!-- Performance characteristics, bottlenecks, optimization opportunities -->
+{/* Performance characteristics, bottlenecks, optimization opportunities */}
 
 ## Future Work
 
-- <!-- Planned improvement 1 -->
-- <!-- Planned improvement 2 -->
+- {/* Planned improvement 1 */}
+- {/* Planned improvement 2 */}
 
 ## References
 
-- <!-- Related design docs -->
-- <!-- External papers or resources -->
+- {/* Related design docs */}
+- {/* External papers or resources */}

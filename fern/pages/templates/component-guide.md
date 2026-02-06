@@ -8,11 +8,11 @@ This guide covers deployment, configuration, and integration for the <Component>
 
 ### Single-Node Setup
 
-<!-- Instructions for local/single-node deployment -->
+{/* Instructions for local/single-node deployment */}
 
 ### Multi-Node Setup
 
-<!-- Instructions for distributed deployment -->
+{/* Instructions for distributed deployment */}
 
 ### Kubernetes Deployment
 
@@ -26,13 +26,13 @@ This guide covers deployment, configuration, and integration for the <Component>
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| <!-- arg --> | <!-- type --> | <!-- default --> | <!-- description --> |
+| {/* arg */} | {/* type */} | {/* default */} | {/* description */} |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| <!-- var --> | <!-- default --> | <!-- description --> |
+| {/* var */} | {/* default */} | {/* description */} |
 
 ### Configuration File
 
@@ -44,15 +44,15 @@ This guide covers deployment, configuration, and integration for the <Component>
 
 ### With Router
 
-<!-- How to integrate with Router -->
+{/* How to integrate with Router */}
 
 ### With Planner
 
-<!-- How to integrate with Planner -->
+{/* How to integrate with Planner */}
 
 ### With Observability
 
-<!-- Metrics, logging, tracing integration -->
+{/* Metrics, logging, tracing integration */}
 
 ## Troubleshooting
 
@@ -75,4 +75,4 @@ This guide covers deployment, configuration, and integration for the <Component>
 | `<Component> Examples` | `<component>_examples.md` |
 | `<Component> Design` | `/docs/design_docs/<component>_design.md` |
 
-<!-- Convert table rows to markdown links -->
+{/* Convert table rows to markdown links */}

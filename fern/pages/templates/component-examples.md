@@ -6,13 +6,13 @@ Usage examples for the <Component>.
 
 ## Basic Examples
 
-### Example 1: <!-- Title -->
+### Example 1: {/* Title */}
 
 ```bash
 # Add example from existing docs
 ```
 
-### Example 2: <!-- Title -->
+### Example 2: {/* Title */}
 
 ```python
 # Add example from existing docs
@@ -34,9 +34,9 @@ Usage examples for the <Component>.
 
 ## Advanced Examples
 
-### <!-- Advanced Use Case Title -->
+### {/* Advanced Use Case Title */}
 
-<!-- Description -->
+{/* Description */}
 
 ```bash
 # Add example

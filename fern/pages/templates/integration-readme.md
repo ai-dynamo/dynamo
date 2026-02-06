@@ -2,7 +2,7 @@
 orphan: true
 ---
 
-<!-- 2-3 sentence overview of this external integration -->
+{/* 2-3 sentence overview of this external integration */}
 
 ## Version Compatibility
 
@@ -31,7 +31,7 @@ orphan: true
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| <!-- param --> | <!-- default --> | <!-- description --> |
+| {/* param */} | {/* default */} | {/* description */} |
 
 ## Guides
 
@@ -40,7 +40,7 @@ orphan: true
 | `<Integration> Setup` | `<integration>_setup.md` | Installation and configuration |
 | `<Integration> with vLLM` | `<integration>_vllm.md` | vLLM-specific usage |
 
-<!-- Convert table rows to markdown links -->
+{/* Convert table rows to markdown links */}
 
 ## External Resources
 

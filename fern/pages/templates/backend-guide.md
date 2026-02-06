@@ -8,11 +8,11 @@ Advanced deployment and configuration for the <Backend> backend.
 
 ### Single-Node Setup
 
-<!-- Local deployment instructions -->
+{/* Local deployment instructions */}
 
 ### Multi-Node Setup
 
-<!-- Distributed deployment with TP/PP -->
+{/* Distributed deployment with TP/PP */}
 
 ### Kubernetes Deployment
 
@@ -26,27 +26,27 @@ Advanced deployment and configuration for the <Backend> backend.
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| <!-- arg --> | <!-- type --> | <!-- default --> | <!-- description --> |
+| {/* arg */} | {/* type */} | {/* default */} | {/* description */} |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| <!-- var --> | <!-- default --> | <!-- description --> |
+| {/* var */} | {/* default */} | {/* description */} |
 
 ### Model Configuration
 
-<!-- Model-specific settings, quantization -->
+{/* Model-specific settings, quantization */}
 
 ## Performance Tuning
 
 ### Memory Optimization
 
-<!-- KV cache sizing, batch limits -->
+{/* KV cache sizing, batch limits */}
 
 ### Throughput Optimization
 
-<!-- Concurrency, prefill/decode settings -->
+{/* Concurrency, prefill/decode settings */}
 
 ## Troubleshooting
 
@@ -54,7 +54,7 @@ Advanced deployment and configuration for the <Backend> backend.
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| <!-- issue --> | <!-- cause --> | <!-- solution --> |
+| {/* issue */} | {/* cause */} | {/* solution */} |
 
 ### Debug Mode
 
@@ -69,4 +69,4 @@ Advanced deployment and configuration for the <Backend> backend.
 | `<Backend> Overview` | `./README.md` |
 | Backend Comparison | `../README.md` |
 
-<!-- Convert to links when using template -->
+{/* Convert to links when using template */}

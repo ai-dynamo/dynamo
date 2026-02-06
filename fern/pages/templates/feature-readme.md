@@ -2,12 +2,12 @@
 orphan: true
 ---
 
-<!-- 2-3 sentence overview of this cross-cutting feature -->
+{/* 2-3 sentence overview of this cross-cutting feature */}
 
 ## Backend Support
 
-<!-- Copy actual backend support from existing feature docs -->
-<!-- Example pattern (from Multimodal index.md): -->
+{/* Copy actual backend support from existing feature docs */}
+{/* Example pattern (from Multimodal index.md): */}
 
 | Backend | Status | Notes |
 |---------|--------|-------|
@@ -19,11 +19,11 @@ See the Feature Matrix for full compatibility.
 
 ## Overview
 
-<!-- How this feature works across backends -->
+{/* How this feature works across backends */}
 
 ## Quick Start
 
-<!-- Add minimal example from existing feature docs -->
+{/* Add minimal example from existing feature docs */}
 
 ## Backend-Specific Guides
 
@@ -33,9 +33,9 @@ See the Feature Matrix for full compatibility.
 | SGLang | `<feature>_sglang.md` |
 | TensorRT-LLM | `<feature>_trtllm.md` |
 
-<!-- Convert table rows to markdown links -->
+{/* Convert table rows to markdown links */}
 
 ## See Also
 
-- <!-- Related features -->
-- <!-- Related components -->
+- {/* Related features */}
+- {/* Related components */}

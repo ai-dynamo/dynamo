@@ -1,8 +1,6 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
+{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
+SPDX-License-Identifier: Apache-2.0 */}
 
 # Dynamo Feature Compatibility Matrices
 
@@ -110,12 +108,12 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 ## Source References
 
-<!-- Backend READMEs -->
+{/* Backend READMEs */}
 [vllm-readme]: docs/backends/vllm/README.md
 [sglang-readme]: docs/backends/sglang/README.md
 [trtllm-readme]: docs/backends/trtllm/README.md
 
-<!-- Design Docs -->
+{/* Design Docs */}
 [disagg]: docs/design_docs/disagg_serving.md
 [kv-routing]: docs/components/router/router_guide.md
 [planner]: docs/components/planner/README.md
@@ -123,13 +121,13 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 [migration]: docs/fault_tolerance/request_migration.md
 [tools]: docs/agents/tool-calling.md
 
-<!-- Multimodal -->
+{/* Multimodal */}
 [mm]: docs/features/multimodal/README.md
 [mm-vllm]: docs/features/multimodal/multimodal_vllm.md
 [mm-trtllm]: docs/features/multimodal/multimodal_trtllm.md
 [mm-sglang]: docs/features/multimodal/multimodal_sglang.md
 
-<!-- Feature-specific -->
+{/* Feature-specific */}
 [lora]: docs/kubernetes/deployment/dynamomodel-guide.md
 [vllm-spec]: docs/features/speculative_decoding/speculative_decoding_vllm.md
 [trtllm-eagle]: docs/backends/trtllm/llama4_plus_eagle.md
