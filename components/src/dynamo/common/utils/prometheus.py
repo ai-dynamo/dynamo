@@ -237,7 +237,7 @@ def get_prometheus_expfmt(
         # Filter to include only vllm and lmcache metrics
         get_prometheus_expfmt(registry, metric_prefix_filters=["vllm:", "lmcache:"])
 
-        # Filter out python_/process_ metrics and add trtllm_ prefix
+        # Filter out python_/process_ metrics (TRT-LLM natively outputs trtllm_* prefix)
         get_prometheus_expfmt(registry, metric_prefix_filters=["trtllm_"])
 
         # Inject labels (custom labels, not auto-injected ones)
