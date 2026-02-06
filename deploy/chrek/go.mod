@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/checkpoint-restore/go-criu/v7 v7.2.0
 	github.com/containerd/containerd v1.7.30
-	github.com/opencontainers/runtime-spec v1.3.0
+	github.com/opencontainers/runtime-spec v1.2.0
 	github.com/sirupsen/logrus v1.9.4
 	golang.org/x/sys v0.40.0
 	google.golang.org/protobuf v1.36.11

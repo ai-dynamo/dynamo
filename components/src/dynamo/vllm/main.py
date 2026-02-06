@@ -499,7 +499,6 @@ async def register_vllm_model(
     config: Config,
     engine_client: AsyncLLM,
     vllm_config,
-    migration_limit: int,
 ):
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -511,7 +510,6 @@ async def register_vllm_model(
         config: Configuration object
         engine_client: vLLM engine client
         vllm_config: vLLM configuration
-        migration_limit: Migration limit for the model
     """
     runtime_config = ModelRuntimeConfig()
 
@@ -562,7 +560,6 @@ async def register_vllm_model(
         config.model,
         config.served_model_name,
         kv_cache_block_size=config.engine_args.block_size,
-        migration_limit=migration_limit,
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
@@ -663,7 +660,6 @@ async def init_prefill(
         config,
         engine_client,
         vllm_config,
-        migration_limit=0,  # Prefill doesn't support migration
     )
 
     health_check_payload = VllmPrefillHealthCheckPayload(
@@ -816,7 +812,6 @@ async def init(
         config,
         engine_client,
         vllm_config,
-        migration_limit=config.migration_limit,
     )
 
     health_check_payload = VllmHealthCheckPayload(
@@ -830,7 +825,7 @@ async def init(
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown=config.migration_limit <= 0,
+                graceful_shutdown=True,
                 metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),

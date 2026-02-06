@@ -294,6 +294,7 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
+                migration_limit: self.migration_limit,
             });
         }
 
@@ -345,6 +346,7 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
+            migration_limit: self.migration_limit,
         })
     }
 }
@@ -363,6 +365,7 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
+    migration_limit: u32,
 }
 
 impl LocalModel {
@@ -424,6 +427,10 @@ impl LocalModel {
 
     pub fn runtime_config(&self) -> &ModelRuntimeConfig {
         &self.runtime_config
+    }
+
+    pub fn migration_limit(&self) -> u32 {
+        self.migration_limit
     }
 
     pub fn namespace(&self) -> Option<&str> {

@@ -225,7 +225,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -237,7 +237,6 @@ fn register_llm<'p>(
     context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
     router_mode: Option<RouterMode>,
-    migration_limit: u32,
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
@@ -247,17 +246,12 @@ fn register_llm<'p>(
     base_model_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
-    if model_type.inner == llm_rs::model_type::ModelType::Prefill {
-        if !matches!(model_input, ModelInput::Tokens) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "ModelType::Prefill requires model_input to be ModelInput::Tokens",
-            ));
-        }
-        if migration_limit != 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "ModelType::Prefill requires migration_limit to be 0",
-            ));
-        }
+    if model_type.inner == llm_rs::model_type::ModelType::Prefill
+        && !matches!(model_input, ModelInput::Tokens)
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+        ));
     }
 
     let model_input = match model_input {
@@ -364,7 +358,6 @@ fn register_llm<'p>(
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(Some(router_config))
-            .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)

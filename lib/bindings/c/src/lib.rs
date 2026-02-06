@@ -1377,6 +1377,7 @@ pub async fn create_worker_selection_pipeline_chat(
         component.drt().clone(),
         model_manager.clone(),
         router_config,
+        0, // migration_limit - default to 0 for C bindings
         None,
         metrics.clone(),
     );
@@ -1498,6 +1499,7 @@ pub async fn create_worker_selection_pipeline_chat(
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        0, // migration_limit - default to 0 for C bindings
         metrics,
     )
     .await?;
