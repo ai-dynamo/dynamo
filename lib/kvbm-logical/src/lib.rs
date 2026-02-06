@@ -13,6 +13,7 @@
 pub mod blocks;
 pub mod events;
 pub mod manager;
+pub mod metrics;
 pub mod pools;
 pub mod pubsub;
 pub mod registry;

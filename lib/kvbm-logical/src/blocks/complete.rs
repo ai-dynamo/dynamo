@@ -36,7 +36,7 @@ impl<T: BlockMetadata> CompleteBlock<T> {
     pub fn reset(mut self) -> MutableBlock<T> {
         let block = self.block.take().unwrap().reset();
 
-        MutableBlock::new(block, self.return_fn.clone())
+        MutableBlock::new(block, self.return_fn.clone(), None)
     }
 }
 

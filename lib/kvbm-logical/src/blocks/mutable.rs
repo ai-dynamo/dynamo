@@ -8,20 +8,31 @@ use super::{
     state::Reset,
 };
 
+use crate::metrics::BlockPoolMetrics;
 use dynamo_tokens::TokenBlock;
+use std::sync::Arc;
 
 /// RAII guard for [`Block<T, Reset>`] that automatically returns to ResetPool on drop
 pub struct MutableBlock<T: BlockMetadata> {
     block: Option<Block<T, Reset>>,
     return_fn: ResetReturnFn<T>,
+    metrics: Option<Arc<BlockPoolMetrics>>,
 }
 
 impl<T: BlockMetadata> MutableBlock<T> {
     /// Create a new MutableBlock in Reset state
-    pub(crate) fn new(block: Block<T, Reset>, return_fn: ResetReturnFn<T>) -> Self {
+    pub(crate) fn new(
+        block: Block<T, Reset>,
+        return_fn: ResetReturnFn<T>,
+        metrics: Option<Arc<BlockPoolMetrics>>,
+    ) -> Self {
+        if let Some(ref m) = metrics {
+            m.inc_inflight_mutable();
+        }
         Self {
             block: Some(block),
             return_fn,
+            metrics,
         }
     }
 
@@ -30,12 +41,30 @@ impl<T: BlockMetadata> MutableBlock<T> {
         self.block_ref().block_id()
     }
 
-    /// Transition from Reset to Complete state with just a [`SequenceHash`]
-    /// bypassing the check on block_size
+    /// Transition from Reset to Complete state with just a [`SequenceHash`].
     ///
-    /// WARNING: This should only be used when the block size is known to be correct
-    pub fn stage(mut self, seq_hash: SequenceHash) -> CompleteBlock<T> {
-        CompleteBlock::new(self.take_block().stage(seq_hash), self.return_fn.clone())
+    /// Validates `block_size` against the inner block's size, returning
+    /// `Err(BlockError::BlockSizeMismatch)` on mismatch (same as [`complete`](Self::complete)).
+    pub fn stage(
+        mut self,
+        seq_hash: SequenceHash,
+        block_size: usize,
+    ) -> Result<CompleteBlock<T>, BlockError<MutableBlock<T>>> {
+        let inner_size = self.block_ref().block_size();
+        if block_size != inner_size {
+            return Err(BlockError::BlockSizeMismatch {
+                expected: inner_size,
+                actual: block_size,
+                block: self,
+            });
+        }
+        if let Some(ref m) = self.metrics {
+            m.inc_stagings();
+        }
+        Ok(CompleteBlock::new(
+            self.take_block().stage(seq_hash),
+            self.return_fn.clone(),
+        ))
     }
 
     /// Transition from Reset to Complete state
@@ -45,7 +74,12 @@ impl<T: BlockMetadata> MutableBlock<T> {
     ) -> Result<CompleteBlock<T>, BlockError<MutableBlock<T>>> {
         let block = self.take_block();
         match block.complete(token_block) {
-            Ok(complete_block) => Ok(CompleteBlock::new(complete_block, self.return_fn.clone())),
+            Ok(complete_block) => {
+                if let Some(ref m) = self.metrics {
+                    m.inc_stagings();
+                }
+                Ok(CompleteBlock::new(complete_block, self.return_fn.clone()))
+            }
             Err(block_error) => {
                 // Extract the block from the error and put it back in self
                 match block_error {
@@ -66,10 +100,6 @@ impl<T: BlockMetadata> MutableBlock<T> {
         }
     }
 
-    pub(crate) fn into_parts(mut self) -> (Block<T, Reset>, ResetReturnFn<T>) {
-        (self.take_block(), self.return_fn.clone())
-    }
-
     #[inline(always)]
     fn take_block(&mut self) -> Block<T, Reset> {
         self.block.take().expect("MutableBlock missing block")
@@ -86,6 +116,9 @@ impl<T: BlockMetadata> Drop for MutableBlock<T> {
     fn drop(&mut self) {
         if let Some(block) = self.block.take() {
             (self.return_fn)(block);
+        }
+        if let Some(ref m) = self.metrics {
+            m.dec_inflight_mutable();
         }
     }
 }

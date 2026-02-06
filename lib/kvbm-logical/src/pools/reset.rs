@@ -9,6 +9,7 @@
 //! - Thread-safe access via parking_lot::Mutex
 
 use crate::BlockId;
+use crate::metrics::BlockPoolMetrics;
 
 use super::{Block, BlockAllocator, BlockMetadata, MutableBlock, Reset};
 use parking_lot::Mutex;
@@ -18,6 +19,7 @@ pub(crate) struct ResetPool<T> {
     block_allocator: Arc<Mutex<dyn BlockAllocator<T> + Send + Sync>>,
     return_fn: Arc<dyn Fn(Block<T, Reset>) + Send + Sync>,
     block_size: usize,
+    metrics: Option<Arc<BlockPoolMetrics>>,
 }
 
 impl<T: BlockMetadata> ResetPool<T> {
@@ -52,7 +54,18 @@ impl<T: BlockMetadata> ResetPool<T> {
             block_allocator,
             return_fn,
             block_size,
+            metrics: None,
         }
+    }
+
+    /// Set the metrics handle for this pool.
+    pub(crate) fn set_metrics(&mut self, metrics: Arc<BlockPoolMetrics>) {
+        self.metrics = Some(metrics);
+    }
+
+    /// Get the metrics handle, if any.
+    pub(crate) fn metrics(&self) -> &Option<Arc<BlockPoolMetrics>> {
+        &self.metrics
     }
 
     /// Tries to allocate upto `count` blocks from the pool.
@@ -66,6 +79,7 @@ impl<T: BlockMetadata> ResetPool<T> {
             blocks.push(MutableBlock::new(
                 allocator.pop().unwrap(),
                 self.return_fn.clone(),
+                self.metrics.clone(),
             ));
         }
 

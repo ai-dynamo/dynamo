@@ -76,15 +76,6 @@ impl<T> Block<T, Reset> {
     // }
 }
 
-impl<T: BlockMetadata> Block<T, Reset> {
-    pub(crate) fn register_with_handle(
-        self,
-        registration_handle: BlockRegistrationHandle,
-    ) -> Block<T, Registered> {
-        into_registered(self.block_id, self.block_size, registration_handle)
-    }
-}
-
 // Implementation for Staged state
 impl<T: BlockMetadata> Block<T, Staged> {
     pub(crate) fn register_with_handle(
@@ -159,7 +150,6 @@ impl<T, State> Block<T, State> {
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub fn block_size(&self) -> usize {
         self.block_size
     }

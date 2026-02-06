@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::metrics::{BlockPoolMetrics, MetricsAggregator, short_type_name};
 use crate::{BlockId, pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 
 use crate::{
@@ -93,6 +94,9 @@ pub struct BlockManagerConfigBuilder<T: BlockMetadata> {
     /// Policy for handling duplicate sequence hashes
     duplication_policy: Option<BlockDuplicationPolicy>,
 
+    /// Optional metrics aggregator for prometheus export
+    aggregator: Option<MetricsAggregator>,
+
     /// Phantom data for type parameter
     _phantom: std::marker::PhantomData<T>,
 }
@@ -128,6 +132,7 @@ pub struct BlockManager<T: BlockMetadata> {
     allocate_mutex: Mutex<()>,
     total_blocks: usize,
     block_size: usize,
+    metrics: Arc<BlockPoolMetrics>,
 }
 
 impl<T: BlockMetadata> BlockManager<T> {
@@ -150,14 +155,32 @@ impl<T: BlockMetadata> BlockManager<T> {
 
     pub fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
         let _guard = self.allocate_mutex.lock();
-        let mut blocks = self.reset_pool.allocate_blocks(count);
-        match self.inactive_pool.allocate_blocks(count - blocks.len()) {
+        let from_reset = self.reset_pool.allocate_blocks(count);
+        let from_reset_count = from_reset.len();
+        let mut blocks = from_reset;
+
+        let remaining_needed = count - blocks.len();
+        let result = match self.inactive_pool.allocate_blocks(remaining_needed) {
             Some(remaining) => {
+                let eviction_count = remaining.len() as u64;
                 blocks.extend(remaining);
+
+                self.metrics.inc_allocations(blocks.len() as u64);
+                self.metrics
+                    .inc_allocations_from_reset(from_reset_count as u64);
+                self.metrics.inc_evictions(eviction_count);
+
                 Some(blocks)
             }
             None => None,
-        }
+        };
+
+        self.metrics
+            .set_reset_pool_size(self.reset_pool.len() as i64);
+        self.metrics
+            .set_inactive_pool_size(self.inactive_pool.len() as i64);
+
+        result
     }
 
     /// Reset the inactive pool by draining all blocks and returning them to the reset pool.
@@ -194,60 +217,33 @@ impl<T: BlockMetadata> BlockManager<T> {
     pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
         blocks
             .into_iter()
-            .map(|block| {
-                let handle = self
-                    .block_registry
-                    .register_sequence_hash(block.sequence_hash());
-                let registered_block =
-                    handle.register_block(block, self.duplication_policy, &self.inactive_pool);
-                ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
-            })
+            .map(|block| self.register_block(block))
             .collect()
     }
 
-    pub fn register_mutable_block_from_existing<U: BlockMetadata>(
-        &self,
-        block: MutableBlock<T>,
-        existing: &ImmutableBlock<U>,
-    ) -> ImmutableBlock<T> {
-        let handle = existing.registration_handle();
-
-        assert!(
-            handle.is_from_registry(&self.block_registry),
-            "Attempted to register block with handle from different registry"
+    pub fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
+        self.metrics.inc_registrations();
+        let handle = self
+            .block_registry
+            .register_sequence_hash(block.sequence_hash());
+        let registered_block = handle.register_block(
+            block,
+            self.duplication_policy,
+            &self.inactive_pool,
+            Some(self.metrics.as_ref()),
         );
-
-        let registered_block =
-            handle.register_mutable_block(block, self.duplication_policy, &self.inactive_pool);
-
-        ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
-    }
-
-    /// Register a mutable block with an explicit sequence hash.
-    ///
-    /// This is used when the block content comes from a remote source (e.g., RDMA pull)
-    /// and we know the sequence hash but don't have an existing local block to copy from.
-    ///
-    /// # Arguments
-    /// * `block` - The mutable block to register
-    /// * `seq_hash` - The sequence hash for this block (from remote)
-    pub fn register_mutable_block_with_hash(
-        &self,
-        block: MutableBlock<T>,
-        seq_hash: SequenceHash,
-    ) -> ImmutableBlock<T> {
-        // Register the sequence hash to get a handle
-        let handle = self.block_registry.register_sequence_hash(seq_hash);
-
-        // Register the block using the handle
-        let registered_block =
-            handle.register_mutable_block(block, self.duplication_policy, &self.inactive_pool);
-
-        ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
+        ImmutableBlock::new(
+            registered_block,
+            self.upgrade_fn.clone(),
+            Some(self.metrics.clone()),
+        )
     }
 
     /// Match blocks does a linear search through the [SequenceHash] array, stopping on the first miss.
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
+        self.metrics
+            .inc_match_hashes_requested(seq_hash.len() as u64);
+
         tracing::debug!(
             num_hashes = seq_hash.len(),
             inactive_pool_len = self.inactive_pool.len(),
@@ -260,7 +256,9 @@ impl<T: BlockMetadata> BlockManager<T> {
             self.active_pool
                 .find_matches(seq_hash, true)
                 .into_iter()
-                .map(|block| ImmutableBlock::new(block, self.upgrade_fn.clone())),
+                .map(|block| {
+                    ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone()))
+                }),
         );
 
         let active_matched = matched.len();
@@ -276,12 +274,12 @@ impl<T: BlockMetadata> BlockManager<T> {
                 inactive_matched,
                 "Matched from inactive pool"
             );
-            matched.extend(
-                inactive_found
-                    .into_iter()
-                    .map(|block| ImmutableBlock::new(block, self.upgrade_fn.clone())),
-            );
+            matched.extend(inactive_found.into_iter().map(|block| {
+                ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone()))
+            }));
         }
+
+        self.metrics.inc_match_blocks_returned(matched.len() as u64);
 
         tracing::debug!(total_matched = matched.len(), "match_blocks result");
         tracing::trace!(matched = ?matched, "matched blocks");
@@ -300,12 +298,18 @@ impl<T: BlockMetadata> BlockManager<T> {
         seq_hashes: &[SequenceHash],
         touch: bool,
     ) -> HashMap<SequenceHash, ImmutableBlock<T>> {
+        self.metrics
+            .inc_scan_hashes_requested(seq_hashes.len() as u64);
+
         let mut result = HashMap::new();
 
         // 1. Check active pool for all hashes (read-only, no touch needed)
         let active_found = self.active_pool.scan_matches(seq_hashes);
         for (hash, block) in active_found {
-            result.insert(hash, ImmutableBlock::new(block, self.upgrade_fn.clone()));
+            result.insert(
+                hash,
+                ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone())),
+            );
         }
 
         // 2. Build remaining hashes set
@@ -319,9 +323,14 @@ impl<T: BlockMetadata> BlockManager<T> {
         if !remaining.is_empty() {
             let inactive_found = self.inactive_pool.scan_blocks(&remaining, touch);
             for (hash, block) in inactive_found {
-                result.insert(hash, ImmutableBlock::new(block, self.upgrade_fn.clone()));
+                result.insert(
+                    hash,
+                    ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone())),
+                );
             }
         }
+
+        self.metrics.inc_scan_blocks_returned(result.len() as u64);
 
         result
     }
@@ -346,6 +355,11 @@ impl<T: BlockMetadata> BlockManager<T> {
     pub fn block_registry(&self) -> &BlockRegistry {
         &self.block_registry
     }
+
+    /// Get a reference to the block pool metrics
+    pub fn metrics(&self) -> &Arc<BlockPoolMetrics> {
+        &self.metrics
+    }
 }
 
 impl<T: BlockMetadata> Default for BlockManagerConfigBuilder<T> {
@@ -356,6 +370,7 @@ impl<T: BlockMetadata> Default for BlockManagerConfigBuilder<T> {
             registry: None,
             inactive_backend: None,
             duplication_policy: None,
+            aggregator: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -484,6 +499,13 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
+    /// Set a metrics aggregator for prometheus export.
+    /// The aggregator will automatically receive this manager's metrics source.
+    pub fn aggregator(mut self, aggregator: MetricsAggregator) -> Self {
+        self.aggregator = Some(aggregator);
+        self
+    }
+
     /// Validate the configuration
     fn validate(&self) -> Result<(), String> {
         let registry = self.registry.as_ref().ok_or("registry is required")?;
@@ -545,11 +567,15 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         // Use provided registry
         let registry = self.registry.unwrap();
 
+        // Create metrics
+        let metrics = Arc::new(BlockPoolMetrics::new(short_type_name::<T>()));
+
         // Create reset pool
         let blocks: Vec<Block<T, Reset>> = (0..block_count as BlockId)
             .map(|id| Block::new(id, block_size))
             .collect();
-        let reset_pool = ResetPool::new(blocks, block_size);
+        let mut reset_pool = ResetPool::new(blocks, block_size);
+        reset_pool.set_metrics(metrics.clone());
 
         // Create backend based on configuration
         let backend: Box<dyn InactivePoolBackend<T>> = match self.inactive_backend.take() {
@@ -629,6 +655,11 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
             },
         );
 
+        // Register with aggregator if provided
+        if let Some(ref aggregator) = self.aggregator {
+            aggregator.register_source(metrics.clone());
+        }
+
         Ok(BlockManager {
             reset_pool,
             active_pool,
@@ -641,6 +672,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
             allocate_mutex: Mutex::new(()),
             total_blocks: block_count,
             block_size,
+            metrics,
         })
     }
 }
@@ -854,6 +886,7 @@ mod tests {
         #[test]
         fn test_allocate_single_block() {
             let manager = create_test_manager(10);
+            let m = manager.metrics();
 
             let initial_available = manager.available_blocks();
             let initial_total = manager.total_blocks();
@@ -866,6 +899,10 @@ mod tests {
             assert_eq!(manager.available_blocks(), initial_available - 1);
             assert_eq!(manager.total_blocks(), initial_total);
 
+            let snap = m.snapshot();
+            assert_eq!(snap.allocations, 1);
+            assert_eq!(snap.inflight_mutable, 1);
+
             let block = blocks.into_iter().next().unwrap();
             // Verify block has a valid ID
             let _block_id = block.block_id();
@@ -874,11 +911,15 @@ mod tests {
             drop(block);
             assert_eq!(manager.available_blocks(), initial_available);
             assert_eq!(manager.total_blocks(), initial_total);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.inflight_mutable, 0);
         }
 
         #[test]
         fn test_allocate_multiple_blocks() {
             let manager = create_test_manager(20);
+            let m = manager.metrics();
 
             let initial_available = manager.available_blocks();
             let initial_total = manager.total_blocks();
@@ -893,6 +934,10 @@ mod tests {
             assert_eq!(manager.available_blocks(), initial_available - 5);
             assert_eq!(manager.total_blocks(), initial_total);
 
+            let snap = m.snapshot();
+            assert_eq!(snap.allocations, 5);
+            assert_eq!(snap.inflight_mutable, 5);
+
             // Verify all blocks have unique IDs
             let mut block_ids = Vec::new();
             for block in blocks {
@@ -904,6 +949,9 @@ mod tests {
             // All blocks should return to pool automatically on drop
             assert_eq!(manager.available_blocks(), initial_available);
             assert_eq!(manager.total_blocks(), initial_total);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.inflight_mutable, 0);
         }
 
         #[test]
@@ -940,6 +988,7 @@ mod tests {
         #[test]
         fn test_sequential_allocations() {
             let manager = create_test_manager(10);
+            let m = manager.metrics();
 
             let total_blocks = manager.total_blocks();
             assert_eq!(manager.available_blocks(), total_blocks);
@@ -956,6 +1005,10 @@ mod tests {
             assert_eq!(blocks3.len(), 3);
             assert_eq!(manager.available_blocks(), 0);
 
+            let snap = m.snapshot();
+            assert_eq!(snap.allocations, 10);
+            assert_eq!(snap.inflight_mutable, 10);
+
             // Should have no blocks left
             let blocks4 = manager.allocate_blocks(1);
             assert!(blocks4.is_none(), "Should not have any blocks left");
@@ -970,6 +1023,9 @@ mod tests {
             drop(blocks1);
             assert_eq!(manager.available_blocks(), total_blocks);
             assert_eq!(manager.total_blocks(), total_blocks);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.inflight_mutable, 0);
         }
     }
 
@@ -983,6 +1039,7 @@ mod tests {
         #[test]
         fn test_mutable_block_returns_to_reset_pool() {
             let manager = create_test_manager(10);
+            let m = manager.metrics();
 
             let initial_available = manager.available_blocks();
             let initial_total = manager.total_blocks();
@@ -998,16 +1055,23 @@ mod tests {
                 // Available blocks should decrease
                 assert_eq!(manager.available_blocks(), initial_available - 3);
                 assert_eq!(manager.total_blocks(), initial_total); // Total never changes
+
+                let snap = m.snapshot();
+                assert_eq!(snap.inflight_mutable, 3);
             } // MutableBlocks dropped here - should return to reset pool
 
             // Available blocks should return to original count
             assert_eq!(manager.available_blocks(), initial_available);
             assert_eq!(manager.total_blocks(), initial_total);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.inflight_mutable, 0);
         }
 
         #[test]
         fn test_complete_block_returns_to_reset_pool() {
             let manager = create_test_manager(10);
+            let m = manager.metrics();
 
             let initial_available = manager.available_blocks();
             let initial_total = manager.total_blocks();
@@ -1016,6 +1080,8 @@ mod tests {
                 let mutable_blocks = manager.allocate_blocks(2).expect("Should allocate blocks");
                 assert_eq!(manager.available_blocks(), initial_available - 2);
 
+                // Note: create_token_block uses 3 tokens but block_size is 4,
+                // so complete() returns Err(BlockSizeMismatch) for all blocks.
                 let _complete_blocks: Vec<_> = mutable_blocks
                     .into_iter()
                     .enumerate()
@@ -1028,16 +1094,24 @@ mod tests {
 
                 // Blocks are still unavailable while in Complete state
                 assert_eq!(manager.available_blocks(), initial_available - 2);
+
+                let snap = m.snapshot();
+                assert_eq!(snap.inflight_mutable, 2);
+                assert_eq!(snap.stagings, 0);
             } // CompleteBlocks dropped here - should return to reset pool
 
             // Available blocks should return to original count since blocks weren't registered
             assert_eq!(manager.available_blocks(), initial_available);
             assert_eq!(manager.total_blocks(), initial_total);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.inflight_mutable, 0);
         }
 
         #[test]
         fn test_registered_block_lifecycle() {
             let manager = create_test_manager(10);
+            let m = manager.metrics();
 
             let initial_available = manager.available_blocks();
             let initial_total = manager.total_blocks();
@@ -1049,6 +1123,10 @@ mod tests {
             let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate blocks");
             assert_eq!(manager.available_blocks(), initial_available - 1);
 
+            let snap = m.snapshot();
+            assert_eq!(snap.allocations, 1);
+            assert_eq!(snap.inflight_mutable, 1);
+
             let complete_block = mutable_blocks
                 .into_iter()
                 .next()
@@ -1059,6 +1137,10 @@ mod tests {
             // Still unavailable while in Complete state
             assert_eq!(manager.available_blocks(), initial_available - 1);
 
+            let snap = m.snapshot();
+            assert_eq!(snap.stagings, 1);
+            assert_eq!(snap.inflight_mutable, 0);
+
             // Step 2: Register the block
             let immutable_blocks = manager.register_blocks(vec![complete_block]);
             assert_eq!(immutable_blocks.len(), 1);
@@ -1066,6 +1148,10 @@ mod tests {
 
             // Block is still not available (it's now in active/inactive pools, not reset)
             assert_eq!(manager.available_blocks(), initial_available - 1);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.registrations, 1);
+            assert_eq!(snap.inflight_immutable, 1);
 
             {
                 // Step 3: Use the block and verify it can be matched
@@ -1075,7 +1161,15 @@ mod tests {
 
                 // Still not available while being used
                 assert_eq!(manager.available_blocks(), initial_available - 1);
+
+                let snap = m.snapshot();
+                assert_eq!(snap.match_hashes_requested, 1);
+                assert_eq!(snap.match_blocks_returned, 1);
+                assert_eq!(snap.inflight_immutable, 2);
             } // matched blocks dropped here
+
+            let snap = m.snapshot();
+            assert_eq!(snap.inflight_immutable, 1);
 
             // Step 4: Drop the original registered block
             drop(immutable_block);
@@ -1083,6 +1177,9 @@ mod tests {
             // Block should now be available again (moved to inactive pool when ref count reached 0)
             assert_eq!(manager.available_blocks(), initial_available);
             assert_eq!(manager.total_blocks(), initial_total);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.inflight_immutable, 0);
         }
 
         #[test]
@@ -1378,6 +1475,7 @@ mod tests {
         #[test]
         fn test_register_single_block() {
             let manager = create_test_manager(10);
+            let m = manager.metrics();
 
             let token_block = create_test_token_block_from_iota(150);
             let expected_hash = token_block.kvbm_sequence_hash();
@@ -1394,11 +1492,16 @@ mod tests {
 
             let immutable_block = immutable_blocks.into_iter().next().unwrap();
             assert_eq!(immutable_block.sequence_hash(), expected_hash);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.registrations, 1);
+            assert_eq!(snap.stagings, 1);
         }
 
         #[test]
         fn test_register_multiple_blocks() {
             let manager = create_test_manager(10);
+            let m = manager.metrics();
 
             let mut complete_blocks = Vec::new();
             let mut expected_hashes = Vec::new();
@@ -1424,6 +1527,10 @@ mod tests {
             for (i, immutable_block) in immutable_blocks.iter().enumerate() {
                 assert_eq!(immutable_block.sequence_hash(), expected_hashes[i]);
             }
+
+            let snap = m.snapshot();
+            assert_eq!(snap.registrations, 3);
+            assert_eq!(snap.stagings, 3);
         }
 
         #[rstest]
@@ -1488,6 +1595,9 @@ mod tests {
                     "With {} policy, duplicates should reuse the same block ID",
                     policy_name
                 );
+
+                let snap = manager.metrics().snapshot();
+                assert_eq!(snap.registration_dedup, 1);
             } else {
                 // Duplicates are allowed - different block IDs
                 assert_ne!(
@@ -1496,6 +1606,9 @@ mod tests {
                     "With {} policy, duplicates should have different block IDs",
                     policy_name
                 );
+
+                let snap = manager.metrics().snapshot();
+                assert_eq!(snap.duplicate_blocks, 1);
             }
         }
 
@@ -1528,8 +1641,11 @@ mod tests {
             let mut registered = manager.register_blocks(vec![primary_complete]);
             let primary_immutable = registered.pop().expect("Should register primary block");
 
-            let result =
-                manager.register_mutable_block_from_existing(duplicate_mutable, &primary_immutable);
+            let duplicate_completed = duplicate_mutable
+                .stage(primary_immutable.sequence_hash(), manager.block_size())
+                .expect("block size should match");
+
+            let result = manager.register_block(duplicate_completed);
 
             assert_eq!(
                 result.block_id(),
@@ -1555,6 +1671,10 @@ mod tests {
                 duplicate_id,
                 "Returned block should be the rejected duplicate"
             );
+
+            let snap = manager.metrics().snapshot();
+            assert_eq!(snap.registrations, 2);
+            assert_eq!(snap.registration_dedup, 1);
         }
     }
 
@@ -1577,6 +1697,7 @@ mod tests {
         #[test]
         fn test_match_single_block() {
             let manager = create_test_manager(10);
+            let m = manager.metrics();
 
             let token_block = create_test_token_block_from_iota(500);
             let seq_hash = token_block.kvbm_sequence_hash();
@@ -1595,6 +1716,10 @@ mod tests {
             let matched_blocks = manager.match_blocks(&[seq_hash]);
             assert_eq!(matched_blocks.len(), 1);
             assert_eq!(matched_blocks[0].sequence_hash(), seq_hash);
+
+            let snap = m.snapshot();
+            assert_eq!(snap.match_hashes_requested, 1);
+            assert_eq!(snap.match_blocks_returned, 1);
         }
 
         #[test]
@@ -1626,6 +1751,10 @@ mod tests {
             for (i, matched_block) in matched_blocks.iter().enumerate() {
                 assert_eq!(matched_block.sequence_hash(), seq_hashes[i]);
             }
+
+            let snap = manager.metrics().snapshot();
+            assert_eq!(snap.match_hashes_requested, 4);
+            assert_eq!(snap.match_blocks_returned, 4);
         }
 
         #[test]
@@ -1661,6 +1790,10 @@ mod tests {
             for matched_block in matched_blocks {
                 assert!(seq_hashes[0..2].contains(&matched_block.sequence_hash()));
             }
+
+            let snap = manager.metrics().snapshot();
+            assert_eq!(snap.match_hashes_requested, 3);
+            assert_eq!(snap.match_blocks_returned, 2);
         }
 
         #[test]

@@ -590,6 +590,7 @@ fn test_attach_block_ref_called_on_inactive_promotion_allow_policy() {
         complete_block1,
         BlockDuplicationPolicy::Allow,
         &inactive_pool,
+        None,
     );
 
     drop(registered1);
@@ -615,6 +616,7 @@ fn test_attach_block_ref_called_on_inactive_promotion_allow_policy() {
         complete_block2,
         BlockDuplicationPolicy::Allow,
         &inactive_pool,
+        None,
     );
 
     let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
@@ -650,6 +652,7 @@ fn test_attach_block_ref_called_on_inactive_promotion_reject_policy() {
         complete_block1,
         BlockDuplicationPolicy::Reject,
         &inactive_pool,
+        None,
     );
 
     drop(registered1);
@@ -669,100 +672,13 @@ fn test_attach_block_ref_called_on_inactive_promotion_reject_policy() {
         complete_block2,
         BlockDuplicationPolicy::Reject,
         &inactive_pool,
+        None,
     );
 
     let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
     assert!(
         after_result.is_some(),
         "try_get_block should succeed after Reject policy promotion"
-    );
-
-    drop(registered2);
-    drop(after_result);
-}
-
-#[test]
-fn test_attach_block_ref_called_on_mutable_block_registration_allow_policy() {
-    use crate::pools::*;
-
-    let registry = BlockRegistry::new();
-    let (reset_pool, inactive_pool) = create_test_inactive_pool();
-
-    let tokens = vec![10u32, 11, 12, 13];
-    let token_block = create_test_token_block(&tokens);
-    let seq_hash = token_block.kvbm_sequence_hash();
-
-    let handle = registry.register_sequence_hash(seq_hash);
-
-    let complete_block1 = Block::<TestMetadata, _>::new(100, 4)
-        .complete(&token_block)
-        .expect("Block size should match");
-
-    let complete_block1 = CompleteBlock::new(complete_block1, reset_pool.return_fn());
-
-    let registered1 = handle.register_block(
-        complete_block1,
-        BlockDuplicationPolicy::Allow,
-        &inactive_pool,
-    );
-
-    drop(registered1);
-    assert!(inactive_pool.has_block(seq_hash));
-
-    let mut mutable_blocks = reset_pool.allocate_blocks(1);
-    let mutable = mutable_blocks.pop().expect("Should have blocks");
-
-    let registered2 =
-        handle.register_mutable_block(mutable, BlockDuplicationPolicy::Allow, &inactive_pool);
-
-    let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
-    assert!(
-        after_result.is_some(),
-        "try_get_block should succeed after mutable block registration with Allow policy"
-    );
-
-    drop(registered2);
-    drop(after_result);
-}
-
-#[test]
-fn test_attach_block_ref_called_on_mutable_block_registration_reject_policy() {
-    use crate::pools::*;
-
-    let registry = BlockRegistry::new();
-    let (reset_pool, inactive_pool) = create_test_inactive_pool();
-
-    let tokens = vec![20u32, 21, 22, 23];
-    let token_block = create_test_token_block(&tokens);
-    let seq_hash = token_block.kvbm_sequence_hash();
-
-    let handle = registry.register_sequence_hash(seq_hash);
-
-    let complete_block1 = Block::<TestMetadata, _>::new(100, 4)
-        .complete(&token_block)
-        .expect("Block size should match");
-
-    let complete_block1 = CompleteBlock::new(complete_block1, reset_pool.return_fn());
-
-    let registered1 = handle.register_block(
-        complete_block1,
-        BlockDuplicationPolicy::Reject,
-        &inactive_pool,
-    );
-
-    drop(registered1);
-    assert!(inactive_pool.has_block(seq_hash));
-
-    let mut mutable_blocks = reset_pool.allocate_blocks(1);
-    let mutable = mutable_blocks.pop().expect("Should have blocks");
-
-    let registered2 =
-        handle.register_mutable_block(mutable, BlockDuplicationPolicy::Reject, &inactive_pool);
-
-    let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
-    assert!(
-        after_result.is_some(),
-        "try_get_block should succeed after mutable block registration with Reject policy"
     );
 
     drop(registered2);

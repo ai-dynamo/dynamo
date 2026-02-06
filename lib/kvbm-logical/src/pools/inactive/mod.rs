@@ -14,6 +14,8 @@ pub mod backends;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use crate::metrics::BlockPoolMetrics;
+
 use super::{
     Block, BlockId, BlockMetadata, InactiveBlock, MutableBlock, PrimaryBlock, Registered,
     RegisteredBlock, SequenceHash, reset::ResetPool,
@@ -74,6 +76,7 @@ pub(crate) struct InactivePool<T: BlockMetadata> {
     return_fn: RegisteredReturnFn<T>,
     #[expect(dead_code)]
     block_size: usize,
+    metrics: Option<Arc<BlockPoolMetrics>>,
 }
 
 struct InactivePoolInner<T: BlockMetadata> {
@@ -98,10 +101,10 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
                     tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");
                 }
                 Err(_block) => {
-                    tracing::warn!(
+                    tracing::trace!(
                         ?seq_hash,
                         strong_count,
-                        "Arc::try_unwrap failed - block NOT returned to pool"
+                        "Arc::try_unwrap failed - block was upgraded before being returned to pool"
                     );
                 }
             }
@@ -112,6 +115,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             reset_return_fn: reset_pool.return_fn(),
             return_fn,
             block_size: reset_pool.block_size(),
+            metrics: reset_pool.metrics().clone(),
         }
     }
 
@@ -173,7 +177,11 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             let mut mutable_blocks = Vec::with_capacity(count);
             mutable_blocks.extend(allocated_blocks.into_iter().map(|registered_block| {
                 let reset_block = registered_block.reset();
-                MutableBlock::new(reset_block, self.reset_return_fn.clone())
+                MutableBlock::new(
+                    reset_block,
+                    self.reset_return_fn.clone(),
+                    self.metrics.clone(),
+                )
             }));
             Some(mutable_blocks)
         } else {
@@ -239,7 +247,11 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             .into_iter()
             .map(|registered_block| {
                 let reset_block = registered_block.reset();
-                MutableBlock::new(reset_block, self.reset_return_fn.clone())
+                MutableBlock::new(
+                    reset_block,
+                    self.reset_return_fn.clone(),
+                    self.metrics.clone(),
+                )
             })
             .collect()
     }

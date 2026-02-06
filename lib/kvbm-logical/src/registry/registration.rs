@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Block registration logic: register_block, register_mutable_block, try_find_existing_block,
-//! try_get_block.
+//! Block registration logic: register_block, try_find_existing_block, try_get_block.
 
 use super::RegisteredReturnFn;
 use super::attachments::AttachmentStore;
 use super::handle::BlockRegistrationHandle;
 
 use crate::blocks::{
-    Block, BlockDuplicationPolicy, BlockMetadata, CompleteBlock, DuplicateBlock, MutableBlock,
-    PrimaryBlock, RegisteredBlock, WeakBlockEntry,
-    state::{Registered, Reset},
+    Block, BlockDuplicationPolicy, BlockMetadata, CompleteBlock, DuplicateBlock, PrimaryBlock,
+    RegisteredBlock, WeakBlockEntry,
+    state::{Registered, Reset, Staged},
 };
+use crate::metrics::BlockPoolMetrics;
 use crate::pools::InactivePool;
 
 use std::any::TypeId;
@@ -24,6 +24,7 @@ impl BlockRegistrationHandle {
         mut block: CompleteBlock<T>,
         duplication_policy: BlockDuplicationPolicy,
         inactive_pool: &InactivePool<T>,
+        metrics: Option<&BlockPoolMetrics>,
     ) -> Arc<dyn RegisteredBlock<T>> {
         assert_eq!(
             block.sequence_hash(),
@@ -37,30 +38,12 @@ impl BlockRegistrationHandle {
 
         register_block_inner(
             self,
-            ExtractedBlock::Staged(inner_block),
+            inner_block,
             block_id,
             reset_return_fn,
             duplication_policy,
             inactive_pool,
-        )
-    }
-
-    pub(crate) fn register_mutable_block<T: BlockMetadata + Sync>(
-        &self,
-        mutable_block: MutableBlock<T>,
-        duplication_policy: BlockDuplicationPolicy,
-        inactive_pool: &InactivePool<T>,
-    ) -> Arc<dyn RegisteredBlock<T>> {
-        let block_id = mutable_block.block_id();
-        let (inner_block, reset_return_fn) = mutable_block.into_parts();
-
-        register_block_inner(
-            self,
-            ExtractedBlock::Reset(inner_block),
-            block_id,
-            reset_return_fn,
-            duplication_policy,
-            inactive_pool,
+            metrics,
         )
     }
 
@@ -92,37 +75,15 @@ impl BlockRegistrationHandle {
     }
 }
 
-/// Extracted block ready for registration (from either CompleteBlock or MutableBlock).
-/// Used to DRY the shared logic between register_block and register_mutable_block.
-enum ExtractedBlock<T: BlockMetadata> {
-    Staged(Block<T, crate::blocks::state::Staged>),
-    Reset(Block<T, Reset>),
-}
-
-impl<T: BlockMetadata> ExtractedBlock<T> {
-    fn register(self, handle: BlockRegistrationHandle) -> Block<T, Registered> {
-        match self {
-            Self::Staged(inner) => inner.register_with_handle(handle),
-            Self::Reset(inner) => inner.register_with_handle(handle),
-        }
-    }
-
-    fn discard(self, return_fn: &Arc<dyn Fn(Block<T, Reset>) + Send + Sync>) {
-        match self {
-            Self::Staged(inner) => return_fn(inner.reset()),
-            Self::Reset(inner) => return_fn(inner),
-        }
-    }
-}
-
-/// Shared registration logic used by both register_block and register_mutable_block.
+/// Core registration logic for register_block.
 fn register_block_inner<T: BlockMetadata + Sync>(
     handle: &BlockRegistrationHandle,
-    extracted: ExtractedBlock<T>,
+    block: Block<T, Staged>,
     block_id: crate::BlockId,
     reset_return_fn: Arc<dyn Fn(Block<T, Reset>) + Send + Sync>,
     duplication_policy: BlockDuplicationPolicy,
     inactive_pool: &InactivePool<T>,
+    metrics: Option<&BlockPoolMetrics>,
 ) -> Arc<dyn RegisteredBlock<T>> {
     let pool_return_fn = inactive_pool.return_fn();
 
@@ -141,17 +102,23 @@ fn register_block_inner<T: BlockMetadata + Sync>(
         // Handle duplicate based on policy
         match duplication_policy {
             BlockDuplicationPolicy::Allow => {
+                if let Some(m) = metrics {
+                    m.inc_duplicate_blocks();
+                }
                 drop(attachments);
                 PrimaryBlock::store_weak_refs(&existing_primary);
-                let registered_block = extracted.register(handle.clone());
+                let registered_block = block.register_with_handle(handle.clone());
                 let duplicate =
                     DuplicateBlock::new(registered_block, existing_primary, reset_return_fn);
                 return Arc::new(duplicate);
             }
             BlockDuplicationPolicy::Reject => {
+                if let Some(m) = metrics {
+                    m.inc_registration_dedup();
+                }
                 drop(attachments);
                 PrimaryBlock::store_weak_refs(&existing_primary);
-                extracted.discard(&reset_return_fn);
+                reset_return_fn(block.reset());
                 return existing_primary as Arc<dyn RegisteredBlock<T>>;
             }
         }
@@ -159,7 +126,7 @@ fn register_block_inner<T: BlockMetadata + Sync>(
 
     // No existing block - register and create new primary
     drop(attachments);
-    let registered_block = extracted.register(handle.clone());
+    let registered_block = block.register_with_handle(handle.clone());
     let primary_arc = PrimaryBlock::new_attached(Arc::new(registered_block), pool_return_fn);
 
     primary_arc as Arc<dyn RegisteredBlock<T>>
