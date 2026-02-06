@@ -69,6 +69,10 @@ def render(args, context, script_dir):
     with open(f"{script_dir}/{filename}", "w") as f:
         f.write(cleaned)
 
+    print(
+        f"INFO: Generated Dockerfile written to {script_dir}/{filename}"
+    )
+
     if args.show_result:
         print("##############")
         print("# Dockerfile #")
