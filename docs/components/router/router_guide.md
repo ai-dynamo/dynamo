@@ -151,7 +151,7 @@ The main KV-aware routing arguments:
 
 - `--router-reset-states`: When specified, resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting with a fresh state. By default (when this flag is not provided), the router persists state across restarts, downloading any available snapshot from NATS object store and continuing to consume events from where it left off. This enables routers to maintain KV cache awareness across restarts. **Warning**: Using `--router-reset-states` can bring existing router replicas into an inconsistent state. Only use this flag when launching the first router replica in a component, or consider using a different namespace/component for a clean slate.
 
-- `--router-snapshot-threshold`: Sets the number of messages in the JetStream before triggering a snapshot. When the message count exceeds this threshold, a router will attempt to purge acknowledged messages from the stream and create a snapshot of the current radix tree state in NATs object store. Defaults to 1000000. This helps manage stream size and provides faster initialization for routers that restart.
+- `--router-snapshot-threshold`: Sets the number of messages in the JetStream before triggering a snapshot. When the message count exceeds this threshold, a router will attempt to purge acknowledged messages from the stream and create a snapshot of the current radix tree state in NATS object store. Defaults to 1000000. This helps manage stream size and provides faster initialization for routers that restart.
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
@@ -178,7 +178,7 @@ The main KV-aware routing arguments:
 > When KV events are enabled (default), NATS is automatically initialized. You can optionally set `NATS_SERVER=nats://...` to specify a custom NATS server; otherwise, it defaults to `localhost:4222`.
 > Use `--no-kv-events` to disable KV events and remove the NATS requirement entirely (with request plane being `tcp` or `http`).
 >
-> When `--kv-overlap-score-weight` is set to 0, no KvIndexer is created and prefix matching is disabled (pure load balancing). When `--no-kv-events` is set, a KvIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
+> When `--kv-overlap-score-weight` is set to 0, no KVIndexer is created and prefix matching is disabled (pure load balancing). When `--no-kv-events` is set, a KVIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
 >
 > **Backend Configuration:** When using `--no-kv-events`, configure your backend workers to disable KV event publishing:
 > - **vLLM**: Use `--kv-events-config '{"enable_kv_cache_events": false}'`
@@ -351,7 +351,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8001 --router-replica-syn
 The `--router-replica-sync` flag enables active block synchronization between replicas:
 - Active blocks are shared via NATS core messaging (fire-and-forget)
 - Replicas exchange routing decisions to maintain consistent load estimates
-- A new replica start with zero active blocks but quickly converges through request handling, by itself and active syncing with other replicas
+- A new replica starts with zero active blocks but quickly converges through request handling, by itself and active syncing with other replicas
 
 Without this flag, each replica maintains its own isolated view of active blocks, potentially leading to suboptimal routing.
 
