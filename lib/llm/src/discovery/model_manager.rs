@@ -581,9 +581,12 @@ impl ModelManager {
     ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
 
+        // Register router via discovery mechanism.
         let discovery = endpoint.component().drt().discovery();
         let instance_id = discovery.instance_id();
 
+        // Build transport for router endpoint based on request plane mode
+        // Use KV_ROUTER__COMPONENT as the component name to distinguish from generate endpoint's component
         let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
         let transport = build_transport_type(endpoint, &router_endpoint_id, instance_id).await?;
 
@@ -596,6 +599,7 @@ impl ModelManager {
 
         discovery.register(discovery_spec).await?;
 
+        // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));

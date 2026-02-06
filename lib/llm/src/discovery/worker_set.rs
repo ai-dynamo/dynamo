@@ -4,9 +4,6 @@
 //! A WorkerSet represents a group of workers deployed from the same configuration,
 //! identified by their shared namespace. Each WorkerSet owns a complete pipeline
 //! (engines, KV router, prefill router) built from its specific ModelDeploymentCard.
-//!
-//! During rolling updates, multiple WorkerSets coexist under the same Model, each
-//! serving traffic proportional to its worker count.
 
 use std::sync::Arc;
 
@@ -143,12 +140,12 @@ impl WorkerSet {
     }
 
     /// Number of active workers in this set, derived from the Client's discovery watcher.
-    /// Returns 0 for in-process models (no watcher).
+    /// Returns 1 for in-process models (no watcher) since they always have one local worker.
     pub fn worker_count(&self) -> usize {
-        self.instance_count_rx
-            .as_ref()
-            .map(|rx| rx.borrow().len())
-            .unwrap_or(0)
+        match &self.instance_count_rx {
+            Some(rx) => rx.borrow().len(),
+            None => 1,
+        }
     }
 
     /// Store the instance watcher from the Client's discovery system.

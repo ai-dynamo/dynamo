@@ -179,7 +179,7 @@ impl ModelWatcher {
 
                     // If we already have a WorkerSet for this (model, namespace) and the
                     // checksums don't match, reject the new worker. Different namespaces
-                    // may legitimately have different checksums (rolling updates).
+                    // may legitimately have different checksums.
                     let can_add = self.manager.is_valid_checksum(
                         card.model_type,
                         card.name(),
@@ -194,6 +194,12 @@ impl ModelWatcher {
                         );
 
                         // TODO: mark that instance down in clients
+                        // Not obvious how to do that given the current design
+                        // Instances come from an `InstanceSource` in a `Client` in a `PushRouter`.
+                        // Calling `report_instance_down` on the Client should do it (although
+                        // needs more testing).
+                        // The `PushRouter` is in `ModelMananger` (`self.manager` here), but inside
+                        // interface `AsyncEngine` which only has a `generate` method.
                         continue;
                     }
 
@@ -396,6 +402,9 @@ impl ModelWatcher {
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
         {
             // Case 1: Tokens + (Chat OR Completions OR Both)
+            // A model that expects pre-processed requests meaning it's up to us whether we
+            // handle Chat or Completions requests, so handle whatever the model supports.
+
             let endpoint = component.endpoint(&mcid.endpoint);
             // Create the KV router whenever any local routed pipeline will be built.
             // The chat factory builds its own router, but completions currently always
@@ -412,7 +421,7 @@ impl ModelWatcher {
                             &endpoint,
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config),
-                            WORKER_TYPE_DECODE,
+                            WORKER_TYPE_DECODE, // This is the decode router
                         )
                         .await?,
                 )
@@ -420,13 +429,17 @@ impl ModelWatcher {
                 None
             };
 
+            // This is expensive, we are loading ~10MiB JSON, so only do it once
             let tokenizer_hf = card.tokenizer_hf().context("tokenizer_hf")?;
 
+            // Create prefill chooser once if we're building pipelines
+            // Both chat and completions will share the same prefill chooser instance
             let model_name = card.name().to_string();
             let prefill_chooser = self
                 .manager
                 .register_prefill_router(model_name.clone(), &namespace)
                 .map(|rx| {
+                    // Create prefill-specific config with track_active_blocks disabled
                     let mut prefill_config = self.router_config.kv_router_config;
                     prefill_config.router_track_active_blocks = false;
 
@@ -437,10 +450,14 @@ impl ModelWatcher {
                         card.kv_cache_block_size,
                         Some(prefill_config),
                         self.router_config.enforce_disagg,
-                        model_name.clone(),
+                        model_name.clone(), // Pass model name for worker monitor lookup
                     )
                 });
 
+            // Get or create the worker monitor for this model.
+            // Always create the monitor for Prometheus metrics (active_decode_blocks, active_prefill_tokens,
+            // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
+            // LoadThresholdConfig allows dynamic threshold updates via the ModelManager.
             let worker_monitor = Some(self.manager.get_or_create_worker_monitor(
                 card.name(),
                 client.clone(),
@@ -451,6 +468,7 @@ impl ModelWatcher {
             worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
 
+            // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
                 let factory_engine = if let Some(ref factory) = self.chat_engine_factory {
                     match factory(mcid.clone(), card.clone()).await {
@@ -520,6 +538,7 @@ impl ModelWatcher {
                 tracing::info!("Completions is ready");
             }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
+            // Case: Text + Embeddings
             let push_router = PushRouter::<
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
@@ -597,6 +616,8 @@ impl ModelWatcher {
             .await?;
             worker_set.completions_engine = Some(Arc::new(push_router));
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
+            // Case 4: Tokens + Embeddings
+            // Create preprocessing pipeline similar to Backend
             let frontend = SegmentSource::<
                 SingleIn<NvCreateEmbeddingRequest>,
                 ManyOut<Annotated<NvCreateEmbeddingResponse>>,
@@ -613,8 +634,10 @@ impl ModelWatcher {
             )
             .await?;
 
+            // Note: Embeddings don't need KV routing complexity or load monitoring
             let service_backend = ServiceBackend::from_engine(Arc::new(router));
 
+            // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
             let embedding_engine = frontend
                 .link(preprocessor.forward_edge())?
                 .link(backend.forward_edge())?
@@ -636,6 +659,8 @@ impl ModelWatcher {
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
         } else if card.model_type.supports_prefill() {
+            // Case 6: Prefill
+            // Guardrail: Verify model_input is Tokens
             if card.model_input != ModelInput::Tokens {
                 anyhow::bail!(
                     "Prefill models must use ModelInput::Tokens, got {}",
@@ -667,6 +692,7 @@ impl ModelWatcher {
 
             return Ok(());
         } else {
+            // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
                 Tokens+(Chat|Completions|Prefill), Text+(Chat|Completions|Images), Tokens+Embeddings, Tensor+TensorBased",
