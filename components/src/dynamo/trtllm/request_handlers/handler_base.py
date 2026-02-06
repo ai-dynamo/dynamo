@@ -301,7 +301,7 @@ class HandlerBase:
         sampling_params = copy.deepcopy(self.default_sampling_params)
 
         for key, value in request["sampling_options"].items():
-            if not value:
+            if value is None:
                 continue
             if hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
