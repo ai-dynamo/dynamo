@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "SLA-based Planner"
 ---
+
+# SLA-based Planner
 
 <Tip>
 **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Profiling + Planner Quick Start Guide](sla-planner-quickstart.md).
@@ -12,13 +13,9 @@ This document covers information regarding the SLA-based planner in `examples/co
 
 The SLA (Service Level Agreement)-based planner is an intelligent autoscaling system that monitors system performance and adjusts the number of prefill and decode workers to meet specified TTFT and ITL targets. Unlike the load-based planner that scales based on resource utilization thresholds, the SLA planner uses predictive modeling and performance interpolation to proactively scale the workers.
 
-<Note>
-Currently, SLA-based planner only supports disaggregated setup.
-</Note>
+<Note>Currently, SLA-based planner only supports disaggregated setup.</Note>
 
-<Warning>
-Bare metal deployment with local connector is deprecated. Please deploy the SLA planner in k8s.
-</Warning>
+<Warning>Bare metal deployment with local connector is deprecated. Please deploy the SLA planner in k8s.</Warning>
 
 ## Architecture Overview
 

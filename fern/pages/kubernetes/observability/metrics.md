@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Dynamo Metrics Collection on Kubernetes"
 ---
+
+# Dynamo Metrics Collection on Kubernetes
 
 ## Overview
 
@@ -34,11 +35,11 @@ The commands enumerated below assume you have installed the kube-prometheus-stac
 
 ### Install Dynamo Operator
 Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../installation-guide.md) for detailed instructions on deploying the Dynamo operator.
-Make sure to set the `prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
+Make sure to set the `dynamo-operator.dynamo.metrics.prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
 
 ```bash
 helm install dynamo-platform ...
-  --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+  --set dynamo-operator.dynamo.metrics.prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
 ```
 
 

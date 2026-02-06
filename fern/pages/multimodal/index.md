@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Multimodal Inference in Dynamo"
 ---
+
+# Multimodal Inference in Dynamo
 
 Dynamo supports multimodal inference across multiple LLM backends, enabling models to process images, video, and audio alongside text. This section provides comprehensive documentation for deploying multimodal models.
 
@@ -179,10 +180,8 @@ Response
 | Encode+Prefill Worker | Combined encoding and prefill |
 | Decode Worker | Decode only, token generation |
 
-<Note>
-TRT-LLM's EP/D mode skips the Python Processor - the Rust frontend handles tokenization and routes directly to the Prefill worker.
-For multimodal requests, the Python prefill worker still re-tokenizes/builds inputs; Rust token_ids are ignored.
-</Note>
+> **Note:** TRT-LLM's EP/D mode skips the Python Processor - the Rust frontend handles tokenization and routes directly to the Prefill worker.
+> For multimodal requests, the Python prefill worker still re-tokenizes/builds inputs; Rust token_ids are ignored.
 
 **When to use:** Models without pre-computed embedding support (Llama 4), or TRT-LLM disaggregated deployment.
 

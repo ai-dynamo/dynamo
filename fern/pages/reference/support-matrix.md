@@ -1,12 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Dynamo Support Matrix"
 ---
+
+# Dynamo Support Matrix
 
 This document provides the support matrix for Dynamo, including hardware, software and build instructions.
 
-**See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](../getting-started/feature-matrix.md) for backend feature support
+**See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support
 
 ## Backend Dependencies
 

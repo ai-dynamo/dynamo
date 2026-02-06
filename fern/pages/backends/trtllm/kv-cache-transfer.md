@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "KV Cache Transfer in Disaggregated Serving"
 ---
+
+# KV Cache Transfer in Disaggregated Serving
 
 In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports two methods for this transfer:
 
@@ -46,9 +47,7 @@ export DYN_KVBM_NIXL_BACKEND_GDS=false
 - `true`, `1`, `on`, `yes` - Enable the backend
 - `false`, `0`, `off`, `no` - Disable the backend
 
-<Note>
-If no `DYN_KVBM_NIXL_BACKEND_*` environment variables are set, UCX is used as the default backend.
-</Note>
+<Note>If no `DYN_KVBM_NIXL_BACKEND_*` environment variables are set, UCX is used as the default backend.</Note>
 
 ## Alternative Method: UCX
 

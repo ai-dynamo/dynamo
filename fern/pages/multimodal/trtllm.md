@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "TensorRT-LLM Multimodal"
 ---
+
+# TensorRT-LLM Multimodal
 
 This document provides a comprehensive guide for multimodal inference using TensorRT-LLM backend in Dynamo.
 
@@ -10,9 +11,7 @@ You can provide multimodal inputs in the following ways:
 - By sending image URLs
 - By providing paths to pre-computed embedding files
 
-<Note>
-You should provide **either image URLs or embedding file paths** in a single request.
-</Note>
+> **Note:** You should provide **either image URLs or embedding file paths** in a single request.
 
 ## Support Matrix
 
@@ -181,9 +180,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/epd_disagg.sh
 ```
 
-<Note>
-This script is designed for 8-node H200 with `Llama-4-Scout-17B-16E-Instruct` model and assumes you have a model-specific embedding file ready.
-</Note>
+> **Note:** This script is designed for 8-node H200 with `Llama-4-Scout-17B-16E-Instruct` model and assumes you have a model-specific embedding file ready.
 
 ### Configuration
 
@@ -250,9 +247,7 @@ sequenceDiagram
 
 This section demonstrates how to deploy large multimodal models that require a multi-node setup using Slurm.
 
-<Note>
-The scripts referenced in this section can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
-</Note>
+> **Note:** The scripts referenced in this section can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
 
 ### Environment Setup
 
@@ -316,9 +311,7 @@ pkill srun
 | E/P/D (pre-computed embeddings) | `epd_disagg.sh` | Yes | Encoder → Prefill (embeddings via NIXL) |
 | E/P/D (WIP) | N/A | No | Encoder → Prefill (handles via params), Prefill → Decode (KV cache) |
 
-<Note>
-NIXL for KV cache transfer is currently beta and only supported on AMD64 (x86_64) architecture.
-</Note>
+> **Note:** NIXL for KV cache transfer is currently beta and only supported on AMD64 (x86_64) architecture.
 
 ## ModelInput Types and Registration
 

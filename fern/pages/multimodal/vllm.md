@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "vLLM Multimodal"
 ---
+
+# vLLM Multimodal
 
 This document provides a comprehensive guide for multimodal inference using vLLM backend in Dynamo.
 
@@ -87,9 +88,7 @@ flowchart LR
   pd_worker --> encode_worker
 ```
 
-<Note>
-Aggregated serving supports LLaVA 1.5 7B and Qwen2.5-VL-7B-Instruct. Disaggregated serving is currently only confirmed for LLaVA.
-</Note>
+> **Note:** Aggregated serving supports LLaVA 1.5 7B and Qwen2.5-VL-7B-Instruct. Disaggregated serving is currently only confirmed for LLaVA.
 
 **Launch:**
 

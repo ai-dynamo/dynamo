@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "TensorRT-LLM Prometheus Metrics"
 ---
+
+# TensorRT-LLM Prometheus Metrics
 
 ## Overview
 
@@ -42,9 +43,7 @@ $ python -m dynamo.frontend
 $ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> --publish-events-and-metrics
 ```
 
-<Note>
-The `backend` must be set to `"pytorch"` for metrics collection (enforced in `components/src/dynamo/trtllm/main.py`). TensorRT-LLM's `MetricsCollector` integration has only been tested/validated with the PyTorch backend.
-</Note>
+**Note:** The `backend` must be set to `"pytorch"` for metrics collection (enforced in `components/src/dynamo/trtllm/main.py`). TensorRT-LLM's `MetricsCollector` integration has only been tested/validated with the PyTorch backend.
 
 Wait for the TensorRT-LLM worker to start, then send requests and check metrics:
 
@@ -66,9 +65,7 @@ curl -s localhost:8081/metrics | grep "^trtllm_"
 
 TensorRT-LLM exposes metrics in Prometheus Exposition Format text at the `/metrics` HTTP endpoint. All TensorRT-LLM engine metrics use the `trtllm_` prefix and include labels (e.g., `model_name`, `engine_type`, `finished_reason`) to identify the source.
 
-<Note>
-TensorRT-LLM uses `model_name` instead of Dynamo's standard `model` label convention.
-</Note>
+**Note:** TensorRT-LLM uses `model_name` instead of Dynamo's standard `model` label convention.
 
 **Example Prometheus Exposition Format text:**
 
@@ -104,9 +101,7 @@ trtllm_request_queue_time_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type
 trtllm_request_queue_time_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 32.1
 ```
 
-<Note>
-The specific metrics shown above are examples and may vary depending on your TensorRT-LLM version. Always inspect your actual `/metrics` endpoint for the current list.
-</Note>
+**Note:** The specific metrics shown above are examples and may vary depending on your TensorRT-LLM version. Always inspect your actual `/metrics` endpoint for the current list.
 
 ### Metric Categories
 
@@ -115,9 +110,7 @@ TensorRT-LLM provides metrics in the following categories (all prefixed with `tr
 - **Request metrics** - Request success tracking and latency measurements
 - **Performance metrics** - Time to first token (TTFT), time per output token (TPOT), and queue time
 
-<Note>
-Metrics may change between TensorRT-LLM versions. Always inspect the `/metrics` endpoint for your version.
-</Note>
+**Note:** Metrics may change between TensorRT-LLM versions. Always inspect the `/metrics` endpoint for your version.
 
 ## Available Metrics
 
@@ -175,9 +168,7 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 }
 ```
 
-<Note>
-These structures are valid as of the date of this documentation but are subject to change with TensorRT-LLM version updates.
-</Note>
+**Note:** These structures are valid as of the date of this documentation but are subject to change with TensorRT-LLM version updates.
 
 ## Implementation Details
 

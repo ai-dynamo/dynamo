@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "vLLM Prometheus Metrics"
 ---
+
+# vLLM Prometheus Metrics
 
 ## Overview
 
@@ -80,9 +81,7 @@ vllm:time_to_first_token_seconds_count{model_name="meta-llama/Llama-3.1-8B"} 165
 vllm:time_to_first_token_seconds_sum{model_name="meta-llama/Llama-3.1-8B"} 89.38
 ```
 
-<Note>
-The specific metrics shown above are examples and may vary depending on your vLLM version. Always inspect your actual `/metrics` endpoint or refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) for the current list.
-</Note>
+**Note:** The specific metrics shown above are examples and may vary depending on your vLLM version. Always inspect your actual `/metrics` endpoint or refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) for the current list.
 
 ### Metric Categories
 
@@ -94,9 +93,7 @@ vLLM provides metrics in the following categories (all prefixed with `vllm:`):
 - **Scheduler metrics** - Scheduling and queue management
 - **Disaggregation metrics** - Metrics specific to disaggregated deployments (when enabled)
 
-<Note>
-Specific metrics are subject to change between vLLM versions. Always refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) or inspect the `/metrics` endpoint for your vLLM version.
-</Note>
+**Note:** Specific metrics are subject to change between vLLM versions. Always refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) or inspect the `/metrics` endpoint for your vLLM version.
 
 ## Available Metrics
 

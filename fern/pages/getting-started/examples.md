@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Dynamo Examples"
 ---
+
+# Dynamo Examples
 
 This directory contains practical examples demonstrating how to deploy and use Dynamo for distributed LLM inference. Each example includes setup instructions, configuration files, and explanations to help you understand different deployment patterns and use cases.
 
@@ -33,7 +34,6 @@ Platform-specific deployment guides for production environments:
 - **[Amazon EKS](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
 - **[Azure AKS](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
 - **[Amazon ECS](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
-- **[Router Standalone](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/router_standalone/)** - Standalone router deployment patterns
 - **Google GKE** - _Coming soon_
 
 ## Runtime Examples

@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Multinode Deployment Guide"
 ---
+
+# Multinode Deployment Guide
 
 This guide explains how to deploy Dynamo workloads across multiple nodes. Multinode deployments enable you to scale compute-intensive LLM workloads across multiple physical machines, maximizing GPU utilization and supporting larger models.
 
@@ -103,9 +104,7 @@ spec:
   # ... your deployment spec
 ```
 
-<Note>
-The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
-</Note>
+> **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
 
 **Force LWS usage:**
 ```yaml
@@ -257,9 +256,7 @@ For SGLang multinode deployments, the operator injects distributed training para
   - The `node-rank` is automatically determined from the pod's stateful identity
 - **Probes**: All probes (liveness, readiness, startup) are automatically removed
 
-<Note>
-The operator intelligently injects these flags regardless of your command structure (direct Python commands or shell wrappers).
-</Note>
+**Note:** The operator intelligently injects these flags regardless of your command structure (direct Python commands or shell wrappers).
 
 ### TensorRT-LLM Backend
 
@@ -291,9 +288,7 @@ For TensorRT-LLM multinode deployments, the operator configures MPI-based commun
 - **Environment Variable**: `OMPI_MCA_orte_keep_fqdn_hostnames=1` is added to all nodes
 - **SSH Volume**: Automatically mounts the SSH keypair secret (typically named `mpirun-ssh-key-<deployment-name>`)
 
-<Important>
-TensorRT-LLM requires an SSH keypair secret to be created before deployment. The secret name follows the pattern `mpirun-ssh-key-<component-name>`.
-</Important>
+**Important:** TensorRT-LLM requires an SSH keypair secret to be created before deployment. The secret name follows the pattern `mpirun-ssh-key-<component-name>`.
 
 ### Compilation Cache Configuration
 

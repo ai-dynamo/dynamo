@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Welcome to NVIDIA Dynamo"
 ---
+
+# Welcome to NVIDIA Dynamo
 
 The NVIDIA Dynamo Platform is a high-performance, low-latency inference framework designed to serve all AI models—across any framework, architecture, or deployment scale.
 
@@ -94,4 +95,4 @@ curl localhost:8000/v1/chat/completions \
 
 - **GitHub Issues**: [Report bugs or request features](https://github.com/ai-dynamo/dynamo/issues)
 - **Discussions**: [Ask questions and share ideas](https://github.com/ai-dynamo/dynamo/discussions)
-- **Reference**: [CLI Reference](../reference/cli.md) | [Glossary](../reference/glossary.md) | [Support Matrix](./support-matrix.md)
+- **Reference**: [CLI Reference](../reference/cli.md) | [Glossary](../reference/glossary.md) | [Support Matrix](../reference/support-matrix.md)

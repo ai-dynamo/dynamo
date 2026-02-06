@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "LLM Deployment using TensorRT-LLM"
 ---
+
+# LLM Deployment using TensorRT-LLM
 
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using TensorRT-LLM.
 
@@ -124,9 +125,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 
 ### Disaggregated with KV Routing
 
-<Warning>
-In disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.
-</Warning>
+<Warning>In disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.</Warning>
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm

@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Metrics Visualization with Prometheus and Grafana"
 ---
+
+# Metrics Visualization with Prometheus and Grafana
 
 ## Overview
 
@@ -70,9 +71,7 @@ Other interfaces:
 - **Prometheus**: `http://localhost:9090`
 - **Tempo** (tracing): Accessible through Grafana's Explore view. See [Tracing Guide](tracing.md) for details.
 
-<Note>
-If accessing from another machine, replace `localhost` with the machine's hostname or IP address, and ensure firewall rules allow access to these ports (3000, 9090).
-</Note>
+**Note:** If accessing from another machine, replace `localhost` with the machine's hostname or IP address, and ensure firewall rules allow access to these ports (3000, 9090).
 
 ---
 
@@ -102,9 +101,7 @@ Grafana is pre-configured with:
 
 4. If you encounter issues with stale data or configuration, stop services and wipe volumes using `docker compose down -v` then restart.
 
-  <Note>
-  The `-v` flag removes named volumes (grafana-data, tempo-data), which will reset dashboards and stored metrics.
-  </Note>
+  **Note:** The `-v` flag removes named volumes (grafana-data, tempo-data), which will reset dashboards and stored metrics.
 
 For specific Docker Compose commands, see [Observability Getting Started](README.md#getting-started-quickly).
 

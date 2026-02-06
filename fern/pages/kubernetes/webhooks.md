@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Webhooks"
 ---
+
+# Webhooks
 
 This document describes the webhook functionality in the Dynamo Operator, including validation webhooks, certificate management, and troubleshooting.
 
@@ -46,9 +47,7 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
   - `DynamoGraphDeployment` validation
   - `DynamoModel` validation
 
-<Note>
-Future releases may add mutating webhooks (for defaults/transformations) and conversion webhooks (for CRD version migrations). All will use the same certificate infrastructure described in this document.
-</Note>
+**Note:** Future releases may add mutating webhooks (for defaults/transformations) and conversion webhooks (for CRD version migrations). All will use the same certificate infrastructure described in this document.
 
 ---
 
@@ -102,9 +101,7 @@ dynamo-operator:
 - In environments where admission webhooks are not supported
 - When troubleshooting validation issues
 
-<Note>
-When webhooks are disabled, controllers perform validation during reconciliation (defense in depth).
-</Note>
+**Note:** When webhooks are disabled, controllers perform validation during reconciliation (defense in depth).
 
 ---
 
@@ -193,9 +190,7 @@ webhook:
       values: ["disabled"]
 ```
 
-<Note>
-For **namespace-restricted operators**, the namespace selector is automatically set to validate only the operator's namespace. This configuration is ignored in namespace-restricted mode.
-</Note>
+**Note:** For **namespace-restricted operators**, the namespace selector is automatically set to validate only the operator's namespace. This configuration is ignored in namespace-restricted mode.
 
 ---
 

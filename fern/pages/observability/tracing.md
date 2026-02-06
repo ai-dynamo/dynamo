@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Distributed Tracing with Tempo"
 ---
+
+# Distributed Tracing with Tempo
 
 ## Overview
 
@@ -12,9 +13,7 @@ Dynamo supports OpenTelemetry-based distributed tracing for visualizing request 
 
 This guide covers single GPU demo setup using Docker Compose. For Kubernetes deployments, see [Kubernetes Deployment](#kubernetes-deployment).
 
-<Note>
-This section has overlap with [Logging of OpenTelemetry Tracing](logging.md) since OpenTelemetry has aspects of both logging and tracing. The tracing approach documented here is for persistent trace visualization and analysis. For short debugging sessions examining trace context directly in logs, see the [Logging](logging.md) guide.
-</Note>
+**Note:** This section has overlap with [Logging of OpenTelemetry Tracing](logging.md) since OpenTelemetry has aspects of both logging and tracing. The tracing approach documented here is for persistent trace visualization and analysis. For short debugging sessions examining trace context directly in logs, see the [Logging](logging.md) guide.
 
 ## Environment Variables
 
@@ -73,10 +72,8 @@ cd examples/backends/vllm/launch
 ./disagg.sh
 ```
 
-<Note>
-The example vLLM `disagg.sh` sets additional per-worker port environment variables (e.g., `DYN_VLLM_KV_EVENT_PORT`,
+**Note:** the example vLLM `disagg.sh` sets additional per-worker port environment variables (e.g., `DYN_VLLM_KV_EVENT_PORT`,
 `VLLM_NIXL_SIDE_CHANNEL_PORT`) to avoid ZMQ "Address already in use" conflicts when multiple workers run on the same host. If you run the components manually, make sure you mirror those port settings.
-</Note>
 
 ```bash
 #!/bin/bash

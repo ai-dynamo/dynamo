@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "SLA-Driven Profiling with DynamoGraphDeploymentRequest"
 ---
+
+# SLA-Driven Profiling with DynamoGraphDeploymentRequest
 
 <Tip>
 **New to DGDR and SLA-Driven Profiling?** Start with the [SLA-Driven Profiling and Planner Deployment Quick Start Guide](../planner/sla-planner-quickstart.md) for step-by-step instructions. This document provides deeper technical details about the profiling process.
@@ -395,9 +396,7 @@ profilingConfig:
       planner_load_predictor: linear             # Load prediction method
 ```
 
-<Note>
-Planner arguments use `planner_` prefix. See planner documentation for full list.
-</Note>
+<Note>Planner arguments use `planner_` prefix. See planner documentation for full list.</Note>
 
 ### Engine Configuration (Auto-configured)
 
