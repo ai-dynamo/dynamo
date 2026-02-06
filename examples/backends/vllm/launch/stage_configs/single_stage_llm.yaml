@@ -36,7 +36,7 @@ stage_args:
       temperature: 0.0
       top_p: 1.0
       top_k: -1
-      max_tokens: 2048
+      max_tokens: 20
       repetition_penalty: 1.1
       seed: 42
-      detokenize: false  # Token-based processing for Dynamo
+      detokenize: true  # Token-based processing for Dynamo
