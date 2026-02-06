@@ -553,13 +553,8 @@ mod integration_tests {
                     if let Some(key) = key {
                         // Remove from ModelManager first (this returns the ModelEntry)
                         if let Some(_removed_card) = manager.remove_model_card(&key) {
-                            // Remove engines (following ModelWatcher::handle_delete pattern)
-                            manager
-                                .remove_chat_completions_model(&model_entry.name)
-                                .ok();
-                            manager.remove_completions_model(&model_entry.name).ok();
-                            manager.remove_embeddings_model(&model_entry.name).ok();
-                            manager.remove_tensor_model(&model_entry.name).ok();
+                            // Remove entire model (following ModelWatcher::handle_delete pattern)
+                            manager.remove_model(&model_entry.name);
 
                             // Then delete from etcd
                             etcd_client.kv_delete(key.as_str(), None).await.unwrap();
