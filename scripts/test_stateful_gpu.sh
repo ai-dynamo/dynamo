@@ -5,23 +5,28 @@
 # GPU Integration Test: Stateful Responses API
 #
 # Tests the stateful responses feature (previous_response_id chaining,
-# hierarchical isolation, store/retrieve/delete) against a live SGLang server.
+# hierarchical isolation, store/retrieve/delete) using Dynamo's full
+# two-process architecture: Dynamo frontend (Axum HTTP) + SGLang backend worker.
 #
-# Requires DYNAMO_ENABLE_STATEFUL_RESPONSES=1 on the Dynamo HTTP service.
+# Architecture:
+#   - SGLang worker: registers with KV store, handles inference (no HTTP)
+#   - Dynamo frontend: Axum HTTP server with responses_router, session middleware,
+#     storage layer — discovers the SGLang worker via KV store
+#   - DYNAMO_ENABLE_STATEFUL_RESPONSES=1 is set automatically on the frontend
 #
 # Isolation model:
 #   - Tenant = hard security boundary (cross-tenant access is blocked)
 #   - Session = metadata (cross-session access within same tenant is ALLOWED)
 #
 # Usage (inside the SGLang container on GPU):
-#   DYNAMO_ENABLE_STATEFUL_RESPONSES=1 ./scripts/test_stateful_gpu.sh
+#   ./scripts/test_stateful_gpu.sh
 #
 # Override defaults:
 #   BASE_URL=http://localhost:9000/v1 MODEL=Qwen/Qwen3-0.6B ./scripts/test_stateful_gpu.sh
 #
 # The script will:
-#   1. Start an SGLang server (unless SKIP_SERVER_START=1)
-#   2. Wait for readiness
+#   1. Start SGLang backend worker + Dynamo frontend (unless SKIP_SERVER_START=1)
+#   2. Wait for worker registration and frontend readiness
 #   3. Run functional tests for the Responses API
 #   4. Report pass/fail results
 
@@ -158,48 +163,71 @@ start_server() {
         return 0
     fi
 
-    log_section "Starting SGLang Server"
+    log_section "Starting Dynamo Frontend + SGLang Backend"
     log_info "Model: ${MODEL}"
-    log_info "Port: ${SERVER_PORT}"
+    log_info "Frontend port: ${SERVER_PORT}"
     log_info "Model path: ${MODEL_PATH}"
 
-    # Start SGLang server in the background
-    python3 -m sglang.launch_server \
+    # Dynamo uses a two-process architecture:
+    #   1. SGLang backend worker — registers with KV store, handles inference
+    #   2. Dynamo frontend — Axum HTTP server with responses_router, session middleware
+    #
+    # Both use --store-kv file for local service discovery (no etcd needed).
+    # The frontend discovers the SGLang worker automatically.
+
+    # Start SGLang backend worker (no HTTP — communicates via request plane)
+    python3 -m dynamo.sglang \
         --model-path "${MODEL_PATH}" \
         --served-model-name "${MODEL}" \
-        --port "${SERVER_PORT}" \
-        --host 0.0.0.0 \
         --trust-remote-code \
         --disable-cuda-graph \
-        2>&1 | tee /tmp/sglang_server.log &
+        --store-kv file \
+        > /tmp/sglang_worker.log 2>&1 &
 
-    SERVER_PID=$!
-    log_info "Server started with PID ${SERVER_PID}"
-    echo "${SERVER_PID}" > /tmp/sglang_server.pid
+    WORKER_PID=$!
+    log_info "SGLang worker started with PID ${WORKER_PID}"
+    echo "${WORKER_PID}" > /tmp/sglang_worker.pid
+
+    # Give the worker a moment to start registering before launching frontend
+    sleep 5
+
+    # Start Dynamo HTTP frontend with stateful responses enabled
+    DYNAMO_ENABLE_STATEFUL_RESPONSES=1 python3 -m dynamo.frontend \
+        --http-port "${SERVER_PORT}" \
+        --store-kv file \
+        > /tmp/dynamo_frontend.log 2>&1 &
+
+    FRONTEND_PID=$!
+    log_info "Dynamo frontend started with PID ${FRONTEND_PID}"
+    echo "${FRONTEND_PID}" > /tmp/dynamo_frontend.pid
 }
 
 wait_for_server() {
-    log_info "Waiting for server to be ready (max ${MAX_WAIT_SECONDS}s)..."
+    log_info "Waiting for Dynamo frontend + SGLang worker to be ready (max ${MAX_WAIT_SECONDS}s)..."
+    log_info "The worker must register with the KV store before the frontend can discover it."
 
     local elapsed=0
     local interval=5
 
     while [ ${elapsed} -lt ${MAX_WAIT_SECONDS} ]; do
-        if curl -s -o /dev/null -w "%{http_code}" "${BASE_URL%/v1}/health" 2>/dev/null | grep -q "200"; then
-            log_info "Server is ready after ${elapsed}s"
-            return 0
-        fi
-
-        # Also try /v1/models as a fallback health check
+        # Check /v1/models — returns data only after the worker has registered
         if curl -s "${BASE_URL}/models" 2>/dev/null | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-if data.get('data'):
+if data.get('data') and len(data['data']) > 0:
     sys.exit(0)
 sys.exit(1)
 " 2>/dev/null; then
-            log_info "Server is ready after ${elapsed}s (models endpoint responding)"
+            log_info "Server is ready after ${elapsed}s (models endpoint has registered backends)"
             return 0
+        fi
+
+        # Fallback: check /health on the frontend
+        if curl -s -o /dev/null -w "%{http_code}" "${BASE_URL%/v1}/health" 2>/dev/null | grep -q "200"; then
+            # Health is up but models might not be registered yet — keep waiting
+            if [ $((elapsed % 30)) -eq 0 ] && [ ${elapsed} -gt 0 ]; then
+                log_info "Frontend health OK but no models registered yet (${elapsed}s)..."
+            fi
         fi
 
         sleep ${interval}
@@ -209,11 +237,13 @@ sys.exit(1)
 
     echo ""
     log_fail "Server did not become ready within ${MAX_WAIT_SECONDS}s"
-    if [ -f /tmp/sglang_server.log ]; then
-        echo "--- Last 20 lines of server log ---"
-        tail -20 /tmp/sglang_server.log
-        echo "---"
-    fi
+    for logfile in /tmp/dynamo_frontend.log /tmp/sglang_worker.log; do
+        if [ -f "${logfile}" ]; then
+            echo "--- Last 20 lines of ${logfile} ---"
+            tail -20 "${logfile}"
+            echo "---"
+        fi
+    done
     return 1
 }
 
@@ -222,16 +252,18 @@ stop_server() {
         return 0
     fi
 
-    if [ -f /tmp/sglang_server.pid ]; then
-        local pid
-        pid=$(cat /tmp/sglang_server.pid)
-        if kill -0 "${pid}" 2>/dev/null; then
-            log_info "Stopping server (PID ${pid})..."
-            kill "${pid}" 2>/dev/null || true
-            wait "${pid}" 2>/dev/null || true
+    for pidfile in /tmp/dynamo_frontend.pid /tmp/sglang_worker.pid; do
+        if [ -f "${pidfile}" ]; then
+            local pid
+            pid=$(cat "${pidfile}")
+            if kill -0 "${pid}" 2>/dev/null; then
+                log_info "Stopping process (PID ${pid}, ${pidfile})..."
+                kill "${pid}" 2>/dev/null || true
+                wait "${pid}" 2>/dev/null || true
+            fi
+            rm -f "${pidfile}"
         fi
-        rm -f /tmp/sglang_server.pid
-    fi
+    done
 }
 
 # ---------------------------------------------------------------------------
