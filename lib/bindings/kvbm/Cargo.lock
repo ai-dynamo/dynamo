@@ -683,6 +683,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bs58"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
+dependencies = [
+ "tinyvec",
+]
+
+[[package]]
 name = "bs62"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -750,9 +759,9 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
-version = "1.10.1"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
+checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 dependencies = [
  "serde",
 ]
@@ -1590,6 +1599,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kv-router"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dynamo-runtime",
+ "dynamo-tokens",
+ "prometheus",
+ "rand 0.9.2",
+ "serde",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.9.0"
 dependencies = [
@@ -1619,12 +1646,16 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
+ "dynamo-kv-router",
  "dynamo-memory",
+ "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
+ "dynamo-tokens",
  "either",
  "erased-serde",
  "etcd-client",
+ "flate2",
  "futures",
  "futures-util",
  "galil-seiferas",
@@ -1698,6 +1729,28 @@ dependencies = [
  "serde",
  "thiserror 2.0.17",
  "tracing",
+]
+
+[[package]]
+name = "dynamo-mocker"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "dashmap 6.1.0",
+ "derive-getters",
+ "derive_builder",
+ "dynamo-kv-router",
+ "dynamo-tokens",
+ "ndarray",
+ "ndarray-interp",
+ "ndarray-npy",
+ "rand 0.9.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1788,6 +1841,20 @@ dependencies = [
  "validator",
  "xxhash-rust",
  "zmq",
+]
+
+[[package]]
+name = "dynamo-tokens"
+version = "0.9.0"
+dependencies = [
+ "bs58",
+ "bytemuck",
+ "dashmap 6.1.0",
+ "derive-getters",
+ "serde",
+ "thiserror 2.0.17",
+ "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]

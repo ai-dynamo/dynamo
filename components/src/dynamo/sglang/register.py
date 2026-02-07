@@ -56,7 +56,6 @@ async def _register_llm_with_runtime_config(
             server_args.model_path,
             server_args.served_model_name,
             kv_cache_block_size=server_args.page_size,
-            migration_limit=dynamo_args.migration_limit,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
         )

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
+use validator::Validate;
 
 use crate::perf_model::PerfModel;
 use dynamo_kv_router::protocols::KvCacheEvent;
@@ -83,21 +84,25 @@ pub enum WorkerType {
 }
 
 /// Configuration arguments for MockVllmEngine
-#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder, Validate)]
 #[builder(pattern = "owned", build_fn(public))]
 pub struct MockEngineArgs {
     #[builder(default = "16384")]
+    #[validate(range(min = 1))]
     pub num_gpu_blocks: usize,
 
     #[builder(default = "64")]
+    #[validate(range(min = 2))]
     pub block_size: usize,
 
     // This was 1024 in the past but reverted back to 256
     #[builder(default = Some(256))]
+    #[validate(range(min = 1))]
     pub max_num_seqs: Option<usize>,
 
     // default for open api server, for llm class it's 16384
     #[builder(default = Some(8192))]
+    #[validate(range(min = 1))]
     pub max_num_batched_tokens: Option<usize>,
 
     #[builder(default = true)]
@@ -107,16 +112,20 @@ pub struct MockEngineArgs {
     pub enable_chunked_prefill: bool,
 
     #[builder(default = "0.01")]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub watermark: f64,
 
     #[builder(default = "1.0")]
+    #[validate(range(min = 0.0))]
     pub speedup_ratio: f64,
 
     #[builder(default = "1")]
+    #[validate(range(min = 1))]
     pub dp_size: u32,
 
     /// Optional startup time in seconds to simulate engine initialization delay
     #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
     pub startup_time: Option<f64>,
 
     /// Worker type for disaggregated serving (Aggregated, Prefill, or Decode)

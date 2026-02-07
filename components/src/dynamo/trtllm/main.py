@@ -40,10 +40,10 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
 )
@@ -219,6 +219,7 @@ async def init(
         "tensor_parallel_size": config.tensor_parallel_size,
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
+        "enable_attention_dp": config.enable_attention_dp,
         "backend": Backend.PYTORCH,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
@@ -391,11 +392,17 @@ async def init(
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
         runtime_config.enable_local_indexer = config.enable_local_indexer
+        # Set data_parallel_size for attention DP mode
+        # This enables the router's scheduler to correctly iterate over all dp_ranks
+        # Need to name ADP as `data_parallel_size` for parity with other frameworks
+        attention_dp_size = engine.get_attention_dp_size()
+        runtime_config.data_parallel_size = attention_dp_size
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
         )
+        logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
 
         # The get_engine_runtime_config function exists but is not called here due to:
         # 1. get_stats_async requires active requests to work properly
@@ -455,7 +462,6 @@ async def init(
                 config.model_path,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
-                migration_limit=config.migration_limit,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
             )
@@ -484,8 +490,8 @@ async def init(
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",  # Empty topic = all topics
                 )
-                consolidator_publisher = ZmqKvEventPublisher(
-                    component, consolidator_config
+                consolidator_publisher = KvEventPublisher(
+                    component, zmq_config=consolidator_config
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "
