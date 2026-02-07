@@ -148,9 +148,8 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
 
     # Record model load time immediately after publisher setup (which creates the gauges)
-    if publisher.component_gauges:
-        publisher.component_gauges.set_model_load_time(load_time)
-        logging.debug(f"SGLang model load time: {load_time:.2f}s")
+    publisher.component_gauges.set_model_load_time(load_time)
+    logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:

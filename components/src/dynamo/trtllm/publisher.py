@@ -43,30 +43,6 @@ logging.basicConfig(level=logging.DEBUG)
 # This ensures these metrics are isolated and can be exposed via their own callback
 DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
-# Gauges will be lazily initialized when model name is available
-DYNAMO_COMPONENT_GAUGES: LLMBackendMetrics | None = None
-
-
-def _ensure_gauges_initialized(
-    model_name: str = "",
-    component_name: str = "",
-) -> LLMBackendMetrics:
-    """Lazy initialization of gauges.
-
-    Returns the initialized LLMBackendMetrics instance. Callers in other modules
-    MUST use the returned value rather than the module-level DYNAMO_COMPONENT_GAUGES
-    binding, because Python's `from module import name` copies the reference at
-    import time and won't see later reassignments to the module global.
-    """
-    global DYNAMO_COMPONENT_GAUGES
-    if DYNAMO_COMPONENT_GAUGES is None:
-        DYNAMO_COMPONENT_GAUGES = LLMBackendMetrics(
-            registry=DYNAMO_COMPONENT_REGISTRY,
-            model_name=model_name,
-            component_name=component_name,
-        )  # pyright: ignore[reportConstantRedefinition]
-    return DYNAMO_COMPONENT_GAUGES
-
 
 # Use non-blocking RPC calls; control overhead with backoff sleeps.
 _STATS_TIMEOUT_SEC = 0.01
@@ -321,6 +297,7 @@ class Publisher:
         worker_id,
         kv_block_size,
         metrics_labels,
+        component_gauges: LLMBackendMetrics,
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
     ):
@@ -331,6 +308,7 @@ class Publisher:
         self.kv_block_size = kv_block_size
         self.max_window_size = None
         self.metrics_labels = metrics_labels
+        self.component_gauges = component_gauges
         self.enable_local_indexer = enable_local_indexer
         self.attention_dp_size = engine.get_attention_dp_size()
 
@@ -424,8 +402,8 @@ class Publisher:
         # Publish initial metrics with 0 active blocks
         # TRT-LLM doesn't use data parallelism currently (dp_rank="0")
         self.metrics_publisher.publish(None, 0)
-        DYNAMO_COMPONENT_GAUGES.set_total_blocks("0", 0)
-        DYNAMO_COMPONENT_GAUGES.set_gpu_cache_usage("0", 0.0)
+        self.component_gauges.set_total_blocks("0", 0)
+        self.component_gauges.set_gpu_cache_usage("0", 0.0)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -485,8 +463,6 @@ class Publisher:
             logging.error("KV metrics publisher not initialized!")
             return False
 
-        _ensure_gauges_initialized()
-
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
@@ -495,13 +471,13 @@ class Publisher:
             self.metrics_publisher.publish(None, kv_active_blocks)
 
             # Publish Prometheus metrics
-            DYNAMO_COMPONENT_GAUGES.set_total_blocks("0", kv_total_blocks)
+            self.component_gauges.set_total_blocks("0", kv_total_blocks)
 
             # Calculate and publish GPU cache usage percentage
             gpu_cache_usage = (
                 kv_active_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
             )
-            DYNAMO_COMPONENT_GAUGES.set_gpu_cache_usage("0", gpu_cache_usage)
+            self.component_gauges.set_gpu_cache_usage("0", gpu_cache_usage)
 
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
@@ -762,6 +738,7 @@ async def get_publisher(
     worker_id,
     kv_block_size,
     metrics_labels,
+    component_gauges: LLMBackendMetrics,
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
 ):
@@ -772,6 +749,7 @@ async def get_publisher(
         worker_id,
         kv_block_size,
         metrics_labels,
+        component_gauges=component_gauges,
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
     )

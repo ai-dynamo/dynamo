@@ -73,8 +73,8 @@ class DynamoSglangPublisher:
         config: Config,
         component: Component,
         generate_endpoint: Endpoint,
+        component_gauges: LLMBackendMetrics,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
-        component_gauges: Optional[LLMBackendMetrics] = None,
     ) -> None:
         """Initialize the SGLang publisher for metrics and KV events.
 
@@ -147,16 +147,15 @@ class DynamoSglangPublisher:
                 )
                 active_decode_blocks = kv_metrics.kv_active_blocks
                 self.metrics_publisher.publish(dp_rank, active_decode_blocks)
-                if self.component_gauges:
-                    dp_rank_str = str(dp_rank)
-                    # Publish total blocks (always available in KvMetrics)
-                    self.component_gauges.set_total_blocks(
-                        dp_rank_str, kv_metrics.kv_total_blocks
-                    )
-                    # Publish GPU cache usage percentage (always available in KvMetrics)
-                    self.component_gauges.set_gpu_cache_usage(
-                        dp_rank_str, kv_metrics.gpu_cache_usage_perc
-                    )
+                dp_rank_str = str(dp_rank)
+                # Publish total blocks (always available in KvMetrics)
+                self.component_gauges.set_total_blocks(
+                    dp_rank_str, kv_metrics.kv_total_blocks
+                )
+                # Publish GPU cache usage percentage (always available in KvMetrics)
+                self.component_gauges.set_gpu_cache_usage(
+                    dp_rank_str, kv_metrics.gpu_cache_usage_perc
+                )
             except Exception:
                 if self._running:
                     logging.exception(
@@ -193,10 +192,9 @@ class DynamoSglangPublisher:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         logging.info("Sending dummy metrics to initialize")
         self.metrics_publisher.publish(self.dp_rank, 0)
-        if self.component_gauges:
-            dp_rank_str = str(self.dp_rank)
-            self.component_gauges.set_total_blocks(dp_rank_str, 0)
-            self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
+        dp_rank_str = str(self.dp_rank)
+        self.component_gauges.set_total_blocks(dp_rank_str, 0)
+        self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
 
     def init_kv_event_publish(self) -> List[KvEventPublisher]:
         """Initialize KV event publisher(s) if configured.
@@ -360,8 +358,8 @@ async def setup_sgl_metrics(
         config,
         component,
         generate_endpoint,
-        metrics_labels,
-        component_gauges,
+        component_gauges=component_gauges,
+        metrics_labels=metrics_labels,
     )
     # Create endpoint in async context (must await before publishing)
     await publisher.metrics_publisher.create_endpoint(component)

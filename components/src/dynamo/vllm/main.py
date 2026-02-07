@@ -17,7 +17,10 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.prometheus import (
+    LLMBackendMetrics,
+    register_engine_metrics_callback,
+)
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     KvEventPublisher,
@@ -51,7 +54,6 @@ from dynamo.vllm.multimodal_handlers import (
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
-from . import publisher
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
@@ -423,6 +425,19 @@ def setup_vllm_engine(config, stat_logger=None):
         f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
     )
 
+    # Construct Prometheus gauges AFTER setup_multiprocess_prometheus() so Gauge objects
+    # see the correct ValueClass (multiprocess vs in-memory).
+    component_gauges = LLMBackendMetrics(
+        registry=DYNAMO_COMPONENT_REGISTRY,
+        model_name=config.served_model_name or "",
+        component_name=config.component or "",
+    )
+
+    # If a StatLoggerFactory was provided, give it the gauges so the loggers
+    # it creates can publish Prometheus metrics.
+    if stat_logger is not None:
+        stat_logger.component_gauges = component_gauges
+
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -479,18 +494,17 @@ def setup_vllm_engine(config, stat_logger=None):
     load_time = time.time() - start_time
 
     # Record model load time
-    # Ensure gauges are initialized (they're lazily created after PROMETHEUS_MULTIPROC_DIR is set)
-    publisher._ensure_gauges_initialized(
-        model_name=config.served_model_name,
-        component_name=config.component,
-    )
-
-    if publisher.DYNAMO_COMPONENT_GAUGES:
-        publisher.DYNAMO_COMPONENT_GAUGES.set_model_load_time(load_time)
+    component_gauges.set_model_load_time(load_time)
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
-    return engine_client, vllm_config, default_sampling_params, prometheus_temp_dir
+    return (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        prometheus_temp_dir,
+        component_gauges,
+    )
 
 
 async def register_vllm_model(
@@ -589,6 +603,7 @@ async def init_prefill(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = pre_created_engine
     else:
         (
@@ -596,6 +611,7 @@ async def init_prefill(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
@@ -714,11 +730,6 @@ async def init(
     list_loras_endpoint = component.endpoint("list_loras")
 
     model_name = config.served_model_name or config.model
-    factory = StatLoggerFactory(
-        component,
-        config.engine_args.data_parallel_rank or 0,
-        metrics_labels=[("model", model_name)],
-    )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -727,13 +738,30 @@ async def init(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            component_gauges,
         ) = pre_created_engine
+        # Factory is created after unpack so component_gauges is available
+        factory = StatLoggerFactory(
+            component,
+            component_gauges=component_gauges,
+            dp_rank=config.engine_args.data_parallel_rank or 0,
+            metrics_labels=[("model", model_name)],
+        )
     else:
+        # Factory is created without component_gauges; setup_vllm_engine() will
+        # create the gauges after setup_multiprocess_prometheus() and set them
+        # on the factory before vLLM calls create_stat_logger().
+        factory = StatLoggerFactory(
+            component,
+            dp_rank=config.engine_args.data_parallel_rank or 0,
+            metrics_labels=[("model", model_name)],
+        )
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            component_gauges,
         ) = setup_vllm_engine(config, factory)
 
     # TODO Hack to get data, move this to registering in TBD
@@ -1016,6 +1044,7 @@ async def init_vllm_native_encoder(
         vllm_config,
         default_sampling_params,
         prometheus_temp_dir,
+        _component_gauges,
     ) = setup_vllm_engine(config)
 
     # Initialize vLLM Native Encoder Worker Handler
@@ -1167,6 +1196,7 @@ async def init_multimodal_worker(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = pre_created_engine
     else:
         (
@@ -1174,6 +1204,7 @@ async def init_multimodal_worker(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = setup_vllm_engine(config)
 
     # Set up decode worker client for disaggregated mode

@@ -37,7 +37,10 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.prometheus import (
+    LLMBackendMetrics,
+    register_engine_metrics_callback,
+)
 from dynamo.common.utils.runtime import create_runtime, parse_endpoint
 from dynamo.llm import (
     KvEventPublisher,
@@ -52,11 +55,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.publisher import (
-    DYNAMO_COMPONENT_REGISTRY,
-    _ensure_gauges_initialized,
-    get_publisher,
-)
+from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
 from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
@@ -344,12 +343,10 @@ async def init(
     # Prepare model name for metrics
     model_name_for_metrics = config.served_model_name or config.model_path
 
-    # Initialize gauges now that model name is available.
-    # IMPORTANT: Use the returned value, not the module-level DYNAMO_COMPONENT_GAUGES
-    # binding. Python's `from module import name` copies the reference at import time,
-    # so the local binding would still be None after _ensure_gauges_initialized updates
-    # the publisher module's global.
-    component_gauges = _ensure_gauges_initialized(
+    # Construct Prometheus gauges directly; passed through to the engine and publisher
+    # via explicit parameters (no module-level global).
+    component_gauges = LLMBackendMetrics(
+        registry=DYNAMO_COMPONENT_REGISTRY,
         model_name=model_name_for_metrics,
         component_name=config.component,
     )
@@ -506,6 +503,7 @@ async def init(
                 int(endpoint.connection_id()),
                 config.kv_block_size,
                 metrics_labels,
+                component_gauges=component_gauges,
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
             ) as publisher:
