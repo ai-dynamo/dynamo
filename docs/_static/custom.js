@@ -2,7 +2,7 @@
 document.addEventListener("DOMContentLoaded", function () {
     var script = document.createElement("script");
     script.type = "module";
-    script.id = "runllm-widget-script"
+    script.id = "runllm-widget-script";
 
     script.src = "https://widget.runllm.com";
 
