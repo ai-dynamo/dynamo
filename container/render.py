@@ -19,25 +19,25 @@ def parse_args():
         "--framework",
         type=str,
         default="vllm",
-        help="Dockerfile framework to use [dynamo, vllm, sglang, trtllm]"
+        help="Dockerfile framework to use [dynamo, vllm, sglang, trtllm]",
     )
     parser.add_argument(
         "--target",
         type=str,
         default="runtime",
-        help="Dockerfile target to use. Non-exhaustive examples: [runtime, dev, local-dev]"
+        help="Dockerfile target to use. Non-exhaustive examples: [runtime, dev, local-dev]",
     )
     parser.add_argument(
         "--platform",
         type=str,
         default="amd64",
-        help="Dockerfile platform to use. [amdg64, arm64]"
+        help="Dockerfile platform to use. [amdg64, arm64]",
     )
     parser.add_argument(
         "--cuda-version",
         type=str,
         default="12.9",
-        help="CUDA version to use. [12.9, 13.0]"
+        help="CUDA version to use. [12.9, 13.0]",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
