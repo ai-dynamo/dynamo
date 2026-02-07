@@ -2198,7 +2198,7 @@ mod tests {
                     .into_iter()
                     .next()
                     .unwrap()
-                    .complete(&token_block)
+                    .complete(token_block)
                     .expect("Should complete block");
                 complete_blocks.push(complete_block);
             }
@@ -2617,7 +2617,7 @@ mod tests {
             let tracker = manager.block_registry().frequency_tracker().unwrap();
             for block in &immutable {
                 let hash = block.sequence_hash();
-                let idx = block.block_id() as usize;
+                let idx = block.block_id();
                 let touches = if idx < 8 {
                     0 // cold: 0-7 untouched
                 } else if idx < 16 {

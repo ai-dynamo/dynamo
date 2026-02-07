@@ -76,7 +76,7 @@ async fn test_full_event_pipeline() {
         .unwrap();
 
     // 4. Register blocks (triggers Create events)
-    let seq_hashes: Vec<_> = (0..5).map(|i| create_seq_hash_at_position(i)).collect();
+    let seq_hashes: Vec<_> = (0..5).map(create_seq_hash_at_position).collect();
     let handles: Vec<_> = seq_hashes
         .iter()
         .map(|&hash| {
