@@ -109,9 +109,7 @@ impl UrlWhitelist {
 pub(crate) fn is_private_or_loopback(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(d)) => {
-            d == "localhost"
-                || d.ends_with(".local")
-                || d == "metadata.google.internal"
+            d == "localhost" || d.ends_with(".local") || d == "metadata.google.internal"
         }
         Some(url::Host::Ipv4(ip)) => {
             ip.is_loopback()
@@ -235,9 +233,7 @@ mod tests {
     #[test]
     fn blocks_loopback_ip() {
         assert!(is_private_or_loopback(&u("http://127.0.0.1/image.jpg")));
-        assert!(is_private_or_loopback(
-            &u("http://127.0.0.1:19193/secret")
-        ));
+        assert!(is_private_or_loopback(&u("http://127.0.0.1:19193/secret")));
     }
 
     #[test]
@@ -254,12 +250,12 @@ mod tests {
 
     #[test]
     fn blocks_cloud_metadata() {
-        assert!(is_private_or_loopback(
-            &u("http://169.254.169.254/latest/meta-data/")
-        ));
-        assert!(is_private_or_loopback(
-            &u("http://metadata.google.internal/computeMetadata/")
-        ));
+        assert!(is_private_or_loopback(&u(
+            "http://169.254.169.254/latest/meta-data/"
+        )));
+        assert!(is_private_or_loopback(&u(
+            "http://metadata.google.internal/computeMetadata/"
+        )));
     }
 
     #[test]
@@ -274,12 +270,12 @@ mod tests {
 
     #[test]
     fn allows_public_domains() {
-        assert!(!is_private_or_loopback(
-            &u("https://i.pinimg.com/image.jpg")
-        ));
-        assert!(!is_private_or_loopback(
-            &u("https://cdn.example.com/photo.png")
-        ));
+        assert!(!is_private_or_loopback(&u(
+            "https://i.pinimg.com/image.jpg"
+        )));
+        assert!(!is_private_or_loopback(&u(
+            "https://cdn.example.com/photo.png"
+        )));
     }
 
     #[test]
