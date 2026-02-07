@@ -89,7 +89,6 @@ class CustomEnginePublisher:
             worker_id=worker_id,
             kv_block_size=block_size,
             dp_rank=dp_rank,
-            enable_local_indexer=False,
         )
 
     def on_blocks_stored(self, token_ids: list[int], block_hashes: list[int],
@@ -196,7 +195,6 @@ config = ZmqKvEventPublisherConfig(
     kv_block_size=block_size,
     zmq_endpoint="tcp://127.0.0.1:5557",  # Where your engine publishes
     zmq_topic="",                          # Subscribe to all topics
-    enable_local_indexer=False,
 )
 
 # Create publisher - it automatically subscribes to ZMQ and forwards to NATS

@@ -182,11 +182,13 @@ impl WorkerQueryClient {
             return Ok(router.clone());
         }
 
-        // Slow path: create new router
+        // Slow path: create new router (no fault detection for recovery queries)
         let endpoint_name = worker_kv_indexer_query_endpoint(dp_rank);
         let endpoint = self.component.endpoint(&endpoint_name);
         let client = endpoint.client().await?;
-        let router = Arc::new(PushRouter::from_client(client, RouterMode::RoundRobin).await?);
+        let router = Arc::new(
+            PushRouter::from_client_no_fault_detection(client, RouterMode::RoundRobin).await?,
+        );
 
         // Insert and return (if another thread inserted first, use theirs)
         Ok(self
@@ -275,6 +277,50 @@ impl WorkerQueryClient {
         total_recovered
     }
 
+    /// Query a worker's local KV indexer with exponential backoff retry.
+    ///
+    /// # Returns
+    /// The query response, or error if all retries are exhausted.
+    async fn query_worker_with_retry(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<WorkerKvQueryResponse> {
+        let mut last_error = None;
+
+        for attempt in 0..RECOVERY_MAX_RETRIES {
+            match self
+                .query_worker(worker_id, dp_rank, start_event_id, end_event_id)
+                .await
+            {
+                Ok(resp) => {
+                    if attempt > 0 {
+                        tracing::info!(
+                            "Worker {worker_id} dp_rank {dp_rank} query succeeded after retry {attempt}"
+                        );
+                    }
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < RECOVERY_MAX_RETRIES - 1 {
+                        let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                        tracing::warn!(
+                            "Worker {worker_id} dp_rank {dp_rank} query failed on attempt {attempt}, \
+                             retrying after {backoff_ms}ms"
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("No response after {RECOVERY_MAX_RETRIES} retries")))
+    }
+
     /// Recover missed KV events from a specific worker's dp_rank with retry logic.
     ///
     /// # Returns
@@ -299,42 +345,9 @@ impl WorkerQueryClient {
              start_event_id: {start_event_id:?}, end_event_id: {end_event_id:?}"
         );
 
-        // Query worker with retry logic for transient failures
-        let mut response = None;
-        let mut last_error = None;
-
-        for attempt in 0..RECOVERY_MAX_RETRIES {
-            match self
-                .query_worker(worker_id, dp_rank, start_event_id, end_event_id)
-                .await
-            {
-                Ok(resp) => {
-                    if attempt > 0 {
-                        tracing::info!(
-                            "Worker {worker_id} dp_rank {dp_rank} query succeeded after retry {attempt}"
-                        );
-                    }
-                    response = Some(resp);
-                    break;
-                }
-                Err(e) => {
-                    last_error = Some(e);
-                    if attempt < RECOVERY_MAX_RETRIES - 1 {
-                        let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
-                        tracing::warn!(
-                            "Worker {worker_id} dp_rank {dp_rank} query failed on attempt {attempt}, \
-                             retrying after {backoff_ms}ms"
-                        );
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    }
-                }
-            }
-        }
-
-        let response = match response {
-            Some(r) => r,
-            None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No response"))),
-        };
+        let response = self
+            .query_worker_with_retry(worker_id, dp_rank, start_event_id, end_event_id)
+            .await?;
 
         // Handle response variants
         let events = match response {

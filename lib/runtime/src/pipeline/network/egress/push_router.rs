@@ -66,6 +66,12 @@ where
     /// If None, busy detection is disabled
     busy_threshold: Option<f64>,
 
+    /// When false, `generate_with_fault_detection` skips fault detection logic:
+    /// it won't call `report_instance_down` on errors, and it uses the raw discovery
+    /// instance list instead of the filtered avail list. Use for recovery/query paths
+    /// where transient failures are expected.
+    fault_detection_enabled: bool,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -112,6 +118,28 @@ where
         Self::from_client_with_threshold(client, router_mode, None, None).await
     }
 
+    /// Create a new PushRouter with fault detection disabled.
+    ///
+    /// Unlike `from_client`, this router will not call `report_instance_down` on
+    /// transient errors, and `direct()` uses the raw discovery instance list instead
+    /// of the filtered avail list. Use for recovery/query paths.
+    pub async fn from_client_no_fault_detection(
+        client: Client,
+        router_mode: RouterMode,
+    ) -> anyhow::Result<Self> {
+        let addressed = addressed_router(&client.endpoint).await?;
+
+        Ok(PushRouter {
+            client: client.clone(),
+            addressed,
+            router_mode,
+            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            busy_threshold: None,
+            fault_detection_enabled: false,
+            _phantom: PhantomData,
+        })
+    }
+
     /// Create a new PushRouter with optional busy threshold and worker load monitor
     pub async fn from_client_with_threshold(
         client: Client,
@@ -132,6 +160,7 @@ where
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold,
+            fault_detection_enabled: true,
             _phantom: PhantomData,
         };
 
@@ -185,7 +214,14 @@ where
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
-        let found = self.client.instance_ids_avail().contains(&instance_id);
+        // When fault detection is disabled, check the raw discovery list
+        // (not filtered by report_instance_down) so transient failures
+        // don't poison the instance for subsequent retries.
+        let found = if self.fault_detection_enabled {
+            self.client.instance_ids_avail().contains(&instance_id)
+        } else {
+            self.client.instance_ids().contains(&instance_id)
+        };
 
         if !found {
             return Err(anyhow::anyhow!(
@@ -271,8 +307,8 @@ where
         instance_id: u64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
-        // Check if all workers are busy (only if busy threshold is set)
-        if self.busy_threshold.is_some() {
+        // Check if all workers are busy (only if busy threshold is set and fault detection enabled)
+        if self.fault_detection_enabled && self.busy_threshold.is_some() {
             let free_instances = self.client.instance_ids_free();
             if free_instances.is_empty() {
                 // Check if we actually have any instances at all
@@ -332,6 +368,9 @@ where
         let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
         match stream {
             Ok(stream) => {
+                if !self.fault_detection_enabled {
+                    return Ok(stream);
+                }
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
@@ -349,7 +388,8 @@ where
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }
             Err(err) => {
-                if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
+                if self.fault_detection_enabled
+                    && let Some(req_err) = err.downcast_ref::<NatsRequestError>()
                     && matches!(req_err.kind(), NatsNoResponders)
                 {
                     tracing::debug!(

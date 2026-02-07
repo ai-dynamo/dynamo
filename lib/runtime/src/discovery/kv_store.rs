@@ -385,7 +385,7 @@ impl Discovery for KVStoreDiscovery {
 
         // Get bucket - if it doesn't exist, return empty list
         let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
-            tracing::info!(
+            tracing::debug!(
                 "KVStoreDiscovery::list: bucket missing for query={:?}, prefix={}, bucket={}",
                 query,
                 prefix,
@@ -396,7 +396,7 @@ impl Discovery for KVStoreDiscovery {
 
         // Get all entries from the bucket
         let entries = bucket.entries().await?;
-        tracing::info!(
+        tracing::debug!(
             "KVStoreDiscovery::list: query={:?}, prefix={}, bucket={}, entries={}",
             query,
             prefix,
