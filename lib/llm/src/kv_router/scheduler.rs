@@ -436,10 +436,12 @@ fn softmax_sample(
         // Find the minimum logit value
         let min_logit = logits.values().fold(f64::INFINITY, |a, &b| a.min(b));
 
-        // Collect all keys with the minimum logit value (to handle ties)
+        // Use epsilon for floating-point comparison to avoid non-deterministic
+        // selection due to tiny arithmetic differences (e.g., 1e-15)
+        const EPSILON: f64 = 1e-5;
         let min_keys: Vec<_> = logits
             .iter()
-            .filter(|&(_, &v)| v == min_logit)
+            .filter(|&(_, &v)| (v - min_logit).abs() < EPSILON)
             .map(|(k, _)| *k)
             .collect();
 
@@ -586,20 +588,18 @@ impl WorkerSelector for DefaultWorkerSelector {
             .unwrap_or(self.kv_router_config.router_temperature);
         let candidates = softmax_sample(&worker_logits, temperature);
 
-        // If multiple candidates (tied), use tree size as tie-breaker
-        // If tree sizes are also equal, min_by_key uses HashMap iteration order (pseudo-random)
+        // Tie-breaker: prefer larger tree_size (more prefix reuse), then worker_id/dp_rank.
+        // Picking the smallest tree_size routes away from the best prefix match and can spread
+        // requests across dp_ranks. Reverse(tree_size) preserves determinism via WorkerWithDpRank.
         let best_worker = if candidates.len() > 1 {
-            tracing::info!("Multiple workers tied with same logit, using tree size as tie-breaker");
+            let tree_sizes = &request.overlaps.tree_sizes;
+            tracing::info!(
+                "Multiple workers tied (n={}), using tree_size(desc) then worker_id as tie-breaker",
+                candidates.len()
+            );
             *candidates
                 .iter()
-                .min_by_key(|worker| {
-                    request
-                        .overlaps
-                        .tree_sizes
-                        .get(worker)
-                        .copied()
-                        .unwrap_or(0)
-                })
+                .min_by_key(|w| (std::cmp::Reverse(tree_sizes.get(w).copied().unwrap_or(0)), **w))
                 .expect("candidates should not be empty")
         } else {
             candidates[0]

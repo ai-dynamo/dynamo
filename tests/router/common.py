@@ -1602,6 +1602,8 @@ def _test_router_indexers_sync(
 
         # Compare states one by one and only show differences
         if len(sorted_state1) != len(sorted_state2):
+            # This is NOT the router tie-breaker / prefix-reuse flake (A1).
+            # It means the two routers did not converge to the same KV event set (event sync/indexer issue).
             logger.error(
                 f"Router 1 has {len(sorted_state1)} events, Router 2 has {len(sorted_state2)} events"
             )
@@ -2018,9 +2020,12 @@ def _test_router_decisions(
                 f"decode_worker_id={result.get('decode_worker_id')}"
             )
 
-            # Wait a bit between requests
+            # NOTE: Avoid sleeps in tests when possible. Fixed delays are timing-sensitive under
+            # load/CI noise and can be either too short (flake) or too long (slow). Prefer waiting
+            # on an explicit readiness condition (e.g., cache indexed / events observed).
             await asyncio.sleep(2)
 
+        # NOTE: Same as above: prefer a condition-based sync check over a fixed sleep.
         # Wait for final synchronization (especially important for DP)
         if test_dp_rank:
             await asyncio.sleep(1)
