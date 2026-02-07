@@ -18,27 +18,27 @@ use dynamo_kv_router::{
     RadixTree, RouterEvent,
     bench_utils::{LatencyStats, SequenceData, generate_sequences},
     compute_block_hash_for_seq,
-    flat_hashmap::FlatHashMap,
+    nested_map::NestedMap,
     protocols::LocalBlockHash,
 };
 use std::time::{Duration, Instant};
 
-/// Unified interface for RadixTree and FlatHashMap benchmarking.
+/// Unified interface for RadixTree and NestedMap benchmarking.
 ///
 /// Both structures have feature parity for store, remove, find_matches, and current_size.
 /// The key difference is find_matches input:
 /// - RadixTree: uses LocalBlockHash (tokens_hash)
-/// - FlatHashMap: uses ExternalSequenceBlockHash (cumulative sequence hash)
+/// - NestedMap: uses ExternalSequenceBlockHash (cumulative sequence hash)
 enum KvIndex {
     Tree(RadixTree),
-    Flat(FlatHashMap),
+    Nested(NestedMap),
 }
 
 impl KvIndex {
     fn name(&self) -> &'static str {
         match self {
             KvIndex::Tree(_) => "RadixTree",
-            KvIndex::Flat(_) => "FlatHashMap",
+            KvIndex::Nested(_) => "NestedMap",
         }
     }
 
@@ -47,8 +47,8 @@ impl KvIndex {
             KvIndex::Tree(tree) => {
                 let _ = tree.apply_event(event);
             }
-            KvIndex::Flat(map) => {
-                map.apply_event(event);
+            KvIndex::Nested(map) => {
+                let _ = map.apply_event(event);
             }
         }
     }
@@ -58,7 +58,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
-            KvIndex::Flat(map) => map.find_matches(local_hashes, early_exit),
+            KvIndex::Nested(map) => map.find_matches(local_hashes, early_exit),
         };
         start.elapsed()
     }
@@ -70,7 +70,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(miss_hashes, early_exit),
-            KvIndex::Flat(map) => map.find_matches(miss_hashes, early_exit),
+            KvIndex::Nested(map) => map.find_matches(miss_hashes, early_exit),
         };
         start.elapsed()
     }
@@ -89,7 +89,7 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(partial, early_exit),
-            KvIndex::Flat(map) => map.find_matches(partial, early_exit),
+            KvIndex::Nested(map) => map.find_matches(partial, early_exit),
         };
         start.elapsed()
     }
@@ -97,7 +97,7 @@ impl KvIndex {
     fn current_size(&self) -> usize {
         match self {
             KvIndex::Tree(tree) => tree.current_size(),
-            KvIndex::Flat(map) => map.current_size(),
+            KvIndex::Nested(map) => map.current_size(),
         }
     }
 }
@@ -197,9 +197,9 @@ struct Args {
     #[arg(long, default_value = "42")]
     seed: u64,
 
-    /// Use flat HashMap baseline instead of radix tree (for comparison)
+    /// Use nested map instead of radix tree (for comparison)
     #[arg(long)]
-    flat_hashmap: bool,
+    nested_map: bool,
 }
 
 /// Build a pre-populated RadixTree (for sweep/dump benchmarks that specifically need RadixTree)
@@ -231,10 +231,10 @@ fn build_tree(sequences: &[SequenceData]) -> RadixTree {
 }
 
 /// Build a pre-populated KvIndex (prints timing info)
-fn build_index(sequences: &[SequenceData], use_flat_hashmap: bool) -> KvIndex {
+fn build_index(sequences: &[SequenceData], use_nested_map: bool) -> KvIndex {
     let num_blocks: usize = sequences.iter().map(|s| s.local_hashes.len()).sum();
-    let name = if use_flat_hashmap {
-        "FlatHashMap"
+    let name = if use_nested_map {
+        "NestedMap"
     } else {
         "RadixTree"
     };
@@ -247,8 +247,8 @@ fn build_index(sequences: &[SequenceData], use_flat_hashmap: bool) -> KvIndex {
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
     let start = Instant::now();
-    let mut index = if use_flat_hashmap {
-        KvIndex::Flat(FlatHashMap::new())
+    let mut index = if use_nested_map {
+        KvIndex::Nested(NestedMap::new())
     } else {
         KvIndex::Tree(RadixTree::new())
     };
@@ -332,7 +332,7 @@ fn bench_store_remove_cycle(args: &Args, time_store: bool) {
         true, // use_cumulative_hash
     );
 
-    let mut index = build_index(&sequences, args.flat_hashmap);
+    let mut index = build_index(&sequences, args.nested_map);
     println!("\n=== Benchmarking {} ({}) ===", op_name, index.name());
     println!("  Size: {} blocks", index.current_size());
 
@@ -394,7 +394,7 @@ fn bench_find_matches(args: &Args) {
         true, // use_cumulative_hash
     );
 
-    let index = build_index(&sequences, args.flat_hashmap);
+    let index = build_index(&sequences, args.nested_map);
     println!("\n=== Benchmarking FIND_MATCHES ({}) ===", index.name());
     println!(
         "  Built with {} sequences, {} total blocks",

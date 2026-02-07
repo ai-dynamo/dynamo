@@ -188,11 +188,11 @@ pub fn generate_sequences(
         let local_hashes: Vec<LocalBlockHash> = (0..depth)
             .map(|block_idx| {
                 let block_idx_u64 = block_idx as u64;
-                if let Some(gid) = group_id {
-                    if block_idx < prefix_length {
-                        // Shared prefix based on group_id
-                        return LocalBlockHash(0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64);
-                    }
+                if let Some(gid) = group_id
+                    && block_idx < prefix_length
+                {
+                    // Shared prefix based on group_id
+                    return LocalBlockHash(0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64);
                 }
                 // Unique suffix (or no shared prefix)
                 LocalBlockHash((seq_id_u64 << 32) | block_idx_u64)
@@ -205,12 +205,12 @@ pub fn generate_sequences(
             let external_hashes: Vec<ExternalSequenceBlockHash> = (0..depth)
                 .map(|block_idx| {
                     let block_idx_u64 = block_idx as u64;
-                    if let Some(gid) = group_id {
-                        if block_idx < prefix_length {
-                            return ExternalSequenceBlockHash(
-                                0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64,
-                            );
-                        }
+                    if let Some(gid) = group_id
+                        && block_idx < prefix_length
+                    {
+                        return ExternalSequenceBlockHash(
+                            0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64,
+                        );
                     }
                     ExternalSequenceBlockHash((seq_id_u64 << 32) | block_idx_u64)
                 })
