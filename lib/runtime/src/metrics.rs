@@ -748,7 +748,7 @@ impl MetricsRegistry {
                 let name = family.name().to_string();
 
                 let entry = by_name.entry(name.clone()).or_insert_with(|| {
-                    let mut out = prometheus::proto::MetricFamily::new();
+                    let mut out = prometheus::proto::MetricFamily::default();
                     out.set_name(name.clone());
                     out.set_help(family.help().to_string());
                     out.set_field_type(family.get_field_type());
