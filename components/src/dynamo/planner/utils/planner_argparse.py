@@ -28,8 +28,8 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--environment",
         default=SLAPlannerDefaults.environment,
-        choices=["kubernetes", "virtual"],
-        help="Environment type",
+        choices=["kubernetes", "virtual", "global-planner"],
+        help="Environment type: kubernetes (direct K8s scaling), virtual (dynamo runtime scaling), global-planner (delegate to GlobalPlanner)",
     )
     parser.add_argument(
         "--namespace",
@@ -176,4 +176,23 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         type=str,
         help="Model name of deployment (only required for virtual environment)",
     )
+
+    # For global-planner environment mode
+    parser.add_argument(
+        "--global-planner-namespace",
+        type=str,
+        default=None,
+        help="Namespace of GlobalPlanner component (required when environment=global-planner)",
+    )
+
     return parser
+
+
+def validate_planner_args(args):
+    """Validate planner configuration"""
+    if args.environment == "global-planner":
+        if not args.global_planner_namespace:
+            raise ValueError(
+                "--global-planner-namespace required when environment=global-planner. "
+                "Please specify the namespace where GlobalPlanner is running."
+            )
