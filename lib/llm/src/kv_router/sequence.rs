@@ -784,10 +784,15 @@ impl ActiveSequencesMultiWorker {
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
     ) -> Result<(), SequenceError> {
-        // Check for worker existence
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+        // Clone the sender upfront so we don't hold the DashMap Ref across
+        // the .await points below. Also eliminates the TOCTOU between
+        // contains_key and a later get().unwrap().
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
 
         // Check for duplicate request
         if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
@@ -825,9 +830,7 @@ impl ActiveSequencesMultiWorker {
             self.request_to_lora.insert(request_id.clone(), lora);
         }
 
-        self.senders
-            .get(&worker)
-            .unwrap()
+        sender
             .send(UpdateSequences::AddRequest {
                 request_id,
                 token_sequence,
@@ -866,10 +869,13 @@ impl ActiveSequencesMultiWorker {
             return Ok(());
         };
 
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+        // Clone sender upfront to avoid TOCTOU between contains_key and get().unwrap()
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
 
         // Publish event only if replica_sync is enabled
         if self.replica_sync {
@@ -890,9 +896,7 @@ impl ActiveSequencesMultiWorker {
         }
 
         // Update local state
-        self.senders
-            .get(&worker)
-            .unwrap()
+        sender
             .send(UpdateSequences::Free {
                 request_id: request_id.clone(),
             })
@@ -923,10 +927,13 @@ impl ActiveSequencesMultiWorker {
                 request_id: request_id.clone(),
             })?;
 
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+        // Clone sender upfront to avoid TOCTOU between contains_key and get().unwrap()
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
 
         // Publish event only if replica_sync is enabled
         if self.replica_sync {
@@ -947,9 +954,7 @@ impl ActiveSequencesMultiWorker {
         }
 
         // Update local state
-        self.senders
-            .get(&worker)
-            .unwrap()
+        sender
             .send(UpdateSequences::MarkPrefillCompleted {
                 request_id: request_id.clone(),
             })
@@ -978,18 +983,19 @@ impl ActiveSequencesMultiWorker {
                 request_id: request_id.clone(),
             })?;
 
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+        // Clone sender upfront to avoid TOCTOU between contains_key and get().unwrap()
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
 
         // Create response channel
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
 
         // Send command to worker
-        self.senders
-            .get(&worker)
-            .unwrap()
+        sender
             .send(UpdateSequences::AddOutputBlock {
                 request_id: request_id.clone(),
                 decay_fraction,
@@ -1016,9 +1022,16 @@ impl ActiveSequencesMultiWorker {
 
     /// Helper method to query a single worker for active blocks/tokens and publish ActiveLoad
     async fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank) {
-        let Some(sender) = self.senders.get(&worker) else {
-            tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
-            return;
+        // Clone the sender and drop the DashMap Ref immediately.
+        // Holding a Ref across .await points can deadlock: if the task yields
+        // and update_workers() needs a write lock on the same shard, the
+        // runtime thread blocks forever.
+        let sender = {
+            let Some(entry) = self.senders.get(&worker) else {
+                tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
+                return;
+            };
+            entry.value().clone()
         };
 
         // Query active blocks
