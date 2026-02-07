@@ -10,82 +10,19 @@ inputs:
     description: 'Kubernetes namespace for deployment'
     required: true
 
-  # Deployment Configuration
-  deployment_file:
-    description: 'Path to the DynamoGraphDeployment YAML file (relative to examples/backends/<framework>)'
-    required: true
   framework:
     description: 'Framework name (vllm, sglang, trtllm)'
     required: true
-  framework_runtime_image:
+  profile:
+    description: 'Deployment profile (e.g., disagg_router, agg)'
+    required: true
+  image:
     description: 'Full container image reference for the framework runtime'
     required: true
-
-  # Model Configuration
-  model_name:
-    description: 'Model name to test (e.g., Qwen/Qwen3-0.6B)'
+  platform_arch:
+    description: 'Platform architecture (amd64, arm64)'
     required: false
-    default: 'Qwen/Qwen3-0.6B'
-
-  # Test Configuration
-  pod_ready_timeout:
-    description: 'Timeout for pods to become ready (kubectl wait format)'
-    required: false
-    default: '300s'
-  model_available_max_attempts:
-    description: 'Maximum attempts to wait for model availability'
-    required: false
-    default: '30'
-  model_available_retry_delay:
-    description: 'Delay between model availability checks (seconds)'
-    required: false
-    default: '5'
-  port_forward_delay:
-    description: 'Delay after port-forward to allow connection (seconds)'
-    required: false
-    default: '10'
-  test_identifier:
-    description: 'Unique identifier for test output (used for log file and artifact naming)'
-    required: true
-
-
-  # Request Configuration
-  max_tokens:
-    description: 'Maximum tokens for test request'
-    required: false
-    default: '30'
-  temperature:
-    description: 'Temperature for test request'
-    required: false
-    default: '0.0'
-  test_prompt:
-    description: 'Test prompt to send (optional, uses default if not provided)'
-    required: false
-    default: ''
-
-  # Validation Configuration
-  min_response_length:
-    description: 'Minimum expected response content length'
-    required: false
-    default: '100'
-  skip_cleanup:
-    description: 'Skip cleanup step (useful for debugging)'
-    required: false
-    default: 'false'
-
-outputs:
-  graph_name:
-    description: 'Name of the deployed DynamoGraphDeployment'
-    value: ${{ steps.deploy.outputs.graph_name }}
-  test_result:
-    description: 'Test result (0=pass, 1=fail)'
-    value: ${{ steps.test.outputs.test_result }}
-  test_log_path:
-    description: 'Path to test output log'
-    value: ${{ steps.setup-test-names.outputs.test_output_log_file }}
-  artifact_name:
-    description: 'Name of the uploaded artifact'
-    value: ${{ steps.setup-test-names.outputs.artifact_name }}
+    default: 'amd64'
 
 runs:
   using: "composite"
@@ -102,232 +39,38 @@ runs:
         kubectl config set-context --current --namespace=${{ inputs.namespace }}
         kubectl config get-contexts
 
-    - name: Setup Test Output Names
-      id: setup-test-names
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+        cache-dependency-path: 'container/deps/requirements.test.txt'
+    - name: Install test dependencies
       shell: bash
       run: |
-        TEST_IDENTIFIER="${{ inputs.test_identifier }}"
-        echo "test_output_log_file=deploy_test_output_${TEST_IDENTIFIER}.log" >> $GITHUB_OUTPUT
-        # Replace underscores with dashes for artifact name (GitHub artifact naming convention)
-        ARTIFACT_NAME="test-results-${TEST_IDENTIFIER//_/-}"
-        echo "artifact_name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+        python -m pip install --upgrade pip
+        pip install -r container/deps/requirements.test.txt
 
     - name: Deploy and Test
       id: deploy
       shell: bash
-      working-directory: ${{ github.workspace }}/examples/backends/${{ inputs.framework }}
       env:
+        KUBECONFIG: ${{ github.workspace }}/.kubeconfig
         NAMESPACE: ${{ inputs.namespace }}
         FRAMEWORK: ${{ inputs.framework }}
-        FRAMEWORK_RUNTIME_IMAGE: ${{ inputs.framework_runtime_image }}
-        DEPLOYMENT_FILE: ${{ inputs.deployment_file }}
-        MODEL_NAME: ${{ inputs.model_name }}
-        POD_READY_TIMEOUT: ${{ inputs.pod_ready_timeout }}
+        PROFILE: ${{ inputs.profile }}
+        IMAGE: ${{ inputs.image }}
       run: |
-        set -x
-        export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
-
-        # Redirect all output to a log file while still showing it
-        exec > >(tee -a "${{ steps.setup-test-names.outputs.test_output_log_file }}") 2>&1
-
-        export KUBE_NS=$NAMESPACE
-        export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
-        echo "graph_name=${GRAPH_NAME}" >> $GITHUB_OUTPUT
-
-        # Update the deployment file with the runtime image
-        # Use strenv() to ensure the image string is treated as plain string, not parsed as YAML
-        yq -i '.spec.services.[].extraPodSpec.mainContainer.image = strenv(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
-
-        echo "=== DEPLOYMENT CONFIGURATION ==="
-        echo "Framework: ${FRAMEWORK}"
-        echo "Runtime Image: ${FRAMEWORK_RUNTIME_IMAGE}"
-        echo "Graph Name: ${GRAPH_NAME}"
-        echo "Namespace: ${KUBE_NS}"
-        echo ""
-        echo "=== UPDATED DEPLOYMENT FILE ==="
-        cat $DEPLOYMENT_FILE
-
-        # Apply the deployment
-        kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
-
-        # Wait for pods to be ready
-        echo "=== WAITING FOR PODS ==="
-        sleep 20
-        echo "Waiting for pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
-
-        if ! kubectl wait --for=condition=ready pod \
-          -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" \
-          -n ${KUBE_NS} \
-          --timeout=${POD_READY_TIMEOUT}; then
-
-          echo "::error::Pods failed to become ready within timeout"
-          echo "deploy_failed=true" >> $GITHUB_OUTPUT
-          exit 1
-        fi
-
-        echo "=== FINAL POD STATUSES ==="
-        kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
-        echo ""
-        kubectl get all -n $KUBE_NS
-
-    - name: Debug Pod Failure
-      id: debug-failure
-      if: failure() && steps.deploy.outputs.deploy_failed == 'true'
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.namespace }}
-        FRAMEWORK: ${{ inputs.framework }}
-        DEPLOYMENT_FILE: ${{ inputs.deployment_file }}
-        GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
-      run: |
-        export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-
-        echo "## ❌ Pod Readiness Failure: ${FRAMEWORK} / ${DEPLOYMENT_FILE}" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "**Graph Name:** \`${GRAPH_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
-        echo "**Namespace:** \`${NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-
-        echo "### All relevant Pods in Namespace" >> "$GITHUB_STEP_SUMMARY"
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-
-        # echo "### Pod Descriptions" >> "$GITHUB_STEP_SUMMARY"
-        # echo '```' >> "$GITHUB_STEP_SUMMARY"
-        # kubectl describe pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} >> "$GITHUB_STEP_SUMMARY" 2>&1
-        # echo '```' >> "$GITHUB_STEP_SUMMARY"
-        # echo "" >> "$GITHUB_STEP_SUMMARY"
-
-        echo "### Pod Logs (last 30 lines per container)" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-
-        # Get logs pod by pod for better readability
-        PODS=$(kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} -o jsonpath='{.items[*].metadata.name}')
-
-        if [ -z "$PODS" ]; then
-          echo "_No pods found matching the deployment label_" >> "$GITHUB_STEP_SUMMARY"
-        else
-          for POD in $PODS; do
-            echo "#### Pod: \`${POD}\`" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            kubectl logs --tail=30 --all-containers=true ${POD} -n ${NAMESPACE} >> "$GITHUB_STEP_SUMMARY" 2>&1 || echo "No logs available for ${POD}" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-          done
-        fi
-
-    - name: Run Validation Tests
-      id: test
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.namespace }}
-        FRAMEWORK: ${{ inputs.framework }}
-        MODEL_NAME: ${{ inputs.model_name }}
-        MAX_ATTEMPTS: ${{ inputs.model_available_max_attempts }}
-        RETRY_DELAY: ${{ inputs.model_available_retry_delay }}
-        PORT_FORWARD_DELAY: ${{ inputs.port_forward_delay }}
-        MAX_TOKENS: ${{ inputs.max_tokens }}
-        TEMPERATURE: ${{ inputs.temperature }}
-        MIN_RESPONSE_LENGTH: ${{ inputs.min_response_length }}
-        TEST_PROMPT: ${{ inputs.test_prompt }}
-        GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
-      run: |
-        set -x
-        export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-
-        # Get frontend pod and setup port-forward
-        FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} \
-          -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} \
-          -o jsonpath='{.items[0].metadata.name}')
-
-        CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${NAMESPACE} \
-          -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
-
-        echo "Frontend Pod: ${FRONTEND_POD}"
-        echo "Container Port: ${CONTAINER_PORT}"
-
-        kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${NAMESPACE} &
-        PORT_FORWARD_PID=$!
-
-        LLM_URL="http://localhost:8000"
-        sleep ${PORT_FORWARD_DELAY}
-
-        echo "LLM URL: ${LLM_URL}"
-        echo "Model Name: ${MODEL_NAME}"
-
-        # Wait for model to be available
-        ATTEMPT=1
-        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-          MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models" || true)
-          if echo "$MODELS_RESPONSE" | jq -e --arg MODEL_NAME "$MODEL_NAME" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
-            echo "Model $MODEL_NAME is available in /v1/models"
-            break
-          fi
-          echo "Waiting for model $MODEL_NAME... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
-          sleep ${RETRY_DELAY}
-          ATTEMPT=$((ATTEMPT + 1))
-        done
-
-        if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-          echo "Model $MODEL_NAME not found after $MAX_ATTEMPTS attempts"
-          echo "Last response: $MODELS_RESPONSE"
-          echo "test_result=1" >> $GITHUB_OUTPUT
-          kill $PORT_FORWARD_PID 2>/dev/null || true
-          exit 1
-        fi
-
-        # Use default prompt if not provided
-        if [ -z "$TEST_PROMPT" ]; then
-          TEST_PROMPT="In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-        fi
-
-        # Send test request
-        RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused \
-          -X POST "${LLM_URL}/v1/chat/completions" \
-          -H 'accept: application/json' \
-          -H 'Content-Type: application/json' \
-          -d '{
-            "model": "'"${MODEL_NAME}"'",
-            "messages": [{"role": "user", "content": "'"${TEST_PROMPT}"'"}],
-            "stream": false,
-            "max_tokens": '"${MAX_TOKENS}"',
-            "temperature": '"${TEMPERATURE}"'
-          }' 2>&1)
-
-        echo "Response: $RESPONSE"
-
-        # Validate response
-        TEST_RESULT=0
-        if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-          echo "❌ Test failed: Response is not valid JSON"
-          echo "Got: $RESPONSE"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          echo "❌ Test failed: Message role is not 'assistant'"
-          echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          echo "❌ Test failed: Model name mismatch"
-          echo "Expected: ${MODEL_NAME}"
-          echo "Got: $(echo "$RESPONSE" | jq '.model')"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > '"${MIN_RESPONSE_LENGTH}"'' >/dev/null 2>&1; then
-          echo "❌ Test failed: Response too short (min: ${MIN_RESPONSE_LENGTH})"
-          echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
-          TEST_RESULT=1
-        else
-          echo "✅ Test passed: Response matches expected format and content"
-        fi
-
-        echo "test_result=${TEST_RESULT}" >> $GITHUB_OUTPUT
-
-        # Cleanup port-forward
-        kill $PORT_FORWARD_PID 2>/dev/null || true
-
-        exit $TEST_RESULT
+        mkdir -p test-results
+        pytest tests/deploy/test_deploy.py \
+          --framework="${FRAMEWORK}" \
+          --profile="${PROFILE}" \
+          --image="${IMAGE}" \
+          --namespace="${NAMESPACE}" \
+          -v -s \
+          --durations=10 \
+          --junitxml=test-results/pytest_deploy_${FRAMEWORK}_${PROFILE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
+          --log-cli-level=INFO
 
     - name: Cleanup Deployment
       if: always() && inputs.skip_cleanup != 'true'
@@ -357,6 +100,6 @@ runs:
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
-        name: ${{ steps.setup-test-names.outputs.artifact_name }}
-        path: ${{ steps.setup-test-names.outputs.test_output_log_file }}
+        name: test-results-${{ inputs.framework }}-${{ inputs.profile }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7

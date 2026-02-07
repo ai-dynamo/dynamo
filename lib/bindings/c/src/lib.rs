@@ -497,20 +497,13 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         };
 
         let kv_router_config = if use_kv_routing {
-            Some(KvRouterConfig::new(
-                (overlap_score_weight >= 0.0).then_some(overlap_score_weight),
-                (router_temperature >= 0.0).then_some(router_temperature),
-                Some(use_kv_events),
-                Some(router_replica_sync),
-                None, // track_active_blocks
-                None, // track_output_blocks
-                None, // assume_kv_reuse
-                None, // router_snapshot_threshold
-                None, // router_reset_states
-                None, // router_ttl_secs
-                None, // router_max_tree_size
-                None, // router_prune_target_ratio
-            ))
+            Some(KvRouterConfig {
+                overlap_score_weight,
+                router_temperature,
+                use_kv_events,
+                router_replica_sync,
+                ..KvRouterConfig::default()
+            })
         } else {
             None
         };
@@ -1384,6 +1377,7 @@ pub async fn create_worker_selection_pipeline_chat(
         component.drt().clone(),
         model_manager.clone(),
         router_config,
+        0, // migration_limit - default to 0 for C bindings
         None,
         metrics.clone(),
     );
@@ -1505,6 +1499,7 @@ pub async fn create_worker_selection_pipeline_chat(
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        0, // migration_limit - default to 0 for C bindings
         metrics,
     )
     .await?;

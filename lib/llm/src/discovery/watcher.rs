@@ -58,6 +58,7 @@ pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
+    migration_limit: u32,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     engine_factory: Option<EngineFactoryCallback>,
@@ -78,6 +79,7 @@ impl ModelWatcher {
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
+        migration_limit: u32,
         engine_factory: Option<EngineFactoryCallback>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
@@ -85,6 +87,7 @@ impl ModelWatcher {
             manager: model_manager,
             drt: runtime,
             router_config,
+            migration_limit,
             notify_on_model: Notify::new(),
             model_update_tx: None,
             engine_factory,
@@ -494,6 +497,7 @@ impl ModelWatcher {
                         tokenizer_hf.clone(),
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
+                        self.migration_limit,
                         self.metrics.clone(),
                     )
                     .await
@@ -529,6 +533,7 @@ impl ModelWatcher {
                     tokenizer_hf,
                     prefill_chooser,
                     self.router_config.enforce_disagg,
+                    self.migration_limit,
                     self.metrics.clone(),
                 )
                 .await

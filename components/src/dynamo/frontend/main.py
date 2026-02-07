@@ -226,6 +226,12 @@ def parse_args():
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
     )
     parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. When > 0, enables request migration on worker disconnect (default: 0).",
+    )
+    parser.add_argument(
         "--active-decode-blocks-threshold",
         type=float,
         default=None,
@@ -304,6 +310,8 @@ def parse_args():
 
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
+    if flags.migration_limit < 0 or flags.migration_limit > 4294967295:
+        parser.error("--migration-limit must be between 0 and 4294967295 (0=disabled)")
 
     return flags
 
@@ -324,6 +332,10 @@ async def async_main():
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
     os.environ["DYN_EVENT_PLANE"] = flags.event_plane
+    logger.info(
+        f"Request migration {'enabled' if flags.migration_limit > 0 else 'disabled'} "
+        f"(limit: {flags.migration_limit})"
+    )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
@@ -393,6 +405,7 @@ async def async_main():
             active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
             enforce_disagg=flags.enforce_disagg,
         ),
+        "migration_limit": flags.migration_limit,
     }
 
     if flags.model_name:

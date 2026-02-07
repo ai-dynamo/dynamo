@@ -95,8 +95,8 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 | **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
 | **KV Block Manager** | ✅ | ✅ | ✅ | — | | | | | | |
 | **Multimodal** | ✅<sup>1</sup> | <sup>2</sup> | — | ✅ | — | | | | | |
-| **Request Migration** | 🚧<sup>3</sup> | ✅ | ✅ | ✅ | 🚧 | — | | | | |
-| **Request Cancellation** | ✅<sup>5</sup> | ✅<sup>5</sup> | ✅<sup>5</sup> | ✅<sup>5</sup> | ✅<sup>5</sup> | ✅<sup>5</sup> | — | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | ✅ | 🚧 | — | | | | |
+| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
 | **LoRA** | | | | | | | | — | | |
 | **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | — | |
 | **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | | ✅ | — |
@@ -104,9 +104,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 > **Notes:**
 > 1. **Multimodal Disaggregation**: Fully supports **EP/D** (Traditional) pattern. **E/P/D** (Full Disaggregation) is WIP and currently supports pre-computed embeddings only. ([Source][mm-trtllm])
 > 2. **Multimodal + KV-Aware Routing**: Not supported. The KV router currently tracks token-based blocks only. ([Source][kv-routing])
-> 3. **Request Migration**: Supported on **Decode/Aggregated** workers only. **Prefill** workers do not support migration. ([Source][trtllm-readme])
-> 4. **Speculative Decoding**: Llama 4 + Eagle support documented. ([Source][trtllm-eagle])
-> 5. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
+> 3. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
 
 ---
 

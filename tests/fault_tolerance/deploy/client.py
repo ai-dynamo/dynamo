@@ -24,9 +24,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
 from kr8s.objects import Pod
 
+from tests.utils.client import wait_for_model_availability
 from tests.utils.managed_deployment import ManagedDeployment
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -110,80 +110,7 @@ def get_frontend_port(
     return pod_name, port, selected_pod
 
 
-def wait_for_model_availability(
-    url: str,
-    endpoint: str,
-    model: str,
-    logger: logging.Logger,
-    max_attempts: int = 15,
-    attempt_timeouts: Optional[List[float]] = None,
-) -> bool:
-    """
-    Wait for model to be available before running AI-Perf.
-
-    Args:
-        url: Base URL for the service
-        endpoint: API endpoint path
-        model: Model name to test
-        logger: Logger instance
-        max_attempts: Maximum number of attempts to check availability
-        attempt_timeouts: List of timeout values for each attempt
-
-    Returns:
-        True if model is available, False otherwise
-    """
-    if attempt_timeouts is None:
-        # Default: Start with 60s timeout, then gradually decrease
-        attempt_timeouts = [60, 60, 45, 30, 30, 20, 20, 15, 15, 15, 10, 10, 10, 10, 10]
-
-    test_url = f"{url}{endpoint}"
-
-    for attempt in range(max_attempts):
-        try:
-            test_payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": "test"}],
-                "max_tokens": 1,
-                "stream": False,
-            }
-
-            timeout_val = attempt_timeouts[min(attempt, len(attempt_timeouts) - 1)]
-            logger.info(
-                f"Testing model availability at {test_url} (attempt {attempt+1}/{max_attempts}, timeout={timeout_val}s)"
-            )
-            response = requests.post(test_url, json=test_payload, timeout=timeout_val)
-
-            if response.status_code == 200:
-                logger.info(f"Model '{model}' is available and responding")
-                # Give a bit more time for stabilization
-                logger.info("Model ready, waiting 5s for stabilization...")
-                time.sleep(5)
-                return True
-            elif response.status_code == 404:
-                logger.warning(
-                    f"Model '{model}' not found (404). Response: {response.text[:200]}"
-                )
-            elif response.status_code == 400:
-                logger.warning(f"Bad request (400). Response: {response.text[:200]}")
-            else:
-                logger.warning(
-                    f"Unexpected status code {response.status_code}: {response.text[:200]}"
-                )
-
-        except requests.Timeout as e:
-            logger.warning(
-                f"Model availability test timed out (attempt {attempt+1}): {e}"
-            )
-        except Exception as e:
-            logger.warning(f"Model availability test failed (attempt {attempt+1}): {e}")
-
-        if attempt < max_attempts - 1:
-            wait_time = 10 if attempt < 5 else 5
-            logger.info(f"Waiting {wait_time}s before retry...")
-            time.sleep(wait_time)
-
-    logger.warning("Could not confirm model availability after all attempts")
-    return False
+# wait_for_model_availability has been moved to tests.utils.client
 
 
 def validate_aiperf_results(

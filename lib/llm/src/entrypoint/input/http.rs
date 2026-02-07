@@ -61,6 +61,7 @@ pub async fn run(
             let http_service = http_service_builder.build()?;
 
             let router_config = model.router_config();
+            let migration_limit = model.migration_limit();
             // Listen for models registering themselves, add them to HTTP service
             // Check if we should filter by namespace (based on the local model's namespace)
             // Get namespace from the model, fallback to endpoint_id namespace if not set
@@ -74,6 +75,7 @@ pub async fn run(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
                 router_config.clone(),
+                migration_limit,
                 target_namespace,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
@@ -146,10 +148,12 @@ pub async fn run(
 
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
+#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
+    migration_limit: u32,
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
@@ -159,6 +163,7 @@ async fn run_watcher(
         runtime.clone(),
         model_manager,
         router_config,
+        migration_limit,
         engine_factory,
         metrics.clone(),
     );

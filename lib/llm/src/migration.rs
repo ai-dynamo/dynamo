@@ -28,17 +28,21 @@ pub struct Migration {
 }
 
 impl Migration {
-    pub fn from_mdc(mdc: &ModelDeploymentCard, metrics: Arc<Metrics>) -> Arc<Self> {
-        tracing::debug!(
-            "model {} migration limit {}",
-            mdc.display_name,
-            mdc.migration_limit
-        );
+    pub fn new(migration_limit: u32, model_name: String, metrics: Arc<Metrics>) -> Arc<Self> {
+        tracing::debug!("model {} migration limit {}", model_name, migration_limit);
         Arc::new(Self {
-            migration_limit: mdc.migration_limit,
-            model_name: Arc::new(mdc.display_name.clone()),
+            migration_limit,
+            model_name: Arc::new(model_name),
             metrics,
         })
+    }
+
+    pub fn from_mdc(
+        mdc: &ModelDeploymentCard,
+        migration_limit: u32,
+        metrics: Arc<Metrics>,
+    ) -> Arc<Self> {
+        Self::new(migration_limit, mdc.display_name.clone(), metrics)
     }
 }
 

@@ -68,11 +68,11 @@ dynamo-operator:
       # Container image configuration for the operator manager
       image:
         # -- Official NVIDIA Dynamo operator image repository
-        repository: "nvcr.io/nvidian/dynamo-dev/dynamo-operator"
+        repository: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
         # -- Image tag (leave empty to use chart default)
-        tag: "schwinns-latest"
+        tag: ""
         # -- Image pull policy - when to pull the image
-        pullPolicy: Always
+        pullPolicy: IfNotPresent
 
       # Command line arguments for the operator manager
       args:
@@ -82,8 +82,7 @@ dynamo-operator:
         - --metrics-bind-address=127.0.0.1:8080
 
   # -- Secrets for pulling private container images
-  imagePullSecrets:
-    - name: ngc-secret
+  imagePullSecrets: []
 
   # Core Dynamo platform configuration
   dynamo:
@@ -215,7 +214,7 @@ dynamo-operator:
   # using the chrek Helm chart in each namespace where checkpointing is needed.
   checkpoint:
     # -- Whether to enable checkpoint/restore functionality
-    enabled: true
+    enabled: false
 
     # Storage configuration
     # These settings tell the operator where to find checkpoint storage

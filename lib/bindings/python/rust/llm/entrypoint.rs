@@ -172,6 +172,7 @@ pub(crate) struct EntrypointArgs {
     extra_engine_args: Option<PathBuf>,
     namespace: Option<String>,
     is_prefill: bool,
+    migration_limit: u32,
     engine_factory: Option<PyEngineFactory>,
 }
 
@@ -179,7 +180,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, migration_limit=0, engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -198,6 +199,7 @@ impl EntrypointArgs {
         extra_engine_args: Option<PathBuf>,
         namespace: Option<String>,
         is_prefill: bool,
+        migration_limit: u32,
         engine_factory: Option<PyObject>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
@@ -242,6 +244,7 @@ impl EntrypointArgs {
             extra_engine_args,
             namespace,
             is_prefill,
+            migration_limit,
             engine_factory,
         })
     }
@@ -274,6 +277,7 @@ pub fn make_engine<'p>(
         .request_template(args.template_file.clone())
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
+        .migration_limit(Some(args.migration_limit))
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port)

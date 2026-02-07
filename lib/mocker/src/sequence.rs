@@ -6,6 +6,7 @@ use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{TokenBlockSequence, Tokens};
 use rand::random;
+use validator::Validate;
 
 /// Create unique blocks from a TokenBlockSequence
 fn create_unique_blocks_from_sequence(
@@ -34,13 +35,14 @@ fn create_unique_blocks_from_sequence(
 
 /// A sequence that is actively being built, with the ability to add tokens and commit to hashes
 /// TODO: reuse tokens
-#[derive(Debug, Getters)]
+#[derive(Debug, Getters, Validate)]
 pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
 
     tokens: TokenBlockSequence,
 
     #[getter(copy)]
+    #[validate(range(min = 2))]
     block_size: usize,
 
     #[getter(copy)]
@@ -67,7 +69,6 @@ impl ActiveSequence {
         enable_prefix_caching: bool,
     ) -> Self {
         let block_size = block_size.unwrap_or(64);
-        assert!(block_size > 1, "block_size must be greater than 1");
         let num_input_tokens = tokens.len();
 
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
@@ -76,7 +77,7 @@ impl ActiveSequence {
         let block_hashes = tokens.blocks().iter().map(|b| b.block_hash()).collect();
         let creation_signal = Some(MoveBlock::Use(unique_blocks.clone(), block_hashes));
 
-        Self {
+        let seq = Self {
             unique_blocks,
             tokens,
             block_size,
@@ -85,7 +86,9 @@ impl ActiveSequence {
             num_input_tokens,
             creation_signal,
             enable_prefix_caching,
-        }
+        };
+        seq.validate().expect("invalid ActiveSequence");
+        seq
     }
 
     pub fn extra_tokens(&self) -> u32 {

@@ -35,12 +35,6 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "type": str,
         "help": f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: {DEFAULT_ENDPOINT}",
     },
-    "migration-limit": {
-        "flags": ["--migration-limit"],
-        "type": int,
-        "default": 0,
-        "help": "Maximum number of times a request may be migrated to a different engine worker",
-    },
     "tool-call-parser": {
         "flags": ["--dyn-tool-call-parser"],
         "type": str,
@@ -159,7 +153,6 @@ class DynamoArgs:
     namespace: str
     component: str
     endpoint: str
-    migration_limit: int
     store_kv: str
     request_plane: str
     event_plane: str
@@ -588,7 +581,6 @@ async def parse_args(args: list[str]) -> Config:
         namespace=parsed_namespace,
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
-        migration_limit=parsed_args.migration_limit,
         store_kv=parsed_args.store_kv,
         request_plane=parsed_args.request_plane,
         event_plane=parsed_args.event_plane,

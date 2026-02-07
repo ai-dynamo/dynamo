@@ -36,7 +36,6 @@ class Config:
     endpoint: str
     is_prefill_worker: bool
     is_decode_worker: bool
-    migration_limit: int = 0
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
@@ -137,12 +136,6 @@ def parse_args() -> Config:
         "--is-decode-worker",
         action="store_true",
         help="Mark this as a decode worker which does not publish KV events.",
-    )
-    parser.add_argument(
-        "--migration-limit",
-        type=int,
-        default=0,
-        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
     parser.add_argument(
         "--connector",
@@ -436,7 +429,6 @@ def parse_args() -> Config:
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.is_decode_worker = args.is_decode_worker
-    config.migration_limit = args.migration_limit
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template

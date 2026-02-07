@@ -45,6 +45,7 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use validator::Validate;
 
 /// Simple metrics struct for mocker's internal use
 #[derive(Clone, Default, Debug)]
@@ -259,12 +260,7 @@ impl Scheduler {
         kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
-        // Assert speedup_ratio is non-negative (0 means infinite speedup)
-        assert!(
-            args.speedup_ratio >= 0.0,
-            "speedup_ratio must be >= 0 (0 means infinite speedup), got: {}",
-            args.speedup_ratio
-        );
+        args.validate().expect("invalid MockEngineArgs");
 
         // Create channel for request handling
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();

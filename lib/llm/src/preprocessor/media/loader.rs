@@ -73,6 +73,7 @@ pub struct MediaLoader {
     media_decoder: MediaDecoder,
     #[allow(dead_code)]
     http_client: reqwest::Client,
+    #[allow(dead_code)]
     media_fetcher: MediaFetcher,
     #[cfg(feature = "media-nixl")]
     nixl_agent: NixlAgent,
