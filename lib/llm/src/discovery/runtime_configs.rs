@@ -72,13 +72,15 @@ impl RuntimeConfigs {
         let mut config_changed = false;
         for worker_id in new_instance_ids {
             let config = new_configs.get(worker_id).cloned();
-            let prev_config = self.configs.get(worker_id);
+            // Extract the previous value and drop the DashMap Ref guard before
+            // calling insert(). Holding the Ref (read lock) while insert() tries
+            // to acquire a write lock on the same shard causes a same-thread deadlock.
+            let prev_val = self.configs.get(worker_id).as_deref().cloned().flatten();
 
             // Check if config changed
             // Case 1: Was None/Missing, now Some -> changed
             // Case 2: Was Some(A), now Some(B) where A != B -> changed
             // Case 3: Was Some, now None -> changed (but we don't insert None usually, effectively same as case 1 inverse but here we treat missing as None)
-            let prev_val = prev_config.as_deref().cloned().flatten();
             if config != prev_val {
                 config_changed = true;
                 if prev_val.is_none() && config.is_some() {
