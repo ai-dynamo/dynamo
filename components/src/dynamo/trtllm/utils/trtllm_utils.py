@@ -66,6 +66,7 @@ class Config:
         self.enable_local_indexer: bool = False
         # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
         self.use_kv_events: bool = False
+        self.guided_decoding_backend: Optional[str] = None
 
     def __str__(self) -> str:
         return (
@@ -102,7 +103,8 @@ class Config:
             f"request_plane={self.request_plane}, "
             f"event_plane={self.event_plane}, "
             f"enable_local_indexer={self.enable_local_indexer}, "
-            f"use_kv_events={self.use_kv_events}"
+            f"use_kv_events={self.use_kv_events}, "
+            f"guided_decoding_backend={self.guided_decoding_backend}"
         )
 
 
@@ -356,6 +358,13 @@ def cmd_line_args():
         default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
         help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
+    parser.add_argument(
+        "--guided-decoding-backend",
+        type=str,
+        default=None,
+        choices=["xgrammar", "llguidance"],
+        help="Backend to use for guided decoding (structured output). Options: xgrammar, llguidance.",
+    )
 
     args = parser.parse_args()
 
@@ -424,6 +433,7 @@ def cmd_line_args():
     # Derive use_kv_events from publish_events_and_metrics
     config.use_kv_events = config.publish_events_and_metrics
     config.connector = args.connector
+    config.guided_decoding_backend = args.guided_decoding_backend
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:
