@@ -230,6 +230,10 @@ pub struct ModelDeploymentCard {
     /// `Text` for engines that take care of pre-processing themselves.
     pub model_input: ModelInput,
 
+    /// LoRA metadata for routing
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora: Option<LoraInfo>,
+
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
@@ -247,6 +251,17 @@ pub struct ModelDeploymentCard {
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
+}
+
+/// LoRA adapter information for routing decisions
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LoraInfo {
+    /// LoRA adapter name (e.g., "customer-123-v2")
+    pub name: String,
+
+    /// Maximum number of LoRA adapters that can be loaded at once on a single GPU
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gpu_lora_count: Option<u32>,
 }
 
 impl ModelDeploymentCard {
@@ -651,6 +666,7 @@ impl ModelDeploymentCard {
             migration_limit: 0,
             model_type: Default::default(),  // set later
             model_input: Default::default(), // set later
+            lora: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             media_decoder: None,

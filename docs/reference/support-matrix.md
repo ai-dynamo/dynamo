@@ -17,8 +17,11 @@ The following table shows the backend framework versions included with each Dyna
 | **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
 | **main (ToT)** | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
-| **v0.8.1.post2** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
-| **v0.8.1.post1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post2` | `0.8.0` |
+| **v1.0.0** *(planned)* | `0.15.0` | *Latest as of 2/17* | *Latest as of 2/17* | `0.10.0` |
+| **v0.9.0** *(in progress)* | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
+| **v0.8.1.post3** *(in progress)* | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post3` | `0.8.0` |
+| **v0.8.1.post2** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post2` | `0.8.0` |
+| **v0.8.1.post1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
 | **v0.8.1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
 | **v0.8.0** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
 | **v0.7.1** | `0.11.0` | `0.5.4.post3` | `1.2.0rc3` | `0.8.0` |
@@ -28,13 +31,15 @@ The following table shows the backend framework versions included with each Dyna
 | **v0.6.1** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
 | **v0.6.0** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
 
-> [!Important]
-> These are the only backend versions tested and supported with each Dynamo release. Using other backend versions is not recommended and compatibility is not guaranteed.
+### Version Labels
 
-**main (ToT)** reflects the current development branch. Patch versions (e.g., v0.8.1.post1) inherit backend versions from their base release unless otherwise noted.
+- **main (ToT)** reflects the current development branch.
+- Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
-> [!Important]
-> Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] Python wheel will fail.
+### Version Compatibility
+
+- Backend versions listed are the only versions tested and supported for each release.
+- TensorRT-LLM does not support Python 3.11; installation of the `ai-dynamo[trtllm]` wheel will fail on Python 3.11.
 
 ### CUDA Versions by Backend
 

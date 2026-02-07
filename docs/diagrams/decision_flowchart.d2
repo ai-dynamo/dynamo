@@ -1,0 +1,38 @@
+direction: down
+
+q1: "AIC shows disagg > agg\nthroughput?" {
+  shape: diamond
+}
+
+q2: "RDMA available\nin cluster?" {
+  shape: diamond
+}
+
+q3: "ISL/OSL ratio > 8:1?" {
+  shape: diamond
+}
+
+q4: "Disagg > 20%\nfaster?" {
+  shape: diamond
+}
+
+agg: "AGGREGATED\nSimpler, no RDMA needed" {
+  shape: rectangle
+  width: 380
+  height: 80
+}
+
+disagg: "DISAGGREGATED\nHigher throughput, needs RDMA" {
+  shape: rectangle
+  width: 380
+  height: 80
+}
+
+q1 -> q2: Yes
+q1 -> agg: No
+q2 -> q3: Yes
+q2 -> agg: No
+q3 -> disagg: Yes
+q3 -> q4: No
+q4 -> disagg: Yes
+q4 -> agg: No

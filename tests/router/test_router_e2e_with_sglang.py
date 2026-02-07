@@ -25,7 +25,7 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
     pytest.mark.e2e,
@@ -173,6 +173,9 @@ class SGLangProcess:
                     [
                         "--dp-size",
                         str(data_parallel_size),
+                        "--tp-size",
+                        str(data_parallel_size),
+                        "--enable-dp-attention",
                     ]
                 )
 
@@ -209,7 +212,7 @@ class SGLangProcess:
                 health_check_ports=[],
                 health_check_urls=[],
                 log_dir=request.node.name,
-                terminate_existing=False,
+                terminate_all_matching_process_names=False,
             )
             self.worker_processes.append(process)
             if data_parallel_size is not None:
@@ -251,7 +254,7 @@ class SGLangProcess:
                 if process.data_dir:
                     process._remove_directory(process.data_dir)
 
-                process._terminate_existing()
+                process._terminate_all_matching_process_names()
                 logger.info(
                     f"[SGLangProcess] Launching process {i} (pid will be assigned)..."
                 )
