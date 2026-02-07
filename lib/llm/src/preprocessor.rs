@@ -277,6 +277,7 @@ impl OpenAIPreprocessor {
                 enable_local_updates: nvext.enable_local_updates,
                 expected_output_tokens: nvext.expected_output_tokens,
                 lora_name,
+                ..Default::default()
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {

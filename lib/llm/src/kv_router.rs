@@ -54,7 +54,7 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
-        sequence::SequenceError,
+        sequence::{SequenceError, SequenceRequest},
         subscriber::{start_kv_router_background, start_kv_router_background_event_plane},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -476,6 +476,7 @@ impl KvRouter {
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        priority_jump: f64,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         #[cfg(feature = "bench")]
         let start = Instant::now();
@@ -508,6 +509,7 @@ impl KvRouter {
                 router_config_override,
                 update_states,
                 lora_name,
+                priority_jump,
             )
             .await?;
 
@@ -553,15 +555,15 @@ impl KvRouter {
 
         if let Err(e) = self
             .scheduler
-            .add_request(
-                request_id.clone(),
-                maybe_seq_hashes,
-                isl_tokens,
-                overlap_blocks,
+            .add_request(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: maybe_seq_hashes,
+                isl: isl_tokens,
+                overlap: overlap_blocks,
                 expected_output_tokens,
                 worker,
                 lora_name,
-            )
+            })
             .await
         {
             tracing::warn!("Failed to add request {request_id}: {e}");
@@ -698,7 +700,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = match request {
             RouterRequest::New { tokens } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true, None)
+                    .find_best_match(Some(&context_id), &tokens, None, true, None, 0.0)
                     .await?;
 
                 RouterResponse::New {
@@ -755,6 +757,7 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
+        let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
 
@@ -778,6 +781,7 @@ impl KvPushRouter {
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,
+                    priority_jump,
                 )
                 .await?;
 
