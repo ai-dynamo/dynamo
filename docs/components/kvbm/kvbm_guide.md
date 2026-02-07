@@ -223,6 +223,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # Launch the container
 ./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
 ```
+> [!NOTE]
 > Important: After logging into the Dynamo TensorRT-LLM runtime container, copy the Triton kernels into the container’s virtual environment as a separate Python module.
 
 ```bash
