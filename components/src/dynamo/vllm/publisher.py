@@ -18,23 +18,6 @@ from dynamo.runtime import Component
 # This ensures these metrics are isolated and can be exposed via their own callback
 DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
-# Gauges will be lazily initialized after PROMETHEUS_MULTIPROC_DIR is set
-DYNAMO_COMPONENT_GAUGES: LLMBackendMetrics | None = None
-
-
-def _ensure_gauges_initialized(
-    model_name: str = "",
-    component_name: str = "",
-):
-    """Lazy initialization of gauges after PROMETHEUS_MULTIPROC_DIR is set."""
-    global DYNAMO_COMPONENT_GAUGES
-    if DYNAMO_COMPONENT_GAUGES is None:
-        DYNAMO_COMPONENT_GAUGES = LLMBackendMetrics(
-            registry=DYNAMO_COMPONENT_REGISTRY,
-            model_name=model_name,
-            component_name=component_name,
-        )  # pyright: ignore[reportConstantRedefinition]
-
 
 class NullStatLogger(StatLoggerBase):
     def __init__(self):
@@ -61,11 +44,13 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self,
         component: Component,
         dp_rank: int,
+        component_gauges: LLMBackendMetrics,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
         self._component = component
         self.dp_rank = dp_rank
+        self.component_gauges = component_gauges
         self.num_gpu_block = 1
         # Schedule async endpoint creation
         self._endpoint_task = asyncio.create_task(self._create_endpoint())
@@ -95,21 +80,21 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self.inner.publish(self.dp_rank, active_decode_blocks)
 
         dp_rank_str = str(self.dp_rank)
-        DYNAMO_COMPONENT_GAUGES.set_total_blocks(dp_rank_str, self.num_gpu_block)
+        self.component_gauges.set_total_blocks(dp_rank_str, self.num_gpu_block)
 
         # Set GPU cache usage percentage directly from scheduler_stats
         # Note: vLLM's scheduler_stats.kv_cache_usage returns very small values
         # (e.g., 0.0000834 for ~0.08% usage), which Prometheus outputs in scientific
         # notation (8.34e-05). This is the correct value and will be properly parsed.
-        DYNAMO_COMPONENT_GAUGES.set_gpu_cache_usage(
+        self.component_gauges.set_gpu_cache_usage(
             dp_rank_str, scheduler_stats.kv_cache_usage
         )
 
     def init_publish(self):
         self.inner.publish(self.dp_rank, 0)
         dp_rank_str = str(self.dp_rank)
-        DYNAMO_COMPONENT_GAUGES.set_total_blocks(dp_rank_str, 0)
-        DYNAMO_COMPONENT_GAUGES.set_gpu_cache_usage(dp_rank_str, 0.0)
+        self.component_gauges.set_total_blocks(dp_rank_str, 0)
+        self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
 
     def log_engine_initialized(self) -> None:
         pass
@@ -121,10 +106,12 @@ class StatLoggerFactory:
     def __init__(
         self,
         component: Component,
+        component_gauges: Optional[LLMBackendMetrics] = None,
         dp_rank: int = 0,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.component = component
+        self.component_gauges = component_gauges
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
         self.dp_rank = dp_rank
         self.metrics_labels = metrics_labels or []
@@ -132,8 +119,16 @@ class StatLoggerFactory:
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
             return NullStatLogger()
+        # component_gauges must be set by setup_vllm_engine() before vLLM
+        # calls create_stat_logger() during engine initialization.
+        assert (
+            self.component_gauges is not None
+        ), "component_gauges must be set before creating stat loggers"
         logger = DynamoStatLoggerPublisher(
-            self.component, dp_rank, metrics_labels=self.metrics_labels
+            self.component,
+            dp_rank,
+            component_gauges=self.component_gauges,
+            metrics_labels=self.metrics_labels,
         )
         self.created_logger = logger
 
