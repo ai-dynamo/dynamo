@@ -445,13 +445,64 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
         let messages_json =
             serde_json::to_value(&messages_value).context("Failed to convert messages to JSON")?;
 
-        let messages_array = messages_json
+        let mut messages_array = messages_json
             .as_array()
-            .context("Messages is not an array")?;
+            .context("Messages is not an array")?
+            .clone();
+
+        // Inject tools and response_format from request into the first system message
+        // DeepSeek V3.2 expects these to be part of the system message for prompt rendering
+        let tools_json = req
+            .tools()
+            .map(|t| serde_json::to_value(&t))
+            .transpose()
+            .context("Failed to convert tools to JSON")?;
+
+        let response_format_json = req
+            .response_format()
+            .map(|rf| serde_json::to_value(&rf))
+            .transpose()
+            .context("Failed to convert response_format to JSON")?;
+
+        if tools_json.is_some() || response_format_json.is_some() {
+            // Find or create system message
+            let system_idx = messages_array
+                .iter()
+                .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
+
+            if let Some(idx) = system_idx {
+                // Add to existing system message
+                if let Some(msg) = messages_array.get_mut(idx)
+                    && let Some(obj) = msg.as_object_mut()
+                {
+                    if let Some(tools) = tools_json {
+                        obj.insert("tools".to_string(), tools);
+                    }
+                    if let Some(rf) = response_format_json {
+                        obj.insert("response_format".to_string(), rf);
+                    }
+                }
+            } else {
+                // Create a system message if none exists
+                let mut system_msg = serde_json::json!({
+                    "role": "system",
+                    "content": ""
+                });
+                if let Some(obj) = system_msg.as_object_mut() {
+                    if let Some(tools) = tools_json {
+                        obj.insert("tools".to_string(), tools);
+                    }
+                    if let Some(rf) = response_format_json {
+                        obj.insert("response_format".to_string(), rf);
+                    }
+                }
+                messages_array.insert(0, system_msg);
+            }
+        }
 
         // Encode with native implementation
         encode_messages(
-            messages_array,
+            &messages_array,
             self.thinking_mode,
             true, // always add BOS token
         )
@@ -510,5 +561,404 @@ mod tests {
         assert!(result.contains("## Tools"));
         assert!(result.contains("get_weather"));
         assert!(result.contains("<functions>"));
+    }
+
+    // Mock request for testing OAIPromptFormatter implementation
+    struct MockRequest {
+        messages: JsonValue,
+        tools: Option<JsonValue>,
+        response_format: Option<JsonValue>,
+    }
+
+    impl MockRequest {
+        fn new(messages: JsonValue) -> Self {
+            Self {
+                messages,
+                tools: None,
+                response_format: None,
+            }
+        }
+
+        fn with_tools(mut self, tools: JsonValue) -> Self {
+            self.tools = Some(tools);
+            self
+        }
+
+        fn with_response_format(mut self, response_format: JsonValue) -> Self {
+            self.response_format = Some(response_format);
+            self
+        }
+    }
+
+    impl super::super::OAIChatLikeRequest for MockRequest {
+        fn model(&self) -> String {
+            "deepseek-v3.2".to_string()
+        }
+
+        fn messages(&self) -> minijinja::value::Value {
+            minijinja::value::Value::from_serialize(&self.messages)
+        }
+
+        fn tools(&self) -> Option<minijinja::value::Value> {
+            self.tools
+                .as_ref()
+                .map(minijinja::value::Value::from_serialize)
+        }
+
+        fn response_format(&self) -> Option<minijinja::value::Value> {
+            self.response_format
+                .as_ref()
+                .map(minijinja::value::Value::from_serialize)
+        }
+
+        fn should_add_generation_prompt(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_formatter_injects_tools_into_existing_system_message() {
+        use super::super::OAIPromptFormatter;
+
+        let tools = json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get current weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City name"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location"]
+                }
+            }
+        }]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "What's the weather in Moscow?"}
+        ]))
+        .with_tools(tools);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // Verify tools were injected into the prompt
+        assert!(
+            result.contains("## Tools"),
+            "Should contain Tools section header"
+        );
+        assert!(
+            result.contains("get_weather"),
+            "Should contain function name"
+        );
+        assert!(
+            result.contains("<functions>"),
+            "Should contain functions block"
+        );
+        assert!(
+            result.contains("</functions>"),
+            "Should contain closing functions tag"
+        );
+        assert!(
+            result.contains("You are a helpful assistant."),
+            "Should preserve original system content"
+        );
+        assert!(
+            result.contains(&format!("<{}function_calls>", tokens::DSML_TOKEN)),
+            "Should contain DSML format instructions"
+        );
+    }
+
+    #[test]
+    fn test_formatter_creates_system_message_for_tools_when_missing() {
+        use super::super::OAIPromptFormatter;
+
+        let tools = json!([{
+            "type": "function",
+            "function": {
+                "name": "get_current_time",
+                "description": "Get current time in a timezone",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "timezone": {"type": "string"}
+                    },
+                    "required": ["timezone"]
+                }
+            }
+        }]);
+
+        // Request without system message
+        let request = MockRequest::new(json!([
+            {"role": "user", "content": "What time is it in Tokyo?"}
+        ]))
+        .with_tools(tools);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // Verify tools were injected via auto-created system message
+        assert!(
+            result.contains("## Tools"),
+            "Should contain Tools section even without explicit system message"
+        );
+        assert!(
+            result.contains("get_current_time"),
+            "Should contain function name"
+        );
+        assert!(
+            result.contains("<functions>"),
+            "Should contain functions block"
+        );
+    }
+
+    #[test]
+    fn test_formatter_without_tools_does_not_add_tools_section() {
+        use super::super::OAIPromptFormatter;
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]));
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // Verify no tools section was added
+        assert!(
+            !result.contains("## Tools"),
+            "Should not contain Tools section when no tools provided"
+        );
+        assert!(
+            !result.contains("<functions>"),
+            "Should not contain functions block when no tools provided"
+        );
+        assert!(
+            result.contains("You are a helpful assistant."),
+            "Should preserve system content"
+        );
+    }
+
+    #[test]
+    fn test_formatter_with_multiple_tools() {
+        use super::super::OAIPromptFormatter;
+
+        let tools = json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Get current time",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "timezone": {"type": "string"}
+                        }
+                    }
+                }
+            }
+        ]);
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Weather and time in Moscow?"}
+        ]))
+        .with_tools(tools);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // Verify both tools are present
+        assert!(
+            result.contains("get_weather"),
+            "Should contain first function"
+        );
+        assert!(
+            result.contains("get_current_time"),
+            "Should contain second function"
+        );
+    }
+
+    // ==================== Structured Output Tests ====================
+
+    #[test]
+    fn test_formatter_injects_response_format_into_existing_system_message() {
+        use super::super::OAIPromptFormatter;
+
+        let response_format = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "city_info",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "country": {"type": "string"},
+                        "population": {"type": "number"}
+                    },
+                    "required": ["city", "country", "population"]
+                }
+            }
+        });
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Tell me about Moscow."}
+        ]))
+        .with_response_format(response_format);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // Verify response format was injected into the prompt
+        assert!(
+            result.contains("## Response Format:"),
+            "Should contain Response Format section header"
+        );
+        assert!(
+            result.contains("json_schema"),
+            "Should contain json_schema type"
+        );
+        assert!(result.contains("city_info"), "Should contain schema name");
+        assert!(
+            result.contains("You are a helpful assistant."),
+            "Should preserve original system content"
+        );
+    }
+
+    #[test]
+    fn test_formatter_creates_system_message_for_response_format_when_missing() {
+        use super::super::OAIPromptFormatter;
+
+        let response_format = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "weather_response",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "temperature": {"type": "number"},
+                        "conditions": {"type": "string"}
+                    }
+                }
+            }
+        });
+
+        // Request without system message
+        let request = MockRequest::new(json!([
+            {"role": "user", "content": "What's the weather?"}
+        ]))
+        .with_response_format(response_format);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // Verify response format was injected via auto-created system message
+        assert!(
+            result.contains("## Response Format:"),
+            "Should contain Response Format section even without explicit system message"
+        );
+        assert!(
+            result.contains("weather_response"),
+            "Should contain schema name"
+        );
+    }
+
+    #[test]
+    fn test_formatter_with_both_tools_and_response_format() {
+        use super::super::OAIPromptFormatter;
+
+        let tools = json!([{
+            "type": "function",
+            "function": {
+                "name": "search_database",
+                "description": "Search the database",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    }
+                }
+            }
+        }]);
+
+        let response_format = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "search_result",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "results": {"type": "array"},
+                        "total_count": {"type": "number"}
+                    }
+                }
+            }
+        });
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a search assistant."},
+            {"role": "user", "content": "Find documents about Rust."}
+        ]))
+        .with_tools(tools)
+        .with_response_format(response_format);
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // Verify both tools and response format are present
+        assert!(result.contains("## Tools"), "Should contain Tools section");
+        assert!(
+            result.contains("search_database"),
+            "Should contain function name"
+        );
+        assert!(
+            result.contains("## Response Format:"),
+            "Should contain Response Format section"
+        );
+        assert!(
+            result.contains("search_result"),
+            "Should contain schema name"
+        );
+        assert!(
+            result.contains("You are a search assistant."),
+            "Should preserve original system content"
+        );
+    }
+
+    #[test]
+    fn test_formatter_without_response_format_does_not_add_response_format_section() {
+        use super::super::OAIPromptFormatter;
+
+        let request = MockRequest::new(json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"}
+        ]));
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        // Verify no response format section was added
+        assert!(
+            !result.contains("## Response Format:"),
+            "Should not contain Response Format section when not provided"
+        );
     }
 }
