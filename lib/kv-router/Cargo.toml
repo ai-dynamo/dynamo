@@ -52,6 +52,11 @@ harness = false
 required-features = ["bench"]
 
 [[bench]]
+name = "concurrent_microbench"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
 name = "kv_indexer_bench"
 harness = false
 required-features = ["bench"]

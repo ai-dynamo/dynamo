@@ -3,7 +3,7 @@
 
 //! Positional HashMap-based KV cache index with nested structure.
 //!
-//! This module provides a `NestedMap` structure that uses nested HashMaps
+//! This module provides a `PositionalIndexer` that uses nested HashMaps
 //! keyed by position for better cache locality and enables jump/binary-search
 //! optimizations in find_matches.
 //!
@@ -13,23 +13,22 @@
 //!   The main lookup structure. Position-first nesting enables O(1) position access.
 //! - `worker_blocks`: worker -> seq_hash -> (position, local_hash)
 //!   Per-worker reverse lookup for efficient remove operations.
-use async_trait::async_trait;
+//!
+//! # Threading
+//!
+//! `PositionalIndexer` implements `SyncIndexer`, meaning all its methods are
+//! synchronous and thread-safe (via `DashMap` and `RwLock`). To get the full
+//! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
+//! in a `ThreadPoolIndexer`.
 use dashmap::DashMap;
-use flume::unbounded;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread::JoinHandle;
+use std::sync::RwLock;
 
-use std::time::Duration;
-
+use crate::indexer::SyncIndexer;
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
-    RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank, KvCacheStoreData,
+    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
+    LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
 };
-
-use crate::compute_block_hash_for_seq;
-use crate::indexer::{KvIndexerInterface, KvRouterError};
 
 /// Entry for the innermost level of the index.
 ///
@@ -103,182 +102,64 @@ impl SeqEntry {
 
 type LevelIndex = RwLock<HashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>>;
 
+/// Positional HashMap-based KV cache index.
+///
+/// Implements [`SyncIndexer`] for use with [`ThreadPoolIndexer`](crate::indexer::ThreadPoolIndexer).
+/// All methods are synchronous and thread-safe.
 pub struct PositionalIndexer {
-    index: Arc<DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>>,
+    index: DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
     /// Per-worker reverse lookup: worker -> seq_hash -> (position, local_hash)
     /// Enables efficient remove operations without global flat reverse map.
-    worker_blocks: Arc<DashMap<WorkerWithDpRank, LevelIndex>>,
+    worker_blocks: DashMap<WorkerWithDpRank, LevelIndex>,
 
-    /// Maps WorkerId to worker thread index for sticky routing.
-    worker_assignments: Arc<DashMap<WorkerId, usize>>,
-    /// Counter for round-robin assignment of new WorkerIds.
-    worker_assignment_count: AtomicUsize,
-
-    /// Channels to send events to worker threads.
-    worker_event_channels: Arc<Vec<flume::Sender<Option<RouterEvent>>>>,
-
-    num_workers: usize,
-    kv_block_size: u32,
     jump_size: usize,
-
-    /// Handles to worker threads for joining on shutdown.
-    thread_handles: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl PositionalIndexer {
     /// Create a new PositionalIndexer.
     ///
     /// # Arguments
-    /// * `num_workers` - Number of worker threads for event processing
-    /// * `kv_block_size` - Block size for KV cache
     /// * `jump_size` - Jump size for find_matches optimization (e.g., 32).
     ///   The algorithm jumps by this many positions at a time, only scanning
     ///   intermediate positions when workers drain (stop matching).
-    pub fn new(num_workers: usize, kv_block_size: u32, jump_size: usize) -> Self {
-        assert!(num_workers > 0, "Number of workers must be greater than 0");
+    pub fn new(jump_size: usize) -> Self {
         assert!(jump_size > 0, "jump_size must be greater than 0");
 
-        let index = Arc::new(DashMap::new());
-        let worker_blocks = Arc::new(DashMap::new());
-        let mut worker_event_senders = Vec::new();
-        let mut thread_handles = Vec::new();
-
-        for _ in 0..num_workers {
-            let (event_sender, event_receiver) = unbounded::<Option<RouterEvent>>();
-            worker_event_senders.push(event_sender);
-
-            let index = Arc::clone(&index);
-            let worker_blocks = Arc::clone(&worker_blocks);
-
-            let handle = std::thread::spawn(move || {
-                loop {
-                    
-                    if let Ok(Some(event)) = event_receiver.recv() {
-                        if let Err(e) = Self::apply_event_impl(&index, &worker_blocks, event) {
-                            tracing::warn!("Failed to apply event: {:?}", e);
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            });
-            thread_handles.push(handle);
-        }
-
         Self {
-            index,
-            worker_blocks,
-            worker_assignments: Arc::new(DashMap::new()),
-            worker_assignment_count: AtomicUsize::new(0),
-            worker_event_channels: Arc::new(worker_event_senders),
-            num_workers,
-            kv_block_size,
+            index: DashMap::new(),
+            worker_blocks: DashMap::new(),
             jump_size,
-            thread_handles: Mutex::new(thread_handles),
-        }
-    }
-
-    /// Wait for all pending events and requests to be processed. Used primarily for debugging and benchmarking.
-    pub async fn flush(&self) {
-        loop {
-            let mut all_empty = true;
-
-            for worker_event_channel in self.worker_event_channels.iter() {
-                if !worker_event_channel.is_empty() {
-                    all_empty = false;
-                    break;
-                }
-            }
-
-            if all_empty {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 }
 
-#[async_trait]
-impl KvIndexerInterface for PositionalIndexer {
-    async fn find_matches(
-        &self,
-        sequence: Vec<LocalBlockHash>,
-    ) -> Result<OverlapScores, KvRouterError> {
+// ============================================================================
+// SyncIndexer implementation
+// ============================================================================
 
-        Ok(
-            self.jump_search_matches(&sequence, false)
-        )
+impl SyncIndexer for PositionalIndexer {
+    fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
+        self.jump_search_matches(sequence, early_exit)
     }
 
-    async fn find_matches_for_request(
-        &self,
-        tokens: &[u32],
-    ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
-        self.find_matches(sequence).await
+    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+        Self::apply_event_impl(&self.index, &self.worker_blocks, event)
     }
 
-    async fn apply_event(&self, event: RouterEvent) {
-        let worker_id = event.worker_id;
-
-        // Get or assign worker thread index using sticky round-robin
-        let thread_idx = *self.worker_assignments.entry(worker_id).or_insert_with(|| {
-            let idx = self
-                .worker_assignment_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let assigned_worker = idx % self.num_workers;
-            tracing::debug!("Worker {} assigned to thread {}", worker_id, assigned_worker);
-            assigned_worker
-        });
-
-        // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(Some(event)) {
-            tracing::error!(
-                "Failed to send event to worker thread {}: {:?}",
-                thread_idx,
-                e
-            );
-        }
+    fn remove_worker(&self, worker_id: WorkerId) {
+        Self::remove_or_clear_worker_blocks_impl(&self.index, &self.worker_blocks, worker_id, false);
     }
 
-    async fn remove_worker(&self, worker_id: WorkerId) {
-        self.remove_worker_blocks(worker_id);
-    }
-
-    fn shutdown(&self) {
-
-        for channel in self.worker_event_channels.iter() {
-            channel.send(None).unwrap();
-        }
-
-        // Take ownership of thread handles and join them
-        let handles = std::mem::take(
-            &mut *self
-                .thread_handles
-                .lock()
-                .expect("thread_handles mutex poisoned"),
-        );
-        for handle in handles {
-            if let Err(e) = handle.join() {
-                tracing::error!("Worker thread panicked during shutdown: {:?}", e);
-            }
-        }
-    }
-
-    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        unimplemented!();
-    }
-
-    async fn process_routing_decision_for_request(
-        &self,
-        _tokens_with_hashes: &mut TokensWithHashes,
-        _worker: WorkerWithDpRank,
-    ) -> Result<(), KvRouterError> {
-        // TODO(jthomson04): Nothing to do here, right?
-        Ok(())
+    fn dump_events(&self) -> Vec<RouterEvent> {
+        // Not implemented for positional indexer - would require reconstructing
+        // the tree structure from the flat position-based index.
+        unimplemented!("dump_events is not supported for PositionalIndexer");
     }
 }
+
+// ============================================================================
+// Event processing (write operations)
+// ============================================================================
 
 impl PositionalIndexer {
     /// Process an event using the provided index and worker_blocks.
@@ -302,11 +183,16 @@ impl PositionalIndexer {
         match op {
             KvCacheEventData::Stored(store_data) => {
                 Self::store_blocks_impl(index, worker_blocks, worker, store_data, id)?;
-
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                Self::remove_blocks_impl(index, worker_blocks, worker, &remove_data.block_hashes, id)?;
+                Self::remove_blocks_impl(
+                    index,
+                    worker_blocks,
+                    worker,
+                    &remove_data.block_hashes,
+                    id,
+                )?;
                 Ok(())
             }
             KvCacheEventData::Cleared => {
@@ -326,8 +212,6 @@ impl PositionalIndexer {
         // Determine starting position based on parent_hash
         let start_pos = match store_data.parent_hash {
             Some(parent_hash) => {
-                // Find parent position from worker_blocks
-
                 let Some(worker_map) = worker_blocks.get(&worker) else {
                     tracing::warn!(
                         worker_id = worker.worker_id.to_string(),
@@ -369,13 +253,16 @@ impl PositionalIndexer {
 
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
             let worker_map = worker_blocks.entry(worker).or_default();
-            worker_map.write().unwrap().insert(seq_hash, (position, local_hash));
+            worker_map
+                .write()
+                .unwrap()
+                .insert(seq_hash, (position, local_hash));
         }
 
         Ok(())
     }
 
-    fn remove_blocks_impl(        
+    fn remove_blocks_impl(
         index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
         worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
         worker: WorkerWithDpRank,
@@ -404,7 +291,7 @@ impl PositionalIndexer {
                 );
                 return Err(KvCacheEventError::BlockNotFound);
             };
-    
+
             // Remove from index
             if let Some(pos_map) = index.get(&position)
                 && let Some(mut entry) = pos_map.get_mut(&local_hash)
@@ -480,9 +367,9 @@ impl PositionalIndexer {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Jump-based search methods (associated functions for use in worker threads)
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Jump-based search methods (read operations)
+// ============================================================================
 
 impl PositionalIndexer {
     /// Compute sequence hash incrementally from previous hash and current local hash.
@@ -663,26 +550,15 @@ impl PositionalIndexer {
                 local_hashes,
             );
 
-            let num_workers_at_next = workers_at_next.as_ref().map(|workers| workers.len()).unwrap_or(0);
+            let num_workers_at_next = workers_at_next
+                .as_ref()
+                .map(|workers| workers.len())
+                .unwrap_or(0);
 
             if num_workers_at_next == active.len() {
                 current_pos = next_pos;
-            } else if num_workers_at_next == 0 {
-                // No active workers match at jump destination
-                // Scan the range to find where each worker drained
-                self.linear_scan_drain(
-                    local_hashes,
-                    &mut seq_hashes,
-                    &mut active,
-                    &mut scores,
-                    current_pos + 1,
-                    next_pos + 1,
-                    false,
-                );
-                current_pos = next_pos;
             } else {
-                // Partial match - some workers drained in between
-                // Scan the range to find exact drain points
+                // Some or all workers drained in between - scan the range
                 self.linear_scan_drain(
                     local_hashes,
                     &mut seq_hashes,

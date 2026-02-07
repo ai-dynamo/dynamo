@@ -60,7 +60,10 @@ use std::sync::OnceLock;
 use std::{
     collections::VecDeque,
     iter,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::AtomicUsize,
+        Arc, Mutex,
+    },
     thread::JoinHandle,
     time::Duration,
 };
@@ -346,6 +349,247 @@ pub trait KvIndexerInterface {
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError>;
+}
+
+// ============================================================================
+// SyncIndexer trait and ThreadPoolIndexer generic wrapper
+// ============================================================================
+
+/// Trait for thread-safe data structures that support KV cache indexing operations.
+///
+/// All methods take `&self` and are synchronous. Implementations must be safe for
+/// concurrent access (via internal locking, DashMap, etc).
+///
+/// This trait is used with [`ThreadPoolIndexer`], which wraps a `SyncIndexer` to
+/// provide the async [`KvIndexerInterface`] with:
+/// - Sticky event routing to N worker threads
+/// - Inline reads on the caller's thread (no channel dispatch for find_matches)
+pub trait SyncIndexer: Send + Sync + 'static {
+    /// Find matches for a sequence of block hashes.
+    fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
+
+    /// Apply a router event to the data structure.
+    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError>;
+
+    /// Remove all entries for a worker.
+    fn remove_worker(&self, worker_id: WorkerId);
+
+    /// Dump the data structure as router events for reconstruction.
+    fn dump_events(&self) -> Vec<RouterEvent>;
+}
+
+/// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
+///
+/// Spawns N OS threads for processing write events (sticky-routed by WorkerId).
+/// Read operations (find_matches) are executed inline on the caller's thread,
+/// avoiding channel overhead and allowing reads to scale with callers.
+///
+/// # Architecture
+///
+/// ```text
+///                                       +------------------------------------+
+///                                       |     N Worker Threads (OS threads)  |
+///                                       |                                    |
+///  worker_event_channels[0] ----------> |   Thread 0: blocking recv loop     |
+///  worker_event_channels[1] ----------> |   Thread 1: blocking recv loop     |
+///  worker_event_channels[N] ----------> |   Thread N: blocking recv loop     |
+///                                       |                                    |
+///  find_matches() ---(inline)---------> |   Arc<T: SyncIndexer>              |
+///                                       |   (shared, thread-safe)            |
+///                                       +------------------------------------+
+/// ```
+pub struct ThreadPoolIndexer<T: SyncIndexer> {
+    /// Shared backend - thread-safe via internal locking.
+    backend: Arc<T>,
+
+    /// Maps WorkerId to worker thread index for sticky routing.
+    worker_assignments: DashMap<WorkerId, usize>,
+    /// Counter for round-robin assignment of new WorkerIds.
+    worker_assignment_count: AtomicUsize,
+
+    /// Channels to send events to worker threads (one per thread).
+    /// Sending `None` signals the thread to shut down.
+    worker_event_channels: Vec<flume::Sender<Option<RouterEvent>>>,
+
+    /// Number of worker threads.
+    num_workers: usize,
+    /// Block size for KV cache.
+    kv_block_size: u32,
+
+    /// Counter for pending + in-flight event operations (used by flush).
+    /// Incremented when an event is sent, decremented after processing completes.
+    pending_events: Arc<AtomicUsize>,
+
+    /// Handles to worker threads for joining on shutdown.
+    thread_handles: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl<T: SyncIndexer> ThreadPoolIndexer<T> {
+    /// Create a new `ThreadPoolIndexer` wrapping the given backend.
+    ///
+    /// Spawns `num_workers` OS threads, each running a blocking recv loop
+    /// that processes events by calling `backend.apply_event()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - The thread-safe data structure to wrap
+    /// * `num_workers` - Number of worker threads for event processing
+    /// * `kv_block_size` - Block size for KV cache
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_workers` is 0.
+    pub fn new(backend: T, num_workers: usize, kv_block_size: u32) -> Self {
+        assert!(num_workers > 0, "Number of workers must be greater than 0");
+
+        let backend = Arc::new(backend);
+        let mut worker_event_senders = Vec::new();
+        let mut thread_handles = Vec::new();
+        let pending_events = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..num_workers {
+            let (event_sender, event_receiver) = flume::unbounded::<Option<RouterEvent>>();
+            worker_event_senders.push(event_sender);
+
+            let backend = Arc::clone(&backend);
+            let pending_events = Arc::clone(&pending_events);
+
+            let handle = std::thread::spawn(move || {
+                loop {
+                    if let Ok(Some(event)) = event_receiver.recv() {
+                        if let Err(e) = backend.apply_event(event) {
+                            tracing::warn!("Failed to apply event: {:?}", e);
+                        }
+                        pending_events.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    } else {
+                        // Channel closed or received None (shutdown signal)
+                        break;
+                    }
+                }
+            });
+            thread_handles.push(handle);
+        }
+
+        Self {
+            backend,
+            worker_assignments: DashMap::new(),
+            worker_assignment_count: AtomicUsize::new(0),
+            worker_event_channels: worker_event_senders,
+            num_workers,
+            kv_block_size,
+            pending_events,
+            thread_handles: Mutex::new(thread_handles),
+        }
+    }
+
+    /// Get a reference to the underlying backend.
+    pub fn backend(&self) -> &T {
+        &self.backend
+    }
+
+    /// Wait for all pending events to be processed.
+    ///
+    /// Used primarily for testing and benchmarking to ensure all write operations
+    /// have completed before checking results.
+    pub async fn flush(&self) {
+        loop {
+            let pending = self
+                .pending_events
+                .load(std::sync::atomic::Ordering::SeqCst);
+
+            if pending == 0 {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+}
+
+#[async_trait]
+impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        // Execute inline on caller's thread - no channel dispatch
+        Ok(self.backend.find_matches(&sequence, false))
+    }
+
+    async fn find_matches_for_request(
+        &self,
+        tokens: &[u32],
+    ) -> Result<OverlapScores, KvRouterError> {
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        Ok(self.backend.find_matches(&sequence, false))
+    }
+
+    async fn apply_event(&self, event: RouterEvent) {
+        let worker_id = event.worker_id;
+
+        // Get or assign worker thread index using sticky round-robin
+        let thread_idx = *self.worker_assignments.entry(worker_id).or_insert_with(|| {
+            let idx = self
+                .worker_assignment_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            idx % self.num_workers
+        });
+
+        // Increment pending counter BEFORE sending to avoid race with flush
+        self.pending_events
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        // Send event to the assigned worker thread
+        if let Err(e) = self.worker_event_channels[thread_idx].send(Some(event)) {
+            // Decrement counter since the event won't be processed
+            self.pending_events
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                "Failed to send event to worker thread {}: {:?}",
+                thread_idx,
+                e
+            );
+        }
+    }
+
+    async fn remove_worker(&self, worker_id: WorkerId) {
+        // Execute inline - the backend is thread-safe
+        self.backend.remove_worker(worker_id);
+    }
+
+    fn shutdown(&self) {
+        // Send shutdown signal (None) to all worker threads
+        for channel in self.worker_event_channels.iter() {
+            let _ = channel.send(None);
+        }
+
+        // Take ownership of thread handles and join them
+        let handles = std::mem::take(
+            &mut *self
+                .thread_handles
+                .lock()
+                .expect("thread_handles mutex poisoned"),
+        );
+        for handle in handles {
+            if let Err(e) = handle.join() {
+                tracing::error!("Worker thread panicked during shutdown: {:?}", e);
+            }
+        }
+    }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        // Execute inline - the backend is thread-safe
+        Ok(self.backend.dump_events())
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        _tokens_with_hashes: &mut TokensWithHashes,
+        _worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        // No-op: pruning not supported in ThreadPoolIndexer
+        Ok(())
+    }
 }
 
 /// A request to process a routing decision.
@@ -1626,6 +1870,7 @@ impl Drop for KvIndexerSharded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::concurrent_radix_tree::ConcurrentRadixTree;
     use crate::nested_map::PositionalIndexer;
     use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash, compute_seq_hash_for_block};
     use rstest::rstest;
@@ -1789,7 +2034,7 @@ mod tests {
 
     #[template]
     #[rstest]
-    fn indexer_template(#[values("single", "sharded", "flat")] variant: &str) {}
+    fn indexer_template(#[values("single", "sharded", "flat", "concurrent")] variant: &str) {}
 
     fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
         let token = CancellationToken::new();
@@ -1799,7 +2044,8 @@ mod tests {
         match variant {
             "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics)),
             "sharded" => Box::new(KvIndexerSharded::new(token, 4, kv_block_size, metrics)),
-            "flat" => Box::new(PositionalIndexer::new(4, kv_block_size, 32)),
+            "flat" => Box::new(ThreadPoolIndexer::new(PositionalIndexer::new(32), 4, kv_block_size)),
+            "concurrent" => Box::new(ThreadPoolIndexer::new(ConcurrentRadixTree::new(), 4, kv_block_size)),
             _ => panic!("Unknown variant: {}", variant),
         }
     }
@@ -1959,7 +2205,10 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_dump_and_restore(variant: &str) {
-        if variant == "flat" {
+        if variant == "flat" || variant == "concurrent" {
+            // ThreadPoolIndexer variants dispatch events to worker threads,
+            // and there is no flush available through KvIndexerInterface.
+            // dump_events may run before events are processed.
             return;
         }
         let index = make_indexer(variant);
