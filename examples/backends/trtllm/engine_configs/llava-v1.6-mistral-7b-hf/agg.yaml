@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,16 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
 enable_attention_dp: false
-disable_overlap_scheduler: true
-moe_config:
-    backend: CUTLASS
+max_num_tokens: 8192
+max_batch_size: 16
+trust_remote_code: true
+backend: pytorch
 enable_chunked_prefill: true
-cuda_graph_config:
-    max_batch_size: 32
-    enable_padding: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.60
+  enable_block_reuse: false
+
 cache_transceiver_config:
-  backend: UCX
-  max_tokens_in_buffer: 65536
-print_iter_log: false
-stream_interval: 10
+  backend: DEFAULT

@@ -63,6 +63,7 @@ spec:
         env:
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
+        imagePullPolicy: {{ .Values.controllerManager.kubeRbacProxy.image.pullPolicy | quote }}
         image: {{ .Values.controllerManager.kubeRbacProxy.image.repository }}:{{
           .Values.controllerManager.kubeRbacProxy.image.tag | default .Chart.AppVersion
           }}
@@ -177,6 +178,7 @@ spec:
         envFrom:
         - secretRef:
             name: dynamo-deployment-env
+        imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | quote }}
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag
 | default .Chart.AppVersion }}
         livenessProbe:

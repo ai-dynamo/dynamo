@@ -139,7 +139,11 @@ The following diagram illustrates the block lifecycle, based on vLLM's block man
 
 ### Evictor
 
-The LRU evictor maintains blocks ordered by their last access time, enabling O(1) eviction of the oldest unused block. It supports both normal insertion (for completed sequences) and front-insertion (for preempted sequences that should be evicted first if memory pressure continues).
+The LRU evictor maintains blocks ordered by a monotonic counter, enabling O(log n) eviction of the lowest-priority block. Each `insert` assigns the next counter value, so blocks inserted later have higher counters and survive longer.
+
+This produces a **depth-aware eviction policy**: when a sequence completes, `free_signal` releases its blocks in reverse order (tail first). Deeper suffix blocks therefore receive lower counters and are evicted before shallower prefix blocks. This keeps shared prefixes cached longer, improving cache hit rates across requests with common prefixes.
+
+The evictor also supports front-insertion (negative counters) for marking blocks for immediate eviction, though this is not currently used in the scheduler.
 
 ### Sequence Tracking
 
