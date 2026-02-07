@@ -15,7 +15,7 @@
 //! A trailing `*` acts as a prefix wildcard; without it the match is exact.
 //!
 //! ```text
-//! DYN_ALLOWED_URL_PATTERNS=https://images.com/*,https://cdn.example.com/*
+//! DYN_ALLOWED_URL_PATTERNS=https://i.pinimg.com/*,https://cdn.example.com/*
 //! ```
 //!
 //! When unset or empty, **all** URLs are allowed (backward-compatible default).
@@ -119,7 +119,34 @@ pub(crate) fn is_private_or_loopback(url: &url::Url) -> bool {
                 // AWS / GCP / Azure metadata endpoint
                 || ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
         }
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Ipv6(ip)) => {
+            if ip.is_loopback() || ip.is_unspecified() {
+                return true;
+            }
+
+            // IPv6 link-local (fe80::/10)
+            let segments = ip.segments();
+            if segments[0] & 0xffc0 == 0xfe80 {
+                return true;
+            }
+
+            // IPv6 unique-local (fc00::/7) — the IPv6 equivalent of RFC 1918
+            if segments[0] & 0xfe00 == 0xfc00 {
+                return true;
+            }
+
+            // IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) can be used to
+            // bypass IPv4 checks. Unwrap the inner IPv4 and re-check.
+            if let Some(ipv4) = ip.to_ipv4_mapped() {
+                return ipv4.is_loopback()
+                    || ipv4.is_private()
+                    || ipv4.is_link_local()
+                    || ipv4.is_unspecified()
+                    || ipv4 == std::net::Ipv4Addr::new(169, 254, 169, 254);
+            }
+
+            false
+        }
         None => true, // no host → block
     }
 }
@@ -267,6 +294,62 @@ mod tests {
     fn blocks_ipv6_loopback() {
         assert!(is_private_or_loopback(&u("http://[::1]/image.jpg")));
     }
+
+    // -- IPv6 link-local and unique-local ------------------------------------
+
+    #[test]
+    fn blocks_ipv6_link_local() {
+        assert!(is_private_or_loopback(&u("http://[fe80::1]/img")));
+        assert!(is_private_or_loopback(&u("http://[fe80::abcd:1]/img")));
+    }
+
+    #[test]
+    fn blocks_ipv6_unique_local() {
+        // fc00::/7 covers both fd00::/8 (commonly used) and fc00::/8
+        assert!(is_private_or_loopback(&u("http://[fd00::1]/internal")));
+        assert!(is_private_or_loopback(&u(
+            "http://[fd12:3456:789a::1]/internal"
+        )));
+        assert!(is_private_or_loopback(&u("http://[fc00::1]/internal")));
+    }
+
+    // -- IPv4-mapped IPv6 bypass prevention ----------------------------------
+
+    #[test]
+    fn blocks_ipv4_mapped_ipv6_loopback() {
+        assert!(is_private_or_loopback(&u(
+            "http://[::ffff:127.0.0.1]/secret"
+        )));
+    }
+
+    #[test]
+    fn blocks_ipv4_mapped_ipv6_private() {
+        assert!(is_private_or_loopback(&u(
+            "http://[::ffff:10.0.0.1]/internal"
+        )));
+        assert!(is_private_or_loopback(&u(
+            "http://[::ffff:192.168.1.1]/internal"
+        )));
+        assert!(is_private_or_loopback(&u(
+            "http://[::ffff:172.16.0.1]/internal"
+        )));
+    }
+
+    #[test]
+    fn blocks_ipv4_mapped_ipv6_metadata() {
+        assert!(is_private_or_loopback(&u(
+            "http://[::ffff:169.254.169.254]/metadata"
+        )));
+    }
+
+    #[test]
+    fn allows_ipv4_mapped_ipv6_public() {
+        assert!(!is_private_or_loopback(&u(
+            "http://[::ffff:93.184.216.34]/img"
+        )));
+    }
+
+    // -- public addresses (should pass) ---------------------------------------
 
     #[test]
     fn allows_public_domains() {
