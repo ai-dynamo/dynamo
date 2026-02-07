@@ -50,8 +50,14 @@ DYNAMO_COMPONENT_GAUGES: LLMBackendMetrics | None = None
 def _ensure_gauges_initialized(
     model_name: str = "",
     component_name: str = "",
-):
-    """Lazy initialization of gauges."""
+) -> LLMBackendMetrics:
+    """Lazy initialization of gauges.
+
+    Returns the initialized LLMBackendMetrics instance. Callers in other modules
+    MUST use the returned value rather than the module-level DYNAMO_COMPONENT_GAUGES
+    binding, because Python's `from module import name` copies the reference at
+    import time and won't see later reassignments to the module global.
+    """
     global DYNAMO_COMPONENT_GAUGES
     if DYNAMO_COMPONENT_GAUGES is None:
         DYNAMO_COMPONENT_GAUGES = LLMBackendMetrics(
@@ -59,6 +65,7 @@ def _ensure_gauges_initialized(
             model_name=model_name,
             component_name=component_name,
         )  # pyright: ignore[reportConstantRedefinition]
+    return DYNAMO_COMPONENT_GAUGES
 
 
 # Use non-blocking RPC calls; control overhead with backoff sleeps.
