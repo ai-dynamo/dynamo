@@ -39,7 +39,7 @@ ARG BUILD_REF
 WORKDIR /workspace
 
 # Install build dependencies for CGO
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libc-dev \
@@ -72,7 +72,7 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 FROM ${BASE_IMAGE}
 
 # Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
