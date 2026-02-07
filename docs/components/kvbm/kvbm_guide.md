@@ -16,6 +16,7 @@ limitations under the License.
 -->
 
 # KVBM Guide
+The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer for frameworks like vLLM and TensorRT-LLM.
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
@@ -412,8 +413,8 @@ uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 
 ## See Also
 
-- [KVBM Overview](README.md)
-- [KVBM Design](../../design_docs/kvbm_design.md)
+- [KVBM Overview](README.md) for a quick overview of KV Caching, KVBM and its architecture
+- [KVBM Design](../../design_docs/kvbm_design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache_integration.md)
 - [FlexKV Integration](../../integrations/flexkv_integration.md)
 - [SGLang HiCache](../../integrations/sglang_hicache.md)

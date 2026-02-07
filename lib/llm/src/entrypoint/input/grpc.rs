@@ -35,6 +35,7 @@ pub async fn run(
         EngineConfig::Dynamic { ref model, .. } => {
             let grpc_service = grpc_service_builder.build()?;
             let router_config = model.router_config();
+            let migration_limit = model.migration_limit();
             // Listen for models registering themselves, add them to gRPC service
             let namespace = model.namespace().unwrap_or("");
             let target_namespace = if is_global_namespace(namespace) {
@@ -46,6 +47,7 @@ pub async fn run(
                 distributed_runtime.clone(),
                 grpc_service.state().manager_clone(),
                 router_config.clone(),
+                migration_limit,
                 target_namespace,
             )
             .await?;
@@ -109,11 +111,19 @@ async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
+    migration_limit: u32,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
     let metrics = Arc::new(Metrics::new());
-    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config, None, metrics);
+    let watch_obj = ModelWatcher::new(
+        runtime.clone(),
+        model_manager,
+        router_config,
+        migration_limit,
+        None,
+        metrics,
+    );
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
