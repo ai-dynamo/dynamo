@@ -2357,7 +2357,9 @@ mod tests {
             block_count: usize,
             iota_base: u32,
         ) -> Vec<ImmutableBlock<TestBlockData>> {
-            let mutable = manager.allocate_blocks(block_count).expect("allocate failed");
+            let mutable = manager
+                .allocate_blocks(block_count)
+                .expect("allocate failed");
             let complete: Vec<_> = mutable
                 .into_iter()
                 .enumerate()
@@ -2575,8 +2577,7 @@ mod tests {
 
         #[test]
         fn test_multi_lru_all_cold_blocks_at_capacity() {
-            let manager =
-                create_backend_manager(64, |b| b.with_multi_lru_backend());
+            let manager = create_backend_manager(64, |b| b.with_multi_lru_backend());
 
             // Allocate, register all 64 (no frequency touches → all cold)
             let immutable = allocate_complete_register_all(&manager, 64, 9000);

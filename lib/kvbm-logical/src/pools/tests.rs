@@ -207,7 +207,9 @@ fn test_mutable_block_stage_and_debug() {
     let seq_hash = crate::KvbmSequenceHashProvider::kvbm_sequence_hash(
         &testing::create_test_token_block(&[10, 11, 12, 13], 4),
     );
-    let complete_block = mutable_block.stage(seq_hash, 4).expect("block size should match");
+    let complete_block = mutable_block
+        .stage(seq_hash, 4)
+        .expect("block size should match");
     assert_eq!(complete_block.sequence_hash(), seq_hash);
 }
 

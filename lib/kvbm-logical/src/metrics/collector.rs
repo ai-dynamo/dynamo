@@ -93,14 +93,24 @@ impl MetricsAggregator {
         let mut descs = Vec::with_capacity(COUNTER_DEFS.len() + GAUGE_DEFS.len());
         for (name, help) in COUNTER_DEFS {
             descs.push(
-                Desc::new(name.to_string(), help.to_string(), vec!["pool".to_string()], Default::default())
-                    .expect("valid desc"),
+                Desc::new(
+                    name.to_string(),
+                    help.to_string(),
+                    vec!["pool".to_string()],
+                    Default::default(),
+                )
+                .expect("valid desc"),
             );
         }
         for (name, help) in GAUGE_DEFS {
             descs.push(
-                Desc::new(name.to_string(), help.to_string(), vec!["pool".to_string()], Default::default())
-                    .expect("valid desc"),
+                Desc::new(
+                    name.to_string(),
+                    help.to_string(),
+                    vec!["pool".to_string()],
+                    Default::default(),
+                )
+                .expect("valid desc"),
             );
         }
 
@@ -132,10 +142,7 @@ impl MetricsAggregator {
     }
 
     /// Register this collector with a `prometheus::Registry`.
-    pub fn register_with(
-        &self,
-        registry: &prometheus::Registry,
-    ) -> Result<(), prometheus::Error> {
+    pub fn register_with(&self, registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.clone()))
     }
 }
@@ -152,11 +159,7 @@ impl Collector for MetricsAggregator {
     }
 
     fn collect(&self) -> Vec<MetricFamily> {
-        let sources = self
-            .inner
-            .sources
-            .read()
-            .expect("sources lock poisoned");
+        let sources = self.inner.sources.read().expect("sources lock poisoned");
         let ext_labels = self
             .inner
             .external_labels
@@ -296,10 +299,7 @@ mod tests {
             .find(|f| f.get_name() == "kvbm_reset_pool_size")
             .expect("should have reset pool size family");
         assert_eq!(reset_family.get_field_type(), MetricType::GAUGE);
-        assert_eq!(
-            reset_family.get_metric()[0].get_gauge().get_value(),
-            42.0
-        );
+        assert_eq!(reset_family.get_metric()[0].get_gauge().get_value(), 42.0);
     }
 
     #[test]
@@ -375,10 +375,7 @@ mod tests {
             .iter()
             .find(|f| f.get_name() == "kvbm_allocations_total")
             .expect("should find allocations in gathered metrics");
-        assert_eq!(
-            alloc_family.get_metric()[0].get_counter().get_value(),
-            42.0
-        );
+        assert_eq!(alloc_family.get_metric()[0].get_counter().get_value(), 42.0);
     }
 
     #[test]

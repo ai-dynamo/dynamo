@@ -107,16 +107,12 @@ impl StatsCollector {
         let stats = if let Some(prev) = entries.back() {
             let dt = now.duration_since(prev.timestamp).as_secs_f64();
             if dt > 0.0 {
-                let alloc_rate =
-                    (raw.allocations - prev.raw.allocations) as f64 / dt;
-                let eviction_rate =
-                    (raw.evictions - prev.raw.evictions) as f64 / dt;
+                let alloc_rate = (raw.allocations - prev.raw.allocations) as f64 / dt;
+                let eviction_rate = (raw.evictions - prev.raw.evictions) as f64 / dt;
 
                 let match_hit_rate = {
-                    let delta_req =
-                        raw.match_hashes_requested - prev.raw.match_hashes_requested;
-                    let delta_ret =
-                        raw.match_blocks_returned - prev.raw.match_blocks_returned;
+                    let delta_req = raw.match_hashes_requested - prev.raw.match_hashes_requested;
+                    let delta_ret = raw.match_blocks_returned - prev.raw.match_blocks_returned;
                     if delta_req > 0 {
                         delta_ret as f64 / delta_req as f64
                     } else {
@@ -125,10 +121,8 @@ impl StatsCollector {
                 };
 
                 let scan_hit_rate = {
-                    let delta_req =
-                        raw.scan_hashes_requested - prev.raw.scan_hashes_requested;
-                    let delta_ret =
-                        raw.scan_blocks_returned - prev.raw.scan_blocks_returned;
+                    let delta_req = raw.scan_hashes_requested - prev.raw.scan_hashes_requested;
+                    let delta_ret = raw.scan_blocks_returned - prev.raw.scan_blocks_returned;
                     if delta_req > 0 {
                         delta_ret as f64 / delta_req as f64
                     } else {
