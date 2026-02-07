@@ -290,10 +290,10 @@ fn test_weak_block_upgrade_via_upgrade_fn() {
     }; // original dropped — block returns to inactive pool
 
     // Upgrade should succeed via the upgrade_fn path (finds block in inactive pool)
-    let upgraded = weak_block.upgrade();
-    if let Some(block) = upgraded {
-        assert_eq!(block.sequence_hash(), seq_hash);
-    }
+    let upgraded = weak_block
+        .upgrade()
+        .expect("upgrade should succeed via upgrade_fn");
+    assert_eq!(upgraded.sequence_hash(), seq_hash);
 }
 
 #[test]

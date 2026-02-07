@@ -229,7 +229,9 @@ impl<K: SketchKey> TinyLFUSketch<K> {
             *entry = (*entry >> 1) & Self::RESET_MASK;
         }
 
-        self.size = (self.size >> 1) - (count >> 2);
+        let half = self.size >> 1;
+        let dec = count >> 2;
+        self.size = half.saturating_sub(dec);
     }
 }
 

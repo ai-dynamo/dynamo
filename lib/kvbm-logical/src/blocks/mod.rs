@@ -67,10 +67,10 @@ pub enum BlockDuplicationPolicy {
     /// Most LLM inference frameworks use allow block duplication for the G1 / device
     /// memory.
     Allow,
-    /// Reject duplicates disables multiple physical blocks to hold the "same".
+    /// Reject duplicates prevents multiple physical blocks from holding the same data.
     /// This essentially dedups the blocks at the time of registration; however, this
-    /// adds additional burden to the implementor throw away the duplicate and use the
-    /// primary block insteads.
+    /// adds additional burden on the implementor to throw away the duplicate and use the
+    /// primary block instead.
     ///
     /// Internally, KVBM will dedup for G2+ storage layers: host, disk, distributed and
     /// object store.

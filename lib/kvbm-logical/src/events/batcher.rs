@@ -6,6 +6,7 @@
 //! The [`EventBatcher`] transforms a stream of individual [`KvCacheEvent`]s into
 //! batched [`KvbmCacheEvents`] for efficient wire transmission.
 
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use async_stream::stream;
@@ -22,14 +23,14 @@ pub struct BatchingConfig {
     /// Maximum time to wait before flushing a batch. Default: 10ms.
     pub window_duration: Duration,
     /// Maximum number of events in a batch before flushing. Default: 1024.
-    pub max_batch_size: usize,
+    pub max_batch_size: NonZeroUsize,
 }
 
 impl Default for BatchingConfig {
     fn default() -> Self {
         Self {
             window_duration: Duration::from_millis(10),
-            max_batch_size: 1024,
+            max_batch_size: NonZeroUsize::new(1024).unwrap(),
         }
     }
 }
@@ -42,7 +43,7 @@ impl BatchingConfig {
     }
 
     /// Sets the maximum batch size.
-    pub fn with_max_size(mut self, size: usize) -> Self {
+    pub fn with_max_size(mut self, size: NonZeroUsize) -> Self {
         self.max_batch_size = size;
         self
     }
@@ -109,7 +110,7 @@ impl EventBatcher {
         stream! {
             pin!(input);
 
-            let mut current_batch: Vec<SequenceHash> = Vec::with_capacity(config.max_batch_size);
+            let mut current_batch: Vec<SequenceHash> = Vec::with_capacity(config.max_batch_size.get());
             let mut current_type: Option<BatchType> = None;
             let mut deadline = tokio::time::Instant::now() + config.window_duration;
 
@@ -144,7 +145,7 @@ impl EventBatcher {
                                 current_batch.push(seq_hash);
 
                                 // Check if we need to flush due to size
-                                if current_batch.len() >= config.max_batch_size {
+                                if current_batch.len() >= config.max_batch_size.get() {
                                     let batch = Self::make_batch(
                                         &mut current_batch,
                                         event_type,
@@ -321,7 +322,7 @@ mod tests {
     async fn test_batcher_flushes_on_max_size() {
         let config = BatchingConfig::default()
             .with_window(Duration::from_secs(60)) // Long window
-            .with_max_size(3);
+            .with_max_size(NonZeroUsize::new(3).unwrap());
         let batcher = EventBatcher::new(config, 12345);
 
         let events = vec![
