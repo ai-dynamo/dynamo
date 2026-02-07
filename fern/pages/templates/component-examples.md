@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 Usage examples for the `<Component>`.
 
 ## Basic Examples

@@ -42,7 +42,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md) | 🚧 | Not supported yet |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
 | [**Load Based Planner**](../../components/planner/README.md) | 🚧 | Planned |

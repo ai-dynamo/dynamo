@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 Templates for creating consistent Dynamo documentation.
 
 ## Directory Hierarchy

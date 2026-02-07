@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 {/* 2-3 sentence overview of this infrastructure topic. */}
 
 ## Quick Start

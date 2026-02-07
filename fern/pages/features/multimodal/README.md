@@ -14,15 +14,6 @@ Dynamo supports multimodal inference across multiple LLM backends, enabling mode
 > This prevents unintended processing of multimodal data from untrusted sources.
 
 ## Backend Documentation
-
-```{toctree}
-:maxdepth: 1
-
-vLLM Multimodal <multimodal-vllm.md>
-TensorRT-LLM Multimodal <multimodal-trtllm.md>
-SGLang Multimodal <multimodal-sglang.md>
-```
-
 ## Support Matrix
 
 ### Backend Capabilities

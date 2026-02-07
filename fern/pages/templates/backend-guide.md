@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 Advanced deployment and configuration for the `<Backend>` backend.
 
 ## Deployment

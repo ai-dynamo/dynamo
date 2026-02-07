@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 Architecture and design decisions for the `<Component>`.
 
 ## Overview

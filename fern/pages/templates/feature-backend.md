@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 Using `<Feature>` with the `<Backend>` backend.
 
 ## Prerequisites

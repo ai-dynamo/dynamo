@@ -379,5 +379,5 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 - [Planner README](README.md) -- Overview and quick start
 - [Planner Guide](planner-guide.md) -- Deployment, configuration, integration
 - [Planner Design](../../design-docs/planner-design.md) -- Architecture deep-dive
-- [DGDR Configuration Reference](../profiler/profiler-guide.md#dgdr-configuration-reference)
+- [DGDR Configuration Reference](../profiler/profiler-guide.md#dgdr-configuration-structure)
 - [SLA-Driven Profiling](../profiler/profiler-guide.md)

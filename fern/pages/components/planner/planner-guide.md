@@ -167,7 +167,7 @@ sla:
 - **ITL**: Token generation latency target (lower = more GPUs needed)
 - **Trade-offs**: Tighter SLAs require more GPU resources
 
-For comprehensive documentation of all configuration options, see the [DGDR Configuration Reference](../profiler/profiler-guide.md#dgdr-configuration-reference).
+For comprehensive documentation of all configuration options, see the [DGDR Configuration Reference](../profiler/profiler-guide.md#dgdr-configuration-structure).
 
 ### Profiling Methods
 
@@ -186,7 +186,7 @@ sweep:
   aicBackendVersion: "0.20.0"
 ```
 
-For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](../profiler/profiler-guide.md#profiling-methods).
+For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](../profiler/profiler-guide.md#profiling-method).
 
 ### Load Predictors
 

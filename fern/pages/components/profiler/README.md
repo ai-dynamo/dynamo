@@ -126,10 +126,3 @@ Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 | [Profiler Examples](profiler-examples.md) | Complete DGDR YAMLs, WebUI, script examples |
 | [SLA Planner Guide](../planner/planner-guide.md) | End-to-end deployment workflow |
 | [SLA Planner Architecture](../planner/planner-guide.md) | How the Planner uses profiling data |
-
-```{toctree}
-:hidden:
-
-profiler-guide
-profiler-examples
-```

@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 {/* One-sentence description */}
 
 See `docs/components/`\<component>`/` for full documentation.

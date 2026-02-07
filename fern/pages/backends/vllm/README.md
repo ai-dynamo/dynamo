@@ -36,7 +36,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | Feature | vLLM | Notes |
 |---------|------|-------|
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md) | 🚧 | WIP |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
 | [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |

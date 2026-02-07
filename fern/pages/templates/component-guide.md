@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 This guide covers deployment, configuration, and integration for the `<Component>`.
 
 ## Deployment

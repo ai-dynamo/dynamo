@@ -311,9 +311,3 @@ For additional support and examples, see the working multinode configurations in
 - **vLLM**: [examples/backends/vllm/deploy/](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.
-
-```{toctree}
-:hidden:
-
-Grove <../grove>
-```

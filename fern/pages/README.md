@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 This directory contains the documentation source files for NVIDIA Dynamo.
 
 ## Prerequisites

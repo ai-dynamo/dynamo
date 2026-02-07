@@ -3,10 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
----
-orphan: true
----
-
 {/* 2-3 sentence overview of what this component does and its role in Dynamo */}
 
 ## Feature Matrix
