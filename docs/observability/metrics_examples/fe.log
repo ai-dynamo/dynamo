@@ -1,0 +1,121 @@
+# HELP dynamo_frontend_disconnected_clients Number of disconnected clients
+# TYPE dynamo_frontend_disconnected_clients gauge
+dynamo_frontend_disconnected_clients 0
+# HELP dynamo_frontend_inflight_requests Number of inflight requests
+# TYPE dynamo_frontend_inflight_requests gauge
+dynamo_frontend_inflight_requests{model="qwen/qwen3-0.6b"} 0
+# HELP dynamo_frontend_input_sequence_tokens Input sequence length in tokens
+# TYPE dynamo_frontend_input_sequence_tokens histogram
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="0"} 0
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="100"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="210"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="430"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="870"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="1800"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="3600"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="7400"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="15000"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="31000"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="63000"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="130000"} 1
+dynamo_frontend_input_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="+Inf"} 1
+dynamo_frontend_input_sequence_tokens_sum{model="qwen/qwen3-0.6b"} 33
+dynamo_frontend_input_sequence_tokens_count{model="qwen/qwen3-0.6b"} 1
+# HELP dynamo_frontend_inter_token_latency_seconds Inter-token latency in seconds
+# TYPE dynamo_frontend_inter_token_latency_seconds histogram
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0"} 0
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.0019"} 21
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.0035"} 298
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.0067"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.013"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.024"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.045"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.084"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.16"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.3"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="0.56"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="1.1"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="2"} 299
+dynamo_frontend_inter_token_latency_seconds_bucket{model="qwen/qwen3-0.6b",le="+Inf"} 299
+dynamo_frontend_inter_token_latency_seconds_sum{model="qwen/qwen3-0.6b"} 0.6126917290000005
+dynamo_frontend_inter_token_latency_seconds_count{model="qwen/qwen3-0.6b"} 299
+# HELP dynamo_frontend_model_context_length Maximum context length in tokens for a worker serving the model
+# TYPE dynamo_frontend_model_context_length gauge
+dynamo_frontend_model_context_length{model="Qwen/Qwen3-0.6B"} 40960
+# HELP dynamo_frontend_model_kv_cache_block_size KV cache block size in tokens for a worker serving the model
+# TYPE dynamo_frontend_model_kv_cache_block_size gauge
+dynamo_frontend_model_kv_cache_block_size{model="Qwen/Qwen3-0.6B"} 1
+# HELP dynamo_frontend_model_max_num_batched_tokens Maximum number of batched tokens for a worker serving the model
+# TYPE dynamo_frontend_model_max_num_batched_tokens gauge
+dynamo_frontend_model_max_num_batched_tokens{model="Qwen/Qwen3-0.6B"} 16384
+# HELP dynamo_frontend_model_max_num_seqs Maximum number of sequences for a worker serving the model
+# TYPE dynamo_frontend_model_max_num_seqs gauge
+dynamo_frontend_model_max_num_seqs{model="Qwen/Qwen3-0.6B"} 2
+# HELP dynamo_frontend_model_migration_limit Maximum number of request migrations allowed for the model
+# TYPE dynamo_frontend_model_migration_limit gauge
+dynamo_frontend_model_migration_limit{model="Qwen/Qwen3-0.6B"} 0
+# HELP dynamo_frontend_model_total_kv_blocks Total KV cache blocks available for a worker serving the model
+# TYPE dynamo_frontend_model_total_kv_blocks gauge
+dynamo_frontend_model_total_kv_blocks{model="Qwen/Qwen3-0.6B"} 92962
+# HELP dynamo_frontend_output_sequence_tokens Output sequence length in tokens
+# TYPE dynamo_frontend_output_sequence_tokens histogram
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="0"} 0
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="100"} 0
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="210"} 0
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="430"} 1
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="880"} 1
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="1800"} 1
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="3700"} 1
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="7600"} 1
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="16000"} 1
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="32000"} 1
+dynamo_frontend_output_sequence_tokens_bucket{model="qwen/qwen3-0.6b",le="+Inf"} 1
+dynamo_frontend_output_sequence_tokens_sum{model="qwen/qwen3-0.6b"} 300
+dynamo_frontend_output_sequence_tokens_count{model="qwen/qwen3-0.6b"} 1
+# HELP dynamo_frontend_output_tokens_total Total number of output tokens generated (updates in real-time)
+# TYPE dynamo_frontend_output_tokens_total counter
+dynamo_frontend_output_tokens_total{model="qwen/qwen3-0.6b"} 300
+# HELP dynamo_frontend_queued_requests Number of requests in HTTP processing queue
+# TYPE dynamo_frontend_queued_requests gauge
+dynamo_frontend_queued_requests{model="qwen/qwen3-0.6b"} 0
+# HELP dynamo_frontend_request_duration_seconds Duration of LLM requests
+# TYPE dynamo_frontend_request_duration_seconds histogram
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="0"} 0
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="1.9"} 0
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="3.4"} 1
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="6.3"} 1
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="12"} 1
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="22"} 1
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="40"} 1
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="75"} 1
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="140"} 1
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="260"} 1
+dynamo_frontend_request_duration_seconds_bucket{model="qwen/qwen3-0.6b",le="+Inf"} 1
+dynamo_frontend_request_duration_seconds_sum{model="qwen/qwen3-0.6b"} 2.177646729
+dynamo_frontend_request_duration_seconds_count{model="qwen/qwen3-0.6b"} 1
+# HELP dynamo_frontend_requests_total Total number of LLM requests processed
+# TYPE dynamo_frontend_requests_total counter
+dynamo_frontend_requests_total{endpoint="chat_completions",model="qwen/qwen3-0.6b",request_type="unary",status="success"} 1
+# HELP dynamo_frontend_time_to_first_token_seconds Time to first token in seconds
+# TYPE dynamo_frontend_time_to_first_token_seconds histogram
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0.0022"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0.0047"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0.01"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0.022"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0.047"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0.1"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0.22"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="0.47"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="1"} 0
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="2.2"} 1
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="4.7"} 1
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="10"} 1
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="22"} 1
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="48"} 1
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="100"} 1
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="220"} 1
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="480"} 1
+dynamo_frontend_time_to_first_token_seconds_bucket{model="qwen/qwen3-0.6b",le="+Inf"} 1
+dynamo_frontend_time_to_first_token_seconds_sum{model="qwen/qwen3-0.6b"} 1.5625701570000001
+dynamo_frontend_time_to_first_token_seconds_count{model="qwen/qwen3-0.6b"} 1
