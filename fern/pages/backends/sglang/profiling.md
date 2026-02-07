@@ -1,10 +1,12 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Profiling SGLang Workers in Dynamo
 
 > [!NOTE]
-> **See also**: [Profiler Component Overview](/docs/components/profiler/README) for SLA-driven profiling and deployment optimization.
+> **See also**: [Profiler Component Overview](../../components/profiler/README.md) for SLA-driven profiling and deployment optimization.
 
 Dynamo exposes profiling endpoints for SGLang workers via the system server's `/engine/*` routes. This allows you to start and stop PyTorch profiling on running inference workers without restarting them.
 
@@ -37,7 +39,7 @@ The profiler outputs Chrome trace files in the specified `output_dir`. You can v
 
 ## Test Script
 
-A test script is provided at [`examples/backends/sglang/test_sglang_profile.py`](../../../examples/backends/sglang/test_sglang_profile.py) that demonstrates the full profiling workflow:
+A test script is provided at [`examples/backends/sglang/test_sglang_profile.py`](../../../../examples/backends/sglang/test_sglang_profile.py) that demonstrates the full profiling workflow:
 
 ```bash
 python examples/backends/sglang/test_sglang_profile.py

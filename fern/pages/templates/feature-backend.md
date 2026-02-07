@@ -1,12 +1,17 @@
 ---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
+---
 orphan: true
 ---
 
-Using <Feature> with the <Backend> backend.
+Using `<Feature>` with the `<Backend>` backend.
 
 ## Prerequisites
 
-- <Backend> installed with <feature> support
+- `<Backend>` installed with `<feature>` support
 - {/* Other requirements */}
 
 ## Configuration
@@ -52,6 +57,6 @@ Using <Feature> with the <Backend> backend.
 | Document | Path |
 |----------|------|
 | `<Feature> Overview` | `./README.md` |
-| `<Backend> Guide` | `/docs/backends/<backend>/README.md` |
+| `<Backend> Guide` | `/docs/backends/`\<backend>`/README.md` |
 
 {/* Convert to links: [Multimodal Overview](./README.md) */}

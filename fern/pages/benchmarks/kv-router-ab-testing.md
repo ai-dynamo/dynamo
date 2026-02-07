@@ -1,3 +1,8 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
 This guide walks you through setting up and running A/B benchmarks to compare Dynamo's KV Smart Router against standard round-robin routing on a Kubernetes cluster.
 
 ## Overview
@@ -569,14 +574,14 @@ kubectl -n benchmark cp ${POD_NAME}:/tmp/router_on_results/profile_export_aiperf
 
 **Factors that reduce KV router benefit:**
 - **Unique prompts** with no prefix reuse
-- **Short prompts** (<1000 tokens) where routing overhead exceeds benefit
+- **Short prompts** (\<1000 tokens) where routing overhead exceeds benefit
 - **Evenly distributed load** where round-robin is already optimal
 - **Low request rate** where cache eviction negates benefits
 
 **Expected Performance:**
 - **High prefix overlap workloads**: 20-50% TTFT improvement
 - **Moderate prefix overlap**: 10-20% improvement
-- **Low prefix overlap**: <5% improvement (may not be worth enabling)
+- **Low prefix overlap**: \<5% improvement (may not be worth enabling)
 
 **KV Smart Router is beneficial when:**
 - TTFT improvements > 20%
@@ -584,7 +589,7 @@ kubectl -n benchmark cp ${POD_NAME}:/tmp/router_on_results/profile_export_aiperf
 - Workload demonstrates measurable prefix reuse patterns
 
 **Standard routing is better when:**
-- KV router shows <10% improvement
+- KV router shows \<10% improvement
 - Increased latency variance is observed
 - Load distribution across workers is more important than cache affinity
 

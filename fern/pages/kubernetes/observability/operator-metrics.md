@@ -1,3 +1,8 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
 ## Overview
 
 The Dynamo Operator exposes Prometheus metrics for monitoring its own health and performance. These metrics are separate from application metrics (frontend/worker) and provide visibility into:

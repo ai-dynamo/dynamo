@@ -1,10 +1,11 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Planner Guide
 
-Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README.md). For architecture internals, see [Planner Design](/docs/design-docs/planner-design).
+Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README.md). For architecture internals, see [Planner Design](../../design-docs/planner-design.md).
 
 ## Deployment
 
@@ -12,8 +13,8 @@ Deployment, configuration, and integration guide for the Dynamo SLA Planner. For
 
 Before deploying the planner, ensure:
 
-- **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation-guide))
-- **[kube-prometheus-stack](/docs/kubernetes/observability/metrics) installed and running** (required for SLA planner metric collection)
+- **Dynamo platform installed** with the operator running (see [Installation Guide](../../kubernetes/installation-guide.md))
+- **[kube-prometheus-stack](../../kubernetes/observability/metrics.md) installed and running** (required for SLA planner metric collection)
 - **Image pull secrets configured** if using private registries (typically `nvcr-imagepullsecret` for NVIDIA images)
 - **Sufficient GPU resources** available in your cluster for profiling
 - **Runtime images available** that contain both profiler and runtime components
@@ -166,7 +167,7 @@ sla:
 - **ITL**: Token generation latency target (lower = more GPUs needed)
 - **Trade-offs**: Tighter SLAs require more GPU resources
 
-For comprehensive documentation of all configuration options, see the [DGDR Configuration Reference](/docs/components/profiler/profiler-guide#dgdr-configuration-reference).
+For comprehensive documentation of all configuration options, see the [DGDR Configuration Reference](../profiler/profiler-guide.md#dgdr-configuration-reference).
 
 ### Profiling Methods
 
@@ -185,7 +186,7 @@ sweep:
   aicBackendVersion: "0.20.0"
 ```
 
-For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/components/profiler/profiler-guide#profiling-methods).
+For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](../profiler/profiler-guide.md#profiling-methods).
 
 ### Load Predictors
 
@@ -339,7 +340,7 @@ Deploy the planner Grafana dashboard:
 kubectl apply -n monitoring -f deploy/observability/k8s/grafana-planner-dashboard-configmap.yaml
 ```
 
-Follow [Dynamo Metrics Collection on Kubernetes](/docs/kubernetes/observability/metrics) to access the Grafana UI and select the **Dynamo Planner Dashboard**.
+Follow [Dynamo Metrics Collection on Kubernetes](../../kubernetes/observability/metrics.md) to access the Grafana UI and select the **Dynamo Planner Dashboard**.
 
 The dashboard displays:
 - **Worker Counts & GPU Usage**: Current prefill/decode worker counts and cumulative GPU hours
@@ -444,13 +445,13 @@ kubectl logs -l job-name=profile-sla-aic -n $NAMESPACE
 | **DGD not deployed** | Verify `autoApply: true` in DGDR spec |
 | **Prometheus errors** | Ensure `PROMETHEUS_ENDPOINT` env var points to your Prometheus service |
 
-For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](/docs/components/profiler/profiler-guide#troubleshooting).
+For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](../profiler/profiler-guide.md#troubleshooting).
 
 ## Related Documentation
 
 - [Planner README](README.md) -- Overview and quick start
 - [Planner Examples](planner-examples.md) -- DGDR YAML examples and sample configurations
-- [Planner Design](/docs/design-docs/planner-design) -- Architecture deep-dive for contributors
-- [DGDR API Reference](/docs/kubernetes/api-reference)
-- [Pre-Deployment Profiling](/docs/components/profiler/profiler-guide)
-- [Dynamo Operator Guide](/docs/kubernetes/dynamo-operator)
+- [Planner Design](../../design-docs/planner-design.md) -- Architecture deep-dive for contributors
+- [DGDR API Reference](../../kubernetes/api-reference.md)
+- [Pre-Deployment Profiling](../profiler/profiler-guide.md)
+- [Dynamo Operator Guide](../../kubernetes/dynamo-operator.md)

@@ -1,5 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Router Guide
 
@@ -293,7 +295,7 @@ await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
 > [!Note]
-> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh).
+> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../../../examples/backends/sglang/launch/disagg_router.sh).
 
 ### Request Flow
 
@@ -375,7 +377,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8002 --router-replica-syn
 
 >[!Note]
 > If you need to start with a fresh state in JetStream mode, you have two options:
-> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](/docs/design-docs/distributed-runtime)) which will start a new stream and NATS object store path
+> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](../../design-docs/distributed-runtime.md)) which will start a new stream and NATS object store path
 > 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
 
 ## Dynamic Threshold Configuration

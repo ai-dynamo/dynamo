@@ -1,5 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Profiler Guide
 
@@ -334,7 +336,7 @@ planner:
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](/docs/components/planner/planner-guide) for full list.
+> Planner arguments use `planner_` prefix. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -592,7 +594,7 @@ AssertionError: num_heads <N> should be divisible by tp_size <M> and the divisio
 **Affected Models:**
 - **Qwen3-0.6B** (16 heads): Max TP = 4
 - **GPT-2** (12 heads): Max TP = 3
-- Most models **<1B parameters**: May hit this constraint
+- Most models **\<1B parameters**: May hit this constraint
 
 **Solution**: Limit `maxNumGpusPerEngine`:
 ```yaml
@@ -639,7 +641,7 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 ## See Also
 
 - [Profiler Examples](profiler-examples.md) - Complete DGDR YAML examples
-- [SLA Planner Guide](/docs/components/planner/planner-guide) - End-to-end deployment workflow
-- [SLA Planner Architecture](/docs/components/planner/planner-guide) - How the Planner uses profiling data
-- [DGDR API Reference](/docs/kubernetes/api-reference) - DGDR specification
+- [SLA Planner Guide](../planner/planner-guide.md) - End-to-end deployment workflow
+- [SLA Planner Architecture](../planner/planner-guide.md) - How the Planner uses profiling data
+- [DGDR API Reference](../../kubernetes/api-reference.md) - DGDR specification
 - [Profiler Arguments Reference](/benchmarks/profiler/utils/profiler_argparse.py) - Full CLI reference

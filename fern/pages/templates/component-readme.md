@@ -1,4 +1,9 @@
 ---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
+---
 orphan: true
 ---
 
@@ -78,6 +83,6 @@ spec:
 |----------|------|-------------|
 | `<Component> Guide` | `<component>_guide.md` | Deployment and configuration |
 | `<Component> Examples` | `<component>_examples.md` | Usage examples |
-| `<Component> Design` | `/docs/design_docs/<component>_design.md` | Architecture |
+| `<Component> Design` | `/docs/design_docs/`\<component>`_design.md` | Architecture |
 
 {/* Convert table rows to markdown links */}

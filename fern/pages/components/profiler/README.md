@@ -1,5 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Profiler
 
@@ -20,7 +22,7 @@ The Dynamo Profiler is an automated performance analysis tool that measures mode
 
 ### Prerequisites
 
-- Dynamo platform installed (see [Installation Guide](/docs/kubernetes/installation-guide))
+- Dynamo platform installed (see [Installation Guide](../../kubernetes/installation-guide.md))
 - Kubernetes cluster with GPU nodes (for DGDR-based profiling)
 - kube-prometheus-stack installed (required for SLA planner)
 
@@ -122,12 +124,12 @@ Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 |----------|-------------|
 | [Profiler Guide](profiler-guide.md) | Configuration, methods, and troubleshooting |
 | [Profiler Examples](profiler-examples.md) | Complete DGDR YAMLs, WebUI, script examples |
-| [SLA Planner Guide](/docs/components/planner/planner-guide) | End-to-end deployment workflow |
-| [SLA Planner Architecture](/docs/components/planner/planner-guide) | How the Planner uses profiling data |
+| [SLA Planner Guide](../planner/planner-guide.md) | End-to-end deployment workflow |
+| [SLA Planner Architecture](../planner/planner-guide.md) | How the Planner uses profiling data |
 
 ```{toctree}
 :hidden:
 
-profiler_guide
-profiler_examples
+profiler-guide
+profiler-examples
 ```

@@ -1,9 +1,11 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Running gpt-oss-120b Disaggregated with SGLang
 
-The gpt-oss-120b guide for SGLang is largely identical to the [guide for vLLM](/docs/backends/vllm/gpt-oss),
+The gpt-oss-120b guide for SGLang is largely identical to the [guide for vLLM](../vllm/gpt-oss.md),
 please ues the vLLM guide as a reference with the different deployment steps as highlighted below:
 
 # Launch the Deployment

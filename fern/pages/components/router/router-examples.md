@@ -1,5 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Router Examples
 
@@ -105,10 +107,10 @@ For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployme
 
 ### Complete K8s Examples
 
-- [TRT-LLM aggregated router example](../../examples/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](../../examples/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](../../examples/backends/sglang/deploy/agg_router.yaml)
-- [Distributed inference tutorial](../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
+- [TRT-LLM aggregated router example](../../../../examples/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](../../../../examples/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](../../../../examples/backends/sglang/deploy/agg_router.yaml)
+- [Distributed inference tutorial](../../../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
 
 **For A/B Testing and Advanced K8s Setup:**
 See the comprehensive [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.

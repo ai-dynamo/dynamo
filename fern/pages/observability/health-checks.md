@@ -1,5 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Dynamo Health Checks
 
@@ -291,7 +293,7 @@ Each backend defines its own minimal health check payload:
 - **SGLang**: Single token generation request
 
 These payloads are designed to:
-- Complete quickly (< 100ms typically)
+- Complete quickly (\< 100ms typically)
 - Minimize GPU overhead
 - Verify the full inference stack is working
 

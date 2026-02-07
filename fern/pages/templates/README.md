@@ -1,4 +1,9 @@
 ---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
+---
 orphan: true
 ---
 
@@ -140,9 +145,9 @@ Templates for creating consistent Dynamo documentation.
 
 | Tier | Purpose | Audience | Location |
 |------|---------|----------|----------|
-| **Tier 1** | Redirect stub (5 lines) | Developers browsing code | `components/src/dynamo/<name>/README.md` |
-| **Tier 2** | User documentation | Users, operators | `docs/<category>/<name>/` (e.g., `docs/components/router/`) |
-| **Tier 3** | Design documentation | Contributors | `docs/design_docs/<name>_design.md` |
+| **Tier 1** | Redirect stub (5 lines) | Developers browsing code | `components/src/dynamo/`\<name>`/README.md` |
+| **Tier 2** | User documentation | Users, operators | `docs/`\<category>`/`\<name>`/` (e.g., `docs/components/router/`) |
+| **Tier 3** | Design documentation | Contributors | `docs/design_docs/`\<name>`_design.md` |
 
 ## Template Selection
 

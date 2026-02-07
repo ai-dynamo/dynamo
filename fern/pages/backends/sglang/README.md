@@ -1,5 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Running SGLang with Dynamo
 
@@ -256,7 +258,7 @@ curl localhost:8000/v1/chat/completions \
 We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes](../../../examples/backends/sglang/deploy/README.md)**
+- **[Deploying Dynamo with SGLang on Kubernetes](../../../../examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](../../../examples/backends/sglang/slurm-jobs/README.md)**
+- **[Deploying Dynamo with SGLang on SLURM](../../../../examples/backends/sglang/slurm-jobs/README.md)**

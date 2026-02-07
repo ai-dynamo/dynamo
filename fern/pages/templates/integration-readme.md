@@ -1,4 +1,9 @@
 ---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
+---
 orphan: true
 ---
 
@@ -6,7 +11,7 @@ orphan: true
 
 ## Version Compatibility
 
-| Dynamo | <Integration> | Notes |
+| Dynamo | `<Integration>` | Notes |
 |--------|---------------|-------|
 | 0.9.x | 1.2.x | Recommended |
 | 0.8.x | 1.1.x | |
@@ -44,5 +49,5 @@ orphan: true
 
 ## External Resources
 
-- [<Integration> Documentation](https://...)
-- [<Integration> GitHub](https://github.com/...)
+- [`<Integration>` Documentation](https://...)
+- [`<Integration>` GitHub](https://github.com/...)

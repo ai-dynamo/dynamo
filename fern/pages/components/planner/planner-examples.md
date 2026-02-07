@@ -1,6 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Planner Examples
 
@@ -233,7 +234,7 @@ Profiling runs against the real backend (via GPUs or AIC). The mocker deployment
 
 For large models, use a pre-populated PVC instead of downloading from HuggingFace:
 
-See [SLA-Driven Profiling](/docs/components/profiler/profiler-guide) for configuration details.
+See [SLA-Driven Profiling](../profiler/profiler-guide.md) for configuration details.
 
 ## Advanced Examples
 
@@ -377,6 +378,6 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 
 - [Planner README](README.md) -- Overview and quick start
 - [Planner Guide](planner-guide.md) -- Deployment, configuration, integration
-- [Planner Design](/docs/design-docs/planner-design) -- Architecture deep-dive
-- [DGDR Configuration Reference](/docs/components/profiler/profiler-guide#dgdr-configuration-reference)
-- [SLA-Driven Profiling](/docs/components/profiler/profiler-guide)
+- [Planner Design](../../design-docs/planner-design.md) -- Architecture deep-dive
+- [DGDR Configuration Reference](../profiler/profiler-guide.md#dgdr-configuration-reference)
+- [SLA-Driven Profiling](../profiler/profiler-guide.md)

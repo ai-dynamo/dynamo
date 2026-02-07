@@ -1,5 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Disaggregated Serving Guide
 
@@ -708,7 +710,7 @@ aiconfigurator cli support \
 
 **"Context stopped or killed" errors (disaggregated only)**:
 - Deploy ETCD and NATS infrastructure (required for KV cache transfer)
-- See [Dynamo Kubernetes Guide](/docs/kubernetes/README) for platform setup
+- See [Dynamo Kubernetes Guide](../../kubernetes/README.md) for platform setup
 
 ### Performance Issues
 
@@ -747,5 +749,5 @@ For balanced workloads (ISL/OSL ratio between 2:1 and 10:1), aggregated is often
 
 - [AIConfigurator CLI Guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/cli_user_guide.md)
 - [Dynamo Deployment Guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/dynamo_deployment_guide.md)
-- [Dynamo Installation Guide](/docs/kubernetes/installation-guide)
-- [Benchmarking Guide](/docs/benchmarks/benchmarking)
+- [Dynamo Installation Guide](../../kubernetes/installation-guide.md)
+- [Benchmarking Guide](../../benchmarks/benchmarking.md)

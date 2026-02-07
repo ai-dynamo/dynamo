@@ -1,3 +1,8 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
 ## Overview
 
 `DynamoModel` is a Kubernetes Custom Resource that represents a machine learning model deployed on Dynamo. It enables you to:

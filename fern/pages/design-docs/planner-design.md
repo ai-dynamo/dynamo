@@ -1,10 +1,11 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
-All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # Planner Design
 
-> **Tier 3 design documentation** for contributors and architects. For user-facing docs, see [docs/components/planner/](/docs/components/planner/).
+> **Tier 3 design documentation** for contributors and architects. For user-facing docs, see [docs/components/planner/](../components/planner/.md).
 
 ## Overview
 
@@ -191,7 +192,7 @@ After the delay:
 ## Known Limitations
 
 1. **30-second startup delay**: Hardcoded wait for component registration. It should be replaced with runtime readiness probing.
-2. **Adjustment interval vs scaling latency**: If `adjustment_interval` < time to scale, scaling decisions can pile up. The planner logs warnings but doesn't queue.
+2. **Adjustment interval vs scaling latency**: If `adjustment_interval` \< time to scale, scaling decisions can pile up. The planner logs warnings but doesn't queue.
 3. **Average-based interpolation**: The planner uses average ISL/OSL, which may not represent bimodal or heavy-tailed distributions well.
 4. **Single DGD scope**: Each planner instance manages exactly one DGD. Multi-model/multi-DGD coordination is not supported.
 5. **Load-based planner deprecated**: The load-based code path exists but is non-functional with current backends (no prefill queue metrics).

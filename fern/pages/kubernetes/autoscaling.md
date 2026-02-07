@@ -1,3 +1,8 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
 This guide explains how to configure autoscaling for DynamoGraphDeployment (DGD) services using the `sglang-agg` example from `examples/backends/sglang/deploy/agg.yaml`.
 
 ## Example DGD
@@ -150,7 +155,7 @@ The Dynamo Planner is an LLM-aware autoscaler that optimizes scaling decisions b
 **When to use Planner:**
 - You want LLM-optimized autoscaling out of the box
 - You need coordinated scaling across prefill/decode services
-- You want SLA-driven scaling (e.g., target TTFT < 500ms)
+- You want SLA-driven scaling (e.g., target TTFT \< 500ms)
 
 **How Planner works:**
 

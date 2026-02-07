@@ -1,5 +1,7 @@
-{/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0 */}
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 # LLM Deployment using vLLM
 
@@ -33,12 +35,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | vLLM | Notes |
 |---------|------|-------|
-| [**Disaggregated Serving**](../../../docs/design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
+| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/components/planner/planner-guide.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/components/planner/README.md) | 🚧 | WIP |
-| [**KVBM**](../../../docs/components/kvbm/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
+| [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |
+| [**KVBM**](../../components/kvbm/README.md) | ✅ |  |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
@@ -148,7 +150,7 @@ This setup demonstrates how to use Dynamo to create an instance using Eagle-base
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../../examples/backends/vllm/deploy/README.md)
 
 ## Configuration
 
@@ -181,7 +183,7 @@ See the high-level notes in [Router Design](../../design-docs/router-design.md#d
 
 ## Request Migration
 
-Dynamo supports [request migration](../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../../docs/fault-tolerance/request-migration.md) documentation for configuration details.
+Dynamo supports [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for configuration details.
 
 ## Request Cancellation
 
@@ -194,4 +196,4 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | **Aggregated** | ✅ | ✅ |
 | **Disaggregated** | ✅ | ✅ |
 
-For more details, see the [Request Cancellation Architecture](../../../docs/fault-tolerance/request-cancellation.md) documentation.
+For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.

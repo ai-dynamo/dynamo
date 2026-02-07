@@ -1,3 +1,8 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+
 This guide explains how to deploy Dynamo workloads across multiple nodes. Multinode deployments enable you to scale compute-intensive LLM workloads across multiple physical machines, maximizing GPU utilization and supporting larger models.
 
 ## Overview
@@ -301,9 +306,9 @@ To enable compilation cache, add a volume mount with `useAsCompilationCache: tru
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [examples/backends/sglang/deploy/](../../../examples/backends/sglang/deploy/.md)
-- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](../../../examples/backends/trtllm/deploy/.md)
-- **vLLM**: [examples/backends/vllm/deploy/](../../../examples/backends/vllm/deploy/.md)
+- **SGLang**: [examples/backends/sglang/deploy/](../../../../examples/backends/sglang/deploy/.md)
+- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](../../../../examples/backends/trtllm/deploy/.md)
+- **vLLM**: [examples/backends/vllm/deploy/](../../../../examples/backends/vllm/deploy/.md)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.
 
