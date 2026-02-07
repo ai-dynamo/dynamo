@@ -53,7 +53,6 @@ from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import (
-    DYNAMO_COMPONENT_GAUGES,
     DYNAMO_COMPONENT_REGISTRY,
     _ensure_gauges_initialized,
     get_publisher,
@@ -345,8 +344,12 @@ async def init(
     # Prepare model name for metrics
     model_name_for_metrics = config.served_model_name or config.model_path
 
-    # Initialize gauges now that model name is available
-    _ensure_gauges_initialized(
+    # Initialize gauges now that model name is available.
+    # IMPORTANT: Use the returned value, not the module-level DYNAMO_COMPONENT_GAUGES
+    # binding. Python's `from module import name` copies the reference at import time,
+    # so the local binding would still be None after _ensure_gauges_initialized updates
+    # the publisher module's global.
+    component_gauges = _ensure_gauges_initialized(
         model_name=model_name_for_metrics,
         component_name=config.component,
     )
@@ -354,7 +357,7 @@ async def init(
     async with get_llm_engine(
         engine_args,
         config.disaggregation_mode,
-        component_gauges=DYNAMO_COMPONENT_GAUGES,
+        component_gauges=component_gauges,
     ) as engine:
         endpoint = component.endpoint(config.endpoint)
 
