@@ -105,21 +105,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        # Trace dp_rank routing for DP attention debugging (tensor shape / empty batch)
-        logging.info("************************************************************")
-        routing = request.get("routing") or {}
-        _dp_rank = routing.get("dp_rank")
-        _num_tokens = len(
-            input_param.get("input_ids", []) or request.get("token_ids", [])
-        )
-        logging.info(
-            "[DP_TRACE] decode_handler.generate request_id=%s routing=%s dp_rank=%s num_tokens=%s",
-            context.id(),
-            routing,
-            _dp_rank,
-            _num_tokens,
-        )
-        logging.info("************************************************************")
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -144,11 +129,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
-            logging.info(
-                "[DP_TRACE] decode_handler (disagg) calling engine.async_generate data_parallel_rank=%s (request_id=%s)",
-                dp_rank,
-                context.id(),
-            )
 
             decode = await self.engine.async_generate(
                 **input_param,
@@ -189,13 +169,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
-            logging.info("************************************************************")
-            logging.info(
-                "[DP_TRACE] decode_handler calling engine.async_generate data_parallel_rank=%s (request_id=%s)",
-                dp_rank,
-                context.id(),
-            )
-            logging.info("************************************************************")
 
             agg = await self.engine.async_generate(
                 **input_param,
