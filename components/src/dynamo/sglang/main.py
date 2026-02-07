@@ -6,7 +6,8 @@ import logging
 import os
 import signal
 import sys
-from typing import Any, Callable
+from collections import defaultdict
+from typing import Any, Callable, DefaultDict
 
 import sglang as sgl
 import uvloop
@@ -83,6 +84,111 @@ async def _handle_non_leader_node(
         publisher.cleanup()
 
 
+SignalCallback = Callable[..., Any]
+
+
+def install_graceful_shutdown(
+    loop: asyncio.AbstractEventLoop,
+    runtime: Any,
+    *,
+    signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),
+    chain_old_os_handlers: bool = False,
+) -> tuple[asyncio.Event, dict[int, list[tuple[SignalCallback, tuple[Any, ...]]]]]:
+    """
+    Set up graceful shutdown + callback chaining.
+
+    What it does:
+      - Owns OS-level SIGTERM/SIGINT via signal.signal(...)
+      - Captures (suppresses) loop.add_signal_handler(SIGTERM/SIGINT, ...) registrations
+        and runs them during shutdown (sync or async)
+      - Calls runtime.shutdown() during shutdown (sync or async)
+      - Sets and returns an asyncio.Event you can await to know shutdown was requested
+
+    Returns:
+      (shutdown_event, deferred_handlers)
+    """
+    shutdown_event = asyncio.Event()
+
+    # Deferred handlers registered via loop.add_signal_handler for these signals
+    deferred_handlers: DefaultDict[int, list[tuple[SignalCallback, tuple[Any, ...]]]] = defaultdict(list)  # type: ignore[assignment]
+
+    # Previous OS handlers (for optional chaining)
+    old_os_handlers: dict[int, Any] = {}
+
+    shutdown_started = False
+
+    async def _shutdown_sequence(signum: int, frame: Any | None) -> None:
+        nonlocal shutdown_started
+        if shutdown_started:
+            return
+        shutdown_started = True
+
+        logging.info("Received signal %s, starting graceful shutdown", signum)
+        shutdown_event.set()
+
+        # Run deferred callbacks in the loop context
+        for cb, args in list(deferred_handlers.get(signum, [])):
+            try:
+                res = cb(*args)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception:
+                logging.exception("Deferred signal callback failed: %r", cb)
+
+        # Call runtime.shutdown() (sync or async)
+        try:
+            res = runtime.shutdown()
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            logging.exception("runtime.shutdown() failed")
+
+        # Optional: chain old OS handler
+        if chain_old_os_handlers:
+            old = old_os_handlers.get(signum)
+            if old and old not in (
+                signal.SIG_DFL,
+                signal.SIG_IGN,
+                signal.default_int_handler,
+            ):
+                try:
+                    old(signum, frame)
+                except Exception:
+                    logging.exception("Chained old OS handler failed")
+
+    def _schedule_shutdown(signum: int, frame: Any | None) -> None:
+        def _kick() -> None:
+            asyncio.create_task(_shutdown_sequence(signum, frame))
+
+        loop.call_soon_threadsafe(_kick)
+
+    def _os_signal_handler(signum: int, frame: Any) -> None:
+        # Keep the OS handler tiny; do real work in the loop thread.
+        _schedule_shutdown(signum, frame)
+
+    # Install OS-level handlers
+    for sig in signals:
+        old_os_handlers[sig] = signal.signal(sig, _os_signal_handler)
+
+    # Intercept loop.add_signal_handler for SIGTERM/SIGINT and defer them
+    orig_add = loop.add_signal_handler
+
+    def watching_add_signal_handler(sig: int, callback: SignalCallback, *args: Any):
+        if sig in signals:
+            logging.info(
+                "Captured loop.add_signal_handler(%s, %r, ...) (deferred).",
+                sig,
+                callback,
+            )
+            deferred_handlers[sig].append((callback, args))
+            return None
+        return orig_add(sig, callback, *args)
+
+    loop.add_signal_handler = watching_add_signal_handler  # type: ignore[assignment]
+
+    return shutdown_event, deferred_handlers
+
+
 async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
@@ -113,47 +219,7 @@ async def worker():
     )
 
     # Set up signal handlers using signal module to allow chaining
-    shutdown_event = asyncio.Event()
-    old_handlers = {}
-
-    def signal_handler(signum, frame):
-        """Handle SIGTERM/SIGINT and chain to previous handlers"""
-        logging.info(f"Received signal {signum}, initiating graceful shutdown")
-        # Schedule shutdown in the event loop from the signal handler context
-        loop.call_soon_threadsafe(shutdown_event.set)
-
-        # Chain to the old handler if it exists and is not default/ignore
-        try:
-            old_handler = old_handlers.get(signum)
-            if old_handler and old_handler not in (
-                signal.SIG_DFL,
-                signal.SIG_IGN,
-                signal.default_int_handler,
-            ):
-                old_handler(signum, frame)
-        finally:
-            runtime.shutdown()
-
-    # Install signal handlers and save old ones for chaining
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        old_handlers[sig] = signal.signal(sig, signal_handler)
-
-    # Override add_signal_handler to prevent SGLang from installing its own signal handlers.
-    # This ensures that Dynamo retains full control over the graceful shutdown flow,
-    # rather than allowing SGLang (or other libraries) to overwrite or interfere
-    # with the signal handlers that Dynamo sets up for SIGTERM/SIGINT.
-    _orig_add = loop.add_signal_handler
-
-    def watching_add_signal_handler(sig: int, callback: Callable, *args: Any):
-        if sig in [signal.SIGTERM, signal.SIGINT]:
-            logging.info(
-                "SIGTERM/SIGINThandler changed via loop.add_signal_handler() is being suppressed by Dynamo"
-            )
-        else:
-            return _orig_add(sig, callback, *args)
-
-    loop.add_signal_handler = watching_add_signal_handler  # type: ignore[assignment]
-
+    shutdown_event, _ = install_graceful_shutdown(loop, runtime)
     logging.info("Signal handlers set up for graceful shutdown (with chaining)")
 
     if config.dynamo_args.image_diffusion_worker:
