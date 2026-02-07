@@ -202,7 +202,10 @@ def predownload_models(pytestconfig):
     else:
         # Fallback to original behavior if extraction failed
         download_models()
+
+    os.environ["HF_HUB_OFFLINE"] = "1"
     yield
+    os.environ.pop("HF_HUB_OFFLINE", None)
 
 
 @pytest.fixture(scope="session")
@@ -218,7 +221,13 @@ def predownload_tokenizers(pytestconfig):
     else:
         # Fallback to original behavior if extraction failed
         download_models(ignore_weights=True)
+
+    # Skip redundant HuggingFace API calls in worker subprocesses since
+    # tokenizers are already cached. This avoids flaky timeouts from slow
+    # HF API responses (the RepoInfo fetch still happens even for cached models).
+    os.environ["HF_HUB_OFFLINE"] = "1"
     yield
+    os.environ.pop("HF_HUB_OFFLINE", None)
 
 
 @pytest.fixture(autouse=True)
