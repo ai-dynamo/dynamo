@@ -32,4 +32,17 @@ impl ModelDeploymentCard {
         let json = self.inner.to_json().map_err(to_pyerr)?;
         Ok(json)
     }
+
+    fn source_path(&self) -> &str {
+        self.inner.source_path()
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn runtime_config(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let rc = pythonize::pythonize(py, &self.inner.runtime_config).map_err(to_pyerr)?;
+        Ok(rc.unbind())
+    }
 }

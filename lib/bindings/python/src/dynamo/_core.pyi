@@ -166,7 +166,14 @@ class Endpoint:
 
     async def client(self) -> Client:
         """
-        Create a `Client` capable of calling served instances of this endpoint
+        Create a `Client` capable of calling served instances of this endpoint using round-robin routing.
+        """
+        ...
+
+    async def client2(self, router_mode: RouterMode) -> Client:
+        """
+        Create a `Client` capable of calling served instances of this endpoint, using a specific
+        router mode (random, round-robin, kv).
         """
         ...
 
@@ -247,6 +254,18 @@ class Client:
     async def direct(self, request: JsonLike, instance: str) -> AsyncIterator[JsonLike]:
         """
         Pick a specific instance of the endpoint
+        """
+        ...
+
+
+class ModelCardInstanceId:
+    """
+    Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
+    The instance_id is not currently exposed in the Python bindings.
+    """
+    def triple(self) -> (str, str, str):
+        """
+        Triple of namespace, component and endpoint this worker is serving.
         """
         ...
 
@@ -1495,4 +1514,5 @@ __all__ = [
     "ModelDeploymentCard",
     "PythonAsyncEngine",
     "prometheus_names",
+    "ModelCardInstanceId",
 ]
