@@ -76,6 +76,9 @@ epp:
     # Use ETCD for discovery instead of Kubernetes (default: false)
     # Set to true via --set epp.dynamo.useEtcd=true to enable ETCD discovery
     useEtcd: false
+    # HuggingFace token secret configuration
+    # The secret should contain a key named HF_TOKEN with the token value
+    hfTokenSecret: "hf-token-secret"
 
 # Platform configuration (for Dynamo mode)
 platformReleaseName: dynamo-platform
