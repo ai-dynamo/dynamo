@@ -38,10 +38,8 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use config::{KvRouterConfig, RouterConfigOverride};
-use indexer::WorkerKvQueryResponse;
 pub use prefill_router::PrefillRouter;
 pub use push_router::KvPushRouter;
-use worker_query::WorkerQueryClient;
 
 use crate::{
     discovery::RuntimeConfigs,
@@ -50,8 +48,7 @@ use crate::{
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
             DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
-            TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
-            compute_block_hash_for_seq,
+            TokensWithHashes, WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
@@ -214,7 +211,6 @@ pub struct KvRouter {
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
-    worker_query_client: Option<WorkerQueryClient>,
 }
 
 impl KvRouter {
@@ -255,15 +251,8 @@ impl KvRouter {
         )
         .await?;
 
-        // Early return if KV event subscription is not needed (use_kv_events=false or overlap_score_weight=0)
-        let worker_query_client = if !kv_router_config.should_subscribe_to_kv_events() {
-            tracing::info!(
-                "Skipping KV event subscription (use_kv_events={}, overlap_score_weight={})",
-                kv_router_config.use_kv_events,
-                kv_router_config.overlap_score_weight,
-            );
-            None
-        } else {
+        // Start KV event subscription if needed (use_kv_events=true and overlap_score_weight>0)
+        if kv_router_config.should_subscribe_to_kv_events() {
             // Guaranteed to be KvIndexer since overlap_score_weight > 0.0
             let Indexer::KvIndexer(kv_indexer) = &indexer else {
                 unreachable!(
@@ -280,17 +269,13 @@ impl KvRouter {
                 workers_with_configs.clone(),
             )
             .await?;
-
-            // Initialize worker query client for external query API
-            // (only needed when KV events are enabled)
-            let worker_query_client = worker_query::WorkerQueryClient::new(
-                component.clone(),
-                workers_with_configs.subscribe(),
-                None, // No removal channel - query only
+        } else {
+            tracing::info!(
+                "Skipping KV event subscription (use_kv_events={}, overlap_score_weight={})",
+                kv_router_config.use_kv_events,
+                kv_router_config.overlap_score_weight,
             );
-            tracing::info!("Worker query client initialized");
-            Some(worker_query_client)
-        };
+        }
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
@@ -300,7 +285,6 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
-            worker_query_client,
         })
     }
 
@@ -479,60 +463,6 @@ impl KvRouter {
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
-    }
-
-    /// Query a specific worker's local KV indexer for its events
-    /// (See docstring for `WorkerQueryClient.query_worker()`)
-    pub async fn query_worker_local_kv(
-        &self,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-        start_event_id: Option<u64>,
-        end_event_id: Option<u64>,
-    ) -> Result<WorkerKvQueryResponse> {
-        let query_client = self
-            .worker_query_client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
-
-        query_client
-            .query_worker(worker_id, dp_rank, start_event_id, end_event_id)
-            .await
-    }
-
-    /// Recover missed KV events from a specific worker's dp_rank.
-    ///
-    /// Queries the worker's local KV indexer for events starting from
-    /// `start_event_id` and applies them to the router's indexer.
-    ///
-    /// # Arguments
-    ///
-    /// * `worker_id` - The worker to recover from
-    /// * `dp_rank` - The data parallel rank to recover from
-    /// * `start_event_id` - First event ID to fetch (inclusive), or None to start from beginning
-    /// * `end_event_id` - Last event ID to fetch (inclusive), or None for all
-    pub async fn recover_from_worker(
-        &self,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-        start_event_id: Option<u64>,
-        end_event_id: Option<u64>,
-    ) -> Result<usize> {
-        let query_client = self
-            .worker_query_client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Worker query client not available"))?;
-
-        let event_tx = match &self.indexer {
-            Indexer::KvIndexer(kv_indexer) => kv_indexer.event_sender(),
-            Indexer::None => {
-                anyhow::bail!("Cannot recover: indexer is disabled (--overlap_score_weight is 0)")
-            }
-        };
-
-        query_client
-            .recover_from_worker(worker_id, dp_rank, start_event_id, end_event_id, &event_tx)
-            .await
     }
 }
 

@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::RuntimeConfigs,
+    discovery::{RuntimeConfigs, RuntimeConfigsSubscriber},
     kv_router::{
         KV_EVENT_SUBJECT, KvRouterConfig, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
         indexer::{DumpRequest, GetWorkersRequest, KvIndexer},
@@ -515,10 +515,13 @@ pub async fn start_kv_router_background(
 pub async fn start_kv_router_background_event_plane(
     component: Component,
     kv_events_tx: mpsc::Sender<RouterEvent>,
+    remove_worker_tx: mpsc::Sender<WorkerId>,
     cancellation_token: CancellationToken,
-    mut worker_query_client: WorkerQueryClient,
+    subscriber: RuntimeConfigsSubscriber,
     transport_kind: EventTransportKind,
 ) -> Result<()> {
+    let mut worker_query_client =
+        WorkerQueryClient::new(component.clone(), subscriber, Some(remove_worker_tx));
     // Subscribe to KV events using the selected event plane transport
     let mut subscriber =
         EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
@@ -661,23 +664,6 @@ pub async fn start_kv_router_background_event_plane(
     Ok(())
 }
 
-/// Backwards-compatible wrapper for NATS Core local-indexer mode.
-pub async fn start_kv_router_background_nats_core(
-    component: Component,
-    kv_events_tx: mpsc::Sender<RouterEvent>,
-    cancellation_token: CancellationToken,
-    worker_query_client: WorkerQueryClient,
-) -> Result<()> {
-    start_kv_router_background_event_plane(
-        component,
-        kv_events_tx,
-        cancellation_token,
-        worker_query_client,
-        EventTransportKind::Nats,
-    )
-    .await
-}
-
 /// Cleanup orphaned NATS consumers that no longer have corresponding router entries
 async fn cleanup_orphaned_consumers(
     nats_queue: &mut NatsQueue,
@@ -780,12 +766,9 @@ pub async fn start_subscriber(
         start_kv_router_background_event_plane(
             component.clone(),
             kv_indexer.event_sender(),
+            kv_indexer.remove_worker_sender(),
             cancellation_token,
-            WorkerQueryClient::new(
-                component,
-                workers_with_configs.subscribe(),
-                Some(kv_indexer.remove_worker_sender()),
-            ),
+            workers_with_configs.subscribe(),
             transport_kind,
         )
         .await
