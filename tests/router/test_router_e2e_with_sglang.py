@@ -25,7 +25,7 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"  # tinyllama has bug in rope kernel for ADP test
+MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
     pytest.mark.e2e,
