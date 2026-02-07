@@ -24,6 +24,7 @@ use futures::stream::{self, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
 pub use dynamo_kv_router::approx;
@@ -123,20 +124,23 @@ pub trait WorkerSelector {
 }
 
 /// Override configuration for router settings that can be specified per-request
-#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
 pub struct RouterConfigOverride {
     #[builder(default)]
     pub overlap_score_weight: Option<f64>,
 
     #[builder(default)]
+    #[validate(range(min = 0.0))]
     pub router_temperature: Option<f64>,
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
 pub struct KvRouterConfig {
+    #[validate(range(min = 0.0))]
     pub overlap_score_weight: f64,
 
+    #[validate(range(min = 0.0))]
     pub router_temperature: f64,
 
     pub use_kv_events: bool,
@@ -157,18 +161,22 @@ pub struct KvRouterConfig {
     pub router_assume_kv_reuse: bool,
 
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
+    #[validate(range(min = 1))]
     pub router_snapshot_threshold: Option<u32>,
 
     /// Whether to reset the router state on startup (default: false)
     pub router_reset_states: bool,
 
     /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
+    #[validate(range(min = 0.0))]
     pub router_ttl_secs: f64,
 
     /// Maximum tree size before pruning (only used when use_kv_events is false, default: 2^20 = 1048576)
+    #[validate(range(min = 1))]
     pub router_max_tree_size: usize,
 
     /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
+    #[validate(range(min = 0.0, max = 1.0))]
     pub router_prune_target_ratio: f64,
 }
 
@@ -192,44 +200,6 @@ impl Default for KvRouterConfig {
 }
 
 impl KvRouterConfig {
-    /// Create a new KvRouterConfig with optional weight values.
-    /// If a weight is None, the default value will be used.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        overlap_score_weight: Option<f64>,
-        temperature: Option<f64>,
-        use_kv_events: Option<bool>,
-        replica_sync: Option<bool>,
-        track_active_blocks: Option<bool>,
-        track_output_blocks: Option<bool>,
-        assume_kv_reuse: Option<bool>,
-        router_snapshot_threshold: Option<Option<u32>>,
-        router_reset_states: Option<bool>,
-        router_ttl_secs: Option<f64>,
-        router_max_tree_size: Option<usize>,
-        router_prune_target_ratio: Option<f64>,
-    ) -> Self {
-        let default = Self::default();
-        Self {
-            overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
-            router_temperature: temperature.unwrap_or(default.router_temperature),
-            use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
-            router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
-            router_track_active_blocks: track_active_blocks
-                .unwrap_or(default.router_track_active_blocks),
-            router_track_output_blocks: track_output_blocks
-                .unwrap_or(default.router_track_output_blocks),
-            router_assume_kv_reuse: assume_kv_reuse.unwrap_or(default.router_assume_kv_reuse),
-            router_snapshot_threshold: router_snapshot_threshold
-                .unwrap_or(default.router_snapshot_threshold),
-            router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
-            router_ttl_secs: router_ttl_secs.unwrap_or(default.router_ttl_secs),
-            router_max_tree_size: router_max_tree_size.unwrap_or(default.router_max_tree_size),
-            router_prune_target_ratio: router_prune_target_ratio
-                .unwrap_or(default.router_prune_target_ratio),
-        }
-    }
-
     /// Compute sequence hashes for active block tracking based on configuration.
     ///
     /// Returns:
@@ -347,6 +317,7 @@ impl KvRouter {
         worker_type: &'static str,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
+        kv_router_config.validate()?;
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
 
@@ -509,9 +480,8 @@ impl KvRouter {
         #[cfg(feature = "bench")]
         let start = Instant::now();
 
-        // Validate that context_id is provided when update_states is true
         if update_states && context_id.is_none() {
-            panic!("context_id must be provided if update_states is true");
+            anyhow::bail!("context_id must be provided when update_states is true");
         }
 
         let isl_tokens = tokens.len();
@@ -784,12 +754,12 @@ impl KvPushRouter {
         handle_local_updates: bool,
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
-
-        // Extract LORA name from routing hints
         let lora_name = routing.and_then(|r| r.lora_name.clone());
+        let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
+        let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
-        let Some(id) = (match phase {
+        let preselected_id = match phase {
             RequestPhase::Prefill => {
                 routing.and_then(|r| r.prefill_worker_id.or(r.backend_instance_id))
             }
@@ -797,9 +767,9 @@ impl KvPushRouter {
                 routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id))
             }
             RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
-        }) else {
-            // No preselected worker - find the best match
-            // Don't update states if this is a query-only request
+        };
+
+        let Some(id) = preselected_id else {
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -818,8 +788,6 @@ impl KvPushRouter {
             });
         };
 
-        // Route to pre-selected or explicitly specified worker
-        let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         tracing::debug!(
             worker_id = id,
             dp_rank = dp_rank,
@@ -827,20 +795,12 @@ impl KvPushRouter {
             "Routing to specified worker"
         );
 
-        // Compute actual overlap blocks by querying the indexer
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
             .get_overlap_blocks(&request.token_ids, worker)
             .await?;
 
-        // Extract expected_output_tokens from routing hints
-        let expected_output_tokens = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.expected_output_tokens);
-
-        // Perform add_request if this router handles local updates
         if !is_query_only && handle_local_updates {
             self.chooser
                 .add_request(

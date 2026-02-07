@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Autoscaling
-
 This guide explains how to configure autoscaling for DynamoGraphDeployment (DGD) services using the `sglang-agg` example from `examples/backends/sglang/deploy/agg.yaml`.
 
 ## Example DGD
@@ -51,8 +49,7 @@ Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAd
 | **Dynamo Planner** | LLM-aware autoscaling with SLA optimization | Production LLM workloads |
 | **Custom Controllers** | Any scale-subresource-compatible controller | Custom requirements |
 
-> [!WARNING]
-> **Deprecation Notice:** The `spec.services[X].autoscaling` field in DGD is **deprecated and ignored**. Use DGDSA with HPA, KEDA, or Planner instead. If you have existing DGDs with `autoscaling` configured, you'll see a warning. Remove the field to silence the warning.
+> **⚠️ Deprecation Notice**: The `spec.services[X].autoscaling` field in DGD is **deprecated and ignored**. Use DGDSA with HPA, KEDA, or Planner instead. If you have existing DGDs with `autoscaling` configured, you'll see a warning. Remove the field to silence the warning.
 
 ## Architecture
 
@@ -158,7 +155,7 @@ The Dynamo Planner is an LLM-aware autoscaler that optimizes scaling decisions b
 **When to use Planner:**
 - You want LLM-optimized autoscaling out of the box
 - You need coordinated scaling across prefill/decode services
-- You want SLA-driven scaling (e.g., target TTFT < 500ms)
+- You want SLA-driven scaling (e.g., target TTFT \< 500ms)
 
 **How Planner works:**
 
@@ -169,14 +166,14 @@ Planner is deployed as a service component within your DGD. It:
 
 **Deployment:**
 
-The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../planner/sla-planner-quickstart.md) for complete instructions.
+The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../components/planner/planner-guide.md) for complete instructions.
 
 Example configurations with Planner:
 - `examples/backends/vllm/deploy/disagg_planner.yaml`
 - `examples/backends/sglang/deploy/disagg_planner.yaml`
 - `examples/backends/trtllm/deploy/disagg_planner.yaml`
 
-For more details, see the [SLA Planner documentation](../planner/sla-planner.md).
+For more details, see the [SLA Planner documentation](../components/planner/planner-guide.md).
 
 ## Autoscaling with Kubernetes HPA
 
@@ -187,7 +184,9 @@ The Horizontal Pod Autoscaler (HPA) is Kubernetes' native autoscaling solution.
 - You want to use standard Kubernetes tooling
 - You need CPU or memory-based scaling
 
-> **Note**: For custom metrics (like TTFT or queue depth), consider using [KEDA](#autoscaling-with-keda-recommended) instead - it's simpler to configure.
+<Note>
+For custom metrics (like TTFT or queue depth), consider using [KEDA](#autoscaling-with-keda-recommended) instead - it's simpler to configure.
+</Note>
 
 ### Basic HPA (CPU-based)
 
@@ -243,7 +242,9 @@ Dynamo metrics include these labels for filtering:
 | `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dynamoNamespace}`) | `default-sglang-agg` |
 | `model` | Model being served | `Qwen/Qwen3-0.6B` |
 
-> **Note**: When you have multiple DGDs in the same namespace, use `dynamo_namespace` to filter metrics for a specific DGD.
+<Note>
+When you have multiple DGDs in the same namespace, use `dynamo_namespace` to filter metrics for a specific DGD.
+</Note>
 
 #### Example: Scale Decode Service Based on TTFT
 
@@ -416,7 +417,9 @@ helm install keda kedacore/keda \
 kubectl get pods -n keda
 ```
 
-> **Note**: If you have Prometheus Adapter installed, either uninstall it first (`helm uninstall prometheus-adapter -n monitoring`) or install KEDA with `--set metricsServer.enabled=false` to avoid API conflicts.
+<Note>
+If you have Prometheus Adapter installed, either uninstall it first (`helm uninstall prometheus-adapter -n monitoring`) or install KEDA with `--set metricsServer.enabled=false` to avoid API conflicts.
+</Note>
 
 ### Example: Scale Decode Based on TTFT
 
@@ -607,7 +610,9 @@ kubectl get dgdsa sglang-agg-decode -n default
 # sglang-agg-decode   sglang-agg  decode    3          10m
 ```
 
-> **Note**: If an autoscaler (KEDA, HPA, Planner) is managing the adapter, your change will be overwritten on the next evaluation cycle.
+<Note>
+If an autoscaler (KEDA, HPA, Planner) is managing the adapter, your change will be overwritten on the next evaluation cycle.
+</Note>
 
 ### With DGDSA Disabled
 
@@ -731,7 +736,7 @@ If you see unstable scaling:
 - [Kubernetes HPA Documentation](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)
 - [KEDA Documentation](https://keda.sh/)
 - [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
-- [Planner Documentation](../planner/sla-planner.md)
+- [Planner Documentation](../components/planner/planner-guide.md)
 - [Dynamo Metrics Reference](../observability/metrics.md)
 - [Prometheus and Grafana Setup](../observability/prometheus-grafana.md)
 

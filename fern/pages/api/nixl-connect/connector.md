@@ -15,7 +15,7 @@ The connector provides two methods of moving data between workers:
 
   - Preparing local memory to be read by a remote worker.
 
-In both cases, local memory is registered with the NIXL-based I/O subsystem via the [`Descriptor`](descriptor.md) class and provided to the connector.
+In both cases, local memory is registered with the NIXL-based I/O subsystem via the [`Descriptor`](#descriptor) class and provided to the connector.
 When RDMA is available, the connector then configures the RDMA subsystem to expose the memory for the requested operation and returns an operation control object;
 otherwise the connector will select the best available RDMA alternative.
 The operation control object, either a [`ReadableOperation`](readable-operation.md) or a [`WritableOperation`](writable-operation.md),
@@ -24,7 +24,7 @@ provides NIXL metadata ([RdmaMetadata](rdma-metadata.md)) via its `.metadata()` 
 The NIXL metadata must be provided to the remote worker expected to complete the operation.
 The metadata contains required information (identifiers, keys, etc.) which enables the remote worker to interact with the provided memory.
 
-> [!WARNING]
+> [!Warning]
 > NIXL metadata contains a worker's address as well as security keys to access specific registered memory descriptors.
 > This data provides direct memory access between workers, and should be considered sensitive and therefore handled accordingly.
 
@@ -37,7 +37,7 @@ The metadata contains required information (identifiers, keys, etc.) which enabl
       self.connector = dynamo.nixl_connect.Connector()
 ```
 
-> [!TIP]
+> [!Tip]
 > See [`ReadOperation`](read-operation.md#example-usage), [`ReadableOperation`](readable-operation.md#example-usage),
 > [`WritableOperation`](writable-operation.md#example-usage), and [`WriteOperation`](write-operation.md#example-usage)
 > for additional examples.
