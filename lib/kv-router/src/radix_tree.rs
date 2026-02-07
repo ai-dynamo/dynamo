@@ -153,7 +153,11 @@ impl RadixTree {
     /// An `OverlapScores` representing the match scores.
     pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
         let mut scores = OverlapScores::new();
-        let mut current = self.root.clone();
+
+        if sequence.is_empty() {
+            return scores;
+        }
+
         let now = Instant::now();
 
         tracing::trace!(
@@ -161,46 +165,129 @@ impl RadixTree {
             sequence.iter().map(|h| h.0).collect::<Vec<_>>()
         );
 
-        for (idx, block_hash) in sequence.iter().enumerate() {
-            let next_block = {
-                let current_borrow = current.borrow();
-                current_borrow.children.get(block_hash).cloned()
-            };
-            if let Some(block) = next_block {
-                scores.update_scores(block.borrow().workers.iter());
+        // Get first child from root.
+        let first_child = {
+            let current_borrow = self.root.borrow();
+            current_borrow.children.get(&sequence[0]).cloned()
+        };
 
-                if let Some(expiration_duration) = self.expiration_duration {
-                    let mut block_mut = block.borrow_mut();
+        let Some(first_child) = first_child else {
+            return scores;
+        };
 
-                    while let Some(access_time) = block_mut.recent_uses.front() {
-                        if now.duration_since(*access_time) > expiration_duration {
-                            block_mut.recent_uses.pop_front();
-                        } else {
-                            break;
-                        }
-                    }
-                    scores.add_frequency(block_mut.recent_uses.len());
-                    block_mut.recent_uses.push_back(now);
-                }
+        // Initialize active worker set from first child.
+        let (mut active, mut active_count) = {
+            let borrow = first_child.borrow();
+            (borrow.workers.clone(), borrow.workers.len())
+        };
 
-                if early_exit && block.borrow().workers.len() == 1 {
+        // Frequency tracking for first child.
+        if let Some(expiration_duration) = self.expiration_duration {
+            let mut block_mut = first_child.borrow_mut();
+            while let Some(access_time) = block_mut.recent_uses.front() {
+                if now.duration_since(*access_time) > expiration_duration {
+                    block_mut.recent_uses.pop_front();
+                } else {
                     break;
                 }
+            }
+            scores.add_frequency(block_mut.recent_uses.len());
+            block_mut.recent_uses.push_back(now);
+        }
 
-                current = block;
-            } else {
-                tracing::trace!(
-                    "RadixTree::find_matches: block not found at index {} for hash {}",
-                    idx,
-                    block_hash.0
-                );
+        if active.is_empty() {
+            return scores;
+        }
+
+        if early_exit && active_count == 1 {
+            for worker in &active {
+                scores.scores.insert(*worker, 1);
+            }
+            for worker in scores.scores.keys() {
+                let tree_size = self
+                    .lookup
+                    .get(worker)
+                    .expect("worker in scores must exist in lookup table")
+                    .len();
+                scores.tree_sizes.insert(*worker, tree_size);
+            }
+            return scores;
+        }
+
+        let mut current = first_child;
+        let mut matched_depth = 1u32;
+
+        // Traverse remaining levels. Workers at a child node are always a subset
+        // of workers at the parent (along the same path), so:
+        //   - workers can only drop out, never join, as we descend
+        //   - if child.workers.len() == active_count, the sets are identical
+        //
+        // This lets us replace O(W) update_scores work at every level with an
+        // O(1) length check. Per-worker iteration only happens at dropout
+        // boundaries, where the count decreases.
+        for idx in 1..sequence.len() {
+            let next_block = {
+                let current_borrow = current.borrow();
+                current_borrow.children.get(&sequence[idx]).cloned()
+            };
+
+            let Some(block) = next_block else {
+                break;
+            };
+
+            // Check for worker dropout (O(1) in the common case).
+            {
+                let borrow = block.borrow();
+                let child_count = borrow.workers.len();
+
+                if child_count < active_count {
+                    // Workers dropped out. Record scores for those that left.
+                    // Score = matched_depth (number of nodes they were present at).
+                    for worker in &active {
+                        if !borrow.workers.contains(worker) {
+                            scores.scores.insert(*worker, matched_depth);
+                        }
+                    }
+                    active.clone_from(&borrow.workers);
+                    active_count = child_count;
+                }
+            }
+
+            // Frequency tracking (always runs when enabled, independent of dropout).
+            if let Some(expiration_duration) = self.expiration_duration {
+                let mut block_mut = block.borrow_mut();
+                while let Some(access_time) = block_mut.recent_uses.front() {
+                    if now.duration_since(*access_time) > expiration_duration {
+                        block_mut.recent_uses.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                scores.add_frequency(block_mut.recent_uses.len());
+                block_mut.recent_uses.push_back(now);
+            }
+
+            if active_count == 0 {
                 break;
             }
+
+            if early_exit && active_count == 1 {
+                matched_depth = (idx + 1) as u32;
+                break;
+            }
+
+            current = block;
+            matched_depth = (idx + 1) as u32;
+        }
+
+        // Record scores for workers that survived through the deepest matched level.
+        for worker in &active {
+            scores.scores.insert(*worker, matched_depth);
         }
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
-        // Populate tree sizes for all workers that have scores
+        // Populate tree sizes for all workers that have scores.
         for worker in scores.scores.keys() {
             let tree_size = self
                 .lookup
