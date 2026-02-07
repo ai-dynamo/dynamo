@@ -419,6 +419,15 @@ class ModelDeploymentCard:
     A model deployment card is a collection of model information
     """
 
+    def to_json_str(self) -> str:
+        """Serialize the model deployment card to a JSON string."""
+        ...
+
+    @staticmethod
+    def from_json_str(json: str) -> "ModelDeploymentCard":
+        """Deserialize a model deployment card from a JSON string."""
+        ...
+
     ...
 
 class ModelRuntimeConfig:
@@ -924,11 +933,35 @@ class ModelType:
 
 class RouterMode:
     """Router mode for load balancing requests across workers"""
+    RoundRobin: "RouterMode"
+    Random: "RouterMode"
+    KV: "RouterMode"
     ...
 
 class RouterConfig:
     """How to route the request"""
-    ...
+
+    def __init__(
+        self,
+        mode: RouterMode,
+        config: Optional[KvRouterConfig] = None,
+        active_decode_blocks_threshold: Optional[float] = None,
+        active_prefill_tokens_threshold: Optional[int] = None,
+        active_prefill_tokens_threshold_frac: Optional[float] = None,
+        enforce_disagg: bool = False,
+    ) -> None:
+        """
+        Create a RouterConfig.
+
+        Args:
+            mode: The router mode (RoundRobin, Random, or KV)
+            config: Optional KV router configuration (used when mode is KV)
+            active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
+            active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
+            active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
+            enforce_disagg: Enforce disaggregated prefill-decode mode
+        """
+        ...
 
 class KvRouterConfig:
     """Values for KV router"""
@@ -1030,7 +1063,7 @@ class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
     ...
 
-async def make_engine(args: EntrypointArgs) -> EngineConfig:
+async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> EngineConfig:
     """Make an engine matching the args"""
     ...
 
@@ -1439,13 +1472,64 @@ class KvPushRouter:
         """
         ...
 
+class EngineType:
+    """Engine type for Dynamo workers"""
+    Echo: "EngineType"
+    Dynamic: "EngineType"
+    Mocker: "EngineType"
+    ...
+
 class EntrypointArgs:
     """
     Settings to connect an input to a worker and run them.
     Use by `dynamo run`.
     """
 
-    ...
+    def __init__(
+        self,
+        engine_type: "EngineType",
+        model_path: Optional[str] = None,
+        model_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
+        context_length: Optional[int] = None,
+        template_file: Optional[str] = None,
+        router_config: Optional[RouterConfig] = None,
+        kv_cache_block_size: Optional[int] = None,
+        http_host: Optional[str] = None,
+        http_port: Optional[int] = None,
+        http_metrics_port: Optional[int] = None,
+        tls_cert_path: Optional[str] = None,
+        tls_key_path: Optional[str] = None,
+        extra_engine_args: Optional[str] = None,
+        namespace: Optional[str] = None,
+        is_prefill: bool = False,
+        migration_limit: int = 0,
+        engine_factory: Optional[Callable] = None,
+    ) -> None:
+        """
+        Create EntrypointArgs.
+
+        Args:
+            engine_type: The type of engine to use
+            model_path: Path to the model directory on disk
+            model_name: Model name or dynamo endpoint (e.g. 'dyn://namespace.component.endpoint')
+            endpoint_id: Optional endpoint ID
+            context_length: Optional context length override
+            template_file: Optional path to a prompt template file
+            router_config: Optional router configuration
+            kv_cache_block_size: Optional KV cache block size
+            http_host: HTTP host to bind to
+            http_port: HTTP port to bind to
+            http_metrics_port: HTTP metrics port (for gRPC service)
+            tls_cert_path: TLS certificate path (PEM format)
+            tls_key_path: TLS key path (PEM format)
+            extra_engine_args: Path to extra engine arguments file
+            namespace: Dynamo namespace for model discovery scoping
+            is_prefill: Whether this is a prefill worker
+            migration_limit: Maximum number of request migrations (0=disabled)
+            engine_factory: Optional Python engine factory callback
+        """
+        ...
 
 class PlannerDecision:
     """A request from planner to client to perform a scaling action.
