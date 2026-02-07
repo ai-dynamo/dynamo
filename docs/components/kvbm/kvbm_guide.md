@@ -194,6 +194,24 @@ curl localhost:8000/v1/chat/completions \
 
 ## Disaggregated Serving with KVBM
 
+KVBM supports disaggregated serving where prefill and decode operations run on separate workers. KVBM is enabled on the prefill worker to offload KV cache.
+
+### Disaggregated Serving with vLLM
+
+```bash
+# 1P1D - one prefill worker and one decode worker
+# NOTE: requires at least 2 GPUs
+cd $DYNAMO_HOME/examples/backends/vllm
+./launch/disagg_kvbm.sh
+
+# 2P2D - two prefill workers and two decode workers
+# NOTE: requires at least 4 GPUs
+cd $DYNAMO_HOME/examples/backends/vllm
+./launch/disagg_kvbm_2p2d.sh
+```
+
+### Disaggregated Serving with TRT-LLM
+
 > [!NOTE]
 > The latest TensorRT-LLM release (1.3.0rc1) is currently experiencing a request hang when running disaggregated serving with KVBM.
 > Please include the TensorRT-LLM commit id `18e611da773026a55d187870ebcfa95ff00c8482` when building the Dynamo TensorRT-LLM runtime image to test the KVBM + disaggregated serving feature.
@@ -216,24 +234,6 @@ cp -r triton_kernels /opt/dynamo/venv/lib/python3.12/site-packages/ && \
 cd /workspace && \
 rm -rf /tmp/TensorRT-LLM
 ```
-
-KVBM supports disaggregated serving where prefill and decode operations run on separate workers. KVBM is enabled on the prefill worker to offload KV cache.
-
-### Disaggregated Serving with vLLM
-
-```bash
-# 1P1D - one prefill worker and one decode worker
-# NOTE: requires at least 2 GPUs
-cd $DYNAMO_HOME/examples/backends/vllm
-./launch/disagg_kvbm.sh
-
-# 2P2D - two prefill workers and two decode workers
-# NOTE: requires at least 4 GPUs
-cd $DYNAMO_HOME/examples/backends/vllm
-./launch/disagg_kvbm_2p2d.sh
-```
-
-### Disaggregated Serving with TRT-LLM
 
 ```bash
 # Launch prefill worker with KVBM
