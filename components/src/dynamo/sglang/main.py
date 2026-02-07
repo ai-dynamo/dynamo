@@ -11,21 +11,31 @@ import sglang as sgl
 import uvloop
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
+    ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import setup_prometheus_registry, setup_sgl_metrics
-from dynamo.sglang.register import register_llm_with_readiness_gate
+from dynamo.sglang.publisher import (
+    DynamoSglangPublisher,
+    setup_prometheus_registry,
+    setup_sgl_metrics,
+)
+from dynamo.sglang.register import (
+    register_image_diffusion_model,
+    register_llm_with_readiness_gate,
+)
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
     DiffusionWorkerHandler,
     EmbeddingWorkerHandler,
+    ImageDiffusionWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
     MultimodalProcessorHandler,
@@ -38,32 +48,38 @@ configure_dynamo_logging()
 
 async def _handle_non_leader_node(
     engine: sgl.Engine,
-    generate_endpoint,
+    publisher: DynamoSglangPublisher,
+    metrics_task: asyncio.Task,
 ) -> None:
     """
     Handle non-leader node (node_rank >= 1) in multi-node deployments.
 
-    Non-leader nodes only run scheduler processes and don't handle requests,
-    but they should still expose metrics via Dynamo's metrics endpoint.
+    Non-leader nodes run scheduler processes but don't handle requests directly.
+    They still need:
+    - KV event publishing (subscribe to local DP ranks, forward to NATS)
+    - Metrics collection from local schedulers
+    - Prometheus metrics exposure
 
     Args:
         engine: The SGLang engine instance.
-        config: SGLang configuration including server args.
-        component: The Dynamo runtime component.
-        generate_endpoint: The Dynamo endpoint for generation requests.
+        publisher: The DynamoSglangPublisher for metrics and KV events.
+        metrics_task: The asyncio task running the metrics loop.
     """
     logging.info(
-        f"Non-leader node detected (node_rank={engine.server_args.node_rank})."
+        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
+        "Running with metrics and KV event publishing for local DP ranks."
     )
 
-    # Only setup Prometheus registry to expose SGLang metrics from shared memory
-    # Non-leader nodes don't need Dynamo metrics publishing or KV events
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-        logging.info("Prometheus metrics registry configured for non-leader node")
-
-    # Wait indefinitely - the process will be terminated via signal handlers
-    await asyncio.Event().wait()
+    try:
+        # Wait indefinitely - the process will be terminated via signal handlers
+        await asyncio.Event().wait()
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            pass
+        publisher.cleanup()
 
 
 async def worker():
@@ -103,7 +119,9 @@ async def worker():
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    if config.dynamo_args.embedding_worker:
+    if config.dynamo_args.image_diffusion_worker:
+        await init_image_diffusion(runtime, config)
+    elif config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
     elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
@@ -118,6 +136,7 @@ async def worker():
         await init_diffusion(runtime, config)
     elif config.serving_mode != DisaggregationMode.PREFILL:
         await init(runtime, config)
+
     else:
         await init_prefill(runtime, config)
 
@@ -137,13 +156,8 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Handle non-leader nodes (multi-node parallelism)
-    # Non-leader nodes only run scheduler processes and expose metrics
-    if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, generate_endpoint)
-        return
-
-    # publisher instantiates the metrics and kv event publishers
+    # Setup metrics and KV events for ALL nodes (including non-leader)
+    # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
@@ -151,6 +165,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
+
+    # Handle non-leader nodes (multi-node parallelism)
+    # Non-leader nodes run schedulers and publish KV events, but don't serve requests
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, publisher, metrics_task)
+        return
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -160,7 +180,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     handler.register_engine_routes(runtime)
 
-    print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
@@ -224,17 +243,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Handle non-leader nodes (multi-node tensor parallelism)
-    # Non-leader nodes only run scheduler processes and expose metrics
-    if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, generate_endpoint)
-        return
-
-    # Perform dummy warmup for prefill worker to avoid initial TTFT hit
-    # Only needed on leader node that handles requests
-    await _warmup_prefill_engine(engine, server_args)
-
-    # publisher instantiates the metrics and kv event publishers
+    # Setup metrics and KV events for ALL nodes (including non-leader)
+    # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
@@ -242,6 +252,16 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
+
+    # Handle non-leader nodes (multi-node parallelism)
+    # Non-leader nodes run schedulers and publish KV events, but don't serve requests
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, publisher, metrics_task)
+        return
+
+    # Perform dummy warmup for prefill worker to avoid initial TTFT hit
+    # Only needed on leader node that handles requests
+    await _warmup_prefill_engine(engine, server_args)
 
     handler = PrefillWorkerHandler(
         component, engine, config, publisher, generate_endpoint
@@ -310,12 +330,8 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Handle non-leader nodes (multi-node parallelism)
-    if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, generate_endpoint)
-        return
-
-    # Setup metrics publisher
+    # Setup metrics and KV events for ALL nodes (including non-leader)
+    # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
@@ -323,6 +339,12 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
+
+    # Handle non-leader nodes (multi-node parallelism)
+    # Non-leader nodes run schedulers and publish KV events, but don't serve requests
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, publisher, metrics_task)
+        return
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -433,6 +455,87 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
+async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
+    """Initialize image diffusion worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    # Initialize DiffGenerator (not sgl.Engine)
+    from sglang.multimodal_gen import DiffGenerator
+
+    if not server_args.model_path:
+        raise ValueError("--model is required for diffusion workers")
+
+    # Parallelism configuration
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    num_gpus = tp_size * dp_size
+
+    # Distributed configuration
+    dist_timeout = getattr(server_args, "dist_timeout", None)
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=server_args.model_path,
+        # Parallelism configuration
+        num_gpus=num_gpus,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        # Distributed configuration
+        dist_timeout=dist_timeout,
+    )
+
+    # Initialize fsspec filesystems for image storage
+    fs_url = dynamo_args.image_diffusion_fs_url
+
+    # Initialize primary filesystem
+    if not fs_url:
+        raise ValueError("--image-diffusion-fs-url is required for diffusion workers")
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # Image diffusion doesn't have metrics publisher like LLM
+    # Could add custom metrics for images/sec, steps/sec later
+
+    handler = ImageDiffusionWorkerHandler(
+        component,
+        generator,
+        config,
+        publisher=None,
+        fs=get_fs(fs_url),
+    )
+
+    # Create proper health check payload that sends a minimal diffusion request
+    health_check_payload = ImageDiffusionHealthCheckPayload(
+        model_path=server_args.model_path
+    ).to_dict()
+
+    ready_event = asyncio.Event()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[],  # No LLM metrics labels
+                health_check_payload=health_check_payload,
+            ),
+            register_image_diffusion_model(
+                generator,
+                generate_endpoint,
+                server_args,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve image diffusion endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
 async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal processor component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -519,7 +622,12 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
 
 async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
-    """Initialize multimodal worker component for aggregated or decode mode"""
+    """Initialize multimodal worker component.
+
+    This worker is always an internal component that should not register with
+    the Frontend. Public registration is handled by the Processor component
+    (--multimodal-processor). For standalone serving, use init() (default).
+    """
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     component = runtime.namespace(dynamo_args.namespace).component(
@@ -545,35 +653,16 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     await handler.async_init()
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
-    ready_event = asyncio.Event()
 
     try:
-        if config.serving_mode == DisaggregationMode.DECODE:
-            # Decode Worker is an internal component, should not register with Frontend
-            # Only needs to provide internal service endpoint for Processor to call
-            await generate_endpoint.serve_endpoint(
-                handler.generate,
-                metrics_labels=[("model", server_args.served_model_name)],
-                graceful_shutdown=True,
-                health_check_payload=health_check_payload,
-            )
-        else:
-            # In aggregated mode, need to register with Frontend
-            await asyncio.gather(
-                generate_endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=[("model", server_args.served_model_name)],
-                    graceful_shutdown=True,
-                    health_check_payload=health_check_payload,
-                ),
-                register_llm_with_readiness_gate(
-                    engine,
-                    generate_endpoint,
-                    server_args,
-                    dynamo_args,
-                    readiness_gate=ready_event,
-                ),
-            )
+        # Multimodal Worker is an internal component, should not register with Frontend.
+        # Only needs to provide internal service endpoint for Processor to call.
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            metrics_labels=[("model", server_args.served_model_name)],
+            graceful_shutdown=True,
+            health_check_payload=health_check_payload,
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise

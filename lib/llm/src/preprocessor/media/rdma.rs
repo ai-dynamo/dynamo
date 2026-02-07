@@ -10,6 +10,8 @@ use {
     base64::{Engine as _, engine::general_purpose},
     dynamo_memory::SystemStorage,
     dynamo_memory::nixl::{self, NixlAgent, NixlDescriptor, RegisteredView},
+    flate2::{Compression, write::ZlibEncoder},
+    std::io::Write,
     std::sync::Arc,
 };
 
@@ -108,7 +110,8 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
 }
 
 // Get NIXL metadata for a descriptor
-// Avoids cross-request leak possibility and reduces metadata size
+// Returns zlib-compressed, base64-encoded metadata in format: "b64:<compressed_base64>"
+// This format matches what Python nixl_connect expects for RdmaMetadata.nixl_metadata
 // TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
 #[cfg(feature = "media-nixl")]
 pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<String> {
@@ -118,7 +121,12 @@ pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<
     // reg_desc_list.add_storage_desc(storage)?;
     // let nixl_partial_md = agent.raw_agent().get_local_partial_md(&reg_desc_list, None)?;
 
-    let b64_encoded = general_purpose::STANDARD.encode(&nixl_md);
+    // Compress with zlib (level 6, matching Python's default)
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
+    encoder.write_all(&nixl_md)?;
+    let compressed = encoder.finish()?;
+
+    let b64_encoded = general_purpose::STANDARD.encode(&compressed);
     Ok(format!("b64:{}", b64_encoded))
 }
 

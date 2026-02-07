@@ -181,24 +181,79 @@ const (
 const sidecarScriptTemplate = `
 set -e
 set -o pipefail
-# Wait for the profiler container to complete, not just for the file to exist
-# This ensures we capture the final config, not intermediate results
+
+# Wait for profiler container to terminate (no timeout - profiling can take hours)
 echo "Waiting for profiler to complete..."
+START_TIME=$(date +%s)
+LAST_PROGRESS_LOG=$START_TIME
+PROGRESS_INTERVAL=300
+
 while true; do
-  # Check if profiler container has finished (either Completed or Error state)
-  # Use kubectl to check the pod's container status
-  STATUS=$(kubectl get pod $HOSTNAME -n {{.Namespace}} -o jsonpath='{.status.containerStatuses[?(@.name=="profiler")].state}' 2>/dev/null || echo "")
-  if echo "$STATUS" | grep -q "terminated"; then
-    echo "Profiler container has terminated"
+  CURRENT_TIME=$(date +%s)
+  ELAPSED=$((CURRENT_TIME - START_TIME))
+
+  # Log progress every 5 minutes
+  if [ $((CURRENT_TIME - LAST_PROGRESS_LOG)) -ge $PROGRESS_INTERVAL ]; then
+    echo "Still waiting... ($(($ELAPSED / 60)) minutes elapsed)"
+    LAST_PROGRESS_LOG=$CURRENT_TIME
+  fi
+
+  # Check if profiler container terminated
+  CONTAINER_STATUS=$(kubectl get pod $HOSTNAME -n {{.Namespace}} -o jsonpath='{.status.containerStatuses[?(@.name=="profiler")].state}' 2>/dev/null || echo "")
+  if echo "$CONTAINER_STATUS" | grep -q "terminated"; then
+    echo "Profiler terminated (ran for $(($ELAPSED / 60)) minutes)"
     break
   fi
   sleep 5
 done
 
-# Now wait for the output file to exist
-echo "Waiting for output file {{.OutputPath}}/{{.OutputFile}}..."
-while [ ! -f {{.OutputPath}}/{{.OutputFile}} ]; do sleep 2; done
-echo "Output file found, creating ConfigMap..."
+# Check profiler status file (2 minute timeout)
+echo "Checking profiler status..."
+STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
+TIMEOUT=120
+CHECK_START=$(date +%s)
+
+# Wait for status file to exist
+while [ ! -f "$STATUS_FILE" ]; do
+  ELAPSED=$(($(date +%s) - CHECK_START))
+  if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo "ERROR: Status file not found after ${TIMEOUT}s"
+    exit 1
+  fi
+  sleep 2
+done
+
+# Read and parse status from YAML file
+STATUS=$(grep "^status:" "$STATUS_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
+
+if [ -z "$STATUS" ]; then
+  echo "ERROR: Invalid status file format"
+  exit 1
+fi
+
+# Check status value
+case "$STATUS" in
+  success)
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    echo "Profiler succeeded: $MESSAGE"
+    ;;
+  failed)
+    ERROR=$(grep "^error:" "$STATUS_FILE" | sed 's/^error: *//' | tr -d '"' | tr -d "'")
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    echo "ERROR: Profiler failed: ${ERROR:-$MESSAGE}"
+    exit 1
+    ;;
+  running)
+    echo "ERROR: Profiler still running (unexpected)"
+    exit 1
+    ;;
+  *)
+    echo "ERROR: Unknown status: $STATUS"
+    exit 1
+    ;;
+esac
+
+echo "Creating ConfigMap..."
 
 # Start building ConfigMap YAML with DGD spec
 cat >/tmp/cm.yaml <<EOF
@@ -220,6 +275,12 @@ if [ -f {{.OutputPath}}/{{.MockerOutputFile}} ]; then
   echo "  {{.MockerOutputFile}}: |" >> /tmp/cm.yaml
   sed 's/^/    /' {{.OutputPath}}/{{.MockerOutputFile}} >> /tmp/cm.yaml
   echo "Added mocker config to ConfigMap"
+fi
+
+# Add profiler status file for debugging
+if [ -f {{.OutputPath}}/profiler_status.yaml ]; then
+  echo "  profiler_status.yaml: |" >> /tmp/cm.yaml
+  sed 's/^/    /' {{.OutputPath}}/profiler_status.yaml >> /tmp/cm.yaml
 fi
 
 # Note: Profiling data (raw_data.npz converted to JSON) is included in the

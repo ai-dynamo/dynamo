@@ -71,8 +71,6 @@ impl DeltaAggregator {
                 };
 
                 if aggregator.error.is_none() && delta.data.is_some() {
-                    // note: we could extract annotations here and add them to the aggregator
-                    // to be return as part of the NIM Response Extension
                     // TODO(#14) - Aggregate Annotation
 
                     // these are cheap to move so we do it every time since we are consuming the delta
