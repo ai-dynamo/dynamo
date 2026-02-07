@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import signal
 import tempfile
 from typing import Optional
 
@@ -18,6 +17,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -118,23 +118,9 @@ async def await_checkpoint_and_was_restored(signal_file: str) -> bool:
         await asyncio.sleep(1)
 
 
-async def graceful_shutdown(runtime, shutdown_event):
-    """
-    Shutdown dynamo distributed runtime.
-    The endpoints will be immediately invalidated so no new requests will be accepted.
-    For endpoints served with graceful_shutdown=True, the serving function will wait until all in-flight requests are finished.
-    For endpoints served with graceful_shutdown=False, the serving function will return immediately.
-    """
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    shutdown_event.set()
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
-
-
 async def worker():
     config = parse_args()
 
-    loop = asyncio.get_running_loop()
     overwrite_args(config)
     dump_config(config.dump_config_to, config)
 
@@ -217,31 +203,14 @@ async def worker():
             logger.info("Exiting after checkpoint completion")
             return
 
-    # Create shutdown event
     shutdown_event = asyncio.Event()
-
-    # Set DYN_EVENT_PLANE environment variable based on config
-    os.environ["DYN_EVENT_PLANE"] = config.event_plane
-
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND use_kv_events is True
-    enable_nats = config.request_plane == "nats" or (
-        config.event_plane == "nats" and config.use_kv_events
+    runtime, _ = create_runtime(
+        store_kv=config.store_kv,
+        request_plane=config.request_plane,
+        event_plane=config.event_plane,
+        use_kv_events=config.use_kv_events,
+        shutdown_event=shutdown_event,
     )
-
-    runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, enable_nats
-    )
-
-    # Set up signal handler for graceful shutdown
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.debug("Signal handlers set up for graceful shutdown")
 
     # Route to appropriate initialization based on config flags
     if config.vllm_native_encoder_worker:

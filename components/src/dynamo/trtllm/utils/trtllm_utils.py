@@ -9,6 +9,7 @@ from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
+from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.trtllm import __version__
 from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 
@@ -112,30 +113,6 @@ def _preprocess_for_encode_config(
 ) -> dict:  # pyright: ignore[reportUnusedFunction]
     """Convert Config object to dictionary for encoding."""
     return obj.__dict__
-
-
-def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
-    """Parse a Dynamo endpoint string into its components.
-
-    Args:
-        endpoint: Endpoint string in format 'namespace.component.endpoint'
-            or 'dyn://namespace.component.endpoint'.
-
-    Returns:
-        Tuple of (namespace, component, endpoint_name).
-
-    Raises:
-        ValueError: If endpoint format is invalid.
-    """
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        raise ValueError(
-            f"Invalid endpoint format: '{endpoint}'. "
-            "Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-    namespace, component, endpoint_name = endpoint_parts
-    return namespace, component, endpoint_name
 
 
 def cmd_line_args():

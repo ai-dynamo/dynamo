@@ -20,6 +20,7 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
+from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_llm
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
@@ -451,15 +452,9 @@ async def parse_args(args: list[str]) -> Config:
             endpoint = f"dyn://{namespace}.backend.generate"
 
     # Always parse the endpoint (whether auto-generated or user-provided)
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        logging.error(
-            f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        sys.exit(1)
-
-    parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+        endpoint
+    )
 
     # Validate parser flags: error if both --{name} and --dyn-{name} are set.
     # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
@@ -627,31 +622,6 @@ def reserve_free_port(host: str = "localhost") -> Generator[int, None, None]:
         yield port
     finally:
         sock.close()
-
-
-def parse_endpoint(endpoint: str) -> List[str]:
-    """Parse endpoint string into namespace, component, and endpoint parts.
-
-    Args:
-        endpoint: Endpoint string in 'dyn://namespace.component.endpoint' format.
-
-    Returns:
-        List of [namespace, component, endpoint] strings.
-
-    Raises:
-        ValueError: If endpoint format is invalid.
-    """
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        error_msg = (
-            f"Invalid endpoint format: '{endpoint}'. "
-            f"Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        logging.error(error_msg)
-        raise ValueError(error_msg)
-
-    return endpoint_parts
 
 
 def _reserve_disaggregation_bootstrap_port() -> int:
