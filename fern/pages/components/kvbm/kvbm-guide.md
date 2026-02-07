@@ -402,7 +402,7 @@ uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 ## See Also
 
 - [KVBM Overview](README.md) for a quick overview of KV Caching, KVBM and its architecture
-- [KVBM Design](../../kvbm-design.md) for a deep dive into KVBM architecture
+- [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache-integration.md)
 - [FlexKV Integration](../../integrations/flexkv-integration.md)
 - [SGLang HiCache](../../integrations/sglang-hicache.md)

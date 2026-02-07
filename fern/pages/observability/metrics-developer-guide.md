@@ -133,5 +133,5 @@ let counter = endpoint.metrics().create_counter(
 
 - [Metrics Overview](metrics.md)
 - [Prometheus and Grafana Setup](prometheus-grafana.md)
-- [Distributed Runtime Architecture](../distributed-runtime.md)
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 

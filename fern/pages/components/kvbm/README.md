@@ -52,12 +52,12 @@ KVBM has three primary logical layers:
 
 **NIXL Layer** — The bottom layer provides unified support for all data and storage transactions. NIXL enables P2P GPU transfers, RDMA and NVLink remote memory sharing, dynamic block registration and metadata exchange, and provides a plugin interface for storage backends including block memory (GPU HBM, Host DRAM, Remote DRAM, Local SSD), local/remote filesystems, object stores, and cloud storage.
 
-> **Learn more:** See the [KVBM Design Document](../../kvbm-design.md) for detailed architecture, components, and data flows.
+> **Learn more:** See the [KVBM Design Document](../../design-docs/kvbm-design.md) for detailed architecture, components, and data flows.
 
 ## Next Steps
 
 - **[KVBM Guide](kvbm-guide.md)** — Installation, configuration, and deployment instructions
-- **[KVBM Design](../../kvbm-design.md)** — Architecture deep dive, components, and data flows
+- **[KVBM Design](../../design-docs/kvbm-design.md)** — Architecture deep dive, components, and data flows
 - **[LMCache Integration](../../integrations/lmcache-integration.md)** — Use LMCache with Dynamo vLLM backend
 - **[FlexKV Integration](../../integrations/flexkv-integration.md)** — Use FlexKV for KV cache management
 - **[SGLang HiCache](../../integrations/sglang-hicache.md)** — Enable SGLang's hierarchical cache with NIXL

@@ -52,7 +52,7 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 
 ## Kubernetes
 
-For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/README.md).
+For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/metrics.md).
 
 **Operator Metrics**: The Dynamo Operator running in Kubernetes exposes its own set of metrics for monitoring controller reconciliation, webhook validation, and resource inventory. See the [Operator Metrics Guide](../kubernetes/observability/operator-metrics.md).
 

@@ -287,4 +287,4 @@ Each event in the payload is a dictionary with `type` field (`BlockStored`, `Blo
 
 - **[Router README](../components/router/README.md)**: Quick start guide for the KV Router
 - **[Router Guide](../components/router/router-guide.md)**: Configuration, tuning, and production setup
-- **[Router Design](../router-design.md)**: Architecture details and event transport modes
+- **[Router Design](../design-docs/router-design.md)**: Architecture details and event transport modes

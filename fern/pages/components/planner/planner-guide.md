@@ -5,7 +5,7 @@
 
 # Planner Guide
 
-Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README.md). For architecture internals, see [Planner Design](../../planner-design.md).
+Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README.md). For architecture internals, see [Planner Design](../../design-docs/planner-design.md).
 
 ## Deployment
 
@@ -451,7 +451,7 @@ For comprehensive troubleshooting including AI Configurator constraints, perform
 
 - [Planner README](README.md) -- Overview and quick start
 - [Planner Examples](planner-examples.md) -- DGDR YAML examples and sample configurations
-- [Planner Design](../../planner-design.md) -- Architecture deep-dive for contributors
+- [Planner Design](../../design-docs/planner-design.md) -- Architecture deep-dive for contributors
 - [DGDR API Reference](../../kubernetes/api-reference.md)
 - [Pre-Deployment Profiling](../profiler/profiler-guide.md)
 - [Dynamo Operator Guide](../../kubernetes/dynamo-operator.md)

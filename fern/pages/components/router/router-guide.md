@@ -332,7 +332,7 @@ For improved fault tolerance, you can launch multiple frontend + router replicas
 
 ### Router State Management
 
-The KV Router tracks two types of state (see [Router Design](../../router-design.md) for details):
+The KV Router tracks two types of state (see [Router Design](../../design-docs/router-design.md) for details):
 
 1. **Prefix blocks (cached KV blocks)**: Maintained in a radix tree, tracking which blocks are cached on each worker. This state is **persistent** - backed by NATS JetStream events and object store snapshots. New router replicas automatically sync this state on startup, ensuring consistent cache awareness across restarts.
 
@@ -377,7 +377,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8002 --router-replica-syn
 
 >[!Note]
 > If you need to start with a fresh state in JetStream mode, you have two options:
-> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](../../distributed-runtime.md)) which will start a new stream and NATS object store path
+> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](../../design-docs/distributed-runtime.md)) which will start a new stream and NATS object store path
 > 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
 
 ## Dynamic Threshold Configuration
@@ -418,5 +418,5 @@ curl http://localhost:8000/busy_threshold
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
-- **[Router Design](../../router-design.md)**: Architecture details and event transport modes
+- **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing

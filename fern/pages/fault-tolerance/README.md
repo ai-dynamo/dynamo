@@ -126,8 +126,8 @@ See [Fault Tolerance Testing](testing.md) for details.
 ## Related Documentation
 
 - [Observability](../observability/README.md) - Metrics and monitoring
-- [Distributed Runtime](../distributed-runtime.md) - Service discovery architecture
-- [Event Plane](../event-plane.md) - etcd and NATS coordination
+- [Distributed Runtime](../design-docs/distributed-runtime.md) - Service discovery architecture
+- [Event Plane](../design-docs/event-plane.md) - etcd and NATS coordination
 
 ```{toctree}
 :hidden:

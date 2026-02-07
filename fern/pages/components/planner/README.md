@@ -66,7 +66,7 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 | [SLA-based Planner](planner-guide.md) | Scaling algorithm, correction factors, load prediction details |
 | [Load-based Planner](README.md) | Legacy load-based scaling (deprecated) |
 | [SLA-Driven Profiling](../profiler/profiler-guide.md) | Pre-deployment profiling process and configuration |
-| [Planner Design](../../planner-design.md) | Architecture deep-dive for contributors |
+| [Planner Design](../../design-docs/planner-design.md) | Architecture deep-dive for contributors |
 
 ## Configuration Reference
 

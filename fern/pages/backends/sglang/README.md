@@ -34,8 +34,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../disagg-serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
 | [**Multimodal Support**](../../features/multimodal/multimodal-sglang.md) | ✅ |  |
