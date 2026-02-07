@@ -557,7 +557,6 @@ async def register_vllm_model(
         config.model,
         config.served_model_name,
         kv_cache_block_size=runtime_values["block_size"],
-        migration_limit=migration_limit,
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
