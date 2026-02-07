@@ -143,8 +143,8 @@ Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) fro
 ```bash
 # Single command approach (recommended)
 export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
-python container/render.py --framework=${FRAMEWORK} --target=local-dev
-docker build -f container/rendered.Dockerfile .
+python container/render.py --framework=${FRAMEWORK} --target=local-dev --short-output
+docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
 
 # Now you've created both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
 ```
@@ -416,8 +416,8 @@ If you see errors like "container is not running" or "An error occurred setting 
 
    # If missing, build the dev image first, then build local-dev
    export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
-   python container/render.py --framework=${FRAMEWORK} --target=local-dev
-   docker build -f container/rendered.Dockerfile .
+   python container/render.py --framework=${FRAMEWORK} --target=local-dev --short-output
+   docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
    ```
 
 2. **Container startup failure:**

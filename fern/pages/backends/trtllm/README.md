@@ -78,11 +78,11 @@ docker compose -f deploy/docker-compose.yml up -d
 apt-get update && apt-get -y install git git-lfs
 
 # On an x86 machine:
-./container/render.py --framework sglang
+python container/render.py --framework sglang --short-output
 docker build -f container/rendered.Dockerfile -t dynamo:latest-trtllm .
 
 # On an ARM machine:
-./container/render.py --framework trtllm --platform arm64
+python container/render.py --framework trtllm --platform arm64 --short-output
 docker build -f container/rendered.Dockerfile -t dynamo:latest-trtllm .
 ```
 

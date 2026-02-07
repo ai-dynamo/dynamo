@@ -1,6 +1,6 @@
 {#
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 
+# SPDX-License-Identifier: Apache-2.0
 #}
 # ======================================================================
 # STAGE: dynamo_tools for developers
@@ -126,9 +126,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Add NVIDIA devtools repository and install development tools (nsight-systems).
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" | \        gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH} /" | \
-        tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/amd64/nvidia.pub" \
+        | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/amd64 /" \
+        | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends nsight-systems-2025.5.1 && \
     rm -rf /var/lib/apt/lists/*

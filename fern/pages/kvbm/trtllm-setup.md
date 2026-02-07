@@ -25,7 +25,7 @@ To use KVBM in TensorRT-LLM, you can follow the steps below:
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a dynamo TRTLLM container (KVBM is built in by default)
-./container/render.py --framework trtllm
+python container/render.py --framework trtllm --short-output
 docker build -f container/rendered.Dockerfile -t dynamo:latest-trtllm .
 
 # Launch the container

@@ -39,7 +39,7 @@ From the Dynamo repository root:
 
 ```bash
 # Build the base Dynamo image
-python container/render.py --framework=dynamo --target=runtime
+python container/render.py --framework=dynamo --target=runtime --short-output
 docker build -f container/rendered.Dockerfile .
 
 # Build the Triton worker image

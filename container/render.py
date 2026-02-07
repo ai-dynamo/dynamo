@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 
+# SPDX-License-Identifier: Apache-2.0
 
 import argparse
 import re
@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -45,8 +46,11 @@ def validate_args(args):
     # TODO: Add validation logic
     return
 
+
 def render(args, context, script_dir):
-    env = Environment(loader=FileSystemLoader(script_dir),trim_blocks=False,lstrip_blocks=True)
+    env = Environment(
+        loader=FileSystemLoader(script_dir), trim_blocks=False, lstrip_blocks=True
+    )
     template = env.get_template("Dockerfile.template")
     rendered = template.render(
         context=context,
@@ -74,7 +78,10 @@ def render(args, context, script_dir):
         print(cleaned)
         print("##############")
 
+    print(f"INFO: Generated Dockerfile written to {script_dir}/{filename}")
+
     return
+
 
 def main():
     args = parse_args()
@@ -92,6 +99,7 @@ def main():
         print(
             "      Recommendation: --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)"
         )
+
 
 if __name__ == "__main__":
     main()

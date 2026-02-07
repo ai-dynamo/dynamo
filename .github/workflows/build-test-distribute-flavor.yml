@@ -175,7 +175,6 @@ jobs:
       - name: Generate Dockerfile
         shell: bash
         run: |
-          echo "::group::Generating Dockerfile"
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
           python ./container/render.py \
               --target=${{ inputs.target }} \
@@ -184,7 +183,6 @@ jobs:
               --cuda-version=${{ inputs.cuda_version }} \
               --show-result \
               --short-output
-          echo "::endgroup::"
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-remote-build
