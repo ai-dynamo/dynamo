@@ -2483,6 +2483,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dynamo-kv-router",
+ "dynamo-kvbm-logical",
  "dynamo-tokens",
  "ndarray",
  "ndarray-interp",
