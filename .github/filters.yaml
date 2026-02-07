@@ -104,6 +104,8 @@ deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/chrek/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 planner:
   - 'components/src/dynamo/planner/**'
@@ -116,11 +118,15 @@ vllm:
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 sglang:
   - 'container/Dockerfile.sglang'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 trtllm:
   - 'container/Dockerfile.trtllm'
@@ -128,6 +134,8 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 frontend:
   - *ci
@@ -143,6 +151,8 @@ frontend:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 rust:
   - '.github/workflows/pre-merge.yml'
