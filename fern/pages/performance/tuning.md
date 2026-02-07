@@ -35,6 +35,7 @@ Typically, the number of GPUs vs the performance follows the following pattern:
 
 <Note>
 for decode-only engines, sometimes larger number of GPUs has to larger KV cache per GPU and more decoding requests running in parallel, which leads to both better throughput/GPU and better latency/user.
+
 For example, for Llama-3.3-70b NVFP4 quantization on B200 in vLLM with 0.9 free GPU memory fraction:
 </Note>
 
@@ -78,7 +79,7 @@ For most frameworks, when chunked prefill is enabled and one forward iteration g
 In the prefill engine, the best strategy is to operate at the smallest batch size that saturates the GPUs so that the average time to first token (TTFT) is minimized.
 For example, for Llama3.3-70b NVFP4 quantization on B200 TP1 in vLLM, the below figure shows the prefill time with different isl (prefix caching is turned off):
 
-![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](../../assets/img/prefill-time.png)
+![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](/assets/img/prefill-time.png)
 
 For isl less than 1000, the prefill efficiency is low because the GPU is not fully saturated.
 For isl larger than 4000, the prefill time per token increases because the attention takes longer to compute with a longer history.

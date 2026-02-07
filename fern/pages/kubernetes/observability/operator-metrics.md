@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Dynamo Operator Metrics
-
 ## Overview
 
 The Dynamo Operator exposes Prometheus metrics for monitoring its own health and performance. These metrics are separate from application metrics (frontend/worker) and provide visibility into:
@@ -18,9 +16,9 @@ The Dynamo Operator exposes Prometheus metrics for monitoring its own health and
 The operator metrics feature requires the same monitoring infrastructure as application metrics. For detailed setup instructions, see the [Kubernetes Metrics Guide](./metrics.md#prerequisites).
 
 **Quick checklist:**
-- kube-prometheus-stack installed (for ServiceMonitor support)
-- Prometheus and Grafana running
-- Dynamo Operator installed via Helm
+- ✅ kube-prometheus-stack installed (for ServiceMonitor support)
+- ✅ Prometheus and Grafana running
+- ✅ Dynamo Operator installed via Helm
 
 ## Metrics Collection
 

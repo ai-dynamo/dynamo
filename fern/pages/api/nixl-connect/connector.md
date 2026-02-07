@@ -15,7 +15,7 @@ The connector provides two methods of moving data between workers:
 
   - Preparing local memory to be read by a remote worker.
 
-In both cases, local memory is registered with the NIXL-based I/O subsystem via the [`Descriptor`](descriptor.md) class and provided to the connector.
+In both cases, local memory is registered with the NIXL-based I/O subsystem via the [`Descriptor`](#descriptor) class and provided to the connector.
 When RDMA is available, the connector then configures the RDMA subsystem to expose the memory for the requested operation and returns an operation control object;
 otherwise the connector will select the best available RDMA alternative.
 The operation control object, either a [`ReadableOperation`](readable-operation.md) or a [`WritableOperation`](writable-operation.md),

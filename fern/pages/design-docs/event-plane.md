@@ -16,9 +16,7 @@ Dynamo's coordination layer adapts to the deployment environment:
 | **Kubernetes** (with operator) | Native K8s (CRDs, EndpointSlices) | NATS (optional) | TCP |
 | **Bare metal / Local** (default) | etcd | NATS (optional) | TCP |
 
-<Note>
-The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
-</Note>
+> **Note:** The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -52,7 +50,7 @@ The operator explicitly sets:
 DYN_DISCOVERY_BACKEND=kubernetes
 ```
 
-<Warning>This must be explicitly configured. The runtime defaults to `kv_store` in all environments.</Warning>
+> **Important:** This must be explicitly configured. The runtime defaults to `kv_store` in all environments.
 
 ### How It Works
 
@@ -461,5 +459,5 @@ This provides KV-aware routing with reduced accuracy but no NATS dependency.
 ## Related Documentation
 
 - [Distributed Runtime](distributed-runtime.md) - Runtime architecture
-- [Request Plane](../guides/request-plane.md) - Request transport configuration
-- [Fault Tolerance](../fault-tolerance/request-cancellation.md) - Failure handling
+- [Request Plane](request-plane.md) - Request transport configuration
+- [Fault Tolerance](../fault-tolerance/README.md) - Failure handling

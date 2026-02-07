@@ -61,7 +61,7 @@ be operating within your distributed runtime.
 
 The current examples use a hard-coded `namespace`. We will address the `namespace` collisions later.
 
-All examples require the `etcd` and `nats.io` pre-requisites to be running and available.
+Most examples require `etcd` for service discovery. `nats.io` is required for KV-aware routing with event tracking; for approximate mode (`--no-kv-events`), NATS is optional.
 
 #### Rust `hello_world`
 
