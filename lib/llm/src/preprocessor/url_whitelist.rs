@@ -15,7 +15,7 @@
 //! A trailing `*` acts as a prefix wildcard; without it the match is exact.
 //!
 //! ```text
-//! DYN_ALLOWED_URL_PATTERNS=https://i.pinimg.com/*,https://cdn.example.com/*
+//! DYN_ALLOWED_URL_PATTERNS=https://images.com/*,https://cdn.example.com/*
 //! ```
 //!
 //! When unset or empty, **all** URLs are allowed (backward-compatible default).
