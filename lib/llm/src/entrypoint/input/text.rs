@@ -1,17 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::entrypoint::EngineConfig;
+use crate::entrypoint::input::common;
 use crate::request_template::RequestTemplate;
 use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
+use dynamo_async_openai::types::ChatCompletionMessageContent;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::pipeline::Context;
 use futures::StreamExt;
 use std::io::{ErrorKind, Write};
-
-use crate::entrypoint::EngineConfig;
-use crate::entrypoint::input::common;
 
 /// Max response tokens for each single query. Must be less than model context size.
 /// TODO: Cmd line flag to overwrite this
@@ -140,9 +140,19 @@ async fn main_loop(
                     let entry = data.choices.first();
                     let chat_comp = entry.as_ref().unwrap();
                     if let Some(c) = &chat_comp.delta.content {
-                        let _ = stdout.write(c.as_bytes());
-                        let _ = stdout.flush();
-                        assistant_message += c;
+                        match c {
+                            ChatCompletionMessageContent::Text(text) => {
+                                let _ = stdout.write(text.as_bytes());
+                                let _ = stdout.flush();
+                                assistant_message += text;
+                            }
+                            ChatCompletionMessageContent::Parts(_) => {
+                                // (ayushag) TODO: Handle multimodal content for multiturn conversations
+                                // Multimodal content - for now just print a placeholder
+                                let _ = stdout.write(b"[multimodal content]");
+                                let _ = stdout.flush();
+                            }
+                        }
                     }
                     if let Some(reason) = chat_comp.finish_reason {
                         tracing::trace!("finish reason: {reason:?}");

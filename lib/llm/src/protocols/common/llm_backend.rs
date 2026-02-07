@@ -13,6 +13,45 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
 
+/// Output type discriminator for different modalities
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputType {
+    #[default]
+    Text,
+    Image,
+    Video,
+    Audio,
+}
+
+/// Image URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ImageUrlData {
+    pub url: String,
+}
+
+/// Video URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VideoUrlData {
+    pub url: String,
+}
+
+/// Audio URL data for responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AudioUrlData {
+    pub url: String,
+}
+
+/// Content part for multimodal outputs (internal representation)
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlData },
+    VideoUrl { video_url: VideoUrlData },
+    AudioUrl { audio_url: AudioUrlData },
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TopLogprob {
     pub rank: u32,
@@ -86,6 +125,14 @@ pub struct LLMEngineOutput {
     // decoded text -
     pub text: Option<String>,
 
+    /// Output type discriminator (text, image, video, audio)
+    #[serde(default)]
+    pub output_type: OutputType,
+
+    /// Multimodal content parts (for non-text outputs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<ContentPart>>,
+
     /// cumulative log probabilities
     pub cum_log_probs: Option<f64>,
 
@@ -125,6 +172,8 @@ impl LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
@@ -142,6 +191,8 @@ impl LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Stop),
@@ -159,6 +210,8 @@ impl LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
@@ -176,6 +229,8 @@ impl LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,

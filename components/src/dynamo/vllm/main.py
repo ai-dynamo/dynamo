@@ -50,6 +50,7 @@ from dynamo.vllm.multimodal_handlers import (
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
+
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
@@ -1241,18 +1242,12 @@ async def init_omni(
     component = runtime.namespace(config.namespace).component(config.component)
     generate_endpoint = component.endpoint(config.endpoint)
 
-    # Load default sampling params from model config (same as other workers)
-    default_sampling_params = (
-        config.engine_args.create_model_config().get_diff_sampling_param()
-    )
-    logger.info(f"Loaded default sampling params: {default_sampling_params}")
-
     # Initialize OmniHandler with Omni orchestrator
     handler = OmniHandler(
         runtime=runtime,
         component=component,
         config=config,
-        default_sampling_params=default_sampling_params,
+        default_sampling_params={},
         shutdown_event=shutdown_event,
     )
 
@@ -1267,11 +1262,9 @@ async def init_omni(
         return
 
     # TODO: extend for multi-stage pipelines
-    # Register as Chat endpoint for text-to-text generation
-    # Use Tokens input since we're doing token-based processing
     await register_llm(
-        ModelInput.Tokens,
-        ModelType.Chat,
+        ModelInput.Text,
+        ModelType.Images,  # Skips tokenizer extraction, supports chat/completions
         generate_endpoint,
         config.model,
         config.served_model_name,
@@ -1280,7 +1273,6 @@ async def init_omni(
 
     logger.info("Starting to serve Omni worker endpoint...")
 
-    # Create health check payload (extracts BOS token from AsyncOmni)
     health_check_payload = (
         await VllmOmniHealthCheckPayload.create(handler.engine_client)
     ).to_dict()

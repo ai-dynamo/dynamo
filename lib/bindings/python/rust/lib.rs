@@ -311,7 +311,7 @@ fn register_llm<'p>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // For TensorBased and Images models, skip HuggingFace downloads and register directly
-        // These model types don't require tokenizers
+        // Images models (vLLM-Omni) handle model loading internally, no tokenizer extraction needed
         if is_tensor_based || is_images {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);

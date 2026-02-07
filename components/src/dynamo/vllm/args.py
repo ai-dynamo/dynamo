@@ -265,7 +265,7 @@ def parse_args() -> Config:
         "--stage-configs-path",
         type=str,
         default=None,
-        help="Path to vLLM-Omni stage configuration YAML file. Required for --omni.",
+        help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
     )
     parser.add_argument(
         "--store-kv",
@@ -389,9 +389,9 @@ def parse_args() -> Config:
             )
 
     # Validate omni worker requirements
-    if args.omni and not args.stage_configs_path:
+    if args.stage_configs_path and not args.omni:
         raise ValueError(
-            "--stage-configs-path is required when using --omni. "
+            "--stage-configs-path is only allowed when using --omni. "
             "Specify a YAML file containing stage configurations for the multi-stage pipeline."
         )
 
@@ -453,7 +453,8 @@ def parse_args() -> Config:
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
     config.enable_local_indexer = args.enable_local_indexer
-    config.use_vllm_tokenizer = args.use_vllm_tokenizer
+    # For omni mode, use vLLM (AsyncOmni) tokenizer on backend
+    config.use_vllm_tokenizer = args.use_vllm_tokenizer or args.omni
     config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config
 

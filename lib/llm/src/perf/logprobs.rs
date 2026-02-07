@@ -953,7 +953,11 @@ mod tests {
             choices: vec![ChatChoiceStream {
                 index: 0,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some("test".to_string()),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "test".to_string(),
+                        ),
+                    ),
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
@@ -987,7 +991,11 @@ mod tests {
             .map(|(i, token_logprobs)| ChatChoiceStream {
                 index: i as u32,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some("test".to_string()),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "test".to_string(),
+                        ),
+                    ),
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
@@ -1337,7 +1345,11 @@ mod tests {
             choices: vec![ChatChoiceStream {
                 index: 0,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some("test".to_string()),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "test".to_string(),
+                        ),
+                    ),
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
