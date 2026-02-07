@@ -156,10 +156,7 @@ def update_dynamo_config_with_engine(
     if dynamo_config.route_to_encoder:
         dynamo_config.component = "processor"
         dynamo_config.endpoint = "generate"
-    elif (
-        dynamo_config.multimodal_encode_worker
-        or dynamo_config.multimodal_encode_prefill_worker
-    ):
+    elif dynamo_config.multimodal_encode_worker:
         dynamo_config.component = "encoder"
         dynamo_config.endpoint = "generate"
     elif dynamo_config.multimodal_decode_worker:

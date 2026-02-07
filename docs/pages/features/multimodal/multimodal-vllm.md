@@ -49,7 +49,6 @@ vLLM supports all multimodal deployment patterns. See [Architecture Patterns](RE
 | PD Worker | `--multimodal-worker` | Prefill + Decode |
 | Prefill Worker | `--multimodal-worker --is-prefill-worker` | Prefill only |
 | Decode Worker | `--multimodal-decode-worker` | Decode only |
-| Encode+Prefill Worker | `--multimodal-encode-prefill-worker --is-prefill-worker` | Combined (Llama 4) |
 
 ## Use the Latest Release
 

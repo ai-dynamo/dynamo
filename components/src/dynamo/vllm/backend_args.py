@@ -90,13 +90,6 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--multimodal-encode-prefill-worker",
-            env_var="DYN_VLLM_MULTIMODAL_ENCODE_PREFILL_WORKER",
-            default=False,
-            help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4).",
-        )
-        add_negatable_bool_argument(
-            g,
             flag_name="--enable-multimodal",
             env_var="DYN_VLLM_ENABLE_MULTIMODAL",
             default=False,
@@ -170,7 +163,6 @@ class DynamoVllmConfig(ConfigBase):
     multimodal_encode_worker: bool
     multimodal_worker: bool
     multimodal_decode_worker: bool
-    multimodal_encode_prefill_worker: bool
     enable_multimodal: bool
     mm_prompt_template: str
     frontend_decoding: bool
@@ -206,7 +198,6 @@ class DynamoVllmConfig(ConfigBase):
                 bool(self.multimodal_encode_worker),
                 bool(self.multimodal_worker),
                 bool(self.multimodal_decode_worker),
-                bool(self.multimodal_encode_prefill_worker),
             ]
         )
 
@@ -215,7 +206,7 @@ class DynamoVllmConfig(ConfigBase):
         if self._count_multimodal_roles() > 1:
             raise ValueError(
                 "Use only one of --multimodal-encode-worker, --multimodal-worker, "
-                "--multimodal-decode-worker, --multimodal-encode-prefill-worker"
+                "--multimodal-decode-worker"
             )
 
     def _validate_multimodal_requires_flag(self) -> None:
