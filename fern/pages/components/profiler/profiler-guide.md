@@ -644,4 +644,4 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 - [SLA Planner Guide](../planner/planner-guide.md) - End-to-end deployment workflow
 - [SLA Planner Architecture](../planner/planner-guide.md) - How the Planner uses profiling data
 - [DGDR API Reference](../../kubernetes/api-reference.md) - DGDR specification
-- [Profiler Arguments Reference](/benchmarks/profiler/utils/profiler_argparse.py) - Full CLI reference
+- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/profiler/utils/profiler_argparse.py) - Full CLI reference

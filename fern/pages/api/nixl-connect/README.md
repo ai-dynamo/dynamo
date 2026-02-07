@@ -141,11 +141,11 @@ flowchart LR
 
 #### Code Examples
 
-See [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) or [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) from our Multimodal example,
+See [MultimodalPDWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) or [MultimodalDecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) from our Multimodal example,
 for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable-operation.md),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
-See [MultimodalEncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) from our Multimodal example,
+See [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) from our Multimodal example,
 for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md),
 a [`WriteOperation`](write-operation.md) is created using the metadata provided by the requesting worker,
 and the worker awaits for the data transfer to complete for yielding a response.
