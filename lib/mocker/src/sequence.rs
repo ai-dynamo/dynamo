@@ -4,32 +4,32 @@
 use crate::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{TokenBlockSequence, Tokens};
+use dynamo_tokens::{PositionalLineageHash, TokenBlockSequence, Tokens};
 use rand::random;
 
-/// Create unique blocks from a TokenBlockSequence
+/// Create unique blocks and positional lineage hashes from a TokenBlockSequence
 fn create_unique_blocks_from_sequence(
     tokens: &TokenBlockSequence,
     block_size: usize,
     enable_prefix_caching: bool,
-) -> Vec<UniqueBlock> {
-    let mut unique_blocks: Vec<UniqueBlock> = tokens
-        .blocks()
-        .iter()
-        .map(|block| {
-            if enable_prefix_caching {
-                UniqueBlock::FullBlock(block.sequence_hash())
-            } else {
-                UniqueBlock::FullBlock(random::<u64>())
-            }
-        })
-        .collect();
+) -> (Vec<UniqueBlock>, Vec<PositionalLineageHash>) {
+    let mut unique_blocks: Vec<UniqueBlock> = Vec::with_capacity(tokens.blocks().len() + 1);
+    let mut plhs: Vec<PositionalLineageHash> = Vec::with_capacity(tokens.blocks().len());
+
+    for block in tokens.blocks().iter() {
+        if enable_prefix_caching {
+            unique_blocks.push(UniqueBlock::FullBlock(block.sequence_hash()));
+        } else {
+            unique_blocks.push(UniqueBlock::FullBlock(random::<u64>()));
+        }
+        plhs.push(block.positional_lineage_hash());
+    }
 
     // Only push the partial block if tokens count isn't a multiple of block_size
     if !tokens.total_tokens().is_multiple_of(block_size) {
         unique_blocks.push(UniqueBlock::default());
     }
-    unique_blocks
+    (unique_blocks, plhs)
 }
 
 /// A sequence that is actively being built, with the ability to add tokens and commit to hashes
@@ -71,10 +71,10 @@ impl ActiveSequence {
         let num_input_tokens = tokens.len();
 
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
-        let unique_blocks =
+        let (unique_blocks, plhs) =
             create_unique_blocks_from_sequence(&tokens, block_size, enable_prefix_caching);
         let block_hashes = tokens.blocks().iter().map(|b| b.block_hash()).collect();
-        let creation_signal = Some(MoveBlock::Use(unique_blocks.clone(), block_hashes));
+        let creation_signal = Some(MoveBlock::Use(unique_blocks.clone(), block_hashes, plhs));
 
         Self {
             unique_blocks,
@@ -112,6 +112,14 @@ impl ActiveSequence {
             .collect()
     }
 
+    pub fn positional_lineage_hashes(&self) -> Vec<PositionalLineageHash> {
+        self.tokens
+            .blocks()
+            .iter()
+            .map(|block| block.positional_lineage_hash())
+            .collect()
+    }
+
     /// Create a new ActiveSequence instance and return the creation signal
     pub fn new_with_signal(
         tokens: Vec<u32>,
@@ -139,12 +147,14 @@ impl ActiveSequence {
 
         // Replace last partial block with full block if it exists
         if let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last().cloned() {
+            let last_complete = self.tokens.last_complete_block().unwrap();
             let last_seq_hash = if self.enable_prefix_caching {
-                self.tokens.last_complete_block().unwrap().sequence_hash()
+                last_complete.sequence_hash()
             } else {
                 random::<u64>()
             };
-            let last_block_hash = self.tokens.last_complete_block().unwrap().block_hash();
+            let last_block_hash = last_complete.block_hash();
+            let last_plh = last_complete.positional_lineage_hash();
             self.unique_blocks.pop();
 
             // After pop, the last element is the parent block
@@ -160,12 +170,13 @@ impl ActiveSequence {
                 last_seq_hash,
                 second_to_last_hash,
                 last_block_hash,
+                last_plh,
             ));
         }
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block], vec![]));
+        signals.push(MoveBlock::Use(vec![new_partial_block], vec![], vec![]));
         Some(signals)
     }
 
@@ -234,6 +245,7 @@ impl ActiveSequence {
         self.creation_signal = Some(MoveBlock::Use(
             self.unique_blocks.clone(),
             self.block_hashes(),
+            self.positional_lineage_hashes(),
         ));
 
         free_signal
@@ -267,7 +279,7 @@ mod tests {
         // Check that we got a Use signal
         assert!(signal1.is_some());
         match &signal1 {
-            Some(MoveBlock::Use(blocks, _hashes)) => {
+            Some(MoveBlock::Use(blocks, _hashes, _plhs)) => {
                 assert_eq!(blocks.len(), 1);
             }
             _ => panic!("Expected Use signal"),
@@ -288,7 +300,7 @@ mod tests {
 
         // First signal should be Promote for the previous block
         match &signal_16[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash, _plh) => {
                 assert_eq!(*parent_hash, None);
             }
             _ => panic!("Expected Promote signal as second signal"),
@@ -296,7 +308,7 @@ mod tests {
 
         // Second signal should be Use for new partial block
         match &signal_16[1] {
-            MoveBlock::Use(blocks, _hashes) => {
+            MoveBlock::Use(blocks, _hashes, _plhs) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
@@ -383,7 +395,7 @@ mod tests {
 
         // Check that signal[0] is promote
         match &signal[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash, _plh) => {
                 // Check that the parent_hash matches unique_blocks[1], which should be a full block
                 if let UniqueBlock::FullBlock(expected_hash) = seq1.unique_blocks()[1] {
                     assert_eq!(
@@ -417,7 +429,7 @@ mod tests {
         // Initial signal - should have received a Use signal for the partial block
         assert!(signal.is_some());
         match signal {
-            Some(MoveBlock::Use(blocks, _hashes)) => {
+            Some(MoveBlock::Use(blocks, _hashes, _plhs)) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
@@ -435,7 +447,7 @@ mod tests {
 
         // First signal should be Promote
         match &signals_second[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash, _plh) => {
                 assert_eq!(*parent_hash, None);
             }
             _ => panic!("Expected Promote signal as first signal after second token"),
@@ -443,7 +455,7 @@ mod tests {
 
         // Second signal should be Use for new partial block
         match &signals_second[1] {
-            MoveBlock::Use(blocks, _hashes) => {
+            MoveBlock::Use(blocks, _hashes, _plhs) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }

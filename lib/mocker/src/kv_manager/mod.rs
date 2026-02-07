@@ -4,6 +4,11 @@
 //! # KV Manager
 //! A synchronous implementation of a block manager that handles MoveBlock signals for caching KV blocks.
 //!
+//! ## Backends
+//! Two backends are available:
+//! - **Manual**: Original HashMap + LRUEvictor reference-counting implementation
+//! - **KvbmLogical**: Production kvbm-logical BlockManager with RAII block lifecycle
+//!
 //! ## Block Operations
 //! The KV manager processes four types of MoveBlock signals:
 //!
@@ -27,27 +32,152 @@
 //! If a Use operation fails (typically due to insufficient space), a false boolean signal
 //! is returned to the scheduler for preemption. Initial KV block allocations for new requests
 //! should not fail due to the watermark checking.
-//!
-//! ## NOTE
-//! For simplicity (or non-simplicity), reference counting is tracked manually instead of using
-//! the more idiomatic built-in Arc reference counter. This can be considered a shadow / mirror
-//! implementation of the main block manager.
+
+mod kvbm_backend;
+
+use crate::protocols::{
+    KvCacheEventSink, KvManagerBackend, MockerEvictionBackend, MoveBlock, PrefillCost,
+};
+use crate::sequence::ActiveSequence;
+use dynamo_tokens::blocks::UniqueBlock;
+use std::sync::Arc;
+
+use self::kvbm_backend::KvbmLogicalKvManager;
+
+/// Enum-based KV manager that dispatches to either the manual or kvbm-logical backend.
+/// The scheduler and ActiveSequence remain completely untouched.
+pub enum KvManager {
+    Manual(ManualKvManager),
+    KvbmLogical(KvbmLogicalKvManager),
+}
+
+impl KvManager {
+    pub fn new(max_capacity: usize, block_size: usize) -> Self {
+        Self::new_with_event_sink(
+            max_capacity,
+            block_size,
+            None,
+            0,
+            KvManagerBackend::Manual,
+            MockerEvictionBackend::default(),
+        )
+    }
+
+    pub fn new_with_event_sink(
+        max_capacity: usize,
+        block_size: usize,
+        kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
+        dp_rank: u32,
+        backend: KvManagerBackend,
+        eviction_backend: MockerEvictionBackend,
+    ) -> Self {
+        match backend {
+            KvManagerBackend::Manual => {
+                Self::Manual(ManualKvManager::new_with_event_sink(
+                    max_capacity,
+                    block_size,
+                    kv_event_sink,
+                    dp_rank,
+                ))
+            }
+            KvManagerBackend::KvbmLogical => {
+                Self::KvbmLogical(KvbmLogicalKvManager::new(
+                    max_capacity,
+                    block_size,
+                    dp_rank,
+                    kv_event_sink,
+                    eviction_backend,
+                ))
+            }
+        }
+    }
+
+    pub fn process(&mut self, event: &MoveBlock) -> bool {
+        match self {
+            Self::Manual(m) => m.process(event),
+            Self::KvbmLogical(m) => m.process(event),
+        }
+    }
+
+    pub fn max_capacity(&self) -> usize {
+        match self {
+            Self::Manual(m) => m.max_capacity,
+            Self::KvbmLogical(m) => m.max_capacity(),
+        }
+    }
+
+    pub fn block_size(&self) -> usize {
+        match self {
+            Self::Manual(m) => m.block_size,
+            Self::KvbmLogical(m) => m.block_size(),
+        }
+    }
+
+    pub fn num_active_blocks(&self) -> usize {
+        match self {
+            Self::Manual(m) => m.num_active_blocks(),
+            Self::KvbmLogical(m) => m.num_active_blocks(),
+        }
+    }
+
+    pub fn num_inactive_blocks(&self) -> usize {
+        match self {
+            Self::Manual(m) => m.num_inactive_blocks(),
+            Self::KvbmLogical(m) => m.num_inactive_blocks(),
+        }
+    }
+
+    pub fn current_capacity(&self) -> usize {
+        match self {
+            Self::Manual(m) => m.current_capacity(),
+            Self::KvbmLogical(m) => m.current_capacity(),
+        }
+    }
+
+    pub fn current_capacity_perc(&self) -> f64 {
+        match self {
+            Self::Manual(m) => m.current_capacity_perc(),
+            Self::KvbmLogical(m) => m.current_capacity_perc(),
+        }
+    }
+
+    pub fn get_active_perc(&self) -> f64 {
+        match self {
+            Self::Manual(m) => m.get_active_perc(),
+            Self::KvbmLogical(m) => m.get_active_perc(),
+        }
+    }
+
+    pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
+        match self {
+            Self::Manual(m) => m.probe_new_blocks(blocks),
+            Self::KvbmLogical(m) => m.probe_new_blocks(blocks),
+        }
+    }
+
+    pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
+        match self {
+            Self::Manual(m) => m.get_prefill_cost(sequence),
+            Self::KvbmLogical(m) => m.get_prefill_cost(sequence),
+        }
+    }
+}
+
+// ============================================================================
+// ManualKvManager — original implementation, unchanged except for MoveBlock pattern updates
+// ============================================================================
 
 use crate::evictor::LRUEvictor;
-use crate::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
-use crate::sequence::ActiveSequence;
 use derive_getters::Getters;
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
-use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 #[derive(Getters)]
-pub struct KvManager {
+pub struct ManualKvManager {
     #[getter(copy)]
     max_capacity: usize,
 
@@ -66,7 +196,7 @@ pub struct KvManager {
     next_event_id: u64,
 }
 
-impl KvManager {
+impl ManualKvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
         Self::new_with_event_sink(max_capacity, block_size, None, 0)
     }
@@ -82,11 +212,11 @@ impl KvManager {
 
         if kv_event_sink.is_some() {
             tracing::info!(
-                "KvManager initialized with event sink for DP rank {dp_rank} with block_size {block_size}"
+                "ManualKvManager initialized with event sink for DP rank {dp_rank} with block_size {block_size}"
             );
         }
 
-        KvManager {
+        ManualKvManager {
             max_capacity,
             block_size,
             active_blocks,
@@ -159,7 +289,7 @@ impl KvManager {
     /// Process a MoveBlock instruction synchronously
     pub fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
-            MoveBlock::Use(hashes, local_hashes) => {
+            MoveBlock::Use(hashes, local_hashes, _plhs) => {
                 let mut blocks_stored = Vec::<u64>::new();
 
                 let mut parent_block: Option<&UniqueBlock> = None;
@@ -253,7 +383,7 @@ impl KvManager {
                 }
             }
 
-            MoveBlock::Promote(uuid, hash, parent_hash, local_hash) => {
+            MoveBlock::Promote(uuid, hash, parent_hash, local_hash, _plh) => {
                 let uuid_block = UniqueBlock::PartialBlock(*uuid);
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
@@ -369,7 +499,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes))
+            manager.process(&MoveBlock::Use(blocks, hashes, vec![]))
         }
 
         // First use 10 blocks (0 to 9) in a batch
@@ -396,7 +526,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes));
+            manager.process(&MoveBlock::Use(blocks, hashes, vec![]));
         }
 
         // Helper function to destroy multiple blocks
@@ -413,8 +543,11 @@ mod tests {
 
         // Helper function to check if active blocks contain expected blocks with expected ref counts
         fn assert_active_blocks(manager: &KvManager, expected_blocks: &[(u64, usize)]) {
+            let KvManager::Manual(m) = manager else {
+                panic!("Expected Manual backend for this test");
+            };
             assert_eq!(
-                manager.active_blocks().len(),
+                m.active_blocks().len(),
                 expected_blocks.len(),
                 "Active blocks count doesn't match expected"
             );
@@ -422,11 +555,11 @@ mod tests {
             for &(id, ref_count) in expected_blocks {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
-                    manager.active_blocks().contains_key(&block),
+                    m.active_blocks().contains_key(&block),
                     "Block {id} not found in active blocks",
                 );
                 assert_eq!(
-                    manager.active_blocks().get(&block),
+                    m.active_blocks().get(&block),
                     Some(&ref_count),
                     "Block {id} has wrong reference count",
                 );
@@ -439,8 +572,11 @@ mod tests {
             expected_size: usize,
             expected_blocks: &[u64],
         ) {
-            let inactive_blocks = manager.get_inactive_blocks();
-            let inactive_blocks_count = manager.inactive_blocks().len();
+            let KvManager::Manual(m) = manager else {
+                panic!("Expected Manual backend for this test");
+            };
+            let inactive_blocks = m.get_inactive_blocks();
+            let inactive_blocks_count = m.inactive_blocks().len();
 
             assert_eq!(
                 inactive_blocks_count, expected_size,
