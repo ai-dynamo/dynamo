@@ -635,6 +635,117 @@ mod tests {
         );
     }
 
+    use crate::protocols::{KvManagerBackend, MockerEvictionBackend};
+
+    /// Shared scheduler test body parameterized by backend, eviction strategy,
+    /// and scheduling options. Both Manual and KvbmLogical tests delegate here.
+    async fn run_scheduler_test(
+        label: &str,
+        kv_manager_backend: KvManagerBackend,
+        eviction_backend: MockerEvictionBackend,
+        use_shared_tokens: bool,
+        enable_prefix_caching: bool,
+        enable_chunked_prefill: bool,
+    ) {
+        let kv_capacity: usize = 500;
+        let block_size: usize = 64;
+        let num_requests: usize = 200;
+        let input_len: usize = 1000;
+        let max_output_tokens: usize = 100;
+
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(kv_capacity)
+            .block_size(block_size)
+            .speedup_ratio(10.0)
+            .enable_prefix_caching(enable_prefix_caching)
+            .enable_chunked_prefill(enable_chunked_prefill)
+            .kv_manager_backend(kv_manager_backend)
+            .eviction_backend(eviction_backend)
+            .build()
+            .unwrap();
+
+        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
+
+        let shared_tokens = if use_shared_tokens {
+            Some(
+                (0..input_len / 2)
+                    .map(|_| rand::random::<u32>() % 50000)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+
+        for _ in 0..num_requests {
+            let input_tokens = if let Some(ref shared) = shared_tokens {
+                let mut tokens = shared.clone();
+                tokens.extend((0..input_len / 2).map(|_| rand::random::<u32>() % 50000));
+                tokens
+            } else {
+                (0..input_len)
+                    .map(|_| rand::random::<u32>() % 50000)
+                    .collect::<Vec<_>>()
+            };
+
+            let request = DirectRequest {
+                tokens: input_tokens,
+                max_output_tokens,
+                uuid: None,
+                dp_rank: 0,
+            };
+            scheduler.receive(request).await;
+        }
+
+        let start_time = std::time::Instant::now();
+        let expected_tokens = num_requests * max_output_tokens;
+        let mut received_tokens = 0;
+
+        let timeout = tokio::time::sleep(Duration::from_secs(2));
+        tokio::pin!(timeout);
+
+        let metrics_rx = scheduler.metrics_receiver();
+        let mut debug_interval = interval(Duration::from_millis(500));
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = debug_interval.tick() => {
+                    let _metrics = metrics_rx.borrow().clone();
+                    tracing::debug!("{label} Forward Pass Metrics: {_metrics:#?}");
+                }
+
+                Some(_) = output_rx.recv() => {
+                    received_tokens += 1;
+                    timeout.set(tokio::time::sleep(Duration::from_secs(2)));
+                }
+
+                _ = &mut timeout => {
+                    break;
+                }
+            }
+        }
+
+        let elapsed = start_time.elapsed();
+        let token_label = if use_shared_tokens { "caching" } else { "random" };
+        println!(
+            "{label} completed in: {elapsed:?} for {token_label} case with \
+             prefix_caching={enable_prefix_caching}, chunked_prefill={enable_chunked_prefill}, \
+             eviction={eviction_backend:?}"
+        );
+
+        assert!(
+            received_tokens == expected_tokens,
+            "{label}: Received {received_tokens} tokens but expected exactly {expected_tokens}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let metrics = scheduler.metrics_receiver().borrow().clone();
+        assert_scheduler_idle(&metrics);
+    }
+
     #[rstest]
     #[case::case_1(false, false, false)]
     #[case::case_2(false, true, false)]
@@ -650,245 +761,58 @@ mod tests {
         #[case] enable_prefix_caching: bool,
         #[case] enable_chunked_prefill: bool,
     ) {
-        unsafe { std::env::set_var("RUST_LOG", "debug") };
-
-        let kv_capacity: usize = 500;
-        let block_size: usize = 64;
-        let num_requests: usize = 200;
-        let input_len: usize = 1000;
-        let max_output_tokens: usize = 100;
-
-        // Create channel for token output
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
-
-        // Create scheduler args using builder - now including enable_prefix_caching
-        let args = MockEngineArgs::builder()
-            .num_gpu_blocks(kv_capacity)
-            .block_size(block_size)
-            .speedup_ratio(10.0)
-            .enable_prefix_caching(enable_prefix_caching)
-            .enable_chunked_prefill(enable_chunked_prefill)
-            .build()
-            .unwrap();
-
-        // Create scheduler with new args struct
-        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
-
-        // Create shared tokens for caching case
-        let shared_tokens = if use_shared_tokens {
-            Some(
-                (0..input_len / 2)
-                    .map(|_| rand::random::<u32>() % 50000)
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        };
-
-        // Create test requests
-        for _ in 0..num_requests {
-            let input_tokens = if let Some(ref shared) = shared_tokens {
-                // For caching case: use shared tokens for first half, random for second half
-                let mut tokens = shared.clone();
-                tokens.extend((0..input_len / 2).map(|_| rand::random::<u32>() % 50000));
-                tokens
-            } else {
-                // For random case: create unique random token vector for each request
-                (0..input_len)
-                    .map(|_| rand::random::<u32>() % 50000)
-                    .collect::<Vec<_>>()
-            };
-
-            let request = DirectRequest {
-                tokens: input_tokens,
-                max_output_tokens,
-                uuid: None,
-                dp_rank: 0,
-            };
-            scheduler.receive(request).await;
-        }
-
-        let start_time = std::time::Instant::now();
-
-        // Collect all generated tokens (should be num_requests * max_output_tokens)
-        let expected_tokens = num_requests * max_output_tokens;
-        let mut received_tokens = 0;
-
-        // Set up a timeout that causes the test to panic if no tokens are received for 2 seconds
-        let timeout = tokio::time::sleep(Duration::from_secs(2));
-        tokio::pin!(timeout);
-
-        // Get metrics receiver
-        let metrics_rx = scheduler.metrics_receiver();
-
-        // Set up debug ticker interval
-        let mut debug_interval = interval(Duration::from_millis(500));
-
-        loop {
-            tokio::select! {
-                biased;
-
-                // Manual debug ticker that prints forward pass metrics
-                _ = debug_interval.tick() => {
-                    let _metrics = metrics_rx.borrow().clone();
-                    tracing::debug!("Forward Pass Metrics: {_metrics:#?}");
-                }
-
-                Some(_) = output_rx.recv() => {
-                    received_tokens += 1;
-                    // Reset timeout whenever we receive a token
-                    timeout.set(tokio::time::sleep(Duration::from_secs(2)));
-                }
-
-                _ = &mut timeout => {
-                    // Break instead of panicking when timeout occurs
-                    break;
-                }
-            }
-        }
-
-        // Calculate and print elapsed time
-        let elapsed = start_time.elapsed();
-        println!(
-            "Test completed in: {elapsed:?} for {} case with prefix_caching={enable_prefix_caching} and chunked_prefill={enable_chunked_prefill}",
-            if use_shared_tokens {
-                "caching"
-            } else {
-                "random"
-            }
-        );
-
-        // Assert that we received the expected number of tokens
-        assert!(
-            received_tokens == expected_tokens,
-            "Received {received_tokens} tokens but expected exactly {expected_tokens}"
-        );
-
-        // Wait a bit for final metrics update to propagate
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let metrics = scheduler.metrics_receiver().borrow().clone();
-        assert_scheduler_idle(&metrics);
+        run_scheduler_test(
+            "Manual",
+            KvManagerBackend::Manual,
+            MockerEvictionBackend::Lineage, // unused by Manual backend
+            use_shared_tokens,
+            enable_prefix_caching,
+            enable_chunked_prefill,
+        )
+        .await;
     }
 
-    // ====== KvbmLogical backend variants ======
-
-    use crate::protocols::{KvManagerBackend, MockerEvictionBackend};
-
     #[rstest]
-    #[case::kvbm_case_1(false, false, false)]
-    #[case::kvbm_case_2(false, true, false)]
-    #[case::kvbm_case_3(true, false, false)]
-    #[case::kvbm_case_4(true, true, false)]
-    #[case::kvbm_case_5(false, false, true)]
-    #[case::kvbm_case_6(false, true, true)]
-    #[case::kvbm_case_7(true, false, true)]
-    #[case::kvbm_case_8(true, true, true)]
+    #[case::kvbm_lineage_1(false, false, false, MockerEvictionBackend::Lineage)]
+    #[case::kvbm_lineage_2(false, true, false, MockerEvictionBackend::Lineage)]
+    #[case::kvbm_lineage_3(true, false, false, MockerEvictionBackend::Lineage)]
+    #[case::kvbm_lineage_4(true, true, false, MockerEvictionBackend::Lineage)]
+    #[case::kvbm_lineage_5(false, false, true, MockerEvictionBackend::Lineage)]
+    #[case::kvbm_lineage_6(false, true, true, MockerEvictionBackend::Lineage)]
+    #[case::kvbm_lineage_7(true, false, true, MockerEvictionBackend::Lineage)]
+    #[case::kvbm_lineage_8(true, true, true, MockerEvictionBackend::Lineage)]
+    #[case::kvbm_lru_1(false, false, false, MockerEvictionBackend::Lru)]
+    #[case::kvbm_lru_2(false, true, false, MockerEvictionBackend::Lru)]
+    #[case::kvbm_lru_3(true, false, false, MockerEvictionBackend::Lru)]
+    #[case::kvbm_lru_4(true, true, false, MockerEvictionBackend::Lru)]
+    #[case::kvbm_lru_5(false, false, true, MockerEvictionBackend::Lru)]
+    #[case::kvbm_lru_6(false, true, true, MockerEvictionBackend::Lru)]
+    #[case::kvbm_lru_7(true, false, true, MockerEvictionBackend::Lru)]
+    #[case::kvbm_lru_8(true, true, true, MockerEvictionBackend::Lru)]
+    #[case::kvbm_multi_lru_1(false, false, false, MockerEvictionBackend::MultiLru)]
+    #[case::kvbm_multi_lru_2(false, true, false, MockerEvictionBackend::MultiLru)]
+    #[case::kvbm_multi_lru_3(true, false, false, MockerEvictionBackend::MultiLru)]
+    #[case::kvbm_multi_lru_4(true, true, false, MockerEvictionBackend::MultiLru)]
+    #[case::kvbm_multi_lru_5(false, false, true, MockerEvictionBackend::MultiLru)]
+    #[case::kvbm_multi_lru_6(false, true, true, MockerEvictionBackend::MultiLru)]
+    #[case::kvbm_multi_lru_7(true, false, true, MockerEvictionBackend::MultiLru)]
+    #[case::kvbm_multi_lru_8(true, true, true, MockerEvictionBackend::MultiLru)]
     #[tokio::test]
     async fn test_scheduler_kvbm_logical_patterns(
         #[case] use_shared_tokens: bool,
         #[case] enable_prefix_caching: bool,
         #[case] enable_chunked_prefill: bool,
+        #[case] eviction_backend: MockerEvictionBackend,
     ) {
-        let kv_capacity: usize = 500;
-        let block_size: usize = 64;
-        let num_requests: usize = 200;
-        let input_len: usize = 1000;
-        let max_output_tokens: usize = 100;
-
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
-
-        let args = MockEngineArgs::builder()
-            .num_gpu_blocks(kv_capacity)
-            .block_size(block_size)
-            .speedup_ratio(10.0)
-            .enable_prefix_caching(enable_prefix_caching)
-            .enable_chunked_prefill(enable_chunked_prefill)
-            .kv_manager_backend(KvManagerBackend::KvbmLogical)
-            .eviction_backend(MockerEvictionBackend::Lineage)
-            .build()
-            .unwrap();
-
-        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
-
-        let shared_tokens = if use_shared_tokens {
-            Some(
-                (0..input_len / 2)
-                    .map(|_| rand::random::<u32>() % 50000)
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        };
-
-        for _ in 0..num_requests {
-            let input_tokens = if let Some(ref shared) = shared_tokens {
-                let mut tokens = shared.clone();
-                tokens.extend((0..input_len / 2).map(|_| rand::random::<u32>() % 50000));
-                tokens
-            } else {
-                (0..input_len)
-                    .map(|_| rand::random::<u32>() % 50000)
-                    .collect::<Vec<_>>()
-            };
-
-            let request = DirectRequest {
-                tokens: input_tokens,
-                max_output_tokens,
-                uuid: None,
-                dp_rank: 0,
-            };
-            scheduler.receive(request).await;
-        }
-
-        let start_time = std::time::Instant::now();
-        let expected_tokens = num_requests * max_output_tokens;
-        let mut received_tokens = 0;
-
-        let timeout = tokio::time::sleep(Duration::from_secs(2));
-        tokio::pin!(timeout);
-
-        let metrics_rx = scheduler.metrics_receiver();
-        let mut debug_interval = interval(Duration::from_millis(500));
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = debug_interval.tick() => {
-                    let _metrics = metrics_rx.borrow().clone();
-                    tracing::debug!("KvbmLogical Forward Pass Metrics: {_metrics:#?}");
-                }
-
-                Some(_) = output_rx.recv() => {
-                    received_tokens += 1;
-                    timeout.set(tokio::time::sleep(Duration::from_secs(2)));
-                }
-
-                _ = &mut timeout => {
-                    break;
-                }
-            }
-        }
-
-        let elapsed = start_time.elapsed();
-        println!(
-            "KvbmLogical test completed in: {elapsed:?} for {} case with prefix_caching={enable_prefix_caching} and chunked_prefill={enable_chunked_prefill}",
-            if use_shared_tokens {
-                "caching"
-            } else {
-                "random"
-            }
-        );
-
-        assert!(
-            received_tokens == expected_tokens,
-            "KvbmLogical: Received {received_tokens} tokens but expected exactly {expected_tokens}"
-        );
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let metrics = scheduler.metrics_receiver().borrow().clone();
-        assert_scheduler_idle(&metrics);
+        run_scheduler_test(
+            "KvbmLogical",
+            KvManagerBackend::KvbmLogical,
+            eviction_backend,
+            use_shared_tokens,
+            enable_prefix_caching,
+            enable_chunked_prefill,
+        )
+        .await;
     }
 
     #[tokio::test]

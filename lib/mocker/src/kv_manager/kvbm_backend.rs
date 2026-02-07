@@ -275,10 +275,13 @@ impl KvbmLogicalKvManager {
                         overlap_blocks += 1;
                         continue;
                     }
-                    // Check block_manager pools via match_blocks (uses PLH)
+                    // Check block_manager registry for cached blocks (read-only)
                     if let Some(plh) = plhs.get(i) {
-                        let matched = self.block_manager.match_blocks(&[*plh]);
-                        if !matched.is_empty() {
+                        let presence = self
+                            .block_manager
+                            .block_registry()
+                            .check_presence::<MockMeta>(&[*plh]);
+                        if presence.first().is_some_and(|(_, present)| *present) {
                             overlap_blocks += 1;
                             continue;
                         }
