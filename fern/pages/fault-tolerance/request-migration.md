@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Request Migration Architecture
-
 This document describes how Dynamo implements request migration to handle worker failures gracefully during LLM text generation. Request migration allows in-progress requests to continue on different workers when the original worker becomes unavailable, providing fault tolerance and improved user experience.
 
 ## Overview
@@ -25,12 +23,11 @@ Key responsibilities:
 
 ### Migration Limit Configuration
 
-Each model can be configured with a migration limit parameter that specifies the maximum number of times a request can be migrated to another worker:
+The migration limit is configured at the **frontend** level and applies globally to all models served by that frontend. This parameter specifies the maximum number of times a request can be migrated to another worker:
 
-- Default behavior: no migration allowed
-- Can be set independently for different engine types
-- Applicable to LLM worker nodes that perform inference
-- Allows engines to override user-specified limits for compatibility
+- Default behavior: no migration allowed (migration_limit=0)
+- Set via `--migration-limit` flag on the frontend
+- Applies to all models served by the frontend
 
 ## Token State Tracking and Request Migration
 
@@ -106,9 +103,7 @@ This token accumulation mechanism ensures that migrations are truly seamless, pr
 
 The migration system is designed with several important architectural considerations:
 
-**Engine Compatibility**: Different LLM engines may have varying capabilities for handling migrated requests. The system allows engines to override migration settings to ensure compatibility and correctness.
-
-**Multi-Model Support**: Since a frontend may serve multiple models simultaneously, migration limits can be configured at the engine level, providing flexibility for different model types with varying reliability characteristics.
+**Multi-Model Support**: Since a frontend may serve multiple models simultaneously, the migration limit is configured at the frontend level and applies uniformly to all models, simplifying operational management.
 
 **State Management**: The system carefully tracks not only token sequences but also metadata such as remaining token budgets, stop conditions, and sampling parameters to ensure complete state preservation.
 
