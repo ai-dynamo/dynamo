@@ -144,7 +144,7 @@ http://localhost:8000/v1/chat/completions
 
 Below is an example of what a trace looks like in Grafana Tempo:
 
-![Trace Example](../../assets/img/trace.png)
+![Trace Example](/assets/img/trace.png)
 
 ### 6. Stop Services
 

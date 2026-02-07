@@ -25,7 +25,7 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
     pytest.mark.e2e,
@@ -173,6 +173,9 @@ class SGLangProcess:
                     [
                         "--dp-size",
                         str(data_parallel_size),
+                        "--tp-size",
+                        str(data_parallel_size),
+                        "--enable-dp-attention",
                     ]
                 )
 
