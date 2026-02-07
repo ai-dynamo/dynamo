@@ -6,6 +6,7 @@
 //! These tests verify the end-to-end flow from BlockRegistry through
 //! EventsManager, EventBatcher, and KvbmCacheEventsPublisher.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -206,7 +207,7 @@ async fn test_max_batch_size_flush() {
         .batching_config(
             BatchingConfig::default()
                 .with_window(Duration::from_secs(60)) // Long window
-                .with_max_size(3),
+                .with_max_size(NonZeroUsize::new(3).unwrap()),
         )
         .build()
         .unwrap();
