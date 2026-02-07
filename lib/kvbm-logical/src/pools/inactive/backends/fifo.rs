@@ -318,9 +318,7 @@ mod tests {
         }
 
         // Verify each key is unique and strictly increasing
-        let keys: Vec<PriorityKey> = (1..=5)
-            .map(|id| *policy.keys.get(&id).unwrap())
-            .collect();
+        let keys: Vec<PriorityKey> = (1..=5).map(|id| *policy.keys.get(&id).unwrap()).collect();
         for window in keys.windows(2) {
             assert!(window[0] < window[1], "keys must be strictly increasing");
         }

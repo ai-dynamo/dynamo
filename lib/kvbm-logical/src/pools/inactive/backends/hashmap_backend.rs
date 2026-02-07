@@ -65,6 +65,12 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for HashMapBackend<T> {
             if let Some(InactiveBlock { seq_hash, .. }) = self.reuse_policy.next_free() {
                 if let Some(block) = self.blocks.remove(&seq_hash) {
                     allocated.push(block);
+                } else {
+                    debug_assert!(
+                        false,
+                        "reuse_policy yielded seq_hash {:?} not found in blocks",
+                        seq_hash
+                    );
                 }
             } else {
                 break;

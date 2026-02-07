@@ -34,7 +34,7 @@ pub trait ReusePolicy: Send + Sync + std::fmt::Debug {
     /// Get the next free block based on the implementation's priority strategy
     ///
     /// Returns None if the free list is empty.
-    /// The returned FreeBlock contains both the block_id and seq_hash needed
+    /// The returned InactiveBlock contains both the block_id and seq_hash needed
     /// to look up the block in the InactivePool's HashMap.
     fn next_free(&mut self) -> Option<InactiveBlock>;
 

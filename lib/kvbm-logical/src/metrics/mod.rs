@@ -16,12 +16,14 @@ pub use collector::MetricsAggregator;
 pub use pool_metrics::{BlockPoolMetrics, MetricsSnapshot};
 pub use stats::{StatsCollector, StatsConfig, StatsSnapshot};
 
-/// Extract the short type name from `std::any::type_name::<T>()`.
+/// Returns the short (unqualified) type name for `T`.
 ///
-/// E.g. `"my_crate::storage::G1"` → `"G1"`.
+/// Strips generic parameters and the module path, returning only the base
+/// type name. May still be imperfect for deeply nested or anonymous types.
 pub fn short_type_name<T: 'static>() -> String {
     let full = std::any::type_name::<T>();
-    full.rsplit("::").next().unwrap_or(full).to_string()
+    let base = full.split_once('<').map(|(b, _)| b).unwrap_or(full);
+    base.rsplit("::").next().unwrap_or(base).to_string()
 }
 
 #[cfg(test)]
@@ -40,5 +42,11 @@ mod tests {
     fn test_short_type_name_primitive() {
         let name = short_type_name::<u32>();
         assert_eq!(name, "u32");
+    }
+
+    #[test]
+    fn test_short_type_name_generic() {
+        let name = short_type_name::<Vec<String>>();
+        assert_eq!(name, "Vec");
     }
 }

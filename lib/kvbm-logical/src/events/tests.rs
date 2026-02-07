@@ -187,7 +187,6 @@ async fn test_type_switch_flushes_batch() {
         "Second batch should be Remove"
     );
 
-    // Keep handle2 alive
     drop(handle2);
 }
 
@@ -240,7 +239,7 @@ async fn test_max_batch_size_flush() {
         panic!("Expected Create batch");
     }
 
-    // Keep handles alive to prevent remove events interfering
+    // Drop handles to allow remove events to proceed
     drop(handles);
 }
 
