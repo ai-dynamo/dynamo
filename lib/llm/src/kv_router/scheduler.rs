@@ -137,7 +137,7 @@ impl KvScheduler {
         let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("KvScheduler workers monitoring task started");
-            let mut last_workers: HashSet<WorkerId> = HashSet::new();
+            let mut last_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = HashMap::new();
 
             loop {
                 // Wait for notification or cancellation
@@ -160,13 +160,11 @@ impl KvScheduler {
                         .iter()
                         .map(|r| (*r.key(), r.value().clone()))
                         .collect();
-                let current_worker_ids: HashSet<WorkerId> =
-                    current_workers.keys().copied().collect();
 
                 // Only update slots if workers have changed
-                if current_worker_ids != last_workers {
-                    slots_monitor.update_workers(current_workers);
-                    last_workers = current_worker_ids;
+                if current_workers != last_workers {
+                    slots_monitor.update_workers(current_workers.clone());
+                    last_workers = current_workers;
                 }
             }
         });

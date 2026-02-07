@@ -68,26 +68,31 @@ impl RuntimeConfigs {
         }
 
         // Then, add/update workers
-        // Track if any config became Some (for notify)
-        let mut config_added = false;
+        // Track if any config became Some (for notify) or if the config value changed
+        let mut config_changed = false;
         for worker_id in new_instance_ids {
             let config = new_configs.get(worker_id).cloned();
-            if config.is_some() {
-                let prev_config = self.configs.get(worker_id);
-                let was_none = prev_config
-                    .as_ref()
-                    .map(|r| r.value().is_none())
-                    .unwrap_or(true);
-                if was_none {
+            let prev_config = self.configs.get(worker_id);
+
+            // Check if config changed
+            // Case 1: Was None/Missing, now Some -> changed
+            // Case 2: Was Some(A), now Some(B) where A != B -> changed
+            // Case 3: Was Some, now None -> changed (but we don't insert None usually, effectively same as case 1 inverse but here we treat missing as None)
+            let prev_val = prev_config.as_deref().cloned().flatten();
+            if config != prev_val {
+                config_changed = true;
+                if prev_val.is_none() && config.is_some() {
                     tracing::info!("RuntimeConfigs: config found for worker_id: {worker_id}");
-                    config_added = true;
+                } else if prev_val.is_some() && config.is_some() {
+                    tracing::debug!("RuntimeConfigs: config updated for worker_id: {worker_id}");
                 }
             }
+
             self.configs.insert(*worker_id, config);
         }
 
-        // Notify when a config with Some value is added OR a worker is removed
-        if config_added || worker_removed {
+        // Notify when a config changes or a worker is removed
+        if config_changed || worker_removed {
             self.notify_change();
         }
     }

@@ -8,22 +8,18 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
-use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
-    discovery::{DiscoveryQuery, EventTransportKind},
+    discovery::DiscoveryQuery,
     pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
-        SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+        async_trait,
     },
     protocols::EndpointId,
     protocols::annotated::Annotated,
     traits::DistributedRuntimeProvider,
 };
-use futures::stream::{self, StreamExt};
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use futures::stream;
 use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
@@ -31,16 +27,20 @@ pub use dynamo_kv_router::approx;
 pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
+pub mod config;
 pub mod prefill_router;
 pub mod publisher;
+pub mod push_router;
 pub mod recorder;
 pub mod scheduler;
 pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
+pub use config::{KvRouterConfig, RouterConfigOverride};
 use indexer::WorkerKvQueryResponse;
 pub use prefill_router::PrefillRouter;
+pub use push_router::KvPushRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
@@ -51,15 +51,12 @@ use crate::{
         protocols::{
             DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
             TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
-            compute_block_hash_for_seq, compute_seq_hash_for_block,
+            compute_block_hash_for_seq,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
     },
     local_model::runtime_config::ModelRuntimeConfig,
-    preprocessor::PreprocessedRequest,
-    protocols::common::llm_backend::LLMEngineOutput,
-    protocols::common::timing::RequestPhase,
 };
 
 // [gluo TODO] shouldn't need to be public
@@ -122,134 +119,6 @@ pub trait WorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
-/// Override configuration for router settings that can be specified per-request
-#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
-pub struct RouterConfigOverride {
-    #[builder(default)]
-    pub overlap_score_weight: Option<f64>,
-
-    #[builder(default)]
-    #[validate(range(min = 0.0))]
-    pub router_temperature: Option<f64>,
-}
-
-/// KV Router configuration parameters
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
-pub struct KvRouterConfig {
-    #[validate(range(min = 0.0))]
-    pub overlap_score_weight: f64,
-
-    #[validate(range(min = 0.0))]
-    pub router_temperature: f64,
-
-    pub use_kv_events: bool,
-
-    /// Enable durable KV events using NATS JetStream instead of the default event plane.
-    /// When false (default), the router uses the event-plane subscriber and requires
-    /// workers to have local_indexer enabled for gap recovery.
-    /// When true, uses JetStream for durability and multi-replica consistency.
-    pub durable_kv_events: bool,
-
-    pub router_replica_sync: bool,
-
-    /// Whether to track active blocks in the router (default: true)
-    pub router_track_active_blocks: bool,
-
-    /// Whether to track output blocks during generation (default: false)
-    /// When enabled, the router adds placeholder blocks as tokens are generated
-    /// and applies fractional decay based on progress toward expected_output_tokens.
-    pub router_track_output_blocks: bool,
-
-    /// Whether to assume KV cache reuse when tracking active blocks (default: true).
-    /// When true, computes actual block hashes for sequence tracking.
-    /// When false, generates random hashes (assuming no KV cache reuse).
-    pub router_assume_kv_reuse: bool,
-
-    /// Threshold for triggering snapshots. If None, no snapshots will be performed.
-    #[validate(range(min = 1))]
-    pub router_snapshot_threshold: Option<u32>,
-
-    /// Whether to reset the router state on startup (default: false)
-    pub router_reset_states: bool,
-
-    /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
-    #[validate(range(min = 0.0))]
-    pub router_ttl_secs: f64,
-
-    /// Maximum tree size before pruning (only used when use_kv_events is false, default: 2^20 = 1048576)
-    #[validate(range(min = 1))]
-    pub router_max_tree_size: usize,
-
-    /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
-    #[validate(range(min = 0.0, max = 1.0))]
-    pub router_prune_target_ratio: f64,
-}
-
-impl Default for KvRouterConfig {
-    fn default() -> Self {
-        Self {
-            overlap_score_weight: 1.0,
-            router_temperature: 0.0,
-            use_kv_events: true,
-            durable_kv_events: false, // default to NATS Core (local indexer mode)
-            router_replica_sync: false,
-            router_track_active_blocks: true,
-            router_track_output_blocks: false,
-            router_assume_kv_reuse: true,
-            router_snapshot_threshold: Some(1000000),
-            router_reset_states: false,
-            router_ttl_secs: 120.0,
-            router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
-            router_prune_target_ratio: 0.8,
-        }
-    }
-}
-
-impl KvRouterConfig {
-    /// Compute sequence hashes for active block tracking based on configuration.
-    ///
-    /// Returns:
-    /// - `None` if `router_track_active_blocks` is false
-    /// - Random hashes if `router_track_active_blocks` is true but `router_assume_kv_reuse` is false
-    /// - Actual sequence hashes if both are true
-    pub fn compute_seq_hashes_for_tracking(
-        &self,
-        tokens: &[u32],
-        block_size: u32,
-    ) -> Option<Vec<u64>> {
-        if !self.router_track_active_blocks {
-            return None;
-        }
-
-        let num_blocks = tokens.len() / block_size as usize;
-        if num_blocks == 0 {
-            return Some(Vec::new());
-        }
-
-        if self.router_assume_kv_reuse {
-            // Compute actual block hashes and sequence hashes
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None);
-            Some(compute_seq_hash_for_block(&block_hashes))
-        } else {
-            // Generate random hashes (no KV reuse assumed)
-            let mut rng = rand::rng();
-            Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
-        }
-    }
-
-    /// Check if KV event subscription should be started.
-    ///
-    /// Returns false if:
-    /// - KV events are disabled (`use_kv_events=false`)
-    /// - Overlap scoring is disabled (`overlap_score_weight=0`)
-    ///
-    /// When false, the router skips starting the KV event subscription entirely,
-    /// avoiding the need to query workers for their local indexer state.
-    pub fn should_subscribe_to_kv_events(&self) -> bool {
-        self.use_kv_events && self.overlap_score_weight > 0.0
-    }
-}
-
 pub enum Indexer {
     /// Updates itself based on KV events emitted by backend workers or routing decisions.
     /// Supports TTL-based expiration and size-based pruning.
@@ -295,7 +164,7 @@ impl Indexer {
         }
     }
 
-    async fn find_matches(
+    pub(crate) async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
@@ -309,7 +178,7 @@ impl Indexer {
         }
     }
 
-    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+    pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => indexer.dump_events().await,
             Indexer::None => {
@@ -320,7 +189,7 @@ impl Indexer {
         }
     }
 
-    async fn process_routing_decision_for_request(
+    pub(crate) async fn process_routing_decision_for_request(
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
@@ -438,6 +307,14 @@ impl KvRouter {
     /// Get a reference to the client used by this KvRouter
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    pub fn indexer(&self) -> &Indexer {
+        &self.indexer
+    }
+
+    pub fn kv_router_config(&self) -> &KvRouterConfig {
+        &self.kv_router_config
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
@@ -693,333 +570,6 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = Annotated::from_data(response);
         let stream = stream::iter(vec![response]);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
-    }
-}
-
-pub struct KvPushRouter {
-    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    pub chooser: Arc<KvRouter>,
-}
-
-/// Result of worker selection containing instance ID, dp_rank, and overlap amount.
-struct WorkerSelection {
-    instance_id: u64,
-    dp_rank: u32,
-    overlap_amount: u32,
-}
-
-impl KvPushRouter {
-    pub fn new(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        chooser: Arc<KvRouter>,
-    ) -> Self {
-        KvPushRouter { inner, chooser }
-    }
-
-    /// Select a worker for the request, either using a preselected worker or finding the best match.
-    ///
-    /// When `is_query_only` is false and `handle_local_updates` is true, this also registers
-    /// the request with the scheduler via `add_request`.
-    async fn select_worker(
-        &self,
-        context_id: &str,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-        is_query_only: bool,
-        handle_local_updates: bool,
-    ) -> Result<WorkerSelection, Error> {
-        let routing = request.routing.as_ref();
-        let lora_name = routing.and_then(|r| r.lora_name.clone());
-        let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
-        let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
-
-        // Get pre-selected worker based on phase, with backend_instance_id as fallback
-        let preselected_id = match phase {
-            RequestPhase::Prefill => {
-                routing.and_then(|r| r.prefill_worker_id.or(r.backend_instance_id))
-            }
-            RequestPhase::Decode => {
-                routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id))
-            }
-            RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
-        };
-
-        let Some(id) = preselected_id else {
-            let (best_worker, overlap_amount) = self
-                .chooser
-                .find_best_match(
-                    Some(context_id),
-                    &request.token_ids,
-                    request.router_config_override.as_ref(),
-                    !is_query_only,
-                    lora_name,
-                )
-                .await?;
-
-            return Ok(WorkerSelection {
-                instance_id: best_worker.worker_id,
-                dp_rank: best_worker.dp_rank,
-                overlap_amount,
-            });
-        };
-
-        tracing::debug!(
-            worker_id = id,
-            dp_rank = dp_rank,
-            ?phase,
-            "Routing to specified worker"
-        );
-
-        let worker = WorkerWithDpRank::new(id, dp_rank);
-        let overlap_blocks = self
-            .chooser
-            .get_overlap_blocks(&request.token_ids, worker)
-            .await?;
-
-        if !is_query_only && handle_local_updates {
-            self.chooser
-                .add_request(
-                    context_id.to_string(),
-                    &request.token_ids,
-                    overlap_blocks,
-                    expected_output_tokens,
-                    worker,
-                    lora_name,
-                )
-                .await;
-        } else {
-            tracing::debug!(
-                request_id = %context_id,
-                worker_id = id,
-                dp_rank = dp_rank,
-                "Skipping add_request - query or handled externally"
-            );
-        }
-
-        Ok(WorkerSelection {
-            instance_id: id,
-            dp_rank,
-            overlap_amount: overlap_blocks,
-        })
-    }
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for KvPushRouter
-{
-    /// Generate method that handles KV-aware routing with three distinct behaviors:
-    ///
-    /// 1. **If `query_instance_id` annotation is set**:
-    ///    - Returns the best matching worker ID without routing the request
-    ///    - Does NOT update any router local states
-    ///    - Response includes worker_instance_id and token_data annotations
-    ///
-    /// 2. **If `backend_instance_id` is set in the request**:
-    ///    - Routes directly to the specified backend instance
-    ///    - DOES update router states to track this request (unless query_instance_id is also set)
-    ///    - Bypasses the normal KV matching logic
-    ///
-    /// 3. **If neither are set (default behavior)**:
-    ///    - Finds the best worker based on KV cache overlap
-    ///    - Updates router states to track the request
-    ///    - Routes to the selected worker
-    ///
-    /// The router state updates include tracking active sequences and managing
-    /// prefill/completion lifecycle for proper KV cache management.
-    async fn generate(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        // Extract context ID for request tracking
-        let context_id = request.context().id().to_string();
-
-        // Simple query-only detection: presence of query_instance_id annotation means query-only mode
-        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-
-        // Determine if this router should handle local state updates (add_request, free, etc.)
-        // Default is true (router handles bookkeeping). Set to false for GAIE Stage 2 where
-        // an external orchestrator (e.g., EPP sidecar) handles bookkeeping via C FFI.
-        let handle_local_updates = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.enable_local_updates)
-            .unwrap_or(true);
-
-        // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
-        let phase = request
-            .tracker
-            .as_ref()
-            .map(|t| t.phase())
-            .unwrap_or(RequestPhase::Aggregated);
-
-        let block_size = self.chooser.block_size() as usize;
-        let selection = self
-            .select_worker(
-                &context_id,
-                &request,
-                phase,
-                is_query_only,
-                handle_local_updates,
-            )
-            .await?;
-        let WorkerSelection {
-            instance_id,
-            dp_rank,
-            overlap_amount,
-        } = selection;
-
-        // In approximate mode (use_kv_events=false), record the routing decision
-        // so the indexer can track cache state based on routing decisions.
-        // This covers both pre-selected workers and find_best_match selections.
-        if !is_query_only && !self.chooser.kv_router_config.use_kv_events {
-            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-            let mut tokens_with_hashes =
-                TokensWithHashes::new(request.token_ids.clone(), self.chooser.block_size);
-            if let Err(e) = self
-                .chooser
-                .indexer
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
-                .await
-            {
-                tracing::warn!(
-                    request_id = %context_id,
-                    worker_id = instance_id,
-                    dp_rank = dp_rank,
-                    error = %e,
-                    "Failed to record routing decision in approximate mode"
-                );
-            }
-        }
-
-        // Record metrics in tracker: KV hit rate, worker ID, and worker type based on phase.
-        // Worker type is stored at routing time to avoid expensive MDC lookups when
-        // updating Prometheus metrics (TTFT/ITL) later in the response stream.
-        if let Some(ref tracker) = request.tracker {
-            let isl_blocks = request.token_ids.len().div_ceil(block_size);
-            tracker.record_kv_hit(overlap_amount, isl_blocks);
-            tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
-        }
-
-        // Handle query-only requests: early return with worker info
-        if is_query_only {
-            let stream_context = request.context().clone();
-            // Tracker is always created for query-only requests (delta generator enables tracking
-            // when query_instance_id annotation is present)
-            let worker_id_info = request.tracker.as_ref().and_then(|t| t.get_worker_info());
-
-            tracing::trace!(
-                ?phase,
-                worker_id = instance_id,
-                ?worker_id_info,
-                "Returning worker selection (query-only mode)"
-            );
-
-            let output = LLMEngineOutput {
-                disaggregated_params: Some(json!({
-                    "worker_id": worker_id_info,
-                    "token_ids": request.token_ids
-                })),
-                ..Default::default()
-            };
-            let response = Annotated::from_data(output);
-            let stream = stream::iter(vec![response]);
-            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
-        }
-
-        // Route to worker
-        let isl_tokens = request.token_ids.len();
-        let expected_output_tokens = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.expected_output_tokens);
-        let track_output_blocks =
-            self.chooser.kv_router_config.router_track_output_blocks && handle_local_updates;
-
-        let (mut backend_input, context) = request.into_parts();
-        backend_input.routing_mut().dp_rank = Some(dp_rank);
-        let updated_request = context.map(|_| backend_input);
-
-        let chooser = self.chooser.clone();
-        let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
-        let stream_context = response_stream.context();
-        let context_for_monitoring = stream_context.clone();
-
-        // Wrap stream with lifecycle management (mark_prefill_completed, free)
-        // Only perform these operations if handle_local_updates is true.
-        // When false, an external caller (e.g., GAIE sidecar) handles bookkeeping via C FFI.
-        let wrapped_stream = Box::pin(async_stream::stream! {
-            let mut prefill_marked = false;
-
-            // Output block tracking state
-            let mut cumulative_osl: usize = 0;
-            let mut current_total_blocks = isl_tokens.div_ceil(block_size);
-
-            loop {
-                tokio::select! {
-                    biased;
-
-                    _ = context_for_monitoring.stopped() => {
-                        tracing::debug!("Request {context_id} cancelled, ending stream");
-                        break;
-                    }
-
-                    item = response_stream.next() => {
-                        let Some(item) = item else {
-                            break;
-                        };
-
-                        if handle_local_updates && !prefill_marked {
-                            // Only mark prefill completed when we receive actual tokens,
-                            // not empty bootstrap info (token_ids: []) from disaggregated prefill
-                            let has_tokens = item.data.as_ref()
-                                .map(|d| !d.token_ids.is_empty())
-                                .unwrap_or(false);
-                            if has_tokens {
-                                if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                                    tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
-                                }
-                                prefill_marked = true;
-                            }
-                        }
-
-                        // Track output blocks if enabled
-                        if track_output_blocks {
-                            let new_tokens = item.data.as_ref()
-                                .map(|d| d.token_ids.len())
-                                .unwrap_or(0);
-                            cumulative_osl += new_tokens;
-
-                            let new_total_blocks = (isl_tokens + cumulative_osl).div_ceil(block_size);
-                            if new_total_blocks > current_total_blocks {
-                                // New block boundary crossed - add output block with decay
-                                // Clamp eot to min 1 to avoid division by zero, and result to min 0.0
-                                let decay_fraction = expected_output_tokens.map(|eot| {
-                                    (1.0 - (cumulative_osl as f64 / eot.max(1) as f64)).max(0.0)
-                                });
-                                if let Err(e) = chooser.add_output_block(&context_id, decay_fraction).await {
-                                    tracing::warn!(
-                                        "Failed to add output block for request {context_id}: {e}"
-                                    );
-                                }
-                                current_total_blocks = new_total_blocks;
-                            }
-                        }
-
-                        yield item;
-                    }
-                }
-            }
-
-            // Only call free() if we handle local updates.
-            // When handle_local_updates=false, external caller handles cleanup via C FFI.
-            if handle_local_updates
-                && let Err(e) = chooser.free(&context_id).await
-            {
-                tracing::warn!("Failed to free request {context_id}: {e}");
-            }
-        });
-        Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
 }
 
