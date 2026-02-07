@@ -154,41 +154,100 @@ impl ConcurrentRadixTree {
     /// Note: `frequencies` field will be empty since frequency tracking is not supported.
     pub fn find_matches_impl(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         let mut scores = OverlapScores::new();
-        let mut current = self.root.clone();
 
-        for (idx, block_hash) in sequence.iter().enumerate() {
-            // Read-lock current to get child reference, then release lock
-            let next_block = {
-                let guard = current.read().unwrap();
-                guard.children.get(block_hash).cloned()
-            };
-            // Lock released here
-
-            let Some(block) = next_block else {
-                tracing::trace!(
-                    "ConcurrentRadixTree::find_matches: block not found at index {} for hash {}",
-                    idx,
-                    block_hash.0
-                );
-                break;
-            };
-
-            // Read workers (read lock only)
-            let should_early_exit = {
-                let guard = block.read().unwrap();
-                scores.update_scores(guard.workers.iter());
-                early_exit && guard.workers.len() == 1
-            };
-            // Guard dropped here
-
-            current = block;
-
-            if should_early_exit {
-                break;
-            }
+        if sequence.is_empty() {
+            return scores;
         }
 
-        // Get tree sizes from lookup (DashMap read)
+        // Get first child from root.
+        let first_child = {
+            let guard = self.root.read().unwrap();
+            guard.children.get(&sequence[0]).cloned()
+        };
+
+        let Some(first_child) = first_child else {
+            return scores;
+        };
+
+        // Initialize active worker set from first child.
+        let (mut active, mut active_count) = {
+            let guard = first_child.read().unwrap();
+            (guard.workers.clone(), guard.workers.len())
+        };
+
+        if active.is_empty() {
+            return scores;
+        }
+
+        if early_exit && active_count == 1 {
+            for worker in &active {
+                scores.scores.insert(*worker, 1);
+            }
+            for worker in scores.scores.keys() {
+                if let Some(entry) = self.lookup.get(worker) {
+                    scores.tree_sizes.insert(*worker, entry.len());
+                }
+            }
+            return scores;
+        }
+
+        let mut current = first_child;
+        let mut matched_depth = 1u32;
+
+        // Traverse remaining levels. Workers at a child node are always a subset
+        // of workers at the parent (along the same path), so:
+        //   - workers can only drop out, never join, as we descend
+        //   - if child.workers.len() == active_count, the sets are identical
+        //
+        // This lets us replace O(W) update_scores work at every level with an
+        // O(1) length check. Per-worker iteration only happens at dropout
+        // boundaries, where the count decreases.
+        for idx in 1..sequence.len() {
+            let next_block = {
+                let guard = current.read().unwrap();
+                guard.children.get(&sequence[idx]).cloned()
+            };
+
+            let Some(block) = next_block else {
+                break;
+            };
+
+            {
+                let guard = block.read().unwrap();
+                let child_count = guard.workers.len();
+
+                if child_count < active_count {
+                    // Workers dropped out. Record scores for those that left.
+                    // Score = matched_depth (number of nodes they were present at).
+                    for worker in &active {
+                        if !guard.workers.contains(worker) {
+                            scores.scores.insert(*worker, matched_depth);
+                        }
+                    }
+                    active.clone_from(&guard.workers);
+                    active_count = child_count;
+
+                    if active_count == 0 {
+                        break;
+                    }
+                }
+
+                if early_exit && active_count == 1 {
+                    matched_depth = (idx + 1) as u32;
+                    break;
+                }
+            }
+
+            current = block;
+            matched_depth = (idx + 1) as u32;
+        }
+
+        // Record scores for workers that survived through the deepest matched level.
+        for worker in &active {
+            scores.scores.insert(*worker, matched_depth);
+        }
+
+        // Get tree sizes from lookup (DashMap read).
         for worker in scores.scores.keys() {
             if let Some(entry) = self.lookup.get(worker) {
                 scores.tree_sizes.insert(*worker, entry.len());
