@@ -140,6 +140,13 @@ class kvrouter:
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
 
 
+class kvstats:
+    # Total number of KV cache blocks available on the worker
+    TOTAL_BLOCKS = "total_blocks"
+    # GPU cache usage as a percentage (0.0-1.0)
+    GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
+
+
 class labels:
     """Automatically inserted Prometheus label names used across the metrics system"""
 
@@ -149,6 +156,19 @@ class labels:
     NAMESPACE = "dynamo_namespace"
     # Label for endpoint identification
     ENDPOINT = "dynamo_endpoint"
+    # Label for worker data-parallel rank.
+    # Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
+    # It is used by worker/load-style metrics that need to disambiguate per-worker series.
+    DP_RANK = "dp_rank"
+    # Label for model name
+    MODEL = "model"
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    WORKER_TYPE = "worker_type"
+
+
+class model_info:
+    # Model load time in seconds
+    LOAD_TIME_SECONDS = "model_load_time_seconds"
 
 
 class name_prefix:
