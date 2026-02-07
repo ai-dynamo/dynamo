@@ -599,10 +599,10 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
                     )
                 })?;
 
-                // Total capacity = block_count, distributed across 4 levels
-                let capacity_per_level = block_count.div_ceil(4); // Round up division
+                // Each level needs capacity for all blocks since the frequency
+                // distribution is unpredictable — all blocks could land in one level.
                 let level_capacity =
-                    NonZeroUsize::new(capacity_per_level).expect("capacity per level must be > 0");
+                    NonZeroUsize::new(block_count).expect("block_count must be > 0");
 
                 tracing::info!(
                     "Using MultiLRU inactive backend with thresholds: {:?}",
@@ -2323,6 +2323,375 @@ mod tests {
 
             // Both managers should see the registered block count in shared registry
             assert!(registry.is_registered(seq_hash));
+        }
+    }
+
+    mod capacity_lifecycle_tests {
+        use super::*;
+
+        /// Build a BlockManager with any backend. Always includes frequency_tracker
+        /// so MultiLRU works; LRU/Lineage ignore it.
+        fn create_backend_manager(
+            block_count: usize,
+            backend_builder: fn(
+                BlockManagerConfigBuilder<TestBlockData>,
+            ) -> BlockManagerConfigBuilder<TestBlockData>,
+        ) -> BlockManager<TestBlockData> {
+            let registry = BlockRegistry::builder()
+                .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
+                .build();
+            backend_builder(
+                BlockManager::<TestBlockData>::builder()
+                    .block_count(block_count)
+                    .block_size(4)
+                    .registry(registry),
+            )
+            .build()
+            .expect("Should build manager")
+        }
+
+        /// Allocate N, complete each with a unique token block, register all.
+        /// Returns the ImmutableBlocks.
+        fn allocate_complete_register_all(
+            manager: &BlockManager<TestBlockData>,
+            block_count: usize,
+            iota_base: u32,
+        ) -> Vec<ImmutableBlock<TestBlockData>> {
+            let mutable = manager.allocate_blocks(block_count).expect("allocate failed");
+            let complete: Vec<_> = mutable
+                .into_iter()
+                .enumerate()
+                .map(|(i, mb)| {
+                    let tb = create_iota_token_block(iota_base + (i as u32 * 4), 4);
+                    mb.complete(&tb).expect("complete failed")
+                })
+                .collect();
+            manager.register_blocks(complete)
+        }
+
+        // ====================================================================
+        // 1. Full capacity register and return to inactive
+        // ====================================================================
+
+        #[rstest]
+        #[case("lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lru_backend())]
+        #[case("multi_lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_multi_lru_backend())]
+        #[case("lineage", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lineage_backend())]
+        fn test_full_capacity_register_and_return_to_inactive(
+            #[case] _backend_name: &str,
+            #[case] backend_builder: fn(
+                BlockManagerConfigBuilder<TestBlockData>,
+            ) -> BlockManagerConfigBuilder<TestBlockData>,
+        ) {
+            let manager = create_backend_manager(32, backend_builder);
+
+            // Allocate, complete, register all 32
+            let immutable = allocate_complete_register_all(&manager, 32, 5000);
+            assert_eq!(manager.inactive_pool.len(), 0);
+            assert_eq!(manager.reset_pool.len(), 0);
+
+            // Drop all ImmutableBlocks → should all land in inactive pool
+            drop(immutable);
+            assert_eq!(manager.inactive_pool.len(), 32);
+            assert_eq!(manager.reset_pool.len(), 0);
+
+            // Check metrics
+            let snap = manager.metrics.snapshot();
+            assert_eq!(snap.allocations, 32);
+            assert_eq!(snap.registrations, 32);
+            assert_eq!(snap.inflight_immutable, 0);
+            assert_eq!(snap.inflight_mutable, 0);
+
+            // Check totals
+            assert_eq!(manager.available_blocks(), 32);
+            assert_eq!(manager.total_blocks(), 32);
+        }
+
+        // ====================================================================
+        // 2. Full capacity eviction cycle
+        // ====================================================================
+
+        #[rstest]
+        #[case("lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lru_backend())]
+        #[case("multi_lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_multi_lru_backend())]
+        #[case("lineage", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lineage_backend())]
+        fn test_full_capacity_eviction_cycle(
+            #[case] _backend_name: &str,
+            #[case] backend_builder: fn(
+                BlockManagerConfigBuilder<TestBlockData>,
+            ) -> BlockManagerConfigBuilder<TestBlockData>,
+        ) {
+            let manager = create_backend_manager(16, backend_builder);
+
+            // Allocate, register all 16
+            let immutable = allocate_complete_register_all(&manager, 16, 6000);
+            assert_eq!(manager.reset_pool.len(), 0);
+            assert_eq!(manager.inactive_pool.len(), 0);
+
+            // Drop all → inactive pool
+            drop(immutable);
+            assert_eq!(manager.inactive_pool.len(), 16);
+            assert_eq!(manager.reset_pool.len(), 0);
+
+            // Allocate 16 again (evicts from inactive)
+            let mutable = manager.allocate_blocks(16).expect("second allocate failed");
+            assert_eq!(manager.inactive_pool.len(), 0);
+            assert_eq!(manager.reset_pool.len(), 0);
+
+            // Drop mutable blocks → reset pool
+            drop(mutable);
+            assert_eq!(manager.reset_pool.len(), 16);
+            assert_eq!(manager.inactive_pool.len(), 0);
+
+            // Check metrics
+            let snap = manager.metrics.snapshot();
+            assert_eq!(snap.evictions, 16);
+            assert_eq!(snap.allocations, 32);
+        }
+
+        // ====================================================================
+        // 3. Mutable drops go to reset, not inactive
+        // ====================================================================
+
+        #[test]
+        fn test_mutable_drops_go_to_reset_not_inactive() {
+            let manager = create_backend_manager(16, |b| b.with_lru_backend());
+
+            let mutable = manager.allocate_blocks(16).expect("allocate failed");
+            assert_eq!(manager.reset_pool.len(), 0);
+            assert_eq!(manager.inactive_pool.len(), 0);
+
+            // Drop all mutable blocks → reset pool
+            drop(mutable);
+            assert_eq!(manager.reset_pool.len(), 16);
+            assert_eq!(manager.inactive_pool.len(), 0);
+
+            let snap = manager.metrics.snapshot();
+            assert_eq!(snap.inflight_mutable, 0);
+            assert_eq!(snap.registrations, 0);
+        }
+
+        // ====================================================================
+        // 4. Complete drops go to reset, not inactive
+        // ====================================================================
+
+        #[test]
+        fn test_complete_drops_go_to_reset_not_inactive() {
+            let manager = create_backend_manager(16, |b| b.with_lru_backend());
+
+            let mutable = manager.allocate_blocks(16).expect("allocate failed");
+            let complete: Vec<_> = mutable
+                .into_iter()
+                .enumerate()
+                .map(|(i, mb)| {
+                    let tb = create_iota_token_block(7000 + (i as u32 * 4), 4);
+                    mb.complete(&tb).expect("complete failed")
+                })
+                .collect();
+            assert_eq!(manager.reset_pool.len(), 0);
+
+            // Drop all CompleteBlocks (not registered) → reset pool
+            drop(complete);
+            assert_eq!(manager.reset_pool.len(), 16);
+            assert_eq!(manager.inactive_pool.len(), 0);
+
+            let snap = manager.metrics.snapshot();
+            assert_eq!(snap.stagings, 16);
+            assert_eq!(snap.registrations, 0);
+        }
+
+        // ====================================================================
+        // 5. Mixed return paths
+        // ====================================================================
+
+        #[rstest]
+        #[case("lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lru_backend())]
+        #[case("multi_lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_multi_lru_backend())]
+        #[case("lineage", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lineage_backend())]
+        fn test_mixed_return_paths(
+            #[case] _backend_name: &str,
+            #[case] backend_builder: fn(
+                BlockManagerConfigBuilder<TestBlockData>,
+            ) -> BlockManagerConfigBuilder<TestBlockData>,
+        ) {
+            let manager = create_backend_manager(24, backend_builder);
+
+            let mutable = manager.allocate_blocks(24).expect("allocate failed");
+            let mut mutable_iter = mutable.into_iter();
+
+            // Group A (8): drop as MutableBlocks
+            {
+                let group_a: Vec<_> = mutable_iter.by_ref().take(8).collect();
+                drop(group_a);
+            }
+            assert_eq!(manager.reset_pool.len(), 8);
+
+            // Group B (8): complete, drop as CompleteBlocks
+            {
+                let group_b: Vec<_> = mutable_iter
+                    .by_ref()
+                    .take(8)
+                    .enumerate()
+                    .map(|(i, mb)| {
+                        let tb = create_iota_token_block(8000 + (i as u32 * 4), 4);
+                        mb.complete(&tb).expect("complete failed")
+                    })
+                    .collect();
+                drop(group_b);
+            }
+            assert_eq!(manager.reset_pool.len(), 16);
+
+            // Group C (8): complete, register, hold ImmutableBlocks
+            let group_c_complete: Vec<_> = mutable_iter
+                .enumerate()
+                .map(|(i, mb)| {
+                    let tb = create_iota_token_block(8100 + (i as u32 * 4), 4);
+                    mb.complete(&tb).expect("complete failed")
+                })
+                .collect();
+            let group_c_immutable = manager.register_blocks(group_c_complete);
+            assert_eq!(manager.inactive_pool.len(), 0);
+
+            // Drop Group C → inactive pool
+            drop(group_c_immutable);
+            assert_eq!(manager.inactive_pool.len(), 8);
+            assert_eq!(manager.reset_pool.len(), 16);
+
+            // Check totals
+            assert_eq!(manager.available_blocks(), 24);
+
+            // Check metrics
+            let snap = manager.metrics.snapshot();
+            assert_eq!(snap.allocations, 24);
+            assert_eq!(snap.stagings, 16); // Group B (8) + Group C (8)
+            assert_eq!(snap.registrations, 8);
+            assert_eq!(snap.inflight_mutable, 0);
+            assert_eq!(snap.inflight_immutable, 0);
+        }
+
+        // ====================================================================
+        // 6. MultiLRU all cold blocks at capacity (regression)
+        // ====================================================================
+
+        #[test]
+        fn test_multi_lru_all_cold_blocks_at_capacity() {
+            let manager =
+                create_backend_manager(64, |b| b.with_multi_lru_backend());
+
+            // Allocate, register all 64 (no frequency touches → all cold)
+            let immutable = allocate_complete_register_all(&manager, 64, 9000);
+
+            // Drop all → all go to level 0 (cold). With old div_ceil(4)=16
+            // per-level capacity this would panic at block 17.
+            drop(immutable);
+            assert_eq!(manager.inactive_pool.len(), 64);
+
+            let snap = manager.metrics.snapshot();
+            assert_eq!(snap.evictions, 0);
+            assert_eq!(snap.allocations, 64);
+        }
+
+        // ====================================================================
+        // 7. MultiLRU mixed frequency levels
+        // ====================================================================
+
+        #[test]
+        fn test_multi_lru_mixed_frequency_levels() {
+            // thresholds [3, 8, 15]: cold=0-2, warm=3-7, hot=8-14, very_hot=15
+            let registry = BlockRegistry::builder()
+                .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
+                .build();
+            let manager = BlockManager::<TestBlockData>::builder()
+                .block_count(32)
+                .block_size(4)
+                .registry(registry)
+                .with_multi_lru_backend()
+                .build()
+                .expect("Should build manager");
+
+            // Allocate, register all 32
+            let immutable = allocate_complete_register_all(&manager, 32, 10000);
+
+            // Touch frequency tracker for different blocks to spread across levels
+            let tracker = manager.block_registry().frequency_tracker().unwrap();
+            for block in &immutable {
+                let hash = block.sequence_hash();
+                let idx = block.block_id() as usize;
+                let touches = if idx < 8 {
+                    0 // cold: 0-7 untouched
+                } else if idx < 16 {
+                    3 // warm: 8-15
+                } else if idx < 24 {
+                    8 // hot: 16-23
+                } else {
+                    15 // very hot: 24-31
+                };
+                for _ in 0..touches {
+                    tracker.touch(hash.as_u128());
+                }
+            }
+
+            // Drop all → distributed across 4 levels
+            drop(immutable);
+            assert_eq!(manager.inactive_pool.len(), 32);
+
+            // Allocate 32 again → evicts from all levels
+            let mutable = manager.allocate_blocks(32).expect("eviction allocate");
+            assert_eq!(manager.inactive_pool.len(), 0);
+            drop(mutable);
+
+            let snap = manager.metrics.snapshot();
+            assert_eq!(snap.evictions, 32);
+            assert_eq!(snap.allocations, 64);
+        }
+
+        // ====================================================================
+        // 8. Double lifecycle cycle
+        // ====================================================================
+
+        #[rstest]
+        #[case("lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lru_backend())]
+        #[case("multi_lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_multi_lru_backend())]
+        #[case("lineage", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lineage_backend())]
+        fn test_double_lifecycle_cycle(
+            #[case] _backend_name: &str,
+            #[case] backend_builder: fn(
+                BlockManagerConfigBuilder<TestBlockData>,
+            ) -> BlockManagerConfigBuilder<TestBlockData>,
+        ) {
+            let manager = create_backend_manager(16, backend_builder);
+
+            // Cycle 1: allocate, register, drop → inactive
+            {
+                let immutable = allocate_complete_register_all(&manager, 16, 11000);
+                drop(immutable);
+            }
+            assert_eq!(manager.inactive_pool.len(), 16);
+
+            // Evict all: allocate from inactive, drop mutable → reset
+            {
+                let mutable = manager.allocate_blocks(16).expect("eviction allocate");
+                drop(mutable);
+            }
+            assert_eq!(manager.reset_pool.len(), 16);
+            assert_eq!(manager.inactive_pool.len(), 0);
+
+            // Cycle 2: allocate, register (different tokens), drop → inactive
+            {
+                let immutable = allocate_complete_register_all(&manager, 16, 12000);
+                drop(immutable);
+            }
+            assert_eq!(manager.inactive_pool.len(), 16);
+
+            // Check metrics
+            let snap = manager.metrics.snapshot();
+            assert_eq!(snap.allocations, 48);
+            assert_eq!(snap.registrations, 32);
+            assert_eq!(snap.evictions, 16);
+
+            // Check totals
+            assert_eq!(manager.available_blocks(), 16);
+            assert_eq!(manager.total_blocks(), 16);
         }
     }
 }
