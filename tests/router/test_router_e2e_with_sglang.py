@@ -25,7 +25,7 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 pytestmark = [
     pytest.mark.e2e,
@@ -173,6 +173,9 @@ class SGLangProcess:
                     [
                         "--dp-size",
                         str(data_parallel_size),
+                        "--tp-size",
+                        str(data_parallel_size),
+                        "--enable-dp-attention",
                     ]
                 )
 
@@ -460,7 +463,11 @@ def test_router_decisions_sglang_dp(
         endpoint = component.endpoint("generate")
 
         _test_router_decisions(
-            sglang_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
+            sglang_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=True,
         )
 
     finally:
