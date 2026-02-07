@@ -25,7 +25,7 @@ def parse_args():
         "--target",
         type=str,
         default="runtime",
-        help="Dockerfile target to use. Non-exhaustive examples :[runtime, dev, local-dev,]"
+        help="Dockerfile target to use. Non-exhaustive examples: [runtime, dev, local-dev]"
     )
     parser.add_argument(
         "--platform",
