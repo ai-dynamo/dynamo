@@ -217,7 +217,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 > Please include the TensorRT-LLM commit id `18e611da773026a55d187870ebcfa95ff00c8482` when building the Dynamo TensorRT-LLM runtime image to test the KVBM + disaggregated serving feature.
 
 ```bash
-# Build a dynamo TensorRT-LLM container with commit-id 18e611da773026a55d187870ebcfa95ff00c8482
+# Build the Dynamo TensorRT-LLM container using commit ID 18e611da773026a55d187870ebcfa95ff00c8482. Note: This build can take a long time.
 ./container/build.sh --framework trtllm --tensorrtllm-commit 18e611da773026a55d187870ebcfa95ff00c8482 --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git
 
 # Launch the container
