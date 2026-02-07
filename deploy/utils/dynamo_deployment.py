@@ -212,8 +212,12 @@ class DynamoDeploymentClient:
     def get_service_url(self) -> str:
         """
         Get the service URL using Kubernetes service DNS.
+
+        The protocol is configurable via SERVICE_PROTOCOL environment variable
+        to support TLS-enabled clusters.
         """
-        service_url = f"http://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
+        protocol = os.environ.get("SERVICE_PROTOCOL", "http")
+        service_url = f"{protocol}://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
         print(f"Using service URL: {service_url}")
         return service_url
 
