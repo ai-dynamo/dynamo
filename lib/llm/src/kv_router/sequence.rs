@@ -858,18 +858,23 @@ impl ActiveSequencesMultiWorker {
         Ok(())
     }
 
-    /// Free all blocks associated with a request
-    ///
-    /// Note: This operation is idempotent. Calling it multiple times for the same request
-    /// will log a warning but not return an error (double free is allowed).
-    pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
-        // Check if request exists - if not, it's already been freed (idempotent)
-        let Some(worker) = self.request_to_worker.get(request_id).map(|entry| *entry) else {
-            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
-            return Ok(());
-        };
+    /// Send a command to the worker assigned to a request, optionally publishing
+    /// a replica-sync event and cleaning up request mappings afterward.
+    async fn send_to_request_worker(
+        &self,
+        request_id: &RequestId,
+        event_data: ActiveSequenceEventData,
+        command_fn: impl FnOnce(RequestId) -> UpdateSequences,
+        remove_mapping: bool,
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
 
-        // Clone sender upfront to avoid TOCTOU between contains_key and get().unwrap()
         let sender = self
             .senders
             .get(&worker)
@@ -877,9 +882,7 @@ impl ActiveSequencesMultiWorker {
             .value()
             .clone();
 
-        // Publish event only if replica_sync is enabled
         if self.replica_sync {
-            // Look up lora_name from mapping
             let lora_name = self
                 .request_to_lora
                 .get(request_id)
@@ -888,27 +891,44 @@ impl ActiveSequencesMultiWorker {
             let event = ActiveSequenceEvent {
                 request_id: request_id.clone(),
                 worker,
-                data: ActiveSequenceEventData::Free,
+                data: event_data,
                 router_id: self.router_id,
                 lora_name,
             };
             self.event_publisher.publish(&event).await?;
         }
 
-        // Update local state
         sender
-            .send(UpdateSequences::Free {
-                request_id: request_id.clone(),
-            })
+            .send(command_fn(request_id.clone()))
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
-        self.request_to_worker.remove(request_id);
-        self.request_to_lora.remove(request_id);
+        if remove_mapping {
+            self.request_to_worker.remove(request_id);
+            self.request_to_lora.remove(request_id);
+        }
 
-        // Publish ActiveLoad metrics for this worker
         self.publish_active_load_for_worker(worker).await;
 
         Ok(())
+    }
+
+    /// Free all blocks associated with a request
+    ///
+    /// Note: This operation is idempotent. Calling it multiple times for the same request
+    /// will log a warning but not return an error (double free is allowed).
+    pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+        if !self.request_to_worker.contains_key(request_id) {
+            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
+            return Ok(());
+        }
+
+        self.send_to_request_worker(
+            request_id,
+            ActiveSequenceEventData::Free,
+            |rid| UpdateSequences::Free { request_id: rid },
+            true,
+        )
+        .await
     }
 
     /// Mark prefill as completed for a request
@@ -919,51 +939,13 @@ impl ActiveSequencesMultiWorker {
         &self,
         request_id: &RequestId,
     ) -> Result<(), SequenceError> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            })?;
-
-        // Clone sender upfront to avoid TOCTOU between contains_key and get().unwrap()
-        let sender = self
-            .senders
-            .get(&worker)
-            .ok_or(SequenceError::WorkerNotFound { worker })?
-            .value()
-            .clone();
-
-        // Publish event only if replica_sync is enabled
-        if self.replica_sync {
-            // Look up lora_name from mapping
-            let lora_name = self
-                .request_to_lora
-                .get(request_id)
-                .map(|entry| entry.value().clone());
-
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::MarkPrefillCompleted,
-                router_id: self.router_id,
-                lora_name,
-            };
-            self.event_publisher.publish(&event).await?;
-        }
-
-        // Update local state
-        sender
-            .send(UpdateSequences::MarkPrefillCompleted {
-                request_id: request_id.clone(),
-            })
-            .map_err(|_| SequenceError::WorkerChannelClosed)?;
-
-        // Publish ActiveLoad metrics for this worker
-        self.publish_active_load_for_worker(worker).await;
-
-        Ok(())
+        self.send_to_request_worker(
+            request_id,
+            ActiveSequenceEventData::MarkPrefillCompleted,
+            |rid| UpdateSequences::MarkPrefillCompleted { request_id: rid },
+            false,
+        )
+        .await
     }
 
     /// Add an output block with optional fractional decay weight
