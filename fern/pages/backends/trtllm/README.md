@@ -41,8 +41,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
-| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
+| [**Disaggregated Serving**](../../disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../disagg-serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
 | [**Load Based Planner**](../../components/planner/README.md) | 🚧 | Planned |
@@ -62,7 +62,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -161,7 +161,7 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../../examples/backends/trtllm/deploy/README.md).
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
 
 ### Client
 
@@ -218,7 +218,7 @@ Logits processors let you modify the next-token logits at every decoding step (e
 ### How it works
 - **Interface**: Implement `dynamo.logits_processing.BaseLogitsProcessor` which defines `__call__(input_ids, logits)` and modifies `logits` in-place.
 - **TRT-LLM adapter**: Use `dynamo.trtllm.logits_processing.adapter.create_trtllm_adapters(...)` to convert Dynamo processors into TRT-LLM-compatible processors and assign them to `SamplingParams.logits_processor`.
-- **Examples**: See example processors in `lib/bindings/python/src/dynamo/logits_processing/examples/` ([temperature](../../../lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py), [hello_world](../../../lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py)).
+- **Examples**: See example processors in `lib/bindings/python/src/dynamo/logits_processing/examples/` ([temperature](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py), [hello_world](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py)).
 
 ### Quick test: HelloWorld processor
 You can enable a test-only processor that forces the model to respond with "Hello world!". This is useful to verify the wiring without modifying your model or engine code.
@@ -299,13 +299,13 @@ The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size`
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../../examples/backends/trtllm/performance-sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance-sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 
 Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
 
-Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm) .
+Here is the instruction: [Running KVBM in TensorRT-LLM](../../components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm) .
 
 ## Known Issues and Mitigations
 

@@ -52,7 +52,7 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 
 ## Kubernetes
 
-For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/.md).
+For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/README.md).
 
 **Operator Metrics**: The Dynamo Operator running in Kubernetes exposes its own set of metrics for monitoring controller reconciliation, webhook validation, and resource inventory. See the [Operator Metrics Guide](../kubernetes/observability/operator-metrics.md).
 
@@ -88,14 +88,14 @@ The dcgm-exporter service in the Docker Compose network is configured to use por
 ### Configuration Files
 
 The following configuration files are located in the `deploy/observability/` directory:
-- [docker-compose.yml](../../deploy/docker-compose.yml): Defines NATS and etcd services
-- [docker-observability.yml](../../deploy/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
-- [prometheus.yml](../../deploy/observability/prometheus.yml): Contains Prometheus scraping configuration
-- [grafana-datasources.yml](../../deploy/observability/grafana-datasources.yml): Contains Grafana datasource configuration
-- [grafana_dashboards/dashboard-providers.yml](../../deploy/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/dynamo.json](../../deploy/observability/grafana_dashboards/dynamo.json): A general Dynamo Dashboard for both SW and HW metrics
-- [grafana_dashboards/dcgm-metrics.json](../../deploy/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/kvbm.json](../../deploy/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics
+- [docker-compose.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml): Defines NATS and etcd services
+- [docker-observability.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
+- [prometheus.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/prometheus.yml): Contains Prometheus scraping configuration
+- [grafana-datasources.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana-datasources.yml): Contains Grafana datasource configuration
+- [grafana_dashboards/dashboard-providers.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/dynamo.json](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana_dashboards/dynamo.json): A general Dynamo Dashboard for both SW and HW metrics
+- [grafana_dashboards/dcgm-metrics.json](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/kvbm.json](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics
 
 ```{toctree}
 :hidden:

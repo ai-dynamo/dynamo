@@ -218,6 +218,6 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
-- [Dynamo Architecture Overview](../design-docs/architecture.md)
+- [Distributed Runtime Architecture](../distributed-runtime.md)
+- [Dynamo Architecture Overview](../architecture.md)
 - [Backend Guide](../development/backend-guide.md)

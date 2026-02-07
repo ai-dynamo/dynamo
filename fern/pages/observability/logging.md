@@ -262,7 +262,7 @@ Notice how the `x_request_id` field appears in all log entries, alongside the `t
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
-- [Dynamo Architecture Overview](../design-docs/architecture.md)
+- [Distributed Runtime Architecture](../distributed-runtime.md)
+- [Dynamo Architecture Overview](../architecture.md)
 - [Backend Guide](../development/backend-guide.md)
 - [Log Aggregation in Kubernetes](../kubernetes/observability/logging.md)

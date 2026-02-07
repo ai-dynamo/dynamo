@@ -36,7 +36,7 @@ See the [support matrix](../../reference/support-matrix.md) for version compatib
 
 ### Build from Source
 
-To build KVBM from source, see the detailed instructions in the [KVBM bindings README](../../../lib/bindings/kvbm/README.md#build-from-source).
+To build KVBM from source, see the detailed instructions in the [KVBM bindings README](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/kvbm/README.md#build-from-source).
 
 ## Run KVBM in Dynamo with vLLM
 
@@ -402,7 +402,7 @@ uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 ## See Also
 
 - [KVBM Overview](README.md) for a quick overview of KV Caching, KVBM and its architecture
-- [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
+- [KVBM Design](../../kvbm-design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache-integration.md)
 - [FlexKV Integration](../../integrations/flexkv-integration.md)
 - [SGLang HiCache](../../integrations/sglang-hicache.md)

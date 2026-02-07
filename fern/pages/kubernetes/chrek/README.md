@@ -118,7 +118,7 @@ ChReK is best suited for:
 ### Getting Started
 - [Dynamo Integration Guide](dynamo.md) - Using ChReK with Dynamo Platform
 - [Standalone Usage Guide](standalone.md) - Using ChReK independently
-- [ChReK Helm Chart README](../../../deploy/helm/charts/chrek/README.md) - Helm chart configuration
+- [ChReK Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/README.md) - Helm chart configuration
 
 ### Related Documentation
 - [CRIU Documentation](https://criu.org/Main_Page) - Upstream CRIU docs

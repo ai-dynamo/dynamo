@@ -345,6 +345,6 @@ ERROR Health check request failed for generate: connection refused
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
-- [Dynamo Architecture Overview](../design-docs/architecture.md)
+- [Distributed Runtime Architecture](../distributed-runtime.md)
+- [Dynamo Architecture Overview](../architecture.md)
 - [Backend Guide](../development/backend-guide.md)

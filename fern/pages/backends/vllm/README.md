@@ -35,8 +35,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | vLLM | Notes |
 |---------|------|-------|
-| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
+| [**Disaggregated Serving**](../../disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
 | [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |
@@ -58,7 +58,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -150,7 +150,7 @@ This setup demonstrates how to use Dynamo to create an instance using Eagle-base
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../../examples/backends/vllm/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)
 
 ## Configuration
 
@@ -179,7 +179,7 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [Router Design](../../design-docs/router-design.md#deterministic-event-ids) on deterministic event IDs.
+See the high-level notes in [Router Design](../../router-design.md#deterministic-event-ids) on deterministic event IDs.
 
 ## Request Migration
 

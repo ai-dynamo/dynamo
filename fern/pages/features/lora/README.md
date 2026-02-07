@@ -263,14 +263,14 @@ kubectl get dynamomodel customer-support-lora
 
 For complete Kubernetes deployment details, see:
 - [Managing Models with DynamoModel](../../kubernetes/deployment/dynamomodel-guide.md)
-- [Kubernetes LoRA Deployment Example](../../../../examples/backends/vllm/deploy/lora/README.md)
+- [Kubernetes LoRA Deployment Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/lora/README.md)
 
 ## Examples
 
 | Example | Description |
 |---------|-------------|
-| [Local LoRA with MinIO](../../../../examples/backends/vllm/launch/lora/README.md) | Local development with S3-compatible storage |
-| [Kubernetes LoRA Deployment](../../../../examples/backends/vllm/deploy/lora/README.md) | Production deployment with DynamoModel CRD |
+| [Local LoRA with MinIO](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/README.md) | Local development with S3-compatible storage |
+| [Kubernetes LoRA Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/lora/README.md) | Production deployment with DynamoModel CRD |
 
 ## Troubleshooting
 

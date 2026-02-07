@@ -81,5 +81,5 @@ curl http://localhost:8000/v1/chat/completions \
 ## See Also
 
 - [vLLM Backend](../../backends/vllm/README.md) - Full vLLM deployment guide
-- [Disaggregated Serving](../../design-docs/disagg-serving.md) - Alternative optimization approach
+- [Disaggregated Serving](../../disagg-serving.md) - Alternative optimization approach
 - [Meta-Llama-3.1-8B-Instruct on Hugging Face](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)

@@ -45,7 +45,7 @@ Before deploying the platform, run the pre-deployment checks to ensure the clust
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](/deploy/pre-deployment/README) for more details.
+This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README) for more details.
 
 ## 1. Install Platform First
 
@@ -78,9 +78,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend      | Aggregated | Aggregated + Router | Disaggregated | Disaggregated + Router | Disaggregated + Planner | Disaggregated Multi-node |
 |--------------|:----------:|:-------------------:|:-------------:|:----------------------:|:-----------------------:|:------------------------:|
-| **[SGLang](/examples/backends/sglang/deploy/README)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **[TensorRT-LLM](/examples/backends/trtllm/deploy/README)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
-| **[vLLM](/examples/backends/vllm/deploy/README)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
+| **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## 3. Deploy Your First Model
 
@@ -226,12 +226,12 @@ Key customization points include:
 
 ## Additional Resources
 
-- **[Examples](../../../examples/README.md)** - Complete working examples
+- **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/README.md)** - Complete working examples
 - **[Create Custom Deployments](deployment/create-deployment.md)** - Build your own CRDs
 - **[Managing Models with DynamoModel](deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
 - **[Operator Documentation](dynamo-operator.md)** - How the platform works
 - **[Service Discovery](service-discovery.md)** - Discovery backends and configuration
-- **[Helm Charts](/deploy/helm/README)** - For advanced users
+- **[Helm Charts](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/README)** - For advanced users
 - **[Checkpointing](chrek/README.md)** - Fast pod startup with checkpoint/restore
 - **[GitOps Deployment with FluxCD](fluxcd.md)** - For advanced users
 - **[Logging](observability/logging.md)** - For logging setup

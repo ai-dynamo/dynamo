@@ -22,7 +22,7 @@ Prometheus Exposition Format text metrics will be available at: `http://localhos
 
 ## Metric Name Constants
 
-The [prometheus_names.rs](../../lib/runtime/src/metrics/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
+The [prometheus_names.rs](https://github.com/ai-dynamo/dynamo/tree/main/lib/runtime/src/metrics/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
 
 ---
 
@@ -133,5 +133,5 @@ let counter = endpoint.metrics().create_counter(
 
 - [Metrics Overview](metrics.md)
 - [Prometheus and Grafana Setup](prometheus-grafana.md)
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
+- [Distributed Runtime Architecture](../distributed-runtime.md)
 

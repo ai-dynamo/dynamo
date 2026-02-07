@@ -43,7 +43,7 @@ kubectl get clusterrolebinding -o json | \
 
 ## Installation Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/helm/charts/platform/README.md).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md).
 
 **Path A: Pre-built Artifacts**
 - Use case: Production deployment, shared or dedicated clusters
@@ -112,7 +112,7 @@ Before proceeding, run the pre-deployment check script to verify your cluster me
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](../../deploy/pre-deployment/README.md) for details.
+This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
 
 > **No cluster?** See [Minikube Setup](deployment/minikube.md) for local development.
 
@@ -274,9 +274,9 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](../../../examples/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](../../../examples/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](../../../examples/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](./observability/metrics.md)
@@ -367,7 +367,7 @@ kubectl delete crd <crd-name>
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../deploy/helm/charts/platform/README.md)
+- [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md)
 - [Create custom deployments](./deployment/create-deployment.md)
 - [Dynamo Operator details](./dynamo-operator.md)
 - [Model Express Server details](https://github.com/ai-dynamo/modelexpress)

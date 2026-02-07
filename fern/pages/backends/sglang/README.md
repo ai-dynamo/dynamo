@@ -34,8 +34,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**Disaggregated Serving**](../../disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../disagg-serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
 | [**Multimodal Support**](../../features/multimodal/multimodal-sglang.md) | ✅ |  |
@@ -155,7 +155,7 @@ Below we provide a guide that lets you run all of our common deployment patterns
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -258,7 +258,7 @@ curl localhost:8000/v1/chat/completions \
 We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes](../../../../examples/backends/sglang/deploy/README.md)**
+- **[Deploying Dynamo with SGLang on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](../../../../examples/backends/sglang/slurm-jobs/README.md)**
+- **[Deploying Dynamo with SGLang on SLURM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/slurm-jobs/README.md)**

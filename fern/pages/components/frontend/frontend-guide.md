@@ -127,16 +127,16 @@ This combination is used when the user is migrating an existing KServe-based bac
 
 When registering the backend, the backend must provide the model's metadata as tensor-based deployment is generic and the frontend can't make any assumptions like for OpenAI Completions model. There are two methods to provide model metadata:
 
-* [TensorModelConfig](../../../lib/llm/src/protocols/tensor.rs): This is Dynamo defined structure for model metadata, the backend can provide the model metadata as shown in this [example](../../../lib/bindings/python/tests/test_tensor.py). For metadata provided in such way, the following field will be set to a fixed value: `version: 1`, `platform: "dynamo"`, `backend: "dynamo"`. Note that for model config endpoint, the rest of the fields will be set to their default values.
-* [triton_model_config](../../../lib/llm/src/protocols/tensor.rs): For users that already have Triton model config and require the full config to be returned for client side logic, they can set the config in `TensorModelConfig::triton_model_config` which supersedes other fields in `TensorModelConfig` and be used for endpoint responses. `triton_model_config` is expected to be the serialized string of the `ModelConfig` protobuf message, see [echo_tensor_worker.py](../../../tests/frontend/grpc/echo_tensor_worker.py) for example.
+* [TensorModelConfig](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/tensor.rs): This is Dynamo defined structure for model metadata, the backend can provide the model metadata as shown in this [example](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/tests/test_tensor.py). For metadata provided in such way, the following field will be set to a fixed value: `version: 1`, `platform: "dynamo"`, `backend: "dynamo"`. Note that for model config endpoint, the rest of the fields will be set to their default values.
+* [triton_model_config](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/tensor.rs): For users that already have Triton model config and require the full config to be returned for client side logic, they can set the config in `TensorModelConfig::triton_model_config` which supersedes other fields in `TensorModelConfig` and be used for endpoint responses. `triton_model_config` is expected to be the serialized string of the `ModelConfig` protobuf message, see [echo_tensor_worker.py](../../../tests/frontend/grpc/echo_tensor_worker.py) for example.
 
 #### Inference
 
-When receiving inference request, the backend will receive [NvCreateTensorRequest](../../../lib/llm/src/protocols/tensor.rs) and be expected to return [NvCreateTensorResponse](../../../lib/llm/src/protocols/tensor.rs), which are the mapping of ModelInferRequest / ModelInferResponse protobuf message in Dynamo.
+When receiving inference request, the backend will receive [NvCreateTensorRequest](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/tensor.rs) and be expected to return [NvCreateTensorResponse](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/tensor.rs), which are the mapping of ModelInferRequest / ModelInferResponse protobuf message in Dynamo.
 
 ## Python Bindings
 
-The frontend may be started via Python binding, this is useful when integrating Dynamo in existing system that desire the frontend to be run in the same process with other components. See [server.py](../../../lib/bindings/python/examples/kserve_grpc_service/server.py) for example.
+The frontend may be started via Python binding, this is useful when integrating Dynamo in existing system that desire the frontend to be run in the same process with other components. See [server.py](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/examples/kserve_grpc_service/server.py) for example.
 
 ## Integration
 

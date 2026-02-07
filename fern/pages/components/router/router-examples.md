@@ -107,10 +107,10 @@ For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployme
 
 ### Complete K8s Examples
 
-- [TRT-LLM aggregated router example](../../../../examples/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](../../../../examples/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](../../../../examples/backends/sglang/deploy/agg_router.yaml)
-- [Distributed inference tutorial](../../../../examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
+- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/agg_router.yaml)
+- [Distributed inference tutorial](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
 
 **For A/B Testing and Advanced K8s Setup:**
 See the comprehensive [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
@@ -270,7 +270,7 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Maximize cache reuse**: Use `best_worker()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
-See [Router Design](../../design-docs/router-design.md) for architecture details and the cost function algorithm.
+See [Router Design](../../router-design.md) for architecture details and the cost function algorithm.
 
 ## KV Event Publishing for Custom Engines
 
@@ -547,4 +547,4 @@ Each event in the payload is a dictionary with `type` field (`BlockStored`, `Blo
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
 - **[Router Guide](router-guide.md)**: Configuration, tuning, and production setup
-- **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
+- **[Router Design](../../router-design.md)**: Architecture details and event transport modes
