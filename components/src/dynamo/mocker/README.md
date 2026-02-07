@@ -28,6 +28,10 @@ The mocker engine now supports a vLLM-style CLI interface with individual argume
 - `--stagger-delay`: Delay in seconds between launching each worker to avoid overwhelming etcd/NATS/frontend. Set to 0 to disable staggering. Use -1 for auto mode (stagger dependent on number of workers). Default: -1 (auto)
 - `--is-prefill-worker` / `--is-decode-worker`: Whether the worker is a prefill or decode worker for disaggregated deployment. If not specified, mocker will be in aggregated mode.
 
+**Environment variables:**
+
+- `DYN_MOCKER_KV_CACHE_TRACE`: Set to `1` or `true` to log structured KV cache allocation/eviction trace (timestamp_ms, block_ids, etc.). Default: off.
+
 ### Example with individual arguments (vLLM-style):
 ```bash
 # Start mocker with custom configuration
