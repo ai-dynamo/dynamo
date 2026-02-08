@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! RAII guard for mutable blocks in Reset state
+//! RAII guard for a block in the **Reset** state.
+//!
+//! A [`MutableBlock`] is the entry point of the block lifecycle. It is
+//! obtained from [`BlockManager::allocate_blocks`](crate::manager::BlockManager::allocate_blocks)
+//! or by calling [`CompleteBlock::reset`](super::CompleteBlock::reset), and
+//! can be advanced to a [`CompleteBlock`](super::CompleteBlock) via
+//! [`stage`](MutableBlock::stage) or [`complete`](MutableBlock::complete).
 
 use super::{
     Block, BlockError, BlockId, BlockMetadata, CompleteBlock, ResetReturnFn, SequenceHash,
@@ -12,7 +18,33 @@ use crate::metrics::BlockPoolMetrics;
 use dynamo_tokens::TokenBlock;
 use std::sync::Arc;
 
-/// RAII guard for [`Block<T, Reset>`] that automatically returns to ResetPool on drop
+/// RAII guard for a block in the **Reset** state.
+///
+/// Wraps an internal `Block<T, Reset>` and guarantees that the block is
+/// returned to the reset pool when the guard is dropped -- whether the
+/// caller explicitly transitions it or simply lets it fall out of scope.
+///
+/// # Obtaining a `MutableBlock`
+///
+/// - [`BlockManager::allocate_blocks`](crate::manager::BlockManager::allocate_blocks)
+///   -- pulls one or more blocks from the reset pool.
+/// - [`CompleteBlock::reset`] -- undoes a staging operation, returning a
+///   block to the Reset state (metrics are *not* carried over on this path).
+///
+/// # State transitions
+///
+/// - [`stage`](Self::stage) -- transitions to [`CompleteBlock`] using a
+///   pre-computed [`SequenceHash`] and a block-size check.
+/// - [`complete`](Self::complete) -- transitions to [`CompleteBlock`] by
+///   extracting the hash from a [`TokenBlock`](dynamo_tokens::TokenBlock).
+///
+/// Both methods consume `self` and return the block inside
+/// `Err(`[`BlockError`]`)` on size mismatch so it is never leaked.
+///
+/// # Drop behaviour
+///
+/// Dropping a `MutableBlock` returns the underlying block to the reset pool
+/// and decrements the `inflight_mutable` metric gauge.
 pub struct MutableBlock<T: BlockMetadata> {
     block: Option<Block<T, Reset>>,
     return_fn: ResetReturnFn<T>,
@@ -36,15 +68,19 @@ impl<T: BlockMetadata> MutableBlock<T> {
         }
     }
 
-    /// Get the block ID
+    /// Returns the [`BlockId`] assigned to this block.
     pub fn block_id(&self) -> BlockId {
         self.block_ref().block_id()
     }
 
-    /// Transition from Reset to Complete state with just a [`SequenceHash`].
+    /// Transitions from **Reset** to **Staged**, producing a [`CompleteBlock`].
     ///
-    /// Validates `block_size` against the inner block's size, returning
-    /// `Err(BlockError::BlockSizeMismatch)` on mismatch (same as [`complete`](Self::complete)).
+    /// The caller supplies a pre-computed [`SequenceHash`] and the expected
+    /// `block_size`. If `block_size` does not match the block's fixed size
+    /// the method returns `Err(`[`BlockError::BlockSizeMismatch`]`)` with the
+    /// `MutableBlock` inside so the caller can recover it.
+    ///
+    /// Increments the `stagings` counter on success.
     pub fn stage(
         mut self,
         seq_hash: SequenceHash,
@@ -67,7 +103,15 @@ impl<T: BlockMetadata> MutableBlock<T> {
         ))
     }
 
-    /// Transition from Reset to Complete state
+    /// Transitions from **Reset** to **Staged**, producing a [`CompleteBlock`].
+    ///
+    /// The [`SequenceHash`] is derived from the provided
+    /// [`TokenBlock`](dynamo_tokens::TokenBlock). If the token block's size
+    /// does not match the block's fixed size the method returns
+    /// `Err(`[`BlockError::BlockSizeMismatch`]`)` with the `MutableBlock`
+    /// inside so the caller can recover it.
+    ///
+    /// Increments the `stagings` counter on success.
     pub fn complete(
         mut self,
         token_block: &TokenBlock,

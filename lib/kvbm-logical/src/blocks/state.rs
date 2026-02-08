@@ -1,10 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Type-state pattern for block lifecycle with compile-time state enforcement.
+//! Type-state markers for the block lifecycle.
 //!
-//! Blocks transition through states: Reset -> Staged -> Registered -> Reset.
-//! The type system prevents invalid state transitions at compile time.
+//! This module defines three `pub(crate)` marker types -- [`Reset`],
+//! [`Staged`], and [`Registered`] -- that are used as the `State` parameter
+//! of `Block<T, State>`. Each marker carries only the data relevant to its
+//! state (e.g. `Staged` holds the [`SequenceHash`](crate::SequenceHash),
+//! `Registered` adds a
+//! [`BlockRegistrationHandle`](crate::registry::BlockRegistrationHandle)).
+//!
+//! Because the state transitions are encoded as methods that consume one
+//! `Block<T, S1>` and return a `Block<T, S2>`, the compiler rejects any
+//! attempt to use a block in the wrong state.
 
 use crate::KvbmSequenceHashProvider;
 
@@ -14,18 +22,19 @@ use crate::registry::BlockRegistrationHandle;
 use super::{SequenceHash, TokenBlock};
 use std::marker::PhantomData;
 
-/// Block identifier type
-
-// State marker types
+/// Marker for a block in the **Reset** state (no data assigned).
 #[derive(Debug)]
 pub struct Reset;
 
-// State-specific data holders
+/// Marker for a block in the **Staged** state (sequence hash assigned, not
+/// yet registered).
 #[derive(Debug)]
 pub struct Staged {
     sequence_hash: SequenceHash,
 }
 
+/// Marker for a block in the **Registered** state (present in the registry
+/// with a [`BlockRegistrationHandle`]).
 #[derive(Debug)]
 pub struct Registered {
     sequence_hash: SequenceHash,
