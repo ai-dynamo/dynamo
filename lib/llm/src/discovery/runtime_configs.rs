@@ -67,6 +67,12 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
                 .filter_map(|id| configs.get(&id).map(|cfg| (id, cfg.clone())))
                 .collect();
 
+            // Only send if the joined result actually changed, to avoid waking
+            // downstream consumers (wait_for, changed) on no-op recomputations.
+            if *tx.borrow() == ready {
+                continue;
+            }
+
             // Break if all receivers dropped (e.g., TOCTOU in model_manager discards a duplicate).
             if tx.send(ready).is_err() {
                 break;
