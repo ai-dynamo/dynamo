@@ -63,7 +63,6 @@ See `values.yaml` for all configuration options.
 | `storage.pvc.name` | PVC name (must match operator config) | `chrek-pvc` |
 | `storage.pvc.size` | PVC size | `100Gi` |
 | `storage.pvc.storageClass` | Storage class name | `""` (default) |
-| `storage.signalHostPath` | Host path for signal files | `/var/lib/chrek/signals` |
 | `daemonset.image.repository` | DaemonSet image repository | `nvidia/chrek-agent` |
 | `daemonset.nodeSelector` | Node selector for GPU nodes | `nvidia.com/gpu.present: "true"` |
 | `daemonset.runtimeClassName` | Runtime class for GPU access | `nvidia` |
@@ -175,4 +174,3 @@ Ensure your storage class supports `ReadWriteMany` access mode for multi-node de
 ## License
 
 Apache License 2.0
-

@@ -64,14 +64,6 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
 }
 
-// getSignalHostPath returns the configured signal host path, or the default if not set
-func (r *CheckpointReconciler) getSignalHostPath() string {
-	if r.Config.Checkpoint.Enabled && r.Config.Checkpoint.Storage.SignalHostPath != "" {
-		return r.Config.Checkpoint.Storage.SignalHostPath
-	}
-	return consts.CheckpointSignalHostPath
-}
-
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
@@ -273,14 +265,14 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		Name: consts.CheckpointSignalVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			HostPath: &corev1.HostPathVolumeSource{
-				Path: r.getSignalHostPath(),
+				Path: r.Config.Checkpoint.Storage.SignalHostPath,
 				Type: &hostPathType,
 			},
 		},
 	})
 
 	// Compute the signal file path - unique per checkpoint hash
-	signalFilePath := consts.CheckpointSignalMountPath + "/" + ckpt.Status.IdentityHash + ".done"
+	signalFilePath := consts.CheckpointSignalMountPath + "/" + ckpt.Status.IdentityHash
 
 	// Add initContainer to clean up any leftover signal file from previous runs
 	// This ensures a fresh start for each checkpoint job without affecting the checkpoint itself
@@ -288,7 +280,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	initContainerImage := r.Config.Checkpoint.InitContainerImage
 
 	podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, corev1.Container{
-		Name:  "cleanup-signal-file",
+		Name:  consts.SignalFileCleanupInitContainerName,
 		Image: initContainerImage,
 		Command: []string{
 			"sh",
@@ -320,8 +312,8 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			},
 			// Ready file: Worker creates this when model is loaded
 			corev1.EnvVar{
-				Name:  consts.EnvCheckpointReadyFile,
-				Value: consts.CheckpointReadyFilePath,
+				Name:  consts.EnvReadyForCheckpointFile,
+				Value: r.Config.Checkpoint.ReadyForCheckpointFilePath,
 			},
 			// Checkpoint hash: For idempotency check
 			corev1.EnvVar{
@@ -338,6 +330,11 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 				Name:  consts.EnvCheckpointStorageType,
 				Value: storageType,
 			},
+			// Restore marker: Written by restore-entrypoint after CRIU restore
+			corev1.EnvVar{
+				Name:  consts.EnvRestoreMarkerFile,
+				Value: r.Config.Checkpoint.RestoreMarkerFilePath,
+			},
 		)
 
 		// Add signal volume mount (required for DaemonSet communication)
@@ -353,9 +350,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		if r.Config.Checkpoint.Storage.PVC.PVCName != "" {
 			pvcName := r.Config.Checkpoint.Storage.PVC.PVCName
 			basePath := r.Config.Checkpoint.Storage.PVC.BasePath
-			if basePath == "" {
-				basePath = consts.CheckpointBasePath
-			}
 			checkpoint.InjectCheckpointVolume(&podTemplate.Spec, pvcName)
 			checkpoint.InjectCheckpointVolumeMount(mainContainer, basePath)
 		}
@@ -371,7 +365,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		mainContainer.ReadinessProbe = &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				Exec: &corev1.ExecAction{
-					Command: []string{"cat", consts.CheckpointReadyFilePath},
+					Command: []string{"cat", r.Config.Checkpoint.ReadyForCheckpointFilePath},
 				},
 			},
 			InitialDelaySeconds: 15,
@@ -391,14 +385,14 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	podTemplate.Spec.SecurityContext = &corev1.PodSecurityContext{
 		SeccompProfile: &corev1.SeccompProfile{
 			Type:             corev1.SeccompProfileTypeLocalhost,
-			LocalhostProfile: ptr.To("profiles/block-iouring.json"),
+			LocalhostProfile: ptr.To(consts.SeccompProfilePath),
 		},
 	}
 
 	// Build the Job
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
-		defaultDeadline := int64(3600)
+		defaultDeadline := int64(3600) // 1 hour
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
@@ -410,7 +404,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 
 	ttlSeconds := ckpt.Spec.Job.TTLSecondsAfterFinished
 	if ttlSeconds == nil {
-		defaultTTL := int32(300)
+		defaultTTL := int32(300) // 5 minutes
 		ttlSeconds = &defaultTTL
 	}
 

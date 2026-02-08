@@ -56,6 +56,7 @@ from dynamo.vllm.multimodal_handlers import (
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
 from .args import Config, overwrite_args, parse_args
+from .chrek import get_checkpoint_config
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
@@ -81,46 +82,17 @@ async def _handle_non_leader_node(dp_rank: int) -> None:
     await asyncio.Event().wait()
 
 
-async def await_checkpoint_and_was_restored(signal_file: str) -> bool:
+async def graceful_shutdown(runtime, shutdown_event):
     """
-    Wait for checkpoint signal file OR restore marker file.
-
-    In checkpoint creation mode, poll until either:
-    1. The signal file exists (checkpoint complete, should exit)
-    2. The restore marker file exists (restored by CRIU, should proceed)
-
-    The restore marker file is created by the restore-entrypoint before CRIU restore,
-    so the restored process can detect it was restored even though os.environ is
-    restored from the checkpoint and doesn't contain new container env vars.
-
-    Args:
-        signal_file: Path to the checkpoint signal file
-
-    Returns:
-        True if restored (should proceed with registration)
-        False if signal file detected (should exit)
+    Shutdown dynamo distributed runtime.
+    The endpoints will be immediately invalidated so no new requests will be accepted.
+    For endpoints served with graceful_shutdown=True, the serving function will wait until all in-flight requests are finished.
+    For endpoints served with graceful_shutdown=False, the serving function will return immediately.
     """
-    # Get restore marker file path (created by restore entrypoint before CRIU restore)
-    restore_marker = os.environ.get("DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored")
-
-    logger.info(
-        f"CHECKPOINT_READY: Model loaded, ready for container checkpoint. Waiting for signal file: {signal_file} or restore marker file: {restore_marker}"
-    )
-
-    while True:
-        # Check if we've been restored (marker file created by restore entrypoint)
-        if os.path.exists(restore_marker):
-            logger.info(
-                f"Detected restore from checkpoint (marker file exists: {restore_marker})"
-            )
-            return True  # Restored - proceed with registration
-
-        # Check if checkpoint is complete (signal file exists)
-        if os.path.exists(signal_file):
-            logger.info(f"Checkpoint signal file detected: {signal_file}")
-            return False  # Checkpoint done - exit
-
-        await asyncio.sleep(1)
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    shutdown_event.set()
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
 
 
 async def worker():
@@ -134,29 +106,10 @@ async def worker():
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
 
-    # Check checkpoint-related environment variables EARLY
-    signal_file = os.environ.get("DYN_CHECKPOINT_SIGNAL_FILE")
-    ready_file = os.environ.get("DYN_CHECKPOINT_READY_FILE")
-
-    is_checkpoint_mode = signal_file is not None
-
-    # EARLY EXIT: Check if checkpoint already exists (before downloading model!)
-    if is_checkpoint_mode:
-        storage_type = os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE")
-        checkpoint_location = os.environ.get("DYN_CHECKPOINT_LOCATION")
-
-        if storage_type == "pvc" and checkpoint_location:
-            done_marker = f"{checkpoint_location}/checkpoint.done"
-
-            if os.path.exists(done_marker):
-                logger.info(
-                    f"Found existing checkpoint at {checkpoint_location}. Storage type: {storage_type}"
-                )
-                return
-            else:
-                logger.info(
-                    f"Checkpoint not found at: {checkpoint_location}. creating new checkpoint"
-                )
+    # Check checkpoint mode and validate env vars EARLY (fail fast if misconfigured)
+    checkpoint_cfg = get_checkpoint_config()
+    if checkpoint_cfg and checkpoint_cfg.checkpoint_exists():
+        return
 
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
@@ -173,39 +126,18 @@ async def worker():
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
     pre_created_engine = None
-    is_restored = False
-    if is_checkpoint_mode:
+    if checkpoint_cfg is not None:
         logger.info(
-            f"Checkpoint mode enabled (DYN_CHECKPOINT_SIGNAL_FILE={signal_file})"
+            f"Checkpoint mode enabled (signal_file={checkpoint_cfg.signal_file})"
         )
 
-        # CHECKPOINT MODE: Load model, sleep, wait for signal file or restore
+        # Checkpoint mode requires sleep mode — enable before engine init
+        config.engine_args.enable_sleep_mode = True
+
         pre_created_engine = setup_vllm_engine(config)
         engine_client = pre_created_engine[0]
 
-        # Put model to sleep before checkpoint (if sleep mode enabled)
-        if config.engine_args.enable_sleep_mode:
-            logger.info(f"Putting model to sleep (level={config.sleep_mode_level})")
-            await engine_client.sleep(level=config.sleep_mode_level)
-
-        # Write ready file to signal that we're ready for checkpointing
-        if ready_file:
-            with open(ready_file, "w") as f:
-                f.write("ready")
-            logger.info(f"Wrote checkpoint ready file: {ready_file}")
-
-        # Wait for checkpoint signal file OR restore detection
-        is_restored = await await_checkpoint_and_was_restored(signal_file)
-
-        if is_restored:
-            # Wake up model and proceed with registration
-            if config.engine_args.enable_sleep_mode:
-                logger.info("Waking up model after checkpoint restore")
-                await engine_client.wake_up()
-            logger.info("Proceeding with endpoint registration after restore")
-        else:
-            # Checkpoint complete, exit
-            logger.info("Exiting after checkpoint completion")
+        if not await checkpoint_cfg.run_lifecycle(engine_client):
             return
 
     shutdown_event = asyncio.Event()

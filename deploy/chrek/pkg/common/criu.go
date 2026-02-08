@@ -10,10 +10,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// OpenDirForCRIU opens a directory and clears the CLOEXEC flag so the FD
-// can be inherited by CRIU child processes.
+// OpenPathForCRIU opens a path (directory or file) and clears the CLOEXEC flag
+// so the FD can be inherited by CRIU child processes.
 // Returns the opened file and its FD. Caller must close the file when done.
-func OpenDirForCRIU(path string) (*os.File, int32, error) {
+func OpenPathForCRIU(path string) (*os.File, int32, error) {
 	dir, err := os.Open(path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to open %s: %w", path, err)

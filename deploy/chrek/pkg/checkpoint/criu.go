@@ -10,65 +10,73 @@ import (
 
 	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
-// CRIUConfig holds configuration for CRIU dump operations.
-// Most options are always-on with safe defaults for K8s environments.
-type CRIUConfig struct {
+// CRIUDumpParams holds per-checkpoint dynamic parameters for CRIU dump.
+// These are values that change per checkpoint operation, not configuration.
+type CRIUDumpParams struct {
 	PID        int
 	ImageDirFD int32
 	RootFS     string
-	GhostLimit uint32 // From env CRIU_GHOST_LIMIT: max ghost file size (0 = CRIU default)
-	Timeout    uint32 // From env CRIU_TIMEOUT: checkpoint timeout in seconds (0 = no timeout)
 }
 
 // OpenImageDir opens a checkpoint directory and prepares it for CRIU.
 // Returns the opened file and its FD. The caller must close the file when done.
 // The file descriptor has CLOEXEC cleared so it can be inherited by CRIU.
 func OpenImageDir(checkpointDir string) (*os.File, int32, error) {
-	return common.OpenDirForCRIU(checkpointDir)
+	return common.OpenPathForCRIU(checkpointDir)
 }
 
-// BuildCRIUOpts creates CRIU options from a config struct.
+// BuildCRIUOpts creates CRIU options from config and per-checkpoint parameters.
 // This sets up the base options; external mounts and namespaces are added separately.
-//
-// Always-on options for K8s:
-//   - LeaveRunning: always keep process running after checkpoint
-//   - ShellJob: containers are often session leaders
-//   - TcpClose: pod IPs change on restore/migration
-//   - FileLocks: applications use file locks
-//   - OrphanPtsMaster: containers with TTYs
-//   - ExtUnixSk: containers have external Unix sockets
-//   - ManageCgroups (IGNORE): let K8s manage cgroups
-//   - LinkRemap: handle deleted-but-open files (safe for all workloads)
-//   - ExtMasters: external bind mount masters (safe for all workloads)
-func BuildCRIUOpts(cfg CRIUConfig) *criurpc.CriuOpts {
-	cgMode := criurpc.CriuCgMode_IGNORE
+// All options come from config (values.yaml) - nothing is hardcoded here.
+func BuildCRIUOpts(cfg *config.CRIUConfig, params CRIUDumpParams) *criurpc.CriuOpts {
 	criuOpts := &criurpc.CriuOpts{
-		Pid:               proto.Int32(int32(cfg.PID)),
-		ImagesDirFd:       proto.Int32(cfg.ImageDirFD),
-		LogLevel:          proto.Int32(4),
-		LogFile:           proto.String("dump.log"),
-		Root:              proto.String(cfg.RootFS),
-		ManageCgroups:     proto.Bool(true),
-		ManageCgroupsMode: &cgMode,
-		// Always-on for K8s environments
-		LeaveRunning:    proto.Bool(true),
-		ShellJob:        proto.Bool(true),
-		TcpClose:        proto.Bool(true),
-		FileLocks:       proto.Bool(true),
-		OrphanPtsMaster: proto.Bool(true),
-		ExtUnixSk:       proto.Bool(true),
-		LinkRemap:       proto.Bool(true),
-		ExtMasters:      proto.Bool(true),
+		Pid:         proto.Int32(int32(params.PID)),
+		ImagesDirFd: proto.Int32(params.ImageDirFD),
+		Root:        proto.String(params.RootFS),
+		LogFile:     proto.String(config.DumpLogFilename),
 	}
 
-	// Optional: ghost limit from env (0 = use CRIU default)
+	if cfg == nil {
+		return criuOpts
+	}
+
+	// RPC options from config
+	criuOpts.LogLevel = proto.Int32(cfg.LogLevel)
+	criuOpts.LeaveRunning = proto.Bool(cfg.LeaveRunning)
+	criuOpts.ShellJob = proto.Bool(cfg.ShellJob)
+	criuOpts.TcpClose = proto.Bool(cfg.TcpClose)
+	criuOpts.FileLocks = proto.Bool(cfg.FileLocks)
+	criuOpts.OrphanPtsMaster = proto.Bool(cfg.OrphanPtsMaster)
+	criuOpts.ExtUnixSk = proto.Bool(cfg.ExtUnixSk)
+	criuOpts.LinkRemap = proto.Bool(cfg.LinkRemap)
+	criuOpts.ExtMasters = proto.Bool(cfg.ExtMasters)
+	criuOpts.AutoDedup = proto.Bool(cfg.AutoDedup)
+	criuOpts.LazyPages = proto.Bool(cfg.LazyPages)
+
+	// Cgroup management mode
+	criuOpts.ManageCgroups = proto.Bool(true)
+	var cgMode criurpc.CriuCgMode
+	switch cfg.ManageCgroupsMode {
+	case "soft":
+		cgMode = criurpc.CriuCgMode_SOFT
+	case "full":
+		cgMode = criurpc.CriuCgMode_FULL
+	case "strict":
+		cgMode = criurpc.CriuCgMode_STRICT
+	case "ignore", "":
+		cgMode = criurpc.CriuCgMode_IGNORE
+	default:
+		cgMode = criurpc.CriuCgMode_IGNORE
+	}
+	criuOpts.ManageCgroupsMode = &cgMode
+
+	// Optional numeric options
 	if cfg.GhostLimit > 0 {
 		criuOpts.GhostLimit = proto.Uint32(cfg.GhostLimit)
 	}
-
-	// Optional: timeout from env (0 = no timeout)
 	if cfg.Timeout > 0 {
 		criuOpts.Timeout = proto.Uint32(cfg.Timeout)
 	}
@@ -129,9 +137,9 @@ func AddExternalStrings(criuOpts *criurpc.CriuOpts, externals []string) {
 
 // ConfigureExternalMounts adds all required external mounts to CRIU options.
 // This includes mounts from /proc/pid/mountinfo plus masked/readonly paths from OCI spec.
-func ConfigureExternalMounts(criuOpts *criurpc.CriuOpts, pid int, hostProc string, containerInfo *checkpointk8s.ContainerInfo) error {
+func ConfigureExternalMounts(criuOpts *criurpc.CriuOpts, pid int, containerInfo *checkpointk8s.ContainerInfo) error {
 	// Get all mounts from mountinfo - CRIU needs every mount marked as external
-	allMounts, err := GetAllMountsFromMountinfo(pid, hostProc)
+	allMounts, err := GetAllMountsFromMountinfo(pid)
 	if err != nil {
 		return fmt.Errorf("failed to get all mounts from mountinfo: %w", err)
 	}
@@ -163,16 +171,24 @@ func ConfigureExternalNamespaces(criuOpts *criurpc.CriuOpts, namespaces map[Name
 	return netNsInode
 }
 
-// BuildCRIUOptsFromCheckpointOpts constructs CRIU options from checkpoint Options.
-// Returns the configured CriuOpts ready for external mount/namespace configuration.
-func BuildCRIUOptsFromCheckpointOpts(opts Options, pid int, imageDirFD int32, rootFS string) *criurpc.CriuOpts {
-	cfg := CRIUConfig{
-		PID:        pid,
-		ImageDirFD: imageDirFD,
-		RootFS:     rootFS,
-		GhostLimit: opts.GhostLimit,
-		Timeout:    opts.Timeout,
+// ConfigureSkipMounts enumerates mounts under the given prefixes and adds them to CRIU's
+// skip mount list. This allows cross-node restore by skipping mounts that may not exist
+// on the target node (e.g., NVIDIA runtime mounts like /run/nvidia/driver/...).
+// Returns the list of mounts that will be skipped, for logging purposes.
+func ConfigureSkipMounts(criuOpts *criurpc.CriuOpts, pid int, prefixes []string) ([]string, error) {
+	if len(prefixes) == 0 {
+		return nil, nil
 	}
 
-	return BuildCRIUOpts(cfg)
+	skipMounts, err := GetMountsUnderPrefixes(pid, prefixes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to enumerate skip mounts from prefixes: %w", err)
+	}
+
+	if len(skipMounts) > 0 {
+		criuOpts.SkipMnt = skipMounts
+	}
+
+	return skipMounts, nil
 }
+

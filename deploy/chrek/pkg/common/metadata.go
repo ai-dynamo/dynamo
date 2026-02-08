@@ -1,204 +1,71 @@
-// metadata.go handles checkpoint metadata for cross-node restore operations.
+// metadata.go provides backwards compatibility aliases for checkpoint data types.
+// DEPRECATED: Use github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config instead.
 package common
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"time"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
+// Constants - deprecated, use config package
 const (
-	// MetadataFilename is the name of the metadata file in checkpoint directories
-	MetadataFilename = "metadata.json"
+	// CheckpointDataFilename is the name of the checkpoint data file in checkpoint directories
+	// Deprecated: Use config.CheckpointDataFilename
+	CheckpointDataFilename = config.CheckpointDataFilename
 	// DescriptorsFilename is the name of the file descriptors file
-	DescriptorsFilename = "descriptors.json"
+	// Deprecated: Use config.DescriptorsFilename
+	DescriptorsFilename = config.DescriptorsFilename
 )
 
-// CheckpointMetadata stores information needed for cross-node restore
-type CheckpointMetadata struct {
-	// Checkpoint identification
-	CheckpointID string    `json:"checkpoint_id"`
-	CreatedAt    time.Time `json:"created_at"`
+// Type aliases for backwards compatibility
+// Deprecated: Use types from github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config
 
-	// Source information
-	SourceNode   string `json:"source_node"`
-	SourcePodIP  string `json:"source_pod_ip,omitempty"` // For cross-node TCP detection
-	ContainerID  string `json:"container_id"`
-	PodName      string `json:"pod_name"`
-	PodNamespace string `json:"pod_namespace"`
-	Image        string `json:"image"`
-
-	// Process information
-	PID int `json:"pid"`
-
-	// Filesystem information
-	RootfsDiffPath  string `json:"rootfs_diff_path,omitempty"`   // Path to rootfs-diff.tar
-	UpperDir        string `json:"upper_dir,omitempty"`          // Original overlay upperdir
-	HasRootfsDiff   bool   `json:"has_rootfs_diff"`              // Whether rootfs diff was captured
-	HasDeletedFiles bool   `json:"has_deleted_files"`            // Whether deleted files were tracked
-
-	// Mount mappings from original container
-	Mounts []MountMetadata `json:"mounts"`
-
-	// OCI spec derived paths (populated from containerd, used at restore)
-	// These replace hardcoded values with runtime-discovered configuration
-	MaskedPaths    []string `json:"masked_paths,omitempty"`     // From OCI spec Linux.MaskedPaths
-	ReadonlyPaths  []string `json:"readonly_paths,omitempty"`   // From OCI spec Linux.ReadonlyPaths
-	BindMountDests []string `json:"bind_mount_dests,omitempty"` // Destinations of bind mounts (for tar exclusions)
-
-	// Namespace information
-	Namespaces []NamespaceMetadata `json:"namespaces"`
-
-	// CRIU options used during checkpoint (for restore compatibility)
-	CRIUOptions CRIUOptionsMetadata `json:"criu_options"`
-}
-
-// CRIUOptionsMetadata stores CRIU options used during checkpoint.
-// This allows restore to use compatible options.
-// Note: In our implementation, most options are hardcoded as always-on for K8s,
-// but we store them for compatibility and debugging purposes.
-type CRIUOptionsMetadata struct {
-	TcpEstablished bool `json:"tcp_established"`
-	TcpClose       bool `json:"tcp_close"`
-	ShellJob       bool `json:"shell_job"`
-	FileLocks      bool `json:"file_locks"`
-	LeaveRunning   bool `json:"leave_running"`
-	LinkRemap      bool `json:"link_remap"`
-	ExtMasters     bool `json:"ext_masters"`
-}
+// CheckpointData stores information needed for cross-node restore
+// Deprecated: Use config.CheckpointData
+type CheckpointData = config.CheckpointData
 
 // MountMetadata stores information about a mount for remapping during restore
-type MountMetadata struct {
-	ContainerPath string   `json:"container_path"`           // Path inside container (e.g., /usr/share/nginx/html)
-	HostPath      string   `json:"host_path"`                // Original host path from mountinfo
-	OCISource     string   `json:"oci_source,omitempty"`     // Source path from OCI spec (may differ from HostPath)
-	OCIType       string   `json:"oci_type,omitempty"`       // Mount type from OCI spec (bind, tmpfs, etc.)
-	OCIOptions    []string `json:"oci_options,omitempty"`    // Mount options from OCI spec
-	VolumeType    string   `json:"volume_type"`              // emptyDir, pvc, configMap, secret, hostPath (best-effort)
-	VolumeName    string   `json:"volume_name"`              // Kubernetes volume name (best-effort from path parsing)
-	FSType        string   `json:"fs_type"`                  // Filesystem type from mountinfo
-	ReadOnly      bool     `json:"read_only"`                // Whether mount is read-only
-}
+// Deprecated: Use config.MountMetadata
+type MountMetadata = config.MountMetadata
 
 // NamespaceMetadata stores namespace information
-type NamespaceMetadata struct {
-	Type       string `json:"type"`        // net, pid, mnt, etc.
-	Inode      uint64 `json:"inode"`       // Namespace inode
-	IsExternal bool   `json:"is_external"` // Whether namespace is external (shared)
-}
+// Deprecated: Use config.NamespaceMetadata
+type NamespaceMetadata = config.NamespaceMetadata
 
-// NewCheckpointMetadata creates a new metadata instance
-func NewCheckpointMetadata(checkpointID string) *CheckpointMetadata {
-	return &CheckpointMetadata{
-		CheckpointID: checkpointID,
-		CreatedAt:    time.Now().UTC(),
-		Mounts:       make([]MountMetadata, 0),
-		Namespaces:   make([]NamespaceMetadata, 0),
-	}
-}
+// Function aliases for backwards compatibility
+// Deprecated: Use functions from github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config
 
-// SaveMetadata writes metadata to a JSON file in the checkpoint directory
-func SaveMetadata(checkpointDir string, meta *CheckpointMetadata) error {
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
-	}
+// NewCheckpointData creates a new checkpoint data instance
+// Deprecated: Use config.NewCheckpointData
+var NewCheckpointData = config.NewCheckpointData
 
-	metadataPath := filepath.Join(checkpointDir, MetadataFilename)
-	if err := os.WriteFile(metadataPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write metadata file: %w", err)
-	}
+// SaveCheckpointData writes checkpoint data to a YAML file in the checkpoint directory
+// Deprecated: Use config.SaveCheckpointData
+var SaveCheckpointData = config.SaveCheckpointData
 
-	return nil
-}
-
-// LoadMetadata reads metadata from a checkpoint directory
-func LoadMetadata(checkpointDir string) (*CheckpointMetadata, error) {
-	metadataPath := filepath.Join(checkpointDir, MetadataFilename)
-
-	data, err := os.ReadFile(metadataPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata file: %w", err)
-	}
-
-	var meta CheckpointMetadata
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
-	}
-
-	return &meta, nil
-}
+// LoadCheckpointData reads checkpoint data from a checkpoint directory
+// Deprecated: Use config.LoadCheckpointData
+var LoadCheckpointData = config.LoadCheckpointData
 
 // SaveDescriptors writes file descriptor information to the checkpoint directory
-func SaveDescriptors(checkpointDir string, descriptors []string) error {
-	data, err := json.Marshal(descriptors)
-	if err != nil {
-		return fmt.Errorf("failed to marshal descriptors: %w", err)
-	}
-
-	descriptorsPath := filepath.Join(checkpointDir, DescriptorsFilename)
-	if err := os.WriteFile(descriptorsPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write descriptors file: %w", err)
-	}
-
-	return nil
-}
+// Deprecated: Use config.SaveDescriptors
+var SaveDescriptors = config.SaveDescriptors
 
 // LoadDescriptors reads file descriptor information from checkpoint directory
-func LoadDescriptors(checkpointDir string) ([]string, error) {
-	descriptorsPath := filepath.Join(checkpointDir, DescriptorsFilename)
-
-	data, err := os.ReadFile(descriptorsPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read descriptors file: %w", err)
-	}
-
-	var descriptors []string
-	if err := json.Unmarshal(data, &descriptors); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal descriptors: %w", err)
-	}
-
-	return descriptors, nil
-}
+// Deprecated: Use config.LoadDescriptors
+var LoadDescriptors = config.LoadDescriptors
 
 // GetCheckpointDir returns the path to a checkpoint directory
-func GetCheckpointDir(baseDir, checkpointID string) string {
-	return filepath.Join(baseDir, checkpointID)
-}
+// Deprecated: Use config.GetCheckpointDir
+var GetCheckpointDir = config.GetCheckpointDir
 
 // ListCheckpoints returns all checkpoint IDs in the base directory
-func ListCheckpoints(baseDir string) ([]string, error) {
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint directory: %w", err)
-	}
+// Deprecated: Use config.ListCheckpoints
+var ListCheckpoints = config.ListCheckpoints
 
-	var checkpoints []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		// Check if metadata file exists
-		metadataPath := filepath.Join(baseDir, entry.Name(), MetadataFilename)
-		if _, err := os.Stat(metadataPath); err == nil {
-			checkpoints = append(checkpoints, entry.Name())
-		}
-	}
-
-	return checkpoints, nil
-}
-
-// GetCheckpointInfo returns metadata for a specific checkpoint
-func GetCheckpointInfo(baseDir, checkpointID string) (*CheckpointMetadata, error) {
-	checkpointDir := GetCheckpointDir(baseDir, checkpointID)
-	return LoadMetadata(checkpointDir)
-}
+// GetCheckpointInfo returns checkpoint data for a specific checkpoint
+// Deprecated: Use config.GetCheckpointInfo
+var GetCheckpointInfo = config.GetCheckpointInfo
 
 // DeleteCheckpoint removes a checkpoint directory
-func DeleteCheckpoint(baseDir, checkpointID string) error {
-	checkpointDir := GetCheckpointDir(baseDir, checkpointID)
-	return os.RemoveAll(checkpointDir)
-}
+// Deprecated: Use config.DeleteCheckpoint
+var DeleteCheckpoint = config.DeleteCheckpoint

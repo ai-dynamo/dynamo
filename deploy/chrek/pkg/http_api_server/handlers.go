@@ -1,0 +1,163 @@
+// handlers.go provides HTTP handlers for the checkpoint agent server.
+package httpApiServer
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
+)
+
+// Handlers holds dependencies for HTTP handlers.
+type Handlers struct {
+	cfg          *config.FullConfig
+	checkpointer *checkpoint.Checkpointer
+}
+
+// NewHandlers creates a new Handlers instance.
+func NewHandlers(cfg *config.FullConfig, checkpointer *checkpoint.Checkpointer) *Handlers {
+	return &Handlers{
+		cfg:          cfg,
+		checkpointer: checkpointer,
+	}
+}
+
+// HandleHealth handles GET /health requests.
+func (h *Handlers) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	resp := HealthResponse{
+		Status:   "healthy",
+		NodeName: h.cfg.Agent.NodeName,
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// HandleCheckpoint handles POST /checkpoint requests.
+func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CheckpointRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, CheckpointResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid request body: %v", err),
+		})
+		return
+	}
+
+	if req.ContainerID == "" {
+		writeJSON(w, http.StatusBadRequest, CheckpointResponse{
+			Success: false,
+			Error:   "container_id is required",
+		})
+		return
+	}
+
+	if req.CheckpointID == "" {
+		req.CheckpointID = fmt.Sprintf("ckpt-%d", time.Now().UnixNano())
+	}
+
+	// Build checkpoint params
+	params := checkpoint.CheckpointParams{
+		ContainerID:   req.ContainerID,
+		ContainerName: req.ContainerName,
+		CheckpointID:  req.CheckpointID,
+		CheckpointDir: h.cfg.Checkpoint.BasePath,
+		NodeName:      h.cfg.Agent.NodeName,
+		PodName:       req.PodName,
+		PodNamespace:  req.PodNamespace,
+	}
+
+	// Copy checkpoint config and disable CUDA if requested
+	checkpointCfg := h.cfg.Checkpoint
+	if req.DisableCUDA {
+		checkpointCfg.CRIU.LibDir = ""
+	}
+
+	ctx := r.Context()
+	result, err := h.checkpointer.Checkpoint(ctx, params, &checkpointCfg)
+	if err != nil {
+		log.Printf("Checkpoint failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, CheckpointResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	// Write checkpoint.done marker so restore-entrypoint can detect this checkpoint
+	checkpointDonePath := result.CheckpointDir + "/" + config.CheckpointDoneFilename
+	if err := os.WriteFile(checkpointDonePath, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
+		log.Printf("Failed to write checkpoint.done marker: %v", err)
+		writeJSON(w, http.StatusInternalServerError, CheckpointResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Checkpoint succeeded but failed to write done marker: %v", err),
+		})
+		return
+	}
+	log.Printf("Wrote checkpoint.done marker: %s", checkpointDonePath)
+
+	log.Printf("Checkpoint successful: %s", result.CheckpointID)
+	writeJSON(w, http.StatusOK, CheckpointResponse{
+		Success:      true,
+		CheckpointID: result.CheckpointID,
+		Message:      fmt.Sprintf("Checkpoint created successfully at %s", result.CheckpointDir),
+	})
+}
+
+// HandleListCheckpoints handles GET /checkpoints requests.
+func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	checkpointIDs, err := config.ListCheckpoints(h.cfg.Checkpoint.BasePath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	var checkpoints []CheckpointInfo
+	for _, id := range checkpointIDs {
+		meta, err := config.GetCheckpointInfo(h.cfg.Checkpoint.BasePath, id)
+		if err != nil {
+			continue
+		}
+		checkpoints = append(checkpoints, CheckpointInfo{
+			ID:           meta.CheckpointID,
+			CreatedAt:    meta.CreatedAt,
+			SourceNode:   meta.SourceNode,
+			ContainerID:  meta.ContainerID,
+			PodName:      meta.PodName,
+			PodNamespace: meta.PodNamespace,
+			Image:        meta.Image,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, ListCheckpointsResponse{
+		Checkpoints: checkpoints,
+	})
+}
+
+// writeJSON writes a JSON response.
+func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}

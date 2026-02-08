@@ -1,4 +1,4 @@
-// metadata_builder provides checkpoint metadata construction.
+// checkpoint_data_builder provides checkpoint data construction.
 package checkpoint
 
 import (
@@ -8,11 +8,11 @@ import (
 	"github.com/sirupsen/logrus"
 
 	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
-// MetadataBuilderConfig holds configuration for building checkpoint metadata.
-type MetadataBuilderConfig struct {
+// CheckpointDataBuilderConfig holds per-checkpoint identifiers for building checkpoint data.
+type CheckpointDataBuilderConfig struct {
 	CheckpointID  string
 	NodeName      string
 	ContainerID   string
@@ -20,33 +20,48 @@ type MetadataBuilderConfig struct {
 	PodName       string
 	PodNamespace  string
 	PID           int
-	CUDAPluginDir string
 }
 
-// BuildCheckpointMetadata constructs checkpoint metadata from container state.
-func BuildCheckpointMetadata(
+// BuildCheckpointData constructs checkpoint data from container state and config.
+// Static config fields (CRIU options, rootfs exclusions) are copied directly from checkpointCfg.
+// Dynamic fields are populated from container introspection.
+func BuildCheckpointData(
 	ctx context.Context,
-	cfg MetadataBuilderConfig,
+	cfg CheckpointDataBuilderConfig,
+	checkpointCfg *config.CheckpointConfig,
 	containerInfo *checkpointk8s.ContainerInfo,
 	mounts []MountMapping,
 	namespaces map[NamespaceType]*NamespaceInfo,
 	k8sClient *checkpointk8s.K8sClient,
 	log *logrus.Entry,
-) *common.CheckpointMetadata {
-	meta := common.NewCheckpointMetadata(cfg.CheckpointID)
-	meta.SourceNode = cfg.NodeName
-	meta.ContainerID = cfg.ContainerID
-	meta.PodName = cfg.PodName
-	meta.PodNamespace = cfg.PodNamespace
-	meta.PID = cfg.PID
-	meta.Image = containerInfo.Image
+) *config.CheckpointData {
+	data := config.NewCheckpointData(cfg.CheckpointID)
+
+	// ========== STATIC: Copy from CheckpointConfig ==========
+	// These are the actual config values, not hardcoded defaults
+	if checkpointCfg != nil {
+		data.CRIU = checkpointCfg.CRIU
+		data.RootfsExclusions = checkpointCfg.RootfsExclusions
+	}
+
+	// ========== DYNAMIC: Fill from container introspection ==========
+	data.SourceNode = cfg.NodeName
+	data.ContainerID = cfg.ContainerID
+	data.PodName = cfg.PodName
+	data.PodNamespace = cfg.PodNamespace
+	data.PID = cfg.PID
+
+	if containerInfo == nil {
+		return data
+	}
+	data.Image = containerInfo.Image
 
 	// Populate OCI spec derived paths
-	meta.MaskedPaths = containerInfo.GetMaskedPaths()
-	meta.ReadonlyPaths = containerInfo.GetReadonlyPaths()
+	data.MaskedPaths = containerInfo.GetMaskedPaths()
+	data.ReadonlyPaths = containerInfo.GetReadonlyPaths()
 
 	// Build mount metadata
-	ociMountByDest := buildOCIMountLookup(containerInfo, meta)
+	ociMountByDest := buildOCIMountLookup(containerInfo, data)
 
 	// Get K8s volume types if available
 	k8sVolumes := getK8sVolumes(ctx, k8sClient, cfg, log)
@@ -54,47 +69,36 @@ func BuildCheckpointMetadata(
 	// Add mount metadata
 	for _, mount := range mounts {
 		mountMeta := buildMountMetadata(mount, k8sVolumes, ociMountByDest)
-		meta.Mounts = append(meta.Mounts, mountMeta)
+		data.Mounts = append(data.Mounts, mountMeta)
 	}
 
 	// Add namespace metadata
 	for nsType, nsInfo := range namespaces {
-		meta.Namespaces = append(meta.Namespaces, common.NamespaceMetadata{
+		data.Namespaces = append(data.Namespaces, config.NamespaceMetadata{
 			Type:       string(nsType),
 			Inode:      nsInfo.Inode,
 			IsExternal: nsInfo.IsExternal,
 		})
 	}
 
-	// Set CRIU options (hardcoded as always-on for K8s, stored for compatibility)
-	meta.CRIUOptions = common.CRIUOptionsMetadata{
-		TcpEstablished: false, // Always false - we close TCP connections
-		TcpClose:       true,  // Always true - pod IPs change on restore
-		ShellJob:       true,  // Always true - containers are session leaders
-		FileLocks:      true,  // Always true - apps use file locks
-		LeaveRunning:   true,  // Always true - keep process running after checkpoint
-		LinkRemap:      true,  // Always true - handle deleted-but-open files
-		ExtMasters:     true,  // Always true - external bind mount masters
-	}
-
-	return meta
+	return data
 }
 
 // buildOCIMountLookup builds a lookup map from OCI mounts and populates bind mount destinations.
-func buildOCIMountLookup(containerInfo *checkpointk8s.ContainerInfo, meta *common.CheckpointMetadata) map[string]checkpointk8s.MountInfo {
+func buildOCIMountLookup(containerInfo *checkpointk8s.ContainerInfo, data *config.CheckpointData) map[string]checkpointk8s.MountInfo {
 	ociMounts := containerInfo.GetMounts()
 	ociMountByDest := make(map[string]checkpointk8s.MountInfo)
 	for _, m := range ociMounts {
 		ociMountByDest[m.Destination] = m
 		if m.Type == "bind" {
-			meta.BindMountDests = append(meta.BindMountDests, m.Destination)
+			data.BindMountDests = append(data.BindMountDests, m.Destination)
 		}
 	}
 	return ociMountByDest
 }
 
 // getK8sVolumes fetches volume types from K8s API if available.
-func getK8sVolumes(ctx context.Context, k8sClient *checkpointk8s.K8sClient, cfg MetadataBuilderConfig, log *logrus.Entry) map[string]*checkpointk8s.VolumeInfo {
+func getK8sVolumes(ctx context.Context, k8sClient *checkpointk8s.K8sClient, cfg CheckpointDataBuilderConfig, log *logrus.Entry) map[string]*checkpointk8s.VolumeInfo {
 	if k8sClient == nil || cfg.PodNamespace == "" || cfg.PodName == "" || cfg.ContainerName == "" {
 		return nil
 	}
@@ -109,7 +113,7 @@ func getK8sVolumes(ctx context.Context, k8sClient *checkpointk8s.K8sClient, cfg 
 }
 
 // buildMountMetadata constructs metadata for a single mount.
-func buildMountMetadata(mount MountMapping, k8sVolumes map[string]*checkpointk8s.VolumeInfo, ociMountByDest map[string]checkpointk8s.MountInfo) common.MountMetadata {
+func buildMountMetadata(mount MountMapping, k8sVolumes map[string]*checkpointk8s.VolumeInfo, ociMountByDest map[string]checkpointk8s.MountInfo) config.MountMetadata {
 	var volumeType, volumeName string
 
 	// Try K8s API first for accurate volume types
@@ -125,7 +129,7 @@ func buildMountMetadata(mount MountMapping, k8sVolumes map[string]*checkpointk8s
 		volumeType, volumeName = checkpointk8s.DetectVolumeTypeFromPath(mount.OutsidePath)
 	}
 
-	mountMeta := common.MountMetadata{
+	mountMeta := config.MountMetadata{
 		ContainerPath: mount.InsidePath,
 		HostPath:      mount.OutsidePath,
 		VolumeType:    volumeType,
@@ -143,4 +147,3 @@ func buildMountMetadata(mount MountMapping, k8sVolumes map[string]*checkpointk8s
 
 	return mountMeta
 }
-

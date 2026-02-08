@@ -7,14 +7,18 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
+
+// Deprecated type alias for backwards compatibility
+type CheckpointMetadata = config.CheckpointData
 
 // GenerateExtMountMaps generates external mount mappings for CRIU restore.
 // It parses /proc/1/mountinfo (the restore container's mounts) and adds
-// mappings for all mount points plus masked/readonly paths from common.
+// mappings for all mount points plus masked/readonly/bind mount paths from checkpoint data.
 //
-// If meta is nil or doesn't have OCI-derived paths, falls back to defaults.
-func GenerateExtMountMaps(meta *common.CheckpointMetadata) ([]*criurpc.ExtMountMap, error) {
+// If data is nil or doesn't have OCI-derived paths, falls back to defaults.
+func GenerateExtMountMaps(data *config.CheckpointData) ([]*criurpc.ExtMountMap, error) {
 	var maps []*criurpc.ExtMountMap
 	addedMounts := make(map[string]bool)
 
@@ -26,27 +30,28 @@ func GenerateExtMountMaps(meta *common.CheckpointMetadata) ([]*criurpc.ExtMountM
 	addedMounts["/"] = true
 
 	// Parse /proc/1/mountinfo for all current mount points
-	mountPoints, err := common.GetMountPointPaths("/proc/1/mountinfo")
+	restoreMounts, err := common.ParseMountInfoFile("/proc/1/mountinfo")
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse mountinfo: %w", err)
 	}
 
-	for _, mountPoint := range mountPoints {
-		if addedMounts[mountPoint] || mountPoint == "/" {
+	// Add all current mount points
+	for _, m := range restoreMounts {
+		if addedMounts[m.Path] || m.Path == "/" {
 			continue
 		}
 		maps = append(maps, &criurpc.ExtMountMap{
-			Key: proto.String(mountPoint),
-			Val: proto.String(mountPoint),
+			Key: proto.String(m.Path),
+			Val: proto.String(m.Path),
 		})
-		addedMounts[mountPoint] = true
+		addedMounts[m.Path] = true
 	}
 
-	// Use masked paths from checkpoint metadata (OCI spec derived)
+	// Use masked paths from checkpoint data (OCI spec derived)
 	// Fall back to defaults for backwards compatibility
 	maskedPaths := common.DefaultMaskedPaths()
-	if meta != nil && len(meta.MaskedPaths) > 0 {
-		maskedPaths = meta.MaskedPaths
+	if data != nil && len(data.MaskedPaths) > 0 {
+		maskedPaths = data.MaskedPaths
 	}
 
 	for _, path := range maskedPaths {
@@ -60,9 +65,9 @@ func GenerateExtMountMaps(meta *common.CheckpointMetadata) ([]*criurpc.ExtMountM
 		addedMounts[path] = true
 	}
 
-	// Also add readonly paths from metadata if available
-	if meta != nil {
-		for _, path := range meta.ReadonlyPaths {
+	// Also add readonly paths from checkpoint data if available
+	if data != nil {
+		for _, path := range data.ReadonlyPaths {
 			if addedMounts[path] {
 				continue
 			}
@@ -71,6 +76,32 @@ func GenerateExtMountMaps(meta *common.CheckpointMetadata) ([]*criurpc.ExtMountM
 				Val: proto.String(path),
 			})
 			addedMounts[path] = true
+		}
+
+		// Add bind mount destinations from checkpoint data
+		// These are critical for CRIU to properly map checkpoint mounts to restore mounts
+		for _, path := range data.BindMountDests {
+			if addedMounts[path] {
+				continue
+			}
+			maps = append(maps, &criurpc.ExtMountMap{
+				Key: proto.String(path),
+				Val: proto.String(path),
+			})
+			addedMounts[path] = true
+		}
+
+		// Also add container paths from mount data
+		// This ensures all mounts from the checkpoint have mappings
+		for _, mount := range data.Mounts {
+			if addedMounts[mount.ContainerPath] {
+				continue
+			}
+			maps = append(maps, &criurpc.ExtMountMap{
+				Key: proto.String(mount.ContainerPath),
+				Val: proto.String(mount.ContainerPath),
+			})
+			addedMounts[mount.ContainerPath] = true
 		}
 	}
 

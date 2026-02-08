@@ -1235,6 +1235,22 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 			return nil, false, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
 		}
 
+		// Inject vLLM sleep level env var into the pod template's main container.
+		// Default to 1 if not set in ServiceCheckpointConfig.
+		sleepLevel := int32(1)
+		if component.Checkpoint != nil && component.Checkpoint.VLLMSleepModeLevel != nil {
+			sleepLevel = *component.Checkpoint.VLLMSleepModeLevel
+		}
+		for i := range podTemplate.Spec.Containers {
+			if podTemplate.Spec.Containers[i].Name == consts.MainContainerName || (i == 0 && len(podTemplate.Spec.Containers) > 0) {
+				podTemplate.Spec.Containers[i].Env = append(podTemplate.Spec.Containers[i].Env, corev1.EnvVar{
+					Name:  consts.EnvCheckpointVLLMSleepLevel,
+					Value: fmt.Sprintf("%d", sleepLevel),
+				})
+				break
+			}
+		}
+
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      ckptName,

@@ -172,4 +172,10 @@ type ServiceCheckpointConfig struct {
 	// Required when checkpointRef is not specified
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
+
+	// VLLMSleepModeLevel determines how the vLLM model sleeps before CRIU checkpoint.
+	// Level 1: offload to CPU, Level 2: discard KV cache, Level 3: discard weights.
+	// +optional
+	// +kubebuilder:default=1
+	VLLMSleepModeLevel *int32 `json:"vllmSleepModeLevel,omitempty"`
 }

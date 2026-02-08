@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // MonitorProcess monitors the restored process and returns its exit code.
@@ -232,51 +234,35 @@ func WaitForPidFile(pidFile string, timeout time.Duration, log *logrus.Entry) (i
 	return 0, fmt.Errorf("timeout waiting for PID file %s after %v", pidFile, timeout)
 }
 
-// RunDefault runs the default command when no checkpoint is available.
-// It attempts to detect and run the appropriate default command for the container.
-func RunDefault(cfg *Config, log *logrus.Entry) error {
-	// If DEFAULT_CMD is set, use it
-	if cfg.DefaultCmd != "" {
-		log.WithField("cmd", cfg.DefaultCmd).Info("Running default command")
-		return execCommand(cfg.DefaultCmd)
+// ExecColdStart execs the cold start command (ColdStartArgs), replacing the current process.
+// If no args are provided, falls back to sleep infinity.
+func ExecColdStart(cfg *config.RestoreConfig, log *logrus.Entry) error {
+	if len(cfg.ColdStartArgs) == 0 {
+		log.Warn("No cold start command provided, sleeping indefinitely")
+		return ExecArgs([]string{"sleep", "infinity"}, log)
 	}
 
-	// Try common application entrypoints
-	if _, err := os.Stat("/docker-entrypoint.sh"); err == nil {
-		log.Info("Running docker-entrypoint.sh")
-		return execCommand("/docker-entrypoint.sh nginx -g 'daemon off;'")
-	}
-
-	// Check for nginx
-	if _, err := exec.LookPath("nginx"); err == nil {
-		log.Info("Running nginx")
-		return execCommand("nginx -g 'daemon off;'")
-	}
-
-	// Fallback to sleep infinity
-	log.Warn("No default command specified and no known entrypoint found, sleeping")
-	return execCommand("sleep infinity")
+	log.WithField("cmd", cfg.ColdStartArgs).Info("Executing cold start command")
+	return ExecArgs(cfg.ColdStartArgs, log)
 }
 
-// execCommand executes a command by replacing the current process.
-func execCommand(cmdLine string) error {
-	// Parse command line - simple split by spaces
-	// For complex commands, shell wrapper is needed
-	parts := strings.Fields(cmdLine)
-	if len(parts) == 0 {
+// ExecArgs replaces the current process with the given command and arguments.
+// Uses syscall.Exec for proper PID 1 behavior in containers.
+func ExecArgs(args []string, log *logrus.Entry) error {
+	if len(args) == 0 {
 		return fmt.Errorf("empty command")
 	}
 
-	cmd := parts[0]
-	args := parts
-
 	// Find the executable path
-	path, err := exec.LookPath(cmd)
+	path, err := exec.LookPath(args[0])
 	if err != nil {
-		// Try running through shell for complex commands
-		path = "/bin/sh"
-		args = []string{"sh", "-c", cmdLine}
+		return fmt.Errorf("command not found: %s: %w", args[0], err)
 	}
+
+	log.WithFields(logrus.Fields{
+		"path": path,
+		"args": args,
+	}).Debug("Replacing process via syscall.Exec")
 
 	// Replace current process with the command
 	return syscall.Exec(path, args, os.Environ())

@@ -8,19 +8,14 @@ import (
 	"path/filepath"
 
 	"github.com/sirupsen/logrus"
-)
 
-const (
-	// RootfsDiffFilename is the name of the rootfs diff tar file
-	RootfsDiffFilename = "rootfs-diff.tar"
-	// DeletedFilesFilename is the name of the deleted files JSON
-	DeletedFilesFilename = "deleted-files.json"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // ApplyRootfsDiff extracts the rootfs-diff.tar from the checkpoint to the target root.
 // This restores filesystem changes that were made in the original container.
 func ApplyRootfsDiff(checkpointPath, targetRoot string, log *logrus.Entry) error {
-	rootfsDiffPath := filepath.Join(checkpointPath, RootfsDiffFilename)
+	rootfsDiffPath := filepath.Join(checkpointPath, config.RootfsDiffFilename)
 
 	// Check if rootfs-diff.tar exists
 	if _, err := os.Stat(rootfsDiffPath); os.IsNotExist(err) {
@@ -61,7 +56,7 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log *logrus.Entry) error
 // ApplyDeletedFiles removes files that were deleted in the original container.
 // These are tracked via overlay whiteout markers (.wh.<filename>).
 func ApplyDeletedFiles(checkpointPath, targetRoot string, log *logrus.Entry) error {
-	deletedFilesPath := filepath.Join(checkpointPath, DeletedFilesFilename)
+	deletedFilesPath := filepath.Join(checkpointPath, config.DeletedFilesFilename)
 
 	// Check if deleted-files.json exists
 	data, err := os.ReadFile(deletedFilesPath)

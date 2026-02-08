@@ -18,8 +18,7 @@ import (
 const (
 	// K8sNamespace is the containerd namespace used by Kubernetes
 	K8sNamespace = "k8s.io"
-	// DefaultSocket is the default containerd socket path
-	DefaultSocket = "/run/containerd/containerd.sock"
+	ContainerdSocket = "/run/containerd/containerd.sock"
 )
 
 // ContainerInfo holds resolved container information from containerd.
@@ -55,11 +54,8 @@ type DiscoveryClient struct {
 }
 
 // NewDiscoveryClient creates a new discovery client.
-func NewDiscoveryClient(socket string) (*DiscoveryClient, error) {
-	if socket == "" {
-		socket = DefaultSocket
-	}
-
+func NewDiscoveryClient() (*DiscoveryClient, error) {
+	socket := ContainerdSocket
 	client, err := containerd.New(socket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to containerd at %s: %w", socket, err)
