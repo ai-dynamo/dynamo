@@ -6,7 +6,6 @@ name: PR
 on:
   push:
     branches:
-      - ci/ops-2989
       - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
@@ -34,7 +33,7 @@ jobs:
   # ============================================================================
   # SETUP & DETECTION JOBS
   # ============================================================================
-  
+
   changed-files:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
