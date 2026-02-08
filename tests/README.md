@@ -22,7 +22,13 @@ dynamo/
 ├── components/
 │   ├── src/dynamo/
 │   |   └── planner/
+│   |   |   └── zoo.py
+│   |   |   └── foo/
+│   |   |   |   └── bar.py
 │   │   │   └── tests/              # Python unit/integration tests for planner
+│   │   │   |   └── test_zoo.py
+│   │   │   |   └── foo/            # Mirror the source code file hierarchy
+│   │   │   |   |   └── test_bar.py
 │   |   └── router/
 │   │   │   └── tests/
 │   |   └── ...
