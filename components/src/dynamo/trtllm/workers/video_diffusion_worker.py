@@ -28,7 +28,22 @@ async def init_video_diffusion_worker(
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
     """
-    # Import diffusion-specific modules (lazy import to avoid loading heavy deps early)
+    # Check visual_gen availability early with a clear error message.
+    # visual_gen is part of TensorRT-LLM but only available on the feat/visual_gen
+    # branch — not yet in any release. Without this check, users would get a cryptic
+    # ImportError deep inside DiffusionEngine.initialize().
+    try:
+        import visual_gen  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "Video diffusion requires the 'visual_gen' package from TensorRT-LLM's "
+            "feat/visual_gen branch. Install with:\n"
+            "  git clone https://github.com/NVIDIA/TensorRT-LLM.git\n"
+            "  cd TensorRT-LLM && git checkout feat/visual_gen\n"
+            "  cd tensorrt_llm/visual_gen && pip install -e .\n"
+            "See: https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen"
+        ) from None
+
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
     from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
     from dynamo.trtllm.request_handlers.video_diffusion import VideoGenerationHandler
