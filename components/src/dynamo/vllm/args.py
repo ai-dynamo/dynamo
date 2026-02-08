@@ -72,6 +72,9 @@ class Config:
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     frontend_decoding: bool = False
 
+    # Multimodal embedding cache capacity in GB (0 = disabled)
+    multimodal_embedding_cache_capacity_gb: float = 0
+
     # vLLM-native encoder worker (ECConnector mode)
     vllm_native_encoder_worker: bool = False
     ec_connector_backend: Optional[str] = "ECExampleConnector"
@@ -227,6 +230,12 @@ def parse_args() -> Config:
             "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
             "Without this flag, images are decoded in the Python backend (default behavior)."
         ),
+    )
+    parser.add_argument(
+        "--dyn-multimodal-embedding-cache-capacity-gb",
+        type=float,
+        default=0,
+        help="Capacity of the multimodal embedding cache in GB. Default: 0 (disabled)",
     )
     parser.add_argument(
         "--vllm-native-encoder-worker",
@@ -442,6 +451,9 @@ def parse_args() -> Config:
     config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
     config.frontend_decoding = args.frontend_decoding
+    config.multimodal_embedding_cache_capacity_gb = (
+        args.dyn_multimodal_embedding_cache_capacity_gb
+    )
     config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
     config.ec_connector_backend = args.ec_connector_backend
     config.ec_storage_path = args.ec_storage_path
