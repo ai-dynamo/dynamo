@@ -21,28 +21,33 @@ use tokio_util::sync::CancellationToken;
 
 use serde::{Deserialize, Serialize};
 
-// TODO: Import your actual indexer interface and implementations
-// use dynamo_kv_router::indexer::{KvIndexerInterface, HashTableIndexer, BTreeIndexer, ...};
-
+/// Indexer backend selection and its backend-specific parameters.
 #[derive(Subcommand, Debug, Clone)]
 enum IndexerArgs {
+    /// Single-threaded radix tree indexer.
     RadixTree {},
 
+    /// Sharded radix tree indexer that partitions workers across independent shards.
     RadixTreeSharded {
+        /// Number of independent shards to split workers across.
         #[clap(long, default_value = "4")]
         num_shards: usize,
     },
 
+    /// Position-based nested map indexer with jump search.
     NestedMap {
+        /// Number of positions to skip during jump search before scanning back.
         #[clap(long, default_value = "8")]
         jump_size: usize,
 
+        /// Number of OS threads that consume and apply KV cache events.
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
 }
 
 impl IndexerArgs {
+    /// Construct the concrete indexer from the parsed CLI args.
     fn build(self, args: &Args) -> Arc<dyn KvIndexerInterface + Send + Sync> {
         let cancel_token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
@@ -71,46 +76,62 @@ impl IndexerArgs {
 #[derive(Parser, Debug)]
 #[clap(version, about, long_about = None)]
 struct Args {
-    /// Path to mooncake trace.
+    /// Path to a JSONL mooncake trace file. Each line is a JSON object with
+    /// fields: uuid, timestamp, hash_ids, output_length.
     mooncake_trace_path: String,
 
+    /// Number of GPU blocks available in the mock engine's KV cache.
+    /// Smaller values force more evictions and produce more remove events.
     #[clap(long, default_value = "2048")]
     num_gpu_blocks: usize,
 
+    /// Number of tokens per KV cache block.
     #[clap(long, default_value = "512")]
     block_size: u32,
 
+    /// Wall-clock duration (ms) over which the trace is replayed during event
+    /// generation. Longer values produce more accurate inter-request timing but
+    /// increase setup time.
     #[clap(long, default_value = "30000")]
     trace_simulation_duration_ms: u64,
 
+    /// Wall-clock duration (ms) over which the benchmark replays requests and
+    /// events against the indexer under test.
     #[clap(long, default_value = "60000")]
     benchmark_duration_ms: u64,
 
+    /// Number of unique simulated inference workers. Each gets a random
+    /// partition of the trace and its own mock engine for event generation.
     #[clap(short, long, default_value = "64")]
     num_unique_inference_workers: usize,
 
+    /// How many times to duplicate the set of unique workers during the
+    /// benchmark phase. Total workers = num_unique_inference_workers * factor.
+    /// Duplicated workers replay identical traces with distinct worker IDs.
     #[clap(short = 'd', long, default_value = "1")]
     inference_worker_duplication_factor: usize,
 
+    /// RNG seed for reproducible worker-to-trace assignment.
     #[clap(long, default_value = "42")]
     seed: u64,
 
-    /// Indexer configuration (defaults to hash-table if not specified)
+    /// Indexer backend to benchmark (defaults to radix-tree if not specified).
     #[clap(subcommand)]
     indexer: Option<IndexerArgs>,
 
-    /// Ignored - passed by cargo bench harness
+    /// Ignored - passed by cargo bench harness.
     #[arg(long, hide = true, global = true)]
     bench: bool,
 }
 
 impl Args {
-    /// Get the indexer config, using a default if none was specified
+    /// Return the indexer config, falling back to RadixTree if none was specified.
     fn get_indexer(&self) -> IndexerArgs {
         self.indexer.clone().unwrap_or(IndexerArgs::RadixTree {})
     }
 }
 
+/// A single request deserialized from the mooncake trace JSONL.
 #[derive(Serialize, Deserialize, Clone)]
 struct MooncakeRequest {
     #[serde(default = "Uuid::new_v4")]
@@ -120,6 +141,8 @@ struct MooncakeRequest {
     output_length: u64,
 }
 
+/// Collects KV cache events emitted by the mock engine during event generation,
+/// tagging each with the wall-clock instant it was produced.
 struct EventCollector {
     events: Mutex<Option<Vec<(KvCacheEvent, Instant)>>>,
 }
@@ -131,6 +154,7 @@ impl EventCollector {
         })
     }
 
+    /// Take ownership of the collected events. Can only be called once.
     fn get_events(self: Arc<Self>) -> Vec<(KvCacheEvent, Instant)> {
         self.events.lock().unwrap().take().unwrap()
     }
@@ -146,18 +170,25 @@ impl KvCacheEventSink for EventCollector {
     }
 }
 
+/// A single entry in a worker's merged benchmark timeline.
 #[derive(Clone)]
 enum WorkerTraceEntry {
+    /// A find_matches request with pre-computed block hashes.
     Request(Vec<LocalBlockHash>),
+    /// A KV cache event (store/remove/clear) to apply to the indexer.
     Event(KvCacheEvent),
 }
 
+/// A timestamped entry in a worker's benchmark trace, used to replay requests
+/// and events at the correct relative timing.
 #[derive(Clone)]
 struct WorkerTrace {
     entry: WorkerTraceEntry,
     timestamp_us: u64,
 }
 
+/// Load the mooncake trace from disk and randomly partition requests across
+/// `num_unique_inference_workers` worker buckets using the configured seed.
 fn process_mooncake_trace(args: &Args) -> anyhow::Result<Vec<Vec<MooncakeRequest>>> {
     let mut traces: Vec<Vec<MooncakeRequest>> = Vec::new();
     for _ in 0..args.num_unique_inference_workers {
@@ -182,6 +213,8 @@ fn process_mooncake_trace(args: &Args) -> anyhow::Result<Vec<Vec<MooncakeRequest
     Ok(traces)
 }
 
+/// Linearly rescale all timestamps in a worker's trace so the total span equals
+/// `duration` milliseconds.
 fn scale_mooncake_trace(trace: &Vec<MooncakeRequest>, duration: u64) -> Vec<MooncakeRequest> {
     let total_duration = trace.last().unwrap().timestamp - trace.first().unwrap().timestamp;
     trace
@@ -193,6 +226,8 @@ fn scale_mooncake_trace(trace: &Vec<MooncakeRequest>, duration: u64) -> Vec<Moon
         .collect::<Vec<MooncakeRequest>>()
 }
 
+/// Expand a request's block-level hash_ids into per-token IDs by repeating each
+/// hash_id `block_size` times.
 fn tokens_from_request(request: &MooncakeRequest, block_size: u32) -> Vec<u32> {
     request
         .hash_ids
@@ -201,6 +236,7 @@ fn tokens_from_request(request: &MooncakeRequest, block_size: u32) -> Vec<u32> {
         .collect()
 }
 
+/// Create a styled progress bar, optionally with a known total length.
 fn make_progress_bar(total: Option<u64>) -> ProgressBar {
     let progress = match total {
         Some(total) => ProgressBar::new(total),
@@ -218,13 +254,19 @@ fn make_progress_bar(total: Option<u64>) -> ProgressBar {
     progress
 }
 
+/// Replay each worker's request trace through a mock engine in real-time to
+/// produce the KV cache events (store/remove/clear) that the engine would emit.
+///
+/// Returns one event list per worker, each entry paired with the wall-clock
+/// instant it was produced. Event ordering within a worker is guaranteed
+/// monotonically non-decreasing by timestamp.
 async fn generate_events(
     traces: &Vec<Vec<MooncakeRequest>>,
     args: &Args,
 ) -> anyhow::Result<Vec<Vec<(KvCacheEvent, Instant)>>> {
     println!("Generating events...");
     let sched_args = MockEngineArgs::builder()
-        .num_gpu_blocks(args.num_gpu_blocks) // small cache to force evictions
+        .num_gpu_blocks(args.num_gpu_blocks)
         .block_size(args.block_size as usize)
         .speedup_ratio(0.0)
         .enable_prefix_caching(true)
@@ -331,6 +373,12 @@ async fn generate_events(
     Ok(events)
 }
 
+/// Merge each worker's request trace and event trace into a single
+/// time-ordered sequence of `WorkerTrace` entries suitable for benchmark
+/// replay.
+///
+/// Timestamps are rescaled from the original trace / simulation durations
+/// into the benchmark duration (microseconds).
 fn prepare_worker_traces(
     traces: Vec<Vec<MooncakeRequest>>,
     events: Vec<Vec<(KvCacheEvent, Instant)>>,
@@ -380,7 +428,6 @@ fn prepare_worker_traces(
         .into_iter()
         .zip(scaled_event_traces.into_iter())
         .map(|(request_trace, event_trace)| {
-            // Merge the request and event traces together per worker, sort by timestamp, and merge into 1 Vec
             let mut merged: Vec<WorkerTrace> = request_trace
                 .into_iter()
                 .chain(event_trace.into_iter())
@@ -391,6 +438,12 @@ fn prepare_worker_traces(
         .collect()
 }
 
+/// Run the benchmark: replay each worker's merged trace against the indexer,
+/// measuring find_matches latency and event processing throughput.
+///
+/// Workers are spawned as tokio tasks, each replaying its trace at the
+/// original inter-entry timing. After all workers finish, the event queue is
+/// flushed and latency percentiles / throughput stats are printed.
 async fn run_benchmark(
     indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
     traces: Vec<Vec<MooncakeRequest>>,
@@ -537,7 +590,7 @@ async fn run_benchmark(
 
     if event_queue_flush_percentage > 5.0 {
         eprintln!(
-            "ERROR: Over 5% of events were unable to be completed within the benchmark duration. 
+            "ERROR: Over 5% of events were unable to be completed within the benchmark duration.
         Results are invalid. Rerun with a smaller trace or less worker duplication."
         );
     }
