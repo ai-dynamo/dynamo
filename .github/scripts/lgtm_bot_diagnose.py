@@ -132,7 +132,15 @@ def parse_codeowners(content: str) -> list[tuple[str, list[str]]]:
 
 
 def match_codeowners(filepath: str, rules: list[tuple[str, list[str]]]) -> list[str]:
-    """Find the CODEOWNERS teams for a file (last matching rule wins)."""
+    """Find the CODEOWNERS teams for a file (last matching rule wins).
+
+    Follows GitHub CODEOWNERS pattern matching rules:
+    - Anchored patterns (start with /) match from repo root
+    - Unanchored patterns without / match filename at any depth
+    - Unanchored patterns with / match against full path and all suffixes
+    - Directory patterns (end with /) match any file under that directory
+    - Last matching rule wins
+    """
     matched_teams: list[str] = []
     for pattern, teams in rules:
         anchored = pattern.startswith("/")
@@ -141,20 +149,35 @@ def match_codeowners(filepath: str, rules: list[tuple[str, list[str]]]) -> list[
         if clean.endswith("/"):
             # Directory pattern: match any file under it
             directory = clean
-            if filepath.startswith(directory):
-                matched_teams = teams
+            if anchored:
+                if filepath.startswith(directory):
+                    matched_teams = teams
+            else:
+                # Unanchored directory: match anywhere in path
+                if filepath.startswith(directory) or f"/{directory}" in f"/{filepath}":
+                    matched_teams = teams
         elif anchored:
-            # Anchored file/glob pattern
+            # Anchored file/glob pattern — match from repo root
             if fnmatch.fnmatch(filepath, clean):
                 matched_teams = teams
-            elif "/" not in clean and filepath == clean:
-                # Simple filename anchored to root
-                matched_teams = teams
         else:
-            # Unanchored: match filename at any depth
-            filename = filepath.rsplit("/", 1)[-1]
-            if fnmatch.fnmatch(filename, pattern):
-                matched_teams = teams
+            # Unanchored pattern
+            if "/" in clean:
+                # Pattern has path separator: match full path and all suffixes
+                if fnmatch.fnmatch(filepath, clean):
+                    matched_teams = teams
+                else:
+                    parts = filepath.split("/")
+                    for i in range(len(parts)):
+                        suffix = "/".join(parts[i:])
+                        if fnmatch.fnmatch(suffix, clean):
+                            matched_teams = teams
+                            break
+            else:
+                # Simple pattern without /: match filename at any depth
+                filename = filepath.rsplit("/", 1)[-1]
+                if fnmatch.fnmatch(filename, clean):
+                    matched_teams = teams
 
     return matched_teams
 
@@ -469,13 +492,13 @@ def build_diagnostic_comment(
     if pr.get("mergeable_state") == "dirty":
         blockers.append("merge conflict")
 
-    # Fork CI detection
-    fork_ci_missing = False
-    if is_fork:
-        pm = ci_results.get("pre-merge-status-check", {})
-        if pm.get("status") == "pending" and not pm.get("url"):
-            fork_ci_missing = True
-            blockers.append("full CI not triggered (fork PR)")
+    # CI trigger detection (applies to all PRs — /ok to test is needed
+    # for both fork PRs and internal branches without GPG signing)
+    ci_not_triggered = False
+    pm = ci_results.get("pre-merge-status-check", {})
+    if pm.get("status") == "pending" and not pm.get("url"):
+        ci_not_triggered = True
+        blockers.append("full CI not triggered")
 
     if blockers:
         count = len(blockers)
@@ -513,15 +536,18 @@ def build_diagnostic_comment(
             lines.append("> **Tip**: Check the CI logs linked above for error details.")
             lines.append("")
 
-    # Fork CI detection
-    if fork_ci_missing:
+    # CI trigger detection
+    if ci_not_triggered:
         lines.append("### Full CI")
         lines.append("")
-        lines.append("This is a fork PR. Full CI has not been triggered.")
-        lines.append(f"A maintainer can run: `/ok to test {head_sha[:7]}`")
+        lines.append(
+            "Full CI has not been triggered for this PR." " A maintainer must comment:"
+        )
+        lines.append(f"```\n/ok to test {head_sha[:7]}\n```")
         lines.append("")
         lines.append(
-            "> **Note**: `/ok to test` must be re-issued after every " "new push."
+            "> **Note**: `/ok to test` must be re-issued after every "
+            "new push — the approval is per-commit, not per-PR."
         )
         lines.append("")
 
@@ -621,14 +647,21 @@ def build_diagnostic_comment(
 
 def post_diagnostic_comment(pr_number: int, body: str) -> None:
     """Post or update the diagnostic comment."""
-    comments = github_request(
-        f"/repos/{OWNER}/{REPO}/issues/{pr_number}/comments?per_page=100"
-    )
-
-    existing = next(
-        (c for c in comments if DIAGNOSIS_MARKER in (c.get("body") or "")),
-        None,
-    )
+    # Search from newest first — bot comments are typically recent
+    existing = None
+    page = 1
+    while existing is None:
+        comments = github_request(
+            f"/repos/{OWNER}/{REPO}/issues/{pr_number}/comments"
+            f"?per_page=100&page={page}&direction=desc"
+        )
+        if not comments:
+            break
+        existing = next(
+            (c for c in comments if DIAGNOSIS_MARKER in (c.get("body") or "")),
+            None,
+        )
+        page += 1
 
     if existing:
         github_request(
@@ -658,7 +691,8 @@ def main() -> None:
     head_sha = pr["head"]["sha"]
     base_ref = pr["base"]["ref"]
     pr_author = pr["user"]["login"]
-    is_fork = pr["head"]["repo"]["full_name"] != f"{OWNER}/{REPO}"
+    head_repo = pr["head"].get("repo")
+    is_fork = (not head_repo) or head_repo["full_name"] != f"{OWNER}/{REPO}"
 
     # Run all diagnostics
     ci_results, failing_checks = diagnose_ci(head_sha)

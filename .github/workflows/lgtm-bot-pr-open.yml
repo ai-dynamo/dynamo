@@ -95,6 +95,11 @@ jobs:
             }
 
             // Match a filepath against CODEOWNERS rules (last match wins)
+            // Follows GitHub CODEOWNERS pattern matching rules:
+            // - Anchored patterns (start with /) match from repo root
+            // - Unanchored patterns without / match filename at any depth
+            // - Unanchored patterns with / match full path and all suffixes
+            // - Directory patterns (end with /) match any file under that directory
             function matchFile(filepath) {
               let matched = [];
               for (const rule of rules) {
@@ -103,30 +108,39 @@ jobs:
                 const clean = anchored ? p.slice(1) : p;
 
                 if (clean.endsWith('/')) {
-                  // Directory pattern: match any file under it
                   const dir = clean;
                   if (anchored) {
                     if (filepath.startsWith(dir)) matched = rule.teams;
                   } else {
-                    if (filepath.includes('/' + dir) || filepath.startsWith(dir)) {
+                    // Unanchored directory: match anywhere in path
+                    if (filepath.startsWith(dir) || ('/' + filepath).includes('/' + dir)) {
                       matched = rule.teams;
                     }
                   }
                 } else if (anchored) {
-                  // Anchored file/glob pattern
-                  if (globMatch(filepath, clean)) {
-                    matched = rule.teams;
-                  } else if (clean.includes('/')) {
-                    // Pattern like .github/workflows/*.ps1
-                    if (globMatch(filepath, clean)) matched = rule.teams;
-                  } else {
-                    // Anchored single file like /CODEOWNERS
-                    if (filepath === clean) matched = rule.teams;
-                  }
+                  // Anchored file/glob pattern — match from repo root
+                  if (globMatch(filepath, clean)) matched = rule.teams;
                 } else {
-                  // Unanchored: match filename at any depth
-                  const filename = filepath.split('/').pop();
-                  if (globMatch(filename, p)) matched = rule.teams;
+                  // Unanchored pattern
+                  if (clean.includes('/')) {
+                    // Pattern has path separator: match full path and all suffixes
+                    if (globMatch(filepath, clean)) {
+                      matched = rule.teams;
+                    } else {
+                      const parts = filepath.split('/');
+                      for (let i = 0; i < parts.length; i++) {
+                        const suffix = parts.slice(i).join('/');
+                        if (globMatch(suffix, clean)) {
+                          matched = rule.teams;
+                          break;
+                        }
+                      }
+                    }
+                  } else {
+                    // Simple pattern without /: match filename at any depth
+                    const filename = filepath.split('/').pop();
+                    if (globMatch(filename, p)) matched = rule.teams;
+                  }
                 }
               }
               return matched;
@@ -226,13 +240,12 @@ jobs:
               commentLines.push('Reviews have been automatically requested.');
             }
 
-            // Fork CI detection
-            if (isFork) {
-              commentLines.push('');
-              commentLines.push('> **Note for external contributors**: A maintainer must comment');
-              commentLines.push(`> \`/ok to test ${headSha.slice(0, 7)}\` to trigger the full CI suite.`);
-              commentLines.push('> This must be re-issued after every new push.');
-            }
+            // CI trigger guidance (applies to all PRs — /ok to test is needed
+            // for both fork PRs and internal branches without GPG signing)
+            commentLines.push('');
+            commentLines.push('> **Triggering CI**: A maintainer must comment');
+            commentLines.push(`> \`/ok to test ${headSha.slice(0, 7)}\` to trigger the full CI suite.`);
+            commentLines.push('> This must be re-issued after every new push (per-commit, not per-PR).');
 
             const commentBody = commentLines.join('\n');
 

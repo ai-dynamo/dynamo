@@ -138,7 +138,7 @@ jobs:
               }
             }
 
-            function buildChecklist(checks, reviewStatus, bpState, isFork, headSha) {
+            function buildChecklist(checks, reviewStatus, bpState, headSha, ciTriggered) {
               const lines = [CHECKLIST_MARKER, '## Merge Checklist', ''];
 
               for (const name of REQUIRED_CHECKS) {
@@ -151,14 +151,10 @@ jobs:
                 lines.push(`- [${icon}] ${display}${suffix}`);
               }
 
-              if (isFork) {
-                const pmStatus = checks['pre-merge-status-check'] || 'pending';
-                const triggered = pmStatus !== 'pending';
-                const icon = triggered ? 'x' : ' ';
-                const note = triggered
-                  ? ''
-                  : ` *(maintainer must run: \`/ok to test ${headSha.slice(0, 7)}\`)*`;
-                lines.push(`- [${icon}] Full CI triggered${note}`);
+              // CI trigger status — applies to all PRs (fork and internal
+              // branches without GPG signing both need /ok to test)
+              if (!ciTriggered) {
+                lines.push(`- [ ] Full CI triggered *(maintainer must run: \`/ok to test ${headSha.slice(0, 7)}\`)*`);
               }
 
               const approvedIcon = reviewStatus.hasApproval ? 'x' : ' ';
@@ -251,12 +247,36 @@ jobs:
               for (const name of REQUIRED_CHECKS) {
                 pendingChecks[name] = 'pending';
               }
+
+              // Fetch reviews so the checklist reflects current approval state
+              let syncApproval = false;
+              let syncChangesRequested = false;
+              const { data: syncReviews } = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              const syncLatest = new Map();
+              for (const review of syncReviews) {
+                if (review.user.login === pr.user.login) continue;
+                if (!['APPROVED', 'CHANGES_REQUESTED'].includes(review.state)) continue;
+                const ex = syncLatest.get(review.user.login);
+                if (!ex || new Date(review.submitted_at) > new Date(ex.submitted_at)) {
+                  syncLatest.set(review.user.login, review);
+                }
+              }
+              for (const [, review] of syncLatest) {
+                if (review.state === 'APPROVED') syncApproval = true;
+                if (review.state === 'CHANGES_REQUESTED') syncChangesRequested = true;
+              }
+
+              // New push — CI not yet triggered for this commit
               const checklist = buildChecklist(
                 pendingChecks,
-                { hasApproval: false, hasChangesRequested: false },
+                { hasApproval: syncApproval, hasChangesRequested: syncChangesRequested },
                 { ok: false, state: 'unknown' },
-                isFork,
                 headSha,
+                false,
               );
               await updateChecklist(prNumber, checklist);
               return;
@@ -382,13 +402,13 @@ jobs:
                 branchProtectionOk = true;
               } else if (mergeableState === 'unknown') {
                 console.log('mergeable_state is unknown (GitHub still computing), skipping label');
-                // Still update the checklist with what we know
+                const pmTriggered = allCheckRuns.some(cr => cr.name === 'pre-merge-status-check');
                 const checklist = buildChecklist(
                   checkResults,
                   { hasApproval, hasChangesRequested },
                   { ok: false, state: 'unknown' },
-                  isFork,
                   headSha,
+                  pmTriggered,
                 );
                 await updateChecklist(prNumber, checklist);
                 return;
@@ -420,12 +440,13 @@ jobs:
 
             // --- Update merge checklist ---
 
+            const pmTriggered = allCheckRuns.some(cr => cr.name === 'pre-merge-status-check');
             const checklist = buildChecklist(
               checkResults,
               { hasApproval, hasChangesRequested },
               { ok: branchProtectionOk, state: mergeableState },
-              isFork,
               headSha,
+              pmTriggered,
             );
             await updateChecklist(prNumber, checklist);
 

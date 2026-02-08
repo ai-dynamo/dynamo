@@ -44,7 +44,8 @@ jobs:
     name: Diagnose PR
     if: >-
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/lgtm-bot diagnose')
+      contains(github.event.comment.body, '/lgtm-bot diagnose') &&
+      github.event.comment.author_association != 'NONE'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout scripts

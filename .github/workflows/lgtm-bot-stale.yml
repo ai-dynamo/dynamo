@@ -25,7 +25,7 @@ name: LGTM Bot Stale
 
 on:
   schedule:
-    - cron: '0 17 * * 1-5' # 9am PT (UTC-8), weekdays
+    - cron: '0 17 * * 1-5' # 9am PST / 10am PDT (UTC 17:00), weekdays
   workflow_dispatch: {} # Allow manual trigger for testing
 
 permissions:
@@ -108,7 +108,7 @@ jobs:
                   );
 
                   if (!recentNudge) {
-                    const daysWaiting = Math.floor(prAge / 24);
+                    const daysWaiting = Math.floor(lastUpdate / 24);
                     const reviewers = [
                       ...pendingUsers.map(u => `@${u.login}`),
                       ...pendingTeams.map(t => `@${context.repo.owner}/${t.slug}`),
