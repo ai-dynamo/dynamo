@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "bench")]
 use std::time::Instant;
@@ -42,7 +41,7 @@ pub use prefill_router::PrefillRouter;
 pub use push_router::KvPushRouter;
 
 use crate::{
-    discovery::RuntimeConfigs,
+    discovery::RuntimeConfigWatch,
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
@@ -110,7 +109,7 @@ pub fn router_discovery_query(namespace: String) -> DiscoveryQuery {
 pub trait WorkerSelector {
     fn select_worker(
         &self,
-        workers: &HashMap<protocols::WorkerId, Option<ModelRuntimeConfig>>,
+        workers: &HashMap<protocols::WorkerId, ModelRuntimeConfig>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
@@ -218,7 +217,7 @@ impl KvRouter {
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
-        workers_with_configs: Arc<RuntimeConfigs>,
+        mut workers_with_configs: RuntimeConfigWatch,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
@@ -238,7 +237,12 @@ impl KvRouter {
         );
 
         // Wait for at least one worker with a known runtime config before starting scheduler
-        workers_with_configs.subscribe().wait_for_some().await;
+        let _ = workers_with_configs
+            .wait_for(|m| !m.is_empty())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("runtime config watch closed before any workers appeared")
+            })?;
 
         let scheduler = KvScheduler::start(
             component.clone(),
@@ -266,7 +270,6 @@ impl KvRouter {
                 router_id,
                 kv_indexer,
                 cancellation_token.clone(),
-                workers_with_configs.clone(),
             )
             .await?;
         } else {

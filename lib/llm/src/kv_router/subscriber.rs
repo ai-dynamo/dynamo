@@ -17,17 +17,13 @@ use rand::Rng;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    discovery::{RuntimeConfigs, RuntimeConfigsSubscriber},
-    kv_router::{
-        KV_EVENT_SUBJECT, KvRouterConfig, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-        indexer::{DumpRequest, GetWorkersRequest, KvIndexer},
-        protocols::{DpRank, RouterEvent, WorkerId},
-        router_discovery_query,
-        worker_query::WorkerQueryClient,
-    },
+use crate::kv_router::{
+    KV_EVENT_SUBJECT, KvRouterConfig, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
+    indexer::{DumpRequest, GetWorkersRequest, KvIndexer},
+    protocols::{DpRank, RouterEvent, WorkerId},
+    router_discovery_query,
+    worker_query::WorkerQueryClient,
 };
-use std::sync::Arc;
 
 /// Helper function to create a KV stream name from a component and subject.
 ///
@@ -517,11 +513,13 @@ pub async fn start_kv_router_background_event_plane(
     kv_events_tx: mpsc::Sender<RouterEvent>,
     remove_worker_tx: mpsc::Sender<WorkerId>,
     cancellation_token: CancellationToken,
-    subscriber: RuntimeConfigsSubscriber,
     transport_kind: EventTransportKind,
 ) -> Result<()> {
-    let mut worker_query_client =
-        WorkerQueryClient::new(component.clone(), subscriber, Some(remove_worker_tx));
+    // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
+    // No blocking wait — recovery happens asynchronously as endpoints are discovered.
+    let worker_query_client =
+        WorkerQueryClient::spawn(component.clone(), remove_worker_tx, kv_events_tx.clone()).await?;
+
     // Subscribe to KV events using the selected event plane transport
     let mut subscriber =
         EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
@@ -549,20 +547,6 @@ pub async fn start_kv_router_background_event_plane(
         }
     }
 
-    // Wait for at least one worker with a known runtime config before proceeding.
-    // This ensures we have actual config data (including enable_local_indexer) available.
-    tracing::info!("KV subscriber waiting for at least one worker with runtime config...");
-    let ready_workers = worker_query_client.wait_for_ready().await;
-    tracing::info!(
-        "KV subscriber found {} worker(s) with runtime config, proceeding",
-        ready_workers.len()
-    );
-
-    // Recover initial state from all workers with local indexer enabled
-    worker_query_client
-        .process_and_recover_workers(&kv_events_tx, "Initial recovery")
-        .await;
-
     tokio::spawn(async move {
         // Track last received event ID per (worker, dp_rank) for gap detection
         // Each dp_rank has its own monotonic event ID sequence
@@ -575,18 +559,6 @@ pub async fn start_kv_router_background_event_plane(
                 _ = cancellation_token.cancelled() => {
                     tracing::debug!("KV Router event plane background task received cancellation signal");
                     break;
-                }
-
-                // Handle runtime config changes (worker add/remove, recovery for new workers)
-                result = worker_query_client.wait_for_config_change() => {
-                    if result.is_err() {
-                        tracing::warn!("Runtime config watch sender dropped");
-                        continue;
-                    }
-
-                    worker_query_client
-                        .process_and_recover_workers(&kv_events_tx, "DISCOVERY")
-                        .await;
                 }
 
                 // Handle event consumption from event plane subscription
@@ -604,7 +576,6 @@ pub async fn start_kv_router_background_event_plane(
                     let event_id = event.event.event_id;
                     let event_key = (worker_id, dp_rank);
 
-                    // Use envelope metadata for additional debugging
                     tracing::trace!(
                         "Received event from publisher {} (seq {})",
                         envelope.publisher_id,
@@ -616,7 +587,6 @@ pub async fn start_kv_router_background_event_plane(
                     if let Some(&last_id) = last_event_ids.get(&event_key)
                         && event_id > last_id + 1
                     {
-                        // Gap detected - recover missing events before processing current
                         let gap_start = last_id + 1;
                         let gap_end = event_id - 1;
                         let gap_size = gap_end - gap_start + 1;
@@ -624,22 +594,15 @@ pub async fn start_kv_router_background_event_plane(
                             "Event ID gap detected for worker {worker_id} dp_rank {dp_rank}, recovering events [{gap_start}, {gap_end}], gap_size: {gap_size}"
                         );
 
-                        // Note: While recovering, new events may queue in the subscriber's
-                        // internal buffer. We don't explicitly buffer them here for simplicity.
-                        // The subscriber will process them in order after recovery completes.
                         if let Err(e) = worker_query_client
-                            .recover_from_worker(worker_id, dp_rank, Some(gap_start), Some(gap_end), &kv_events_tx)
+                            .recover_from_worker(worker_id, dp_rank, Some(gap_start), Some(gap_end))
                             .await
                         {
                             tracing::error!(
                                 "Failed to recover gap events for worker {worker_id} dp_rank {dp_rank} (gap_start: {gap_start}, gap_end: {gap_end}); proceeding with current event anyway: {e}"
                             );
-                            // Note: If recovery fails, we still apply the current event.
-                            // The tree will have a gap, but it's better than dropping the event.
                         }
                     }
-                    // First event from this (worker, dp_rank) is always valid - we accept whatever ID it has.
-                    // This handles initial startup and worker restarts without requiring event 0.
 
                     // Update last seen event ID (use max to handle out-of-order)
                     last_event_ids
@@ -709,13 +672,7 @@ pub async fn start_subscriber(
     router_id: u64,
     kv_indexer: &KvIndexer,
     cancellation_token: CancellationToken,
-    workers_with_configs: Arc<RuntimeConfigs>,
 ) -> Result<()> {
-    tracing::info!(
-        "Found {} worker(s), starting KV event subscriber",
-        workers_with_configs.num_workers()
-    );
-
     let transport_kind = EventTransportKind::from_env_or_default();
 
     // Start subscriber - durable_kv_events flag determines the mode:
@@ -729,7 +686,6 @@ pub async fn start_subscriber(
         }
         tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
 
-        // Convert router_id to string for NATS consumer naming
         let consumer_id = router_id.to_string();
         start_kv_router_background(
             component,
@@ -748,8 +704,6 @@ pub async fn start_subscriber(
         )
         .await
     } else {
-        // Default: Use NATS Core / generic event plane (ZMQ or NATS Core)
-        // This mode requires workers to have local_indexer enabled (which is now the default)
         if transport_kind == EventTransportKind::Zmq {
             if kv_router_config.router_snapshot_threshold.is_some()
                 || kv_router_config.router_reset_states
@@ -768,7 +722,6 @@ pub async fn start_subscriber(
             kv_indexer.event_sender(),
             kv_indexer.remove_worker_sender(),
             cancellation_token,
-            workers_with_configs.subscribe(),
             transport_kind,
         )
         .await

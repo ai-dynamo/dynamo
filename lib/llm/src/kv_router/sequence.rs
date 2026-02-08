@@ -424,7 +424,7 @@ impl ActiveSequencesMultiWorker {
     pub async fn new(
         component: Component,
         block_size: usize,
-        workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
+        workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
         replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
@@ -438,7 +438,7 @@ impl ActiveSequencesMultiWorker {
 
         // Expand workers by their dp_rank
         for (worker_id, config) in workers_with_configs {
-            let dp_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1);
+            let dp_size = config.data_parallel_size;
 
             for dp_rank in 0..dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
@@ -710,17 +710,14 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Update the set of workers, adding and removing as needed
-    pub fn update_workers(
-        &self,
-        new_workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
-    ) {
+    pub fn update_workers(&self, new_workers_with_configs: HashMap<u64, ModelRuntimeConfig>) {
         let current_workers: HashSet<WorkerWithDpRank> =
             self.senders.iter().map(|entry| *entry.key()).collect();
 
         // Expand new workers by their dp_rank
         let mut new_workers: HashSet<WorkerWithDpRank> = HashSet::new();
         for (worker_id, config) in &new_workers_with_configs {
-            let dp_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1);
+            let dp_size = config.data_parallel_size;
 
             for dp_rank in 0..dp_size {
                 new_workers.insert(WorkerWithDpRank::new(*worker_id, dp_rank));
@@ -1332,11 +1329,11 @@ mod tests {
         // Create runtime config for worker 0 with dp_size=2
         let mut config_worker_0 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
         config_worker_0.data_parallel_size = 2;
-        workers_with_configs.insert(0, Some(config_worker_0));
+        workers_with_configs.insert(0, config_worker_0);
 
         // Create runtime config for worker 1 with dp_size=1 (default)
         let config_worker_1 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
-        workers_with_configs.insert(1, Some(config_worker_1));
+        workers_with_configs.insert(1, config_worker_1);
 
         let seq_manager_1 = Arc::new(
             ActiveSequencesMultiWorker::new(
@@ -1504,9 +1501,18 @@ mod tests {
         // Create multi-worker sequence managers with ALL workers [0, 1, 2]
         // Both use the same component to ensure event synchronization works
         let mut workers_with_configs = HashMap::new();
-        workers_with_configs.insert(0, None);
-        workers_with_configs.insert(1, None);
-        workers_with_configs.insert(2, None);
+        workers_with_configs.insert(
+            0,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
+        workers_with_configs.insert(
+            1,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
+        workers_with_configs.insert(
+            2,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
 
         let seq_manager_1 = Arc::new(
             ActiveSequencesMultiWorker::new(
