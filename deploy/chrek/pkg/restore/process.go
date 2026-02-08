@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // MonitorProcess monitors the restored process and returns its exit code.
@@ -234,7 +236,7 @@ func WaitForPidFile(pidFile string, timeout time.Duration, log *logrus.Entry) (i
 
 // RunDefault runs the default command when no checkpoint is available.
 // It attempts to detect and run the appropriate default command for the container.
-func RunDefault(cfg *Config, log *logrus.Entry) error {
+func RunDefault(cfg *config.RestoreConfig, log *logrus.Entry) error {
 	// If DEFAULT_CMD is set, use it
 	if cfg.DefaultCmd != "" {
 		log.WithField("cmd", cfg.DefaultCmd).Info("Running default command")

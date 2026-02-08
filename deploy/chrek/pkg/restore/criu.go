@@ -13,27 +13,40 @@ import (
 )
 
 // CRIURestoreConfig holds configuration for CRIU restore operations.
-// Most options are always-on with safe defaults for K8s environments.
+// Most fields come from the saved CheckpointData.CRIU config.
 type CRIURestoreConfig struct {
-	ImageDirFD   int32
-	RootPath     string
-	LogLevel     int32
-	LogFile      string
-	WorkDirFD    int32
-	NetNsFD      int32
+	// File descriptors
+	ImageDirFD int32
+	WorkDirFD  int32
+	NetNsFD    int32
+
+	// Paths
+	RootPath string
+	LogFile  string
+
+	// Options from CheckpointData.CRIU
+	LogLevel          int32
+	Timeout           uint32 // CRIU timeout in seconds (0 = no timeout, required for CUDA)
+	ShellJob          bool   // Allow session leaders (containers are often session leaders)
+	TcpClose          bool   // Close TCP connections (pod IPs change on restore)
+	FileLocks         bool   // Allow file locks
+	ExtUnixSk         bool   // Allow external Unix sockets
+	ManageCgroupsMode string // Cgroup handling mode: "ignore" lets K8s manage cgroups
+
+	// External mount mappings (from CheckpointData.CRIU.ExternalMounts)
 	ExtMountMaps []*criurpc.ExtMountMap
 }
 
 // OpenImageDir opens a checkpoint directory and clears CLOEXEC for CRIU.
 // Returns the opened file and its FD. Caller must close the file when done.
 func OpenImageDir(checkpointPath string) (*os.File, int32, error) {
-	return common.OpenDirForCRIU(checkpointPath)
+	return common.OpenPathForCRIU(checkpointPath)
 }
 
 // OpenNetworkNamespace opens the target network namespace for restore.
 // Returns the opened file and its FD. Caller must close the file when done.
 func OpenNetworkNamespace(nsPath string) (*os.File, int32, error) {
-	return common.OpenDirForCRIU(nsPath)
+	return common.OpenPathForCRIU(nsPath)
 }
 
 // OpenWorkDir opens a work directory for CRIU and clears CLOEXEC.
@@ -67,14 +80,28 @@ func OpenWorkDir(workDir string, log *logrus.Entry) (*os.File, int32) {
 
 // BuildRestoreCRIUOpts creates CRIU options for restore from a config struct.
 //
-// Always-on options for K8s:
-//   - ShellJob: containers are often session leaders
-//   - TcpClose: pod IPs change on restore/migration
-//   - FileLocks: applications use file locks
-//   - ExtUnixSk: containers have external Unix sockets
-//   - ManageCgroups (IGNORE): let K8s manage cgroups
+// Options from CheckpointData.CRIU (saved at checkpoint time):
+//   - ShellJob, TcpClose, FileLocks, ExtUnixSk, ManageCgroupsMode
+//
+// Hardcoded restore-specific options:
+//   - RstSibling: restore in detached mode
+//   - MntnsCompatMode: cross-container restore
+//   - EvasiveDevices, ForceIrmap: device/inode handling
 func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
-	cgMode := criurpc.CriuCgMode_IGNORE
+	// Map cgroup management mode from config
+	var cgMode criurpc.CriuCgMode
+	switch cfg.ManageCgroupsMode {
+	case "soft":
+		cgMode = criurpc.CriuCgMode_SOFT
+	case "full":
+		cgMode = criurpc.CriuCgMode_FULL
+	case "strict":
+		cgMode = criurpc.CriuCgMode_STRICT
+	case "ignore", "":
+		cgMode = criurpc.CriuCgMode_IGNORE
+	default:
+		cgMode = criurpc.CriuCgMode_IGNORE
+	}
 
 	criuOpts := &criurpc.CriuOpts{
 		ImagesDirFd: proto.Int32(cfg.ImageDirFD),
@@ -84,23 +111,28 @@ func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
 		// Root filesystem - use current container's root
 		Root: proto.String(cfg.RootPath),
 
-		// Restore in detached mode - process runs in background
+		// Restore in detached mode - process runs in background (restore-specific)
 		RstSibling: proto.Bool(true),
 
-		// Mount namespace compatibility mode for cross-container restore
-		MntnsCompatMode: proto.Bool(true),
+		// Mount namespace mode:
+		// - MntnsCompatMode=false (default): Uses mount-v2 with MOVE_MOUNT_SET_GROUP (kernel 5.15+)
+		//   This is preferred as it doesn't create temp dirs in /tmp
+		// - MntnsCompatMode=true: Uses compat mode which creates /tmp/cr-tmpfs.XXX
+		//   This can cause "Device or resource busy" errors on cleanup
+		// We explicitly set to false to use mount-v2 (requires kernel 5.15+)
+		MntnsCompatMode: proto.Bool(false),
 
-		// Always-on for K8s environments
-		ShellJob:  proto.Bool(true),
-		TcpClose:  proto.Bool(true),
-		FileLocks: proto.Bool(true),
-		ExtUnixSk: proto.Bool(true),
+		// Options from saved CheckpointData.CRIU
+		ShellJob:  proto.Bool(cfg.ShellJob),
+		TcpClose:  proto.Bool(cfg.TcpClose),
+		FileLocks: proto.Bool(cfg.FileLocks),
+		ExtUnixSk: proto.Bool(cfg.ExtUnixSk),
 
-		// Cgroup management - ignore to avoid conflicts
+		// Cgroup management from saved config
 		ManageCgroups:     proto.Bool(true),
 		ManageCgroupsMode: &cgMode,
 
-		// Device and inode handling
+		// Device and inode handling (restore-specific)
 		EvasiveDevices: proto.Bool(true),
 		ForceIrmap:     proto.Bool(true),
 
@@ -121,6 +153,11 @@ func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
 	// Add work directory if specified
 	if cfg.WorkDirFD >= 0 {
 		criuOpts.WorkDirFd = proto.Int32(cfg.WorkDirFD)
+	}
+
+	// Add timeout if specified (required for CUDA restores)
+	if cfg.Timeout > 0 {
+		criuOpts.Timeout = proto.Uint32(cfg.Timeout)
 	}
 
 	return criuOpts

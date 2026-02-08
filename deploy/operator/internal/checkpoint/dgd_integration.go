@@ -20,7 +20,6 @@ package checkpoint
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -161,42 +160,21 @@ func ResolveCheckpointForService(
 	return info, nil
 }
 
-// InjectCheckpointEnvVars adds checkpoint-related environment variables to a container
-// Sets STORAGE_TYPE, LOCATION, PATH, HASH, and CRIU-related vars for unified storage backend handling.
+// InjectCheckpointEnvVars adds checkpoint-related environment variables to a container.
+// Sets LOCATION and HASH for the restored pod. Storage type is NOT injected here —
+// the restore side doesn't need it. Checkpoint job pods get it separately.
 func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, config *controller_common.CheckpointConfig) {
 	if !info.Enabled {
 		return
 	}
 
-	// Determine storage type (default to PVC if not set)
-	storageType := info.StorageType
-	if storageType == "" {
-		storageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(controller_common.CheckpointStorageTypePVC)
-	}
-
-	envVars := []corev1.EnvVar{
-		{
-			Name:  consts.EnvCheckpointStorageType,
-			Value: string(storageType),
-		},
-	}
+	var envVars []corev1.EnvVar
 
 	// Location is the source (where to fetch from)
 	if info.Location != "" {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  consts.EnvCheckpointLocation,
 			Value: info.Location,
-		})
-	}
-
-	// For PVC storage, also inject DYNAMO_CHECKPOINT_PATH (base directory)
-	// This is used by k8s-runc-bypass restore entrypoint
-	if string(storageType) == controller_common.CheckpointStorageTypePVC && info.Location != "" {
-		// Extract base path using filepath.Dir()
-		basePath := filepath.Dir(info.Location)
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  consts.EnvCheckpointPath,
-			Value: basePath,
 		})
 	}
 
@@ -208,34 +186,11 @@ func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, 
 		})
 	}
 
-	// Add CRIU-related env vars for restore operations
-	criuTimeout := consts.DefaultCRIUTimeout
-	if config != nil && config.CRIUTimeout != "" {
-		criuTimeout = config.CRIUTimeout
-	}
-
-	envVars = append(envVars,
-		corev1.EnvVar{
-			Name:  consts.EnvRestoreMarkerFile,
-			Value: consts.RestoreMarkerFilePath,
-		},
-		corev1.EnvVar{
-			Name:  consts.EnvCRIUWorkDir,
-			Value: consts.CRIUWorkDirPath,
-		},
-		corev1.EnvVar{
-			Name:  consts.EnvCRIULogDir,
-			Value: consts.CRIULogDirPath,
-		},
-		corev1.EnvVar{
-			Name:  consts.EnvCUDAPluginDir,
-			Value: consts.CUDAPluginDirPath,
-		},
-		corev1.EnvVar{
-			Name:  consts.EnvCRIUTimeout,
-			Value: criuTimeout,
-		},
-	)
+	// NOTE: CRIU-related env vars (CRIU_WORK_DIR, CRIU_LOG_DIR, CUDA_PLUGIN_DIR,
+	// CRIU_TIMEOUT) are NOT injected here. The restore entrypoint reads CRIU options
+	// from the saved CheckpointData (metadata.yaml), and other paths are hardcoded
+	// constants. DYN_RESTORE_MARKER_FILE is also not injected — both the restore
+	// entrypoint and vLLM default to the same hardcoded path (/tmp/dynamo-restored).
 
 	// Prepend checkpoint env vars to ensure they're available
 	container.Env = append(envVars, container.Env...)

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // MountMapping represents an external mount for CRIU
@@ -52,12 +54,8 @@ var systemMountPaths = map[string]bool{
 
 // ParseMountInfo parses /proc/<pid>/mountinfo and returns bind mounts
 // that need to be handled by CRIU as external mounts
-func ParseMountInfo(pid int, hostProc string) ([]MountMapping, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", hostProc, pid)
+func ParseMountInfo(pid int) ([]MountMapping, error) {
+	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", config.HostProcPath, pid)
 	file, err := os.Open(mountinfoPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open mountinfo: %w", err)
@@ -169,8 +167,8 @@ func parseMountInfoLine(line string) (MountMapping, bool) {
 }
 
 // GetBindMounts returns only bind mounts (type "bind" or with bind option)
-func GetBindMounts(pid int, hostProc string) ([]MountMapping, error) {
-	mounts, err := ParseMountInfo(pid, hostProc)
+func GetBindMounts(pid int) ([]MountMapping, error) {
+	mounts, err := ParseMountInfo(pid)
 	if err != nil {
 		return nil, err
 	}
@@ -190,8 +188,8 @@ func GetBindMounts(pid int, hostProc string) ([]MountMapping, error) {
 }
 
 // GetKubernetesVolumeMounts returns mounts that appear to be Kubernetes volumes
-func GetKubernetesVolumeMounts(pid int, hostProc string) ([]MountMapping, error) {
-	mounts, err := ParseMountInfo(pid, hostProc)
+func GetKubernetesVolumeMounts(pid int) ([]MountMapping, error) {
+	mounts, err := ParseMountInfo(pid)
 	if err != nil {
 		return nil, err
 	}
@@ -230,12 +228,8 @@ type AllMountInfo struct {
 // captures everything from mountinfo, not just the filtered subset.
 // Without marking ALL mounts as external, CRIU restore fails with
 // "No mapping for <mount_id>:(null) mountpoint" errors.
-func GetAllMountsFromMountinfo(pid int, hostProc string) ([]AllMountInfo, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", hostProc, pid)
+func GetAllMountsFromMountinfo(pid int) ([]AllMountInfo, error) {
+	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", config.HostProcPath, pid)
 	file, err := os.Open(mountinfoPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open mountinfo: %w", err)
@@ -259,6 +253,42 @@ func GetAllMountsFromMountinfo(pid int, hostProc string) ([]AllMountInfo, error)
 	}
 
 	return mounts, nil
+}
+
+// GetMountsUnderPrefixes returns all mount points that fall under any of the given
+// directory prefixes. This is used to enumerate mounts to skip during checkpoint,
+// allowing cross-node restore when certain mounts (e.g., nvidia runtime mounts)
+// don't exist on the target node.
+//
+// For example, with prefixes ["/run/nvidia/driver", "/proc/driver/nvidia"]:
+//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_tu10x.bin -> included
+//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_ga10x.bin -> included
+//   - /proc/driver/nvidia/params -> included
+//   - /run/nvidia-ctk-hook -> NOT included (doesn't match prefix)
+func GetMountsUnderPrefixes(pid int, prefixes []string) ([]string, error) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+
+	mounts, err := GetAllMountsFromMountinfo(pid)
+	if err != nil {
+		return nil, err
+	}
+
+	var matchedMounts []string
+	for _, m := range mounts {
+		for _, prefix := range prefixes {
+			// Check if mount point starts with prefix
+			// Use HasPrefix with trailing slash check to avoid partial matches
+			// e.g., "/run/nvidia" should match "/run/nvidia/driver/..." but not "/run/nvidia-ctk-hook"
+			if strings.HasPrefix(m.MountPoint, prefix+"/") || m.MountPoint == prefix {
+				matchedMounts = append(matchedMounts, m.MountPoint)
+				break // Don't add same mount twice if it matches multiple prefixes
+			}
+		}
+	}
+
+	return matchedMounts, nil
 }
 
 // parseAllMountInfoLine parses a single line from mountinfo without filtering.
