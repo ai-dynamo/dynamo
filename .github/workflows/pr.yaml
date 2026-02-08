@@ -41,6 +41,7 @@ jobs:
     steps:
       - name: can you see? 
         run: |
+          sleep 10000
           ls -la /models/ci/models/qwen
 
 
