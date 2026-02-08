@@ -40,13 +40,7 @@ except ImportError:
 
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.multimodal_handlers import (
-    EncodeWorkerHandler,
-    MultimodalDecodeWorkerHandler,
-    MultimodalPDWorkerHandler,
-    VLLMEncodeWorkerHandler,
-)
-from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
+from dynamo.vllm.worker_factory import WorkerFactory
 
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
@@ -242,21 +236,17 @@ async def worker():
     logging.debug("Signal handlers set up for graceful shutdown")
 
     # Route to appropriate initialization based on config flags
-    if config.vllm_native_encoder_worker:
-        await init_vllm_native_encoder(runtime, config, shutdown_event)
-        logger.debug("init_vllm_native_encoder completed")
-    elif config.multimodal_encode_worker:
-        await init_multimodal_encode_worker(runtime, config, shutdown_event)
-        logger.debug("init_multimodal_encode_worker completed")
-    elif (
-        config.multimodal_worker
-        or config.multimodal_decode_worker
-        or config.multimodal_encode_prefill_worker
-    ):
-        await init_multimodal_worker(
+    if WorkerFactory.handles(config):
+        # Create worker factory with setup functions
+        factory = WorkerFactory(
+            setup_vllm_engine_fn=setup_vllm_engine,
+            setup_kv_event_publisher_fn=setup_kv_event_publisher,
+            register_vllm_model_fn=register_vllm_model,
+        )
+        await factory.create(
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
-        logger.debug("init_multimodal_worker completed")
+        logger.debug("multimodal worker completed")
     elif config.omni:
         await init_omni(runtime, config, shutdown_event)
         logger.debug("init_omni completed")
@@ -871,239 +861,6 @@ def get_engine_cache_info(engine: AsyncLLM):
     except Exception as e:
         logging.error(f"Failed to get configuration values from vLLM config: {e}")
         raise
-
-
-async def init_multimodal_encode_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
-    """Initialize multimodal encode worker component"""
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
-
-    handler = EncodeWorkerHandler(
-        config.engine_args,
-    )
-    await handler.async_init(runtime)
-    logger.info("Starting to serve the encode worker endpoint...")
-
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve encode worker endpoint: {e}")
-        raise
-    finally:
-        handler.cleanup()
-
-
-async def init_vllm_native_encoder(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
-    """
-    Initialize vLLM-native encoder worker component (ECConnector mode).
-    In this mode, vLLM handles encoder execution, caching, and storage automatically.
-    """
-    # Create component and endpoint
-    component = runtime.namespace(config.namespace).component(config.component)
-    generate_endpoint = component.endpoint(config.endpoint)
-
-    # Configure ECTransferConfig for producer role
-    instance_id = 0
-    engine_id = f"{config.namespace}.{config.component}.encoder.{instance_id}"
-
-    # Configure encoder with producer role, it will be responsible for creating embeddings and storing them in the shared storage
-    ec_transfer_config = create_ec_transfer_config(
-        engine_id=engine_id,
-        ec_role="ec_producer",
-        ec_connector_backend=config.ec_connector_backend,
-        ec_storage_path=config.ec_storage_path,
-        ec_extra_config=config.ec_extra_config,
-    )
-
-    # Set ECTransferConfig on engine args
-    config.engine_args.ec_transfer_config = ec_transfer_config
-
-    # Setup vLLM engine
-    (
-        engine_client,
-        vllm_config,
-        default_sampling_params,
-        prometheus_temp_dir,
-    ) = setup_vllm_engine(config)
-
-    # Initialize vLLM Native Encoder Worker Handler
-    handler = VLLMEncodeWorkerHandler(
-        runtime,
-        component,
-        engine_client,
-        config,
-    )
-    handler.add_temp_dir(prometheus_temp_dir)
-
-    logger.info("Starting to serve vLLM-native encoder endpoint...")
-
-    # 6. Serve endpoint
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve vLLM-native encoder endpoint: {e}")
-        raise
-    finally:
-        handler.cleanup()
-
-
-async def init_multimodal_worker(
-    runtime: DistributedRuntime,
-    config: Config,
-    shutdown_event: asyncio.Event,
-    pre_created_engine=None,
-):
-    """
-    Initialize multimodal worker component.
-
-    Supports two modes:
-    1. --multimodal-worker: Receives embeddings from separate encoder
-    2. --multimodal-encode-prefill-worker: Handles inline encoding (e.g., Llama 4)
-
-    Both can operate in aggregated (P+D) or disaggregated (P→D) mode.
-
-    When --ec-consumer-mode is enabled, configures as ECConnector consumer
-    to load encoder embeddings from shared storage.
-    """
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
-    clear_endpoint = component.endpoint("clear_kv_blocks")
-
-    # Configure ECConnector consumer mode if enabled
-    if config.ec_consumer_mode:
-        logger.info("Configuring as ECConnector consumer for encoder embeddings")
-        instance_id = 0
-        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
-
-        # The PD Worker just load the embeddings from the shared storage, so it is a consumer
-        ec_transfer_config = create_ec_transfer_config(
-            engine_id=engine_id,
-            ec_role="ec_consumer",
-            ec_connector_backend=config.ec_connector_backend,
-            ec_storage_path=config.ec_storage_path,
-            ec_extra_config=config.ec_extra_config,
-        )
-
-        # Set ECTransferConfig on engine args
-        config.engine_args.ec_transfer_config = ec_transfer_config
-        logger.info(f"Configured as ECConnector consumer with engine_id={engine_id}")
-
-    # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if pre_created_engine is not None:
-        (
-            engine_client,
-            vllm_config,
-            default_sampling_params,
-            prometheus_temp_dir,
-        ) = pre_created_engine
-    else:
-        (
-            engine_client,
-            vllm_config,
-            default_sampling_params,
-            prometheus_temp_dir,
-        ) = setup_vllm_engine(config)
-
-    # Set up encode worker client when routing to encoder is enabled
-    # (PD worker handles encode routing directly instead of a separate processor)
-    encode_worker_client = None
-    if config.route_to_encoder:
-        encode_worker_client = (
-            await runtime.namespace(config.namespace)
-            .component("encoder")
-            .endpoint("generate")
-            .client()
-        )
-        logger.info("Waiting for Encoder Worker Instances ...")
-        await encode_worker_client.wait_for_instances()
-        if config.ec_consumer_mode:
-            logger.info("Connected to vLLM-native encoder workers (ECConnector mode)")
-        else:
-            logger.info("Connected to standalone encoder workers")
-
-    # Set up decode worker client for disaggregated mode
-    decode_worker_client = None
-    if config.is_prefill_worker:
-        # Prefill worker needs to connect to decode worker
-        decode_worker_client = (
-            await runtime.namespace(config.namespace)
-            .component("decoder")
-            .endpoint("generate")
-            .client()
-        )
-        await decode_worker_client.wait_for_instances()
-        logger.info("Connected to decode worker for disaggregated mode")
-
-    # Choose handler based on worker type
-    if config.multimodal_decode_worker:
-        handler = MultimodalDecodeWorkerHandler(
-            runtime, component, engine_client, config, shutdown_event
-        )
-    else:
-        handler = MultimodalPDWorkerHandler(
-            runtime,
-            component,
-            engine_client,
-            config,
-            encode_worker_client,
-            decode_worker_client,
-            shutdown_event,
-        )
-    handler.add_temp_dir(prometheus_temp_dir)
-
-    await handler.async_init(runtime)
-
-    # Set up KV event publisher for prefix caching if enabled
-    kv_publisher = setup_kv_event_publisher(
-        config, component, generate_endpoint, vllm_config
-    )
-    if kv_publisher:
-        handler.kv_publisher = kv_publisher
-
-    # Register model with the frontend so it can route requests
-    model_type = parse_endpoint_types(config.dyn_endpoint_types)
-    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-    await register_vllm_model(
-        model_input,
-        model_type,
-        generate_endpoint,
-        config,
-        engine_client,
-        vllm_config,
-        migration_limit=config.migration_limit,
-    )
-
-    metrics_labels = [("model", config.served_model_name or config.model)]
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                metrics_labels=metrics_labels,
-            ),
-            clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks,
-                metrics_labels=metrics_labels,
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve endpoints: {e}")
-        raise
-    finally:
-        handler.cleanup()
 
 
 async def init_omni(
