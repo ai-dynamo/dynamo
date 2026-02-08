@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
-use super::{KvWorkerMonitor, RuntimeConfigs};
+use super::{KvWorkerMonitor, RuntimeConfigWatch, runtime_config_watch};
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
@@ -77,7 +77,7 @@ pub struct ModelManager {
 
     // Per-model monitoring: worker_monitors for load-based rejection, runtime_configs for KvScheduler
     worker_monitors: DashMap<String, KvWorkerMonitor>,
-    runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
+    runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 }
 
 impl Default for ModelManager {
@@ -568,12 +568,12 @@ impl ModelManager {
     }
 
     /// Get or create a runtime config watcher for an endpoint.
-    /// Spawns a background task to watch for worker config changes.
-    /// Returns a shared RuntimeConfigs that KvScheduler can use directly.
+    /// Spawns a background task that joins instance availability and config discovery.
+    /// Returns a `watch::Receiver` with the latest `HashMap<WorkerId, ModelRuntimeConfig>`.
     pub async fn get_or_create_runtime_config_watcher(
         &self,
         endpoint: &Endpoint,
-    ) -> anyhow::Result<Arc<RuntimeConfigs>> {
+    ) -> anyhow::Result<RuntimeConfigWatch> {
         let endpoint_id = endpoint.id();
 
         // Fast path: return existing if present
@@ -581,20 +581,17 @@ impl ModelManager {
             return Ok(existing.clone());
         }
 
-        // Atomic get-or-insert to avoid TOCTOU race
-        let inner = Arc::new(RuntimeConfigs::new());
-        let (result, is_new) = match self.runtime_configs.entry(endpoint_id) {
-            Entry::Occupied(e) => (e.get().clone(), false),
+        // Slow path: create the watch (spawns a background task).
+        // If another caller raced us, the entry() below picks up the winner;
+        // the loser's background task stops once its receivers are dropped.
+        let rx = runtime_config_watch(endpoint).await?;
+        let result = match self.runtime_configs.entry(endpoint_id) {
+            Entry::Occupied(e) => e.get().clone(),
             Entry::Vacant(e) => {
-                e.insert(inner.clone());
-                (inner, true)
+                e.insert(rx.clone());
+                rx
             }
         };
-
-        // Only spawn watcher if we were the one who inserted
-        if is_new {
-            result.start_watcher(endpoint).await?;
-        }
 
         Ok(result)
     }
@@ -606,9 +603,9 @@ impl ModelManager {
         endpoint_id: &EndpointId,
         worker_id: WorkerId,
     ) -> Option<DisaggregatedEndpoint> {
-        let inner = self.runtime_configs.get(endpoint_id)?;
-        let config_ref = inner.configs.get(&worker_id)?;
-        config_ref.as_ref()?.disaggregated_endpoint.clone()
+        let rx = self.runtime_configs.get(endpoint_id)?;
+        let configs = rx.borrow();
+        configs.get(&worker_id)?.disaggregated_endpoint.clone()
     }
 
     /// Lists all models with worker monitors configured.
