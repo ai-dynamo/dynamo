@@ -7,8 +7,10 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.vllm.multimodal_handlers import multimodal_pd_worker_handler as mod
@@ -169,6 +171,190 @@ class TestBuildRequestFromFrontend:
 
         mock_fetch.assert_awaited_once()
         assert result.multimodal_inputs == [fake_group]
+
+    @pytest.mark.asyncio
+    async def test_with_cache_calls_fetch_with_cache(self):
+        """With cache enabled -> delegates to _fetch_embeddings_with_cache."""
+        mock_client = MagicMock()
+        config = _make_config(multimodal_embedding_cache_capacity_gb=1.0)
+        handler = _make_handler(config=config, encode_worker_client=mock_client)
+        handler.default_sampling_params = {}
+
+        fake_group = MultiModalGroup(multimodal_input=MultiModalInput())
+        with patch.object(
+            handler,
+            "_fetch_embeddings_with_cache",
+            new_callable=AsyncMock,
+            return_value=[fake_group],
+        ) as mock_cache_fetch:
+            raw = _make_raw_frontend_request(image_urls=["http://img.png"])
+            result = await handler._build_request_from_frontend(raw)
+
+        mock_cache_fetch.assert_awaited_once_with(
+            ["http://img.png"],
+            result.request_id,
+        )
+        assert result.multimodal_inputs == [fake_group]
+
+
+class TestFetchEmbeddingsWithCache:
+    @pytest.mark.asyncio
+    async def test_all_cached(self):
+        """All URLs cached -> no encode worker call."""
+        mock_client = MagicMock()
+        config = _make_config(multimodal_embedding_cache_capacity_gb=1.0)
+        handler = _make_handler(config=config, encode_worker_client=mock_client)
+
+        tensor = torch.randn(1, 10, dtype=torch.float16)
+        grid = [[1, 2, 3]]
+        url = "http://img1.png"
+        key = mod.get_embedding_hash(url)
+        handler.embedding_cache_manager.set(
+            key, CachedEmbedding(tensor=tensor, image_grid_thw=grid)
+        )
+
+        with patch.object(
+            mod,
+            "fetch_embeddings_from_encode_workers",
+            new_callable=AsyncMock,
+        ) as mock_fetch:
+            groups = await handler._fetch_embeddings_with_cache([url], "req-1")
+
+        mock_fetch.assert_not_awaited()
+        assert len(groups) == 1
+        assert torch.equal(groups[0].cached_embedding, tensor)
+        assert groups[0].image_grid_thw == grid
+
+    @pytest.mark.asyncio
+    async def test_all_uncached(self):
+        """All URLs uncached -> full encode worker call, results cached."""
+        mock_client = MagicMock()
+        config = _make_config(multimodal_embedding_cache_capacity_gb=1.0)
+        handler = _make_handler(config=config, encode_worker_client=mock_client)
+        handler._connector = None
+        handler.EMBEDDINGS_DTYPE = torch.float16
+        handler.EMBEDDINGS_DEVICE = "cpu"
+
+        url = "http://img1.png"
+        tensor = torch.randn(1, 10, dtype=torch.float16)
+        fake_group = MultiModalGroup(
+            multimodal_input=MultiModalInput(),
+            image_grid_thw=[[1, 2, 3]],
+        )
+
+        with (
+            patch.object(
+                mod,
+                "fetch_embeddings_from_encode_workers",
+                new_callable=AsyncMock,
+                return_value=[fake_group],
+            ) as mock_fetch,
+            patch.object(
+                mod,
+                "load_embeddings",
+                new_callable=AsyncMock,
+                return_value=tensor,
+            ),
+        ):
+            groups = await handler._fetch_embeddings_with_cache([url], "req-1")
+
+        mock_fetch.assert_awaited_once()
+        assert len(groups) == 1
+        assert torch.equal(groups[0].cached_embedding, tensor)
+
+        # Verify result was cached
+        key = mod.get_embedding_hash(url)
+        cached = handler.embedding_cache_manager.get(key)
+        assert cached is not None
+        assert torch.equal(cached.tensor, tensor)
+        assert cached.image_grid_thw == [[1, 2, 3]]
+
+    @pytest.mark.asyncio
+    async def test_mixed_cache(self):
+        """Mixed cache hits/misses -> only misses sent to encode workers."""
+        mock_client = MagicMock()
+        config = _make_config(multimodal_embedding_cache_capacity_gb=1.0)
+        handler = _make_handler(config=config, encode_worker_client=mock_client)
+        handler._connector = None
+        handler.EMBEDDINGS_DTYPE = torch.float16
+        handler.EMBEDDINGS_DEVICE = "cpu"
+
+        url_cached = "http://cached.png"
+        url_miss = "http://miss.png"
+        cached_tensor = torch.randn(1, 10, dtype=torch.float16)
+        miss_tensor = torch.randn(1, 10, dtype=torch.float16)
+
+        # Pre-populate cache for first URL
+        key = mod.get_embedding_hash(url_cached)
+        handler.embedding_cache_manager.set(
+            key, CachedEmbedding(tensor=cached_tensor, image_grid_thw=None)
+        )
+
+        fake_group = MultiModalGroup(
+            multimodal_input=MultiModalInput(),
+            image_grid_thw=[[4, 5, 6]],
+        )
+
+        with (
+            patch.object(
+                mod,
+                "fetch_embeddings_from_encode_workers",
+                new_callable=AsyncMock,
+                return_value=[fake_group],
+            ) as mock_fetch,
+            patch.object(
+                mod,
+                "load_embeddings",
+                new_callable=AsyncMock,
+                return_value=miss_tensor,
+            ),
+        ):
+            groups = await handler._fetch_embeddings_with_cache(
+                [url_cached, url_miss], "req-1"
+            )
+
+        # Only the miss URL should have been sent
+        mock_fetch.assert_awaited_once()
+        call_args = mock_fetch.call_args
+        assert call_args[0][1] == [url_miss]
+
+        assert len(groups) == 2
+        assert torch.equal(groups[0].cached_embedding, cached_tensor)
+        assert torch.equal(groups[1].cached_embedding, miss_tensor)
+
+
+class TestLoadMultimodalDataWithCache:
+    @pytest.mark.asyncio
+    async def test_cached_embedding_path(self):
+        """_load_multimodal_data uses cached_embedding when set on a group."""
+        handler = _make_handler()
+
+        tensor = torch.randn(1, 10, dtype=torch.float16)
+        group = MultiModalGroup(
+            multimodal_input=MultiModalInput(),
+            cached_embedding=tensor,
+            image_grid_thw=None,
+        )
+
+        from vllm.sampling_params import SamplingParams
+
+        request = vLLMMultimodalRequest(
+            engine_prompt=PatchedTokensPrompt(prompt_token_ids=[1, 2, 3]),
+            sampling_params=SamplingParams(),
+            request_id="req-1",
+            multimodal_inputs=[group],
+        )
+
+        with patch.object(
+            mod,
+            "accumulate_embeddings",
+        ) as mock_accum:
+            await handler._load_multimodal_data(request)
+
+        mock_accum.assert_called_once()
+        call_args = mock_accum.call_args
+        assert torch.equal(call_args[0][3], tensor)
+        assert call_args[0][4] is None
 
 
 class TestGenerateAgg:

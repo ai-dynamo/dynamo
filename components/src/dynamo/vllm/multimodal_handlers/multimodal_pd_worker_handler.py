@@ -13,6 +13,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.runtime import Client, Component, DistributedRuntime
@@ -27,6 +28,7 @@ from ..multimodal_utils import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
 )
+from ..multimodal_utils.encode_utils import get_embedding_hash
 from ..multimodal_utils.model import is_qwen_vl_model
 from ..multimodal_utils.prefill_worker_utils import (
     IMAGE_URL_KEY,
@@ -106,6 +108,68 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self._connector = connect.Connector()
         logger.info("Multimodal PD Worker async initialization completed.")
 
+    async def _fetch_embeddings_with_cache(
+        self,
+        image_urls: list[str],
+        request_id: str,
+    ) -> list[MultiModalGroup]:
+        """Fetch embeddings with local cache lookup.
+
+        For each URL, check the embedding cache first. Only URLs with cache
+        misses are sent to encode workers. Results are cached for future use.
+        """
+        assert self.embedding_cache_manager is not None
+
+        results: list[MultiModalGroup | None] = [None] * len(image_urls)
+        uncached: list[tuple[int, str]] = []
+
+        for idx, url in enumerate(image_urls):
+            key = get_embedding_hash(url)
+            cached = self.embedding_cache_manager.get(key)
+            if cached is not None:
+                logger.debug(f"[{request_id}] Cache hit for URL index {idx}")
+                results[idx] = MultiModalGroup(
+                    cached_embedding=cached.tensor,
+                    image_grid_thw=cached.image_grid_thw,
+                )
+            else:
+                uncached.append((idx, url))
+
+        if uncached:
+            logger.info(
+                f"[{request_id}] Cache miss for {len(uncached)}/{len(image_urls)} URLs, "
+                "fetching from encode workers"
+            )
+            miss_urls = [url for _, url in uncached]
+            groups = await fetch_embeddings_from_encode_workers(
+                self.encode_worker_client,  # type: ignore[arg-type]
+                miss_urls,
+                request_id,
+            )
+            for (idx, url), group in zip(uncached, groups):
+                embedding = await load_embeddings(
+                    group,
+                    self.EMBEDDINGS_DTYPE,
+                    self.EMBEDDINGS_DEVICE,
+                    self._connector,
+                )
+                key = get_embedding_hash(url)
+                self.embedding_cache_manager.set(
+                    key,
+                    CachedEmbedding(
+                        tensor=embedding,
+                        image_grid_thw=group.image_grid_thw,
+                    ),
+                )
+                group.cached_embedding = embedding
+                results[idx] = group
+        else:
+            logger.info(
+                f"[{request_id}] All {len(image_urls)} URLs served from cache"
+            )
+
+        return [r for r in results if r is not None]
+
     async def _build_request_from_frontend(
         self, raw_request: dict
     ) -> vLLMMultimodalRequest:
@@ -137,6 +201,12 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     self.encode_worker_client,
                     image_urls,
                     raw_request["token_ids"],
+                    request_id,
+                )
+            elif self.embedding_cache_manager is not None:
+                # Standalone encoder with local embedding cache
+                multimodal_groups = await self._fetch_embeddings_with_cache(
+                    image_urls,
                     request_id,
                 )
             else:
@@ -209,6 +279,15 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 # non-disaggregated mode (vLLM encodes inline).
                 multi_modal_data["image"].append(
                     await self.image_loader.load_image(mi.multimodal_input.image_url)
+                )
+            elif mi.cached_embedding is not None:
+                # Pre-computed embeddings from local cache
+                accumulate_embeddings(
+                    multi_modal_data,
+                    self.config.model,
+                    self.EMBEDDINGS_DTYPE,
+                    mi.cached_embedding,
+                    mi.image_grid_thw,
                 )
             else:
                 # Pre-computed embeddings via NIXL RDMA or local safetensors
