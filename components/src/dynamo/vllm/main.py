@@ -556,7 +556,7 @@ async def register_vllm_model(
         generate_endpoint,
         config.model,
         config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
+        kv_cache_block_size=runtime_values["block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
@@ -860,6 +860,7 @@ def get_engine_cache_info(engine: AsyncLLM):
         # Get values directly from vllm_config instead of collective_rpc
         cache_values = {
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
+            "block_size": engine.vllm_config.cache_config.block_size,
         }
 
         scheduler_values = {
@@ -871,6 +872,7 @@ def get_engine_cache_info(engine: AsyncLLM):
         logging.info(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
+            "block_size": cache_values["block_size"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
             "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
         }
