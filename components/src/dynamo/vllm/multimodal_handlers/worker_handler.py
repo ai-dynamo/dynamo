@@ -122,7 +122,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         component: Component,
         engine_client: AsyncLLM,
         config,
-        decode_worker_client: Client = None,
+        decode_worker_client: Client | None = None,
         shutdown_event=None,
     ):
         # Get default_sampling_params from config
@@ -157,7 +157,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Create and initialize a dynamo connector for this worker.
         # We'll need this to move data between this worker and remote workers efficiently.
         # Note: This is synchronous initialization, async initialization happens in async_init
-        self._connector = None  # Will be initialized in async_init
+        self._connector: connect.Connector | None = (
+            None  # Will be initialized in async_init
+        )
         self.image_loader = ImageLoader()
 
         logger.info("Multimodal PD Worker has been initialized")
@@ -279,7 +281,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 ) in await self.decode_worker_client.round_robin(
                     decode_request.model_dump_json()
                 ):
-                    output = MyRequestOutput.model_validate_json(decode_response.data())
+                    output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore[attr-defined]
                     yield MyRequestOutput(
                         request_id=output.request_id,
                         prompt=output.prompt,
