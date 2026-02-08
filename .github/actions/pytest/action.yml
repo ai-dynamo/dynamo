@@ -46,6 +46,10 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  local_models_dir:
+    description: 'Host path to pre-staged HuggingFace models (org/model layout). Mounted read-only into the test container and set as DYNAMO_LOCAL_MODELS_DIR. Leave empty to skip.'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -63,6 +67,7 @@ runs:
         fi
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
+
 
     - name: Start MinIO Service
       if: inputs.start_minio == 'true'
@@ -238,7 +243,14 @@ runs:
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
         echo "▶️ Executing: $PYTEST_CMD"
 
-        docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
+        # Build optional local-models flags (mount + env) when a path is provided
+        LOCAL_MODELS_FLAGS=""
+        if [[ -n "${{ inputs.local_models_dir }}" ]]; then
+          echo "📦 Local models dir: ${{ inputs.local_models_dir }}"
+          LOCAL_MODELS_FLAGS="-v ${{ inputs.local_models_dir }}:${{ inputs.local_models_dir }}:ro --env DYNAMO_LOCAL_MODELS_DIR=${{ inputs.local_models_dir }}"
+        fi
+
+        docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${LOCAL_MODELS_FLAGS} --rm -w /workspace \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \

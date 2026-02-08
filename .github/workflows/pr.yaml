@@ -36,15 +36,90 @@ jobs:
   # ============================================================================
 
 
+
   test-mountpoint:
-    runs-on: stg-tester-arm-v1
-    env: 
+    name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    runs-on: stg-tester-amd-gpu-v1
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
       DYNAMO_LOCAL_MODELS_DIR: /models/ci/models
     steps:
-      - name: can you see? 
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
         run: |
-          ls -la ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:main-vllm-amd64
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull relevant images
+        shell: bash
+        run: |
+          start_time=$(date +%s)
+          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          docker pull quay.io/minio/minio
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "⏱️ Image pull duration: ${duration}s"
 
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        run: |
+          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.test_image }}"
+
+          # Run the sanity check script inside the container
+          # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+          export WORKSPACE=/workspace
+
+          set +e
+          docker run --rm "${{ steps.calculate-target-tag.outputs.test_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+      # Run CPU-only tests first (parallelized for speed)
+      # These are unit tests marked with gpu_0 that don't require GPU hardware
+      - name: Run CPU-only tests (parallelized)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ format('pre_merge and vllm and gpu_0') }}
+          framework: vllm
+          test_type: "pre_merge_cpu"
+          platform_arch: amd64
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'auto'
+          dind_as_sidecar: 'true'
+          local_models_dir: ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
+
+      # Run GPU tests sequentially (only on amd64 runners with GPU)
+      # These are e2e tests marked with gpu_1 that require GPU hardware
+      - name: Run GPU tests (sequential)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ format('pre_merge and vllm and gpu_1') }}
+          framework: vllm
+          test_type: "pre_merge_gpu"
+          platform_arch: amd64
+          enable_mypy: 'false' # already covered by CPU tests
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+          local_models_dir: ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
 
 #   changed-files:
 #     runs-on: ubuntu-latest
