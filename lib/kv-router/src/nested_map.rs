@@ -24,8 +24,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
-    RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank, KvCacheStoreData,
+    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
+    LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
 };
 
 use crate::compute_block_hash_for_seq;
@@ -151,14 +151,9 @@ impl PositionalIndexer {
             let worker_blocks = Arc::clone(&worker_blocks);
 
             let handle = std::thread::spawn(move || {
-                loop {
-                    
-                    if let Ok(Some(event)) = event_receiver.recv() {
-                        if let Err(e) = Self::apply_event_impl(&index, &worker_blocks, event) {
-                            tracing::warn!("Failed to apply event: {:?}", e);
-                        }
-                    } else {
-                        break;
+                while let Ok(Some(event)) = event_receiver.recv() {
+                    if let Err(e) = Self::apply_event_impl(&index, &worker_blocks, event) {
+                        tracing::warn!("Failed to apply event: {:?}", e);
                     }
                 }
             });
@@ -177,26 +172,6 @@ impl PositionalIndexer {
             thread_handles: Mutex::new(thread_handles),
         }
     }
-
-    /// Wait for all pending events and requests to be processed. Used primarily for debugging and benchmarking.
-    pub async fn flush(&self) {
-        loop {
-            let mut all_empty = true;
-
-            for worker_event_channel in self.worker_event_channels.iter() {
-                if !worker_event_channel.is_empty() {
-                    all_empty = false;
-                    break;
-                }
-            }
-
-            if all_empty {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
 }
 
 #[async_trait]
@@ -205,10 +180,7 @@ impl KvIndexerInterface for PositionalIndexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
-
-        Ok(
-            self.jump_search_matches(&sequence, false)
-        )
+        Ok(self.jump_search_matches(&sequence, false))
     }
 
     async fn find_matches_for_request(
@@ -228,7 +200,11 @@ impl KvIndexerInterface for PositionalIndexer {
                 .worker_assignment_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let assigned_worker = idx % self.num_workers;
-            tracing::debug!("Worker {} assigned to thread {}", worker_id, assigned_worker);
+            tracing::debug!(
+                "Worker {} assigned to thread {}",
+                worker_id,
+                assigned_worker
+            );
             assigned_worker
         });
 
@@ -247,7 +223,6 @@ impl KvIndexerInterface for PositionalIndexer {
     }
 
     fn shutdown(&self) {
-
         for channel in self.worker_event_channels.iter() {
             channel.send(None).unwrap();
         }
@@ -264,6 +239,31 @@ impl KvIndexerInterface for PositionalIndexer {
                 tracing::error!("Worker thread panicked during shutdown: {:?}", e);
             }
         }
+    }
+
+    async fn flush(&self) -> usize {
+        let curr_size = self
+            .worker_event_channels
+            .iter()
+            .map(|channel| channel.len())
+            .sum();
+        loop {
+            let mut all_empty = true;
+
+            for worker_event_channel in self.worker_event_channels.iter() {
+                if !worker_event_channel.is_empty() {
+                    all_empty = false;
+                    break;
+                }
+            }
+
+            if all_empty {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        curr_size
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
@@ -306,7 +306,13 @@ impl PositionalIndexer {
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                Self::remove_blocks_impl(index, worker_blocks, worker, &remove_data.block_hashes, id)?;
+                Self::remove_blocks_impl(
+                    index,
+                    worker_blocks,
+                    worker,
+                    &remove_data.block_hashes,
+                    id,
+                )?;
                 Ok(())
             }
             KvCacheEventData::Cleared => {
@@ -361,21 +367,26 @@ impl PositionalIndexer {
             let seq_hash = block_data.block_hash;
 
             // Insert into index: position -> local_hash -> seq_hash -> worker
-            let pos_map = index.entry(position).or_default();
-            pos_map
-                .entry(local_hash)
-                .and_modify(|entry| entry.insert(seq_hash, worker))
-                .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+            {
+                let pos_map = index.entry(position).or_default();
+                pos_map
+                    .entry(local_hash)
+                    .and_modify(|entry| entry.insert(seq_hash, worker))
+                    .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+            }
 
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
             let worker_map = worker_blocks.entry(worker).or_default();
-            worker_map.write().unwrap().insert(seq_hash, (position, local_hash));
+            worker_map
+                .write()
+                .unwrap()
+                .insert(seq_hash, (position, local_hash));
         }
 
         Ok(())
     }
 
-    fn remove_blocks_impl(        
+    fn remove_blocks_impl(
         index: &DashMap<usize, DashMap<LocalBlockHash, SeqEntry>>,
         worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
         worker: WorkerWithDpRank,
@@ -404,7 +415,7 @@ impl PositionalIndexer {
                 );
                 return Err(KvCacheEventError::BlockNotFound);
             };
-    
+
             // Remove from index
             if let Some(pos_map) = index.get(&position)
                 && let Some(mut entry) = pos_map.get_mut(&local_hash)
@@ -560,8 +571,7 @@ impl PositionalIndexer {
                 break;
             }
 
-            let workers_at_pos =
-                self.get_workers_lazy(pos, sequence[pos], seq_hashes, sequence);
+            let workers_at_pos = self.get_workers_lazy(pos, sequence[pos], seq_hashes, sequence);
 
             match workers_at_pos {
                 Some(workers) => {
@@ -663,7 +673,10 @@ impl PositionalIndexer {
                 local_hashes,
             );
 
-            let num_workers_at_next = workers_at_next.as_ref().map(|workers| workers.len()).unwrap_or(0);
+            let num_workers_at_next = workers_at_next
+                .as_ref()
+                .map(|workers| workers.len())
+                .unwrap_or(0);
 
             if num_workers_at_next == active.len() {
                 current_pos = next_pos;

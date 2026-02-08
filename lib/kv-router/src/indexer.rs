@@ -69,6 +69,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::approx::{BlockEntry, PruneConfig, PruneManager};
 // use crate::nested_map::NestedMap;
+pub use crate::nested_map::PositionalIndexer;
 use crate::protocols::*;
 pub use crate::radix_tree::RadixTree;
 use dynamo_tokens::SequenceHash;
@@ -346,6 +347,12 @@ pub trait KvIndexerInterface {
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError>;
+
+    /// Async task that returns when all pending events have been processed.
+    /// For now, we assume that no requests or events are being sent in the meantime.
+    /// Returns the amount of events still in the queue at the time of the flush.
+    /// Used primarily for debugging.
+    async fn flush(&self) -> usize;
 }
 
 /// A request to process a routing decision.
@@ -778,6 +785,16 @@ impl KvIndexerInterface for KvIndexer {
         self.process_routing_decision_internal(worker, local_hashes, sequence_hashes)
             .await
     }
+    async fn flush(&self) -> usize {
+        let curr_size = self.event_tx.max_capacity() - self.event_tx.capacity();
+        loop {
+            if self.event_tx.capacity() == self.event_tx.max_capacity() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        curr_size
+    }
 }
 
 impl KvIndexer {
@@ -1088,6 +1105,10 @@ impl KvIndexerInterface for LocalKvIndexer {
         self.indexer
             .process_routing_decision_for_request(tokens_with_hashes, worker)
             .await
+    }
+
+    async fn flush(&self) -> usize {
+        self.indexer.flush().await
     }
 }
 
@@ -1587,6 +1608,25 @@ impl KvIndexerInterface for KvIndexerSharded {
 
         self.process_routing_decision_internal(worker, local_hashes, sequence_hashes)
             .await
+    }
+
+    async fn flush(&self) -> usize {
+        let curr_size = self
+            .event_tx
+            .iter()
+            .map(|tx| tx.max_capacity() - tx.capacity())
+            .sum();
+        loop {
+            if self
+                .event_tx
+                .iter()
+                .all(|tx| tx.capacity() == tx.max_capacity())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        curr_size
     }
 }
 
