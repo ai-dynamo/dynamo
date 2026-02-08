@@ -1,0 +1,462 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LGTM Bot - Automatically manages merge readiness for PRs.
+# Features:
+#   1. Adds/removes the "lgtm" label based on CI, reviews, and branch protection
+#   2. Maintains a live merge checklist comment showing all merge gates
+#
+# The "lgtm" label indicates a PR is ready to merge when ALL gates pass:
+#   - All required CI checks pass (pre-merge, copyright, DCO, PR title lint)
+#   - At least one approved review (not from the PR author)
+#   - No outstanding "changes requested" reviews
+#   - Branch protection satisfied (including CODEOWNERS requirements)
+#
+# The label is removed immediately when new commits are pushed.
+
+name: LGTM Bot
+
+on:
+  # Re-evaluate after CI workflows complete
+  workflow_run:
+    workflows: ["Pre Merge", "Copyright Checks", "Lint PR"]
+    types: [completed]
+  # Re-evaluate when reviews change
+  pull_request_review:
+    types: [submitted, dismissed]
+  # Remove label when new commits are pushed (uses _target for fork write access)
+  pull_request_target:
+    types: [synchronize]
+
+permissions:
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  evaluate-lgtm:
+    name: Evaluate LGTM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate merge readiness
+        id: lgtm
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'lgtm';
+            const LABEL_COLOR = '0E8A16';
+            const LABEL_DESCRIPTION = 'All CI checks passing, approved, and DCO signed';
+            const CHECKLIST_MARKER = '<!-- lgtm-bot-checklist -->';
+
+            const REQUIRED_CHECKS = [
+              'pre-merge-status-check',
+              'copyright-checks',
+              'DCO',
+              'Validate PR title and add label',
+            ];
+
+            const CHECK_DISPLAY = {
+              'pre-merge-status-check': 'Pre-merge CI',
+              'copyright-checks': 'Copyright headers',
+              'DCO': 'DCO sign-off',
+              'Validate PR title and add label': 'PR title format',
+            };
+
+            // --- Helpers ---
+
+            async function ensureLabelExists() {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: LABEL,
+                  color: LABEL_COLOR,
+                  description: LABEL_DESCRIPTION,
+                });
+              } catch (e) {
+                if (e.status !== 422) throw e; // 422 = already exists
+              }
+            }
+
+            async function addLabel(prNumber) {
+              await ensureLabelExists();
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [LABEL],
+              });
+            }
+
+            async function removeLabel(prNumber) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: LABEL,
+                });
+              } catch (e) {
+                if (e.status !== 404) throw e; // 404 = label not on this PR
+              }
+            }
+
+            async function updateChecklist(prNumber, body) {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              });
+              const existing = comments.find(c => c.body && c.body.includes(CHECKLIST_MARKER));
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body,
+                });
+              }
+            }
+
+            function buildChecklist(checks, reviewStatus, bpState, isFork, headSha) {
+              const lines = [CHECKLIST_MARKER, '## Merge Checklist', ''];
+
+              for (const name of REQUIRED_CHECKS) {
+                const display = CHECK_DISPLAY[name] || name;
+                const status = checks[name] || 'pending';
+                const icon = status === 'pass' ? 'x' : ' ';
+                let suffix = '';
+                if (status === 'pending') suffix = ' *(running...)*';
+                else if (status === 'fail') suffix = ' *(failing)*';
+                lines.push(`- [${icon}] ${display}${suffix}`);
+              }
+
+              if (isFork) {
+                const pmStatus = checks['pre-merge-status-check'] || 'pending';
+                const triggered = pmStatus !== 'pending';
+                const icon = triggered ? 'x' : ' ';
+                const note = triggered
+                  ? ''
+                  : ` *(maintainer must run: \`/ok to test ${headSha.slice(0, 7)}\`)*`;
+                lines.push(`- [${icon}] Full CI triggered${note}`);
+              }
+
+              const approvedIcon = reviewStatus.hasApproval ? 'x' : ' ';
+              const approvedNote = reviewStatus.hasApproval ? '' : ' *(no approvals yet)*';
+              lines.push(`- [${approvedIcon}] At least 1 approval${approvedNote}`);
+
+              if (reviewStatus.hasChangesRequested) {
+                lines.push('- [ ] No outstanding change requests *(changes requested)*');
+              }
+
+              const bpIcon = bpState.ok ? 'x' : ' ';
+              let bpNote = '';
+              if (!bpState.ok) {
+                if (bpState.state === 'dirty') bpNote = ' *(merge conflict)*';
+                else if (bpState.state === 'blocked') bpNote = ' *(pending -- may need CODEOWNERS review)*';
+                else if (bpState.state === 'unknown') bpNote = ' *(computing...)*';
+                else bpNote = ' *(pending)*';
+              }
+              lines.push(`- [${bpIcon}] Branch protection satisfied${bpNote}`);
+
+              lines.push('');
+              lines.push('> When all items are checked, the `lgtm` label will be added automatically.');
+              lines.push('> Run `/lgtm-bot diagnose` for detailed analysis of any blockers.');
+
+              return lines.join('\n');
+            }
+
+            // --- Determine PR number ---
+
+            let prNumber;
+
+            if (context.eventName === 'workflow_run') {
+              const prs = context.payload.workflow_run.pull_requests;
+              if (prs && prs.length > 0) {
+                prNumber = prs[0].number;
+              } else {
+                // Fallback for fork PRs where pull_requests array may be empty
+                const headBranch = context.payload.workflow_run.head_branch;
+                const headRepoOwner = context.payload.workflow_run.head_repository?.owner?.login;
+                if (headRepoOwner && headBranch) {
+                  const { data: pulls } = await github.rest.pulls.list({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    state: 'open',
+                    head: `${headRepoOwner}:${headBranch}`,
+                    per_page: 1,
+                  });
+                  if (pulls.length > 0) {
+                    prNumber = pulls[0].number;
+                  }
+                }
+              }
+            } else {
+              // pull_request_target and pull_request_review both include PR
+              prNumber = context.payload.pull_request?.number;
+            }
+
+            if (!prNumber) {
+              console.log('No associated PR found, skipping');
+              return;
+            }
+
+            console.log(`Evaluating PR #${prNumber}`);
+
+            // --- Get PR details ---
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            if (pr.draft || pr.state !== 'open') {
+              console.log(`PR is ${pr.draft ? 'draft' : pr.state}, skipping`);
+              return;
+            }
+
+            const headSha = pr.head.sha;
+            const hasLabel = pr.labels.some(l => l.name === LABEL);
+            const isFork = pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`;
+
+            // --- On synchronize (new push): remove label, update checklist ---
+
+            if (context.eventName === 'pull_request_target') {
+              if (hasLabel) {
+                console.log('New commits pushed, removing lgtm label');
+                await removeLabel(prNumber);
+              }
+              const pendingChecks = {};
+              for (const name of REQUIRED_CHECKS) {
+                pendingChecks[name] = 'pending';
+              }
+              const checklist = buildChecklist(
+                pendingChecks,
+                { hasApproval: false, hasChangesRequested: false },
+                { ok: false, state: 'unknown' },
+                isFork,
+                headSha,
+              );
+              await updateChecklist(prNumber, checklist);
+              return;
+            }
+
+            // --- Check required CI statuses ---
+
+            let allCheckRuns = [];
+            let page = 1;
+            while (true) {
+              const { data } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: headSha,
+                per_page: 100,
+                page,
+              });
+              allCheckRuns = allCheckRuns.concat(data.check_runs);
+              if (allCheckRuns.length >= data.total_count) break;
+              page++;
+            }
+
+            const { data: combinedStatus } = await github.rest.repos.getCombinedStatusForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: headSha,
+            });
+
+            let allChecksPassing = true;
+            const checkResults = {};
+
+            for (const name of REQUIRED_CHECKS) {
+              const matching = allCheckRuns.filter(cr => cr.name === name);
+
+              if (matching.length > 0) {
+                const latest = matching.sort((a, b) =>
+                  new Date(b.started_at || 0) - new Date(a.started_at || 0)
+                )[0];
+
+                if (latest.status !== 'completed') {
+                  checkResults[name] = 'pending';
+                  allChecksPassing = false;
+                } else if (['success', 'neutral', 'skipped'].includes(latest.conclusion)) {
+                  checkResults[name] = 'pass';
+                } else {
+                  checkResults[name] = 'fail';
+                  allChecksPassing = false;
+                }
+                continue;
+              }
+
+              // Fallback: check commit statuses (case-insensitive match)
+              const statusMatch = combinedStatus.statuses.find(
+                s => s.context === name || s.context.toLowerCase() === name.toLowerCase()
+              );
+
+              if (statusMatch) {
+                checkResults[name] = statusMatch.state === 'success' ? 'pass' : 'fail';
+                if (statusMatch.state !== 'success') allChecksPassing = false;
+                continue;
+              }
+
+              checkResults[name] = 'pending';
+              allChecksPassing = false;
+            }
+
+            console.log('CI check results:');
+            for (const [name, status] of Object.entries(checkResults)) {
+              console.log(`  ${status.padEnd(8)} ${name}`);
+            }
+
+            // --- Check reviews (always, for the checklist) ---
+
+            let hasApproval = false;
+            let hasChangesRequested = false;
+
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            const latestByUser = new Map();
+            for (const review of reviews) {
+              if (review.user.login === pr.user.login) continue;
+              if (!['APPROVED', 'CHANGES_REQUESTED'].includes(review.state)) continue;
+
+              const existing = latestByUser.get(review.user.login);
+              if (!existing || new Date(review.submitted_at) > new Date(existing.submitted_at)) {
+                latestByUser.set(review.user.login, review);
+              }
+            }
+
+            for (const [user, review] of latestByUser) {
+              if (review.state === 'APPROVED') {
+                hasApproval = true;
+                console.log(`  approved  ${user}`);
+              } else if (review.state === 'CHANGES_REQUESTED') {
+                hasChangesRequested = true;
+                console.log(`  changes   ${user}`);
+              }
+            }
+
+            if (!hasApproval) console.log('  No approvals found');
+            if (hasChangesRequested) console.log('  Outstanding changes requested');
+
+            // --- Check branch protection / CODEOWNERS via mergeable_state ---
+
+            let branchProtectionOk = false;
+            let mergeableState = 'pending';
+
+            if (allChecksPassing && hasApproval && !hasChangesRequested) {
+              const { data: freshPr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+
+              mergeableState = freshPr.mergeable_state;
+              console.log(`\nBranch protection mergeable_state: ${mergeableState}`);
+
+              if (mergeableState === 'clean' || mergeableState === 'unstable') {
+                branchProtectionOk = true;
+              } else if (mergeableState === 'unknown') {
+                console.log('mergeable_state is unknown (GitHub still computing), skipping label');
+                // Still update the checklist with what we know
+                const checklist = buildChecklist(
+                  checkResults,
+                  { hasApproval, hasChangesRequested },
+                  { ok: false, state: 'unknown' },
+                  isFork,
+                  headSha,
+                );
+                await updateChecklist(prNumber, checklist);
+                return;
+              } else {
+                console.log(`mergeable_state is ${mergeableState}, not eligible for lgtm`);
+              }
+            }
+
+            // --- Apply or remove label ---
+
+            const shouldHaveLabel = allChecksPassing && hasApproval && !hasChangesRequested && branchProtectionOk;
+
+            console.log(`\nResult: ci=${allChecksPassing} approved=${hasApproval} noChangesReq=${!hasChangesRequested} branchProtection=${branchProtectionOk} => lgtm=${shouldHaveLabel}`);
+
+            if (shouldHaveLabel && !hasLabel) {
+              await addLabel(prNumber);
+              console.log('Added lgtm label');
+              core.setOutput('lgtm_added', 'true');
+              core.setOutput('pr_number', String(prNumber));
+              core.setOutput('pr_title', pr.title);
+              core.setOutput('pr_url', pr.html_url);
+              core.setOutput('pr_author', pr.user.login);
+            } else if (!shouldHaveLabel && hasLabel) {
+              await removeLabel(prNumber);
+              console.log('Removed lgtm label');
+            } else {
+              console.log(`No label change needed (has=${hasLabel}, should=${shouldHaveLabel})`);
+            }
+
+            // --- Update merge checklist ---
+
+            const checklist = buildChecklist(
+              checkResults,
+              { hasApproval, hasChangesRequested },
+              { ok: branchProtectionOk, state: mergeableState },
+              isFork,
+              headSha,
+            );
+            await updateChecklist(prNumber, checklist);
+
+      # --- Slack notification (only when lgtm label is newly added) ---
+      # To enable: add SLACK_LGTM_WEBHOOK_URL as a repository secret
+      # and set SLACK_LGTM_ENABLED variable to 'true'
+      - name: Notify Slack
+        if: steps.lgtm.outputs.lgtm_added == 'true' && vars.SLACK_LGTM_ENABLED == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_LGTM_WEBHOOK_URL }}
+          PR_NUMBER: ${{ steps.lgtm.outputs.pr_number }}
+          PR_TITLE: ${{ steps.lgtm.outputs.pr_title }}
+          PR_URL: ${{ steps.lgtm.outputs.pr_url }}
+          PR_AUTHOR: ${{ steps.lgtm.outputs.pr_author }}
+        run: |
+          curl -sSf -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n \
+              --arg pr_num "$PR_NUMBER" \
+              --arg pr_title "$PR_TITLE" \
+              --arg pr_url "$PR_URL" \
+              --arg pr_author "$PR_AUTHOR" \
+              '{
+                text: ":white_check_mark: PR #\($pr_num) is ready to merge",
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: ":white_check_mark: *PR Ready to Merge*\n<\($pr_url)|#\($pr_num): \($pr_title)>\nAuthor: \($pr_author) | All CI checks passing, approved, DCO signed"
+                    }
+                  }
+                ]
+              }')"

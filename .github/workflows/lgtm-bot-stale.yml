@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LGTM Bot Stale - Scheduled nudges for stale reviews and merge reminders.
+#
+# Runs daily on weekdays at 9am Pacific:
+#   - Stale review nudge: PRs waiting for review for 48+ hours
+#   - Merge reminder: PRs with lgtm label for 24+ hours (forgot to merge?)
+#
+# Both use deduped comments (won't post again within 24h of last nudge).
+
+name: LGTM Bot Stale
+
+on:
+  schedule:
+    - cron: '0 17 * * 1-5' # 9am PT (UTC-8), weekdays
+  workflow_dispatch: {} # Allow manual trigger for testing
+
+permissions:
+  pull-requests: write
+
+jobs:
+  stale-check:
+    name: Check Stale PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Nudge stale reviews and remind to merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const now = new Date();
+            const MS_PER_HOUR = 3600000;
+            const STALE_REVIEW_HOURS = 48;
+            const MERGE_REMINDER_HOURS = 24;
+            const NUDGE_COOLDOWN_HOURS = 24; // Don't re-nudge within this window
+            const NUDGE_MARKER = '<!-- lgtm-bot-stale-nudge -->';
+            const MERGE_MARKER = '<!-- lgtm-bot-merge-reminder -->';
+
+            // Fetch all open, non-draft PRs
+            let allPRs = [];
+            let page = 1;
+            while (true) {
+              const { data: prs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                sort: 'updated',
+                direction: 'asc',
+                per_page: 100,
+                page,
+              });
+              allPRs = allPRs.concat(prs);
+              if (prs.length < 100) break;
+              page++;
+            }
+
+            allPRs = allPRs.filter(pr => !pr.draft);
+            console.log(`Found ${allPRs.length} open non-draft PRs`);
+
+            for (const pr of allPRs) {
+              const prNumber = pr.number;
+
+              // ==========================================================
+              // Stale review nudge (48h+ without response)
+              // ==========================================================
+
+              const { data: requestedReviewers } = await github.rest.pulls.listRequestedReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+
+              const pendingUsers = requestedReviewers.users || [];
+              const pendingTeams = requestedReviewers.teams || [];
+
+              if (pendingUsers.length > 0 || pendingTeams.length > 0) {
+                // Use PR updated_at as a proxy for when review was requested
+                // (more reliable than timeline events for this use case)
+                const prAge = (now - new Date(pr.created_at)) / MS_PER_HOUR;
+                const lastUpdate = (now - new Date(pr.updated_at)) / MS_PER_HOUR;
+
+                // Only nudge if PR is old enough and hasn't been updated recently
+                if (prAge >= STALE_REVIEW_HOURS && lastUpdate >= STALE_REVIEW_HOURS) {
+                  // Check for recent nudge to avoid spam
+                  const { data: comments } = await github.rest.issues.listComments({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    per_page: 10,
+                    direction: 'desc',
+                  });
+
+                  const recentNudge = comments.find(c =>
+                    c.body && c.body.includes(NUDGE_MARKER) &&
+                    (now - new Date(c.created_at)) / MS_PER_HOUR < NUDGE_COOLDOWN_HOURS
+                  );
+
+                  if (!recentNudge) {
+                    const daysWaiting = Math.floor(prAge / 24);
+                    const reviewers = [
+                      ...pendingUsers.map(u => `@${u.login}`),
+                      ...pendingTeams.map(t => `@${context.repo.owner}/${t.slug}`),
+                    ];
+
+                    await github.rest.issues.createComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: prNumber,
+                      body: [
+                        NUDGE_MARKER,
+                        `**Review Reminder** — This PR has been waiting for review for ${daysWaiting} day${daysWaiting !== 1 ? 's' : ''}.`,
+                        '',
+                        `Pending reviewers: ${reviewers.join(', ')}`,
+                        '',
+                        '> If this review is no longer needed, please remove the review request.',
+                      ].join('\n'),
+                    });
+                    console.log(`Nudged PR #${prNumber} (${daysWaiting} days waiting)`);
+                  }
+                }
+              }
+
+              // ==========================================================
+              // Merge reminder (lgtm label for 24h+ without merge)
+              // ==========================================================
+
+              const hasLgtm = pr.labels.some(l => l.name === 'lgtm');
+
+              if (hasLgtm) {
+                // Find when lgtm was last added via issue events
+                const { data: events } = await github.rest.issues.listEvents({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  per_page: 100,
+                });
+
+                const labelEvents = events
+                  .filter(e => e.event === 'labeled' && e.label?.name === 'lgtm')
+                  .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+                if (labelEvents.length > 0) {
+                  const labeledAt = new Date(labelEvents[0].created_at);
+                  const hoursSinceLabel = (now - labeledAt) / MS_PER_HOUR;
+
+                  if (hoursSinceLabel >= MERGE_REMINDER_HOURS) {
+                    // Check for recent merge reminder
+                    const { data: comments } = await github.rest.issues.listComments({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: prNumber,
+                      per_page: 10,
+                      direction: 'desc',
+                    });
+
+                    const recentReminder = comments.find(c =>
+                      c.body && c.body.includes(MERGE_MARKER) &&
+                      (now - new Date(c.created_at)) / MS_PER_HOUR < NUDGE_COOLDOWN_HOURS
+                    );
+
+                    if (!recentReminder) {
+                      await github.rest.issues.createComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: prNumber,
+                        body: [
+                          MERGE_MARKER,
+                          `**Merge Reminder** — This PR has had the \`lgtm\` label for over ${Math.floor(hoursSinceLabel)} hours and is ready to merge.`,
+                          '',
+                          `@${pr.user.login}, did you forget to merge this?`,
+                        ].join('\n'),
+                      });
+                      console.log(`Merge reminder for PR #${prNumber} (${Math.floor(hoursSinceLabel)}h with lgtm)`);
+                    }
+                  }
+                }
+              }
+            }
+
+            console.log('Stale check complete');

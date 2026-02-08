@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LGTM Bot Diagnose - On-demand PR merge readiness diagnostics.
+# Triggered by commenting "/lgtm-bot diagnose" on a PR.
+#
+# Analyzes:
+#   - CI check statuses with log excerpts
+#   - Review status and CODEOWNERS requirements
+#   - Unresolved review conversations
+#   - Merge conflicts, DCO, PR title format
+#   - Fork CI trigger status
+#
+# Optionally uses NVIDIA Inference API (Claude Opus 4.6) for
+# LLM-powered CI failure diagnosis and fix suggestions.
+
+name: LGTM Bot Diagnose
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  pull-requests: write
+  checks: read
+  statuses: read
+  contents: read
+  actions: read
+
+jobs:
+  diagnose:
+    name: Diagnose PR
+    if: >-
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/lgtm-bot diagnose')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Run diagnosis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          NVIDIA_INFERENCE_API_KEY: ${{ secrets.NVIDIA_INFERENCE_API_KEY }}
+        run: python3 .github/scripts/lgtm_bot_diagnose.py

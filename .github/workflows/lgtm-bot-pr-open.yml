@@ -1,0 +1,317 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LGTM Bot PR Open - Runs when a PR is opened or updated.
+# Features:
+#   3. Auto-request reviews from CODEOWNERS teams
+#   4. Post a comment listing required CODEOWNERS teams
+#   5. Apply PR size labels based on lines changed
+#   Plus: Fork CI detection for external contributors
+
+name: LGTM Bot PR Open
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  pr-onboard:
+    name: PR Onboarding
+    runs-on: ubuntu-latest
+    steps:
+      - name: Onboard PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const prNumber = pr.number;
+            const headSha = pr.head.sha;
+            const isFork = pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`;
+            const isOpened = ['opened', 'reopened'].includes(context.payload.action);
+
+            console.log(`Processing PR #${prNumber} (${context.payload.action}, fork=${isFork})`);
+
+            // ============================================================
+            // Feature 5: PR Size Labels
+            // ============================================================
+
+            const SIZE_LABELS = [
+              { name: 'size/XS', max: 10,       color: '3CBF00', desc: '0-10 lines changed' },
+              { name: 'size/S',  max: 50,       color: '5D9801', desc: '11-50 lines changed' },
+              { name: 'size/M',  max: 200,      color: 'FF9900', desc: '51-200 lines changed' },
+              { name: 'size/L',  max: 500,      color: 'FF5500', desc: '201-500 lines changed' },
+              { name: 'size/XL', max: Infinity, color: 'D40000', desc: '501+ lines changed' },
+            ];
+
+            const totalChanges = pr.additions + pr.deletions;
+            const sizeLabel = SIZE_LABELS.find(s => totalChanges <= s.max);
+
+            // Ensure all size labels exist
+            for (const sl of SIZE_LABELS) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: sl.name,
+                  color: sl.color,
+                  description: sl.desc,
+                });
+              } catch (e) {
+                if (e.status !== 422) throw e; // 422 = already exists
+              }
+            }
+
+            // Remove old size labels, add the correct one
+            const currentLabels = pr.labels.map(l => l.name);
+            for (const sl of SIZE_LABELS) {
+              if (sl.name !== sizeLabel.name && currentLabels.includes(sl.name)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: sl.name,
+                }).catch(() => {});
+              }
+            }
+
+            if (!currentLabels.includes(sizeLabel.name)) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [sizeLabel.name],
+              });
+            }
+
+            console.log(`Applied ${sizeLabel.name} (${totalChanges} lines changed)`);
+
+            // ============================================================
+            // CODEOWNERS parsing (shared by Features 3 & 4)
+            // ============================================================
+
+            // Fetch CODEOWNERS file from base branch
+            let codeownersContent = '';
+            try {
+              const { data: codeownersFile } = await github.rest.repos.getContent({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: 'CODEOWNERS',
+                ref: pr.base.ref,
+              });
+              codeownersContent = Buffer.from(codeownersFile.content, 'base64').toString();
+            } catch (e) {
+              console.log('Could not fetch CODEOWNERS file:', e.message);
+            }
+
+            if (!codeownersContent) {
+              console.log('No CODEOWNERS file found, skipping review request and comment');
+              return;
+            }
+
+            // Parse CODEOWNERS into rules
+            const rules = [];
+            for (const line of codeownersContent.split('\n')) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith('#')) continue;
+              const parts = trimmed.split(/\s+/);
+              if (parts.length < 2) continue;
+              const pattern = parts[0];
+              const teams = parts.slice(1).filter(p => p.startsWith('@'));
+              if (teams.length) rules.push({ pattern, teams });
+            }
+
+            // Simple glob matcher for CODEOWNERS patterns
+            function globMatch(str, pattern) {
+              const re = pattern
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                .replace(/\*\*/g, '{{GLOBSTAR}}')
+                .replace(/\*/g, '[^/]*')
+                .replace(/\?/g, '[^/]')
+                .replace(/\{\{GLOBSTAR\}\}/g, '.*');
+              return new RegExp(`^${re}$`).test(str);
+            }
+
+            // Match a filepath against CODEOWNERS rules (last match wins)
+            function matchFile(filepath) {
+              let matched = [];
+              for (const rule of rules) {
+                const p = rule.pattern;
+                const anchored = p.startsWith('/');
+                const clean = anchored ? p.slice(1) : p;
+
+                if (clean.endsWith('/')) {
+                  // Directory pattern: match any file under it
+                  const dir = clean;
+                  if (anchored) {
+                    if (filepath.startsWith(dir)) matched = rule.teams;
+                  } else {
+                    if (filepath.includes('/' + dir) || filepath.startsWith(dir)) {
+                      matched = rule.teams;
+                    }
+                  }
+                } else if (anchored) {
+                  // Anchored file/glob pattern
+                  if (globMatch(filepath, clean)) {
+                    matched = rule.teams;
+                  } else if (clean.includes('/')) {
+                    // Pattern like .github/workflows/*.ps1
+                    if (globMatch(filepath, clean)) matched = rule.teams;
+                  } else {
+                    // Anchored single file like /CODEOWNERS
+                    if (filepath === clean) matched = rule.teams;
+                  }
+                } else {
+                  // Unanchored: match filename at any depth
+                  const filename = filepath.split('/').pop();
+                  if (globMatch(filename, p)) matched = rule.teams;
+                }
+              }
+              return matched;
+            }
+
+            // Fetch changed files
+            let changedFiles = [];
+            let page = 1;
+            while (true) {
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page,
+              });
+              changedFiles = changedFiles.concat(files.map(f => f.filename));
+              if (files.length < 100) break;
+              page++;
+            }
+
+            // Build team -> files map
+            const teamFiles = {};
+            for (const filepath of changedFiles) {
+              const teams = matchFile(filepath);
+              for (const team of teams) {
+                if (!teamFiles[team]) teamFiles[team] = [];
+                teamFiles[team].push(filepath);
+              }
+            }
+
+            const requiredTeams = Object.keys(teamFiles);
+            console.log(`Required CODEOWNERS teams: ${requiredTeams.join(', ') || 'none'}`);
+
+            // ============================================================
+            // Feature 3: Auto-request CODEOWNERS reviews (on open only)
+            // ============================================================
+
+            if (isOpened && requiredTeams.length > 0) {
+              // Extract team slugs from @org/team format
+              const teamSlugs = requiredTeams
+                .map(t => {
+                  const match = t.match(/@[^/]+\/(.+)/);
+                  return match ? match[1] : null;
+                })
+                .filter(Boolean);
+
+              if (teamSlugs.length > 0) {
+                try {
+                  await github.rest.pulls.requestReviewers({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: prNumber,
+                    team_reviewers: teamSlugs,
+                  });
+                  console.log(`Requested reviews from: ${teamSlugs.join(', ')}`);
+                } catch (e) {
+                  // May fail if team doesn't have access or author is a member
+                  console.log(`Could not request some team reviews: ${e.message}`);
+                }
+              }
+            }
+
+            // ============================================================
+            // Feature 4: CODEOWNERS visibility comment
+            // ============================================================
+
+            const CODEOWNERS_MARKER = '<!-- lgtm-bot-codeowners -->';
+
+            // Determine reason for each team
+            function teamReason(team) {
+              if (team.includes('rust')) return 'Rust files changed';
+              if (team.includes('python')) return 'Python files changed';
+              if (team.includes('Devops')) return 'CI/infra files changed';
+              if (team.includes('deploy')) return 'Deploy files changed';
+              return 'Files changed';
+            }
+
+            let commentLines = [
+              CODEOWNERS_MARKER,
+              '## Required Reviewers',
+              '',
+              'Based on the files changed in this PR, the following teams need to review:',
+              '',
+              '| Team | Reason | Files |',
+              '|------|--------|-------|',
+            ];
+
+            for (const [team, files] of Object.entries(teamFiles)) {
+              const fileList = files.slice(0, 3).map(f => `\`${f}\``).join(', ');
+              const more = files.length > 3 ? ` (+${files.length - 3} more)` : '';
+              commentLines.push(`| ${team} | ${teamReason(team)} | ${fileList}${more} |`);
+            }
+
+            commentLines.push('');
+            if (isOpened) {
+              commentLines.push('Reviews have been automatically requested.');
+            }
+
+            // Fork CI detection
+            if (isFork) {
+              commentLines.push('');
+              commentLines.push('> **Note for external contributors**: A maintainer must comment');
+              commentLines.push(`> \`/ok to test ${headSha.slice(0, 7)}\` to trigger the full CI suite.`);
+              commentLines.push('> This must be re-issued after every new push.');
+            }
+
+            const commentBody = commentLines.join('\n');
+
+            // Find existing comment or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+
+            const existingComment = comments.find(c => c.body && c.body.includes(CODEOWNERS_MARKER));
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody,
+              });
+              console.log('Updated CODEOWNERS comment');
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: commentBody,
+              });
+              console.log('Created CODEOWNERS comment');
+            }

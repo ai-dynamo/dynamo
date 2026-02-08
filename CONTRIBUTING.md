@@ -205,11 +205,45 @@ For larger contributions, follow these steps:
 
 6. **Address Code Rabbit Review** – Respond to automated Code Rabbit suggestions, including nitpicks.
 
-7. **Trigger CI Tests** – For external contributors, a Dynamo maintainer must comment `/ok to test <commit-id>` to run the full CI suite, where `<commit-id>` is the short SHA of your latest commit. Fix any failing tests before requesting human review.
+7. **Trigger CI Tests** – For external contributors, a Dynamo maintainer must comment `/ok to test <commit-id>` to run the full CI suite, where `<commit-id>` is the short SHA of your latest commit. **Important**: This must be re-issued after every new push — the approval is per-commit, not per-PR. Fix any failing tests before requesting human review. If you're unsure what's failing, comment `/lgtm-bot diagnose` on your PR for a detailed analysis.
 
-8. **Request Review** – Add the person who approved your issue as a reviewer. Check [CODEOWNERS](CODEOWNERS) for required approvers based on files modified.
+8. **Request Review** – CODEOWNERS team reviews are automatically requested when your PR is opened. The bot also posts a comment listing which teams are required and why. You can add additional reviewers manually — check [CODEOWNERS](CODEOWNERS) for the full list of required approvers based on files modified.
 
 > **Note on AI-Generated Code**: While we encourage using AI tools, you must fully understand every change in your PR. Inability to explain submitted code will result in rejection.
+
+---
+
+## Merge Readiness & LGTM Bot
+
+The LGTM Bot automates merge readiness tracking for all PRs. Here's what it does:
+
+### Automatic Features
+
+- **`lgtm` label** – Automatically added when your PR passes all CI checks, has at least one approval (not from the author), has no outstanding change requests, and satisfies branch protection (including CODEOWNERS). Removed automatically when new commits are pushed.
+- **Merge checklist** – A live-updating comment on your PR showing the status of every merge gate (CI checks, reviews, CODEOWNERS, conflicts). Updated on every CI completion, review change, and push.
+- **PR size labels** – Your PR is automatically labeled `size/XS`, `size/S`, `size/M`, `size/L`, or `size/XL` based on total lines changed. Updated when you push new commits.
+- **CODEOWNERS review requests** – Reviews are automatically requested from the relevant [CODEOWNERS](CODEOWNERS) teams when your PR is opened. A comment lists which teams are required and which files triggered each team.
+- **Stale review nudge** – If a review has been pending for 48+ hours, the bot posts a reminder tagging the pending reviewers.
+- **Merge reminder** – If your PR has the `lgtm` label for 24+ hours without being merged, the bot posts a reminder.
+
+### On-Demand Diagnostics
+
+Comment `/lgtm-bot diagnose` on any PR to get a detailed analysis of what's blocking merge:
+
+- **CI failures** – Lists failing checks with links to logs and (when available) AI-powered fix suggestions
+- **Missing reviews** – Shows which CODEOWNERS teams still need to review
+- **Unresolved conversations** – Lists unresolved review threads with direct links
+- **Merge conflicts** – Detects conflicts and suggests rebasing
+- **DCO / PR title** – Checks for DCO sign-off and conventional commit format
+- **Fork CI status** – For external contributors, shows whether full CI has been triggered and provides the exact `/ok to test <sha>` command for maintainers
+
+### For External Contributors
+
+External contributors (from forks) should be aware of:
+
+1. **CI triggering** – A Dynamo maintainer must comment `/ok to test <commit-id>` to run the full CI suite. This must be re-issued after every new push.
+2. **CODEOWNERS visibility** – The bot posts a comment listing which teams need to review your PR, since you may not be able to see team membership directly.
+3. **Merging** – Only organization members can merge PRs. Once your PR has the `lgtm` label, a maintainer will merge it.
 
 ---
 
