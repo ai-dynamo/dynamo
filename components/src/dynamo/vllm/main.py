@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import signal
 import tempfile
 from typing import Optional
 
@@ -17,6 +16,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
     KvEventPublisher,
@@ -61,6 +61,7 @@ from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+shutdown_endpoints: list = []
 
 
 async def _handle_non_leader_node(dp_rank: int) -> None:
@@ -116,19 +117,6 @@ async def await_checkpoint_and_was_restored(signal_file: str) -> bool:
             return False  # Checkpoint done - exit
 
         await asyncio.sleep(1)
-
-
-async def graceful_shutdown(runtime, shutdown_event):
-    """
-    Shutdown dynamo distributed runtime.
-    The endpoints will be immediately invalidated so no new requests will be accepted.
-    For endpoints served with graceful_shutdown=True, the serving function will wait until all in-flight requests are finished.
-    For endpoints served with graceful_shutdown=False, the serving function will return immediately.
-    """
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    shutdown_event.set()
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
 
 
 async def worker():
@@ -233,15 +221,7 @@ async def worker():
     runtime = DistributedRuntime(
         loop, config.store_kv, config.request_plane, enable_nats
     )
-
-    # Set up signal handler for graceful shutdown
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.debug("Signal handlers set up for graceful shutdown")
+    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
     # Route to appropriate initialization based on config flags
     if config.vllm_native_encoder_worker:
@@ -647,6 +627,7 @@ async def init_prefill(
     if config.engine_args.data_parallel_rank:
         await _handle_non_leader_node(config.engine_args.data_parallel_rank)
         return
+    shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
 
     # Register prefill model with ModelType.Prefill
     model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
@@ -788,6 +769,13 @@ async def init(
     if config.engine_args.data_parallel_rank:
         await _handle_non_leader_node(config.engine_args.data_parallel_rank)
         return
+    shutdown_endpoints[:] = [
+        generate_endpoint,
+        clear_endpoint,
+        load_lora_endpoint,
+        unload_lora_endpoint,
+        list_loras_endpoint,
+    ]
 
     # Parse endpoint types from --dyn-endpoint-types flag
     model_type = parse_endpoint_types(config.dyn_endpoint_types)
@@ -888,6 +876,7 @@ async def init_multimodal_processor(
     component = runtime.namespace(config.namespace).component(config.component)
 
     generate_endpoint = component.endpoint(config.endpoint)
+    shutdown_endpoints[:] = [generate_endpoint]
 
     # Get encode worker client
     encode_worker_client = (
@@ -945,6 +934,7 @@ async def init_multimodal_encode_worker(
     component = runtime.namespace(config.namespace).component(config.component)
 
     generate_endpoint = component.endpoint(config.endpoint)
+    shutdown_endpoints[:] = [generate_endpoint]
 
     # Get PD worker client
     # In multimodal mode, the PD worker always registers as "backend"
@@ -988,6 +978,7 @@ async def init_vllm_native_encoder(
     # Create component and endpoint
     component = runtime.namespace(config.namespace).component(config.component)
     generate_endpoint = component.endpoint(config.endpoint)
+    shutdown_endpoints[:] = [generate_endpoint]
 
     # Configure ECTransferConfig for producer role
     instance_id = 0
@@ -1056,6 +1047,7 @@ async def init_ec_processor(
     # Create component and endpoint
     component = runtime.namespace(config.namespace).component(config.component)
     generate_endpoint = component.endpoint(config.endpoint)
+    shutdown_endpoints[:] = [generate_endpoint]
 
     # Get encoder worker client
     encoder_client = (
@@ -1135,6 +1127,7 @@ async def init_multimodal_worker(
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
+    shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
 
     # Configure ECConnector consumer mode if enabled
     if config.ec_consumer_mode:
@@ -1267,6 +1260,7 @@ async def init_omni(
     if config.engine_args.data_parallel_rank:
         await _handle_non_leader_node(config.engine_args.data_parallel_rank)
         return
+    shutdown_endpoints[:] = [generate_endpoint]
 
     # TODO: extend for multi-stage pipelines
     # Register as Chat endpoint for text-to-text generation

@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import sys
 
 # Configure TLLM_LOG_LEVEL before importing tensorrt_llm
@@ -38,6 +37,7 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
     KvEventPublisher,
@@ -69,13 +69,7 @@ from dynamo.trtllm.utils.trtllm_utils import (
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 configure_dynamo_logging()
-
-
-async def graceful_shutdown(runtime, shutdown_event):
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    shutdown_event.set()
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
+shutdown_endpoints: list = []
 
 
 async def get_engine_runtime_config(
@@ -145,16 +139,7 @@ async def worker():
     runtime = DistributedRuntime(
         loop, config.store_kv, config.request_plane, enable_nats
     )
-
-    # Set up signal handler for graceful shutdown
-    def signal_handler():
-        # Schedule the shutdown coroutine instead of calling it directly
-        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers set up for graceful shutdown")
+    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
     await init(runtime, config, shutdown_event)
 
@@ -370,6 +355,7 @@ async def init(
 
     async with get_llm_engine(engine_args, config.disaggregation_mode) as engine:
         endpoint = component.endpoint(config.endpoint)
+        shutdown_endpoints[:] = [endpoint]
 
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
