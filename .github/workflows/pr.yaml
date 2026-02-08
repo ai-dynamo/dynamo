@@ -43,7 +43,6 @@ jobs:
     steps:
       - name: can you see? 
         run: |
-          sleep 10000
           ls -la ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
 
 
