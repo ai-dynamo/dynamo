@@ -42,6 +42,7 @@
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
    backends/vllm/prompt-embeddings.md
+   backends/vllm/vllm-omni.md
 
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
