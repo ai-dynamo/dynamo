@@ -38,11 +38,13 @@ jobs:
 
   test-mountpoint:
     runs-on: stg-tester-arm-v1
+    env: 
+      DYNAMO_LOCAL_MODELS_DIR: /models/ci/models
     steps:
       - name: can you see? 
         run: |
           sleep 10000
-          ls -la /models/ci/models/qwen
+          ls -la ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
 
 
 #   changed-files:

@@ -23,6 +23,85 @@ from tests.utils.port_utils import (
 
 _logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Local model cache (CI optimisation)
+# ---------------------------------------------------------------------------
+# In CI the most-used models are pre-staged on a shared, **read-only** volume
+# (e.g. an S3-backed PersistentVolume mounted at /models/ci/models).
+#
+# Why not just set HF_HOME (or HF_HUB_CACHE) to that path?
+#   1. The volume is mounted read-only.  huggingface_hub writes to its cache
+#      directory (lock files, partial downloads, token storage), so pointing
+#      HF_HOME at a read-only path would break any model that is *not* already
+#      present — the download would fail with a permission error.
+#   2. The volume is shared across multiple concurrent CI runners (the PVC uses
+#      ReadOnlyMany access mode).  A writable shared cache would risk
+#      corruption from concurrent writes.
+#   3. huggingface_hub expects its own internal layout inside HF_HOME
+#      (models--<org>--<name>/snapshots/<hash>/…), which does not match the
+#      human-readable <org>/<model>/ layout used on the shared volume.
+#
+# Instead we keep the default (writable) HF_HOME and, for each model that
+# exists on the local volume, create a lightweight symlink inside the HF cache
+# that points back to the read-only copy.  This lets from_pretrained() and
+# snapshot_download() resolve the model from local storage with zero network
+# I/O, while still allowing HF to download any model that is *not* staged
+# locally.
+#
+# Override the path with DYNAMO_LOCAL_MODELS_DIR if your CI mounts models
+# elsewhere.  On developer machines the default path simply won't exist and
+# the code falls through to a normal HuggingFace download.
+# ---------------------------------------------------------------------------
+LOCAL_MODELS_DIR = os.environ.get("DYNAMO_LOCAL_MODELS_DIR", "/models/ci/models")
+
+
+def _link_local_model_to_hf_cache(model_id: str, local_models_dir: str) -> bool:
+    """Create HF cache symlinks for a locally available model.
+
+    Builds the huggingface_hub cache structure so that from_pretrained() and
+    snapshot_download() resolve the model without a network round-trip.
+
+    The symlink layout created inside HF_HUB_CACHE for a model such as
+    ``Qwen/Qwen3-0.6B``::
+
+        models--Qwen--Qwen3-0.6B/
+          refs/main          -> text file containing "local"
+          snapshots/local/   -> symlink to <local_models_dir>/Qwen/Qwen3-0.6B
+
+    Returns True if the model was found locally and linked, False otherwise.
+    """
+    local_model_path = os.path.join(local_models_dir, model_id)
+    if not os.path.isdir(local_model_path):
+        return False
+
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        hf_cache = HF_HUB_CACHE
+    except ImportError:
+        hf_cache = os.path.join(
+            os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
+            "hub",
+        )
+
+    sanitized = model_id.replace("/", "--")
+    cache_model_dir = os.path.join(hf_cache, f"models--{sanitized}")
+    refs_dir = os.path.join(cache_model_dir, "refs")
+    snapshots_dir = os.path.join(cache_model_dir, "snapshots")
+
+    os.makedirs(refs_dir, exist_ok=True)
+    os.makedirs(snapshots_dir, exist_ok=True)
+
+    with open(os.path.join(refs_dir, "main"), "w") as f:
+        f.write("local")
+
+    snapshot_link = os.path.join(snapshots_dir, "local")
+    if os.path.islink(snapshot_link) or os.path.exists(snapshot_link):
+        os.remove(snapshot_link)
+    os.symlink(os.path.realpath(local_model_path), snapshot_link)
+
+    return True
+
 
 def pytest_configure(config):
     # Defining markers to avoid `<marker> not found in 'markers' configuration option`
@@ -149,6 +228,16 @@ def download_models(model_list=None, ignore_weights=False):
         from huggingface_hub import snapshot_download
 
         for model_id in model_list:
+            # Check local models directory first
+            if os.path.isdir(LOCAL_MODELS_DIR) and _link_local_model_to_hf_cache(
+                model_id, LOCAL_MODELS_DIR
+            ):
+                logging.info(
+                    f"Linked local model to HF cache: {model_id} "
+                    f"(from {LOCAL_MODELS_DIR})"
+                )
+                continue
+
             logging.info(
                 f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
             )
