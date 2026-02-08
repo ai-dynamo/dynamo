@@ -16,7 +16,8 @@ pub mod radix_tree;
 
 // Re-export key types for convenience
 pub use indexer::MaybeError;
-pub use nested_map::NestedMap;
+// pub use nested_map::NestedMap;
+pub use nested_map::PositionalIndexer;
 pub use protocols::{
     KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
     compute_block_hash_for_seq,

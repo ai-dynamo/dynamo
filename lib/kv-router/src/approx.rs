@@ -391,7 +391,7 @@ mod tests {
             max_tree_size: usize::MAX,
             prune_target_ratio: 0.5,
         };
-        let mut indexer = KvIndexer::new_with_frequency(
+        let indexer = KvIndexer::new_with_frequency(
             cancel.clone(),
             None,
             KV_BLOCK_SIZE,
@@ -443,7 +443,7 @@ mod tests {
             max_tree_size: usize::MAX,
             prune_target_ratio: 0.5,
         };
-        let mut indexer = KvIndexer::new_with_frequency(
+        let indexer = KvIndexer::new_with_frequency(
             cancel.clone(),
             None,
             KV_BLOCK_SIZE,
