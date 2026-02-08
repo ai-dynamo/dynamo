@@ -62,6 +62,26 @@ on:
         required: false
         type: boolean
         default: false
+      build_timeout_minutes:
+        description: 'Timeout in minutes for the build step'
+        required: false
+        type: number
+        default: 60
+      test_gpu_timeout_minutes:
+        description: 'Timeout in minutes for the GPU test step'
+        required: false
+        type: number
+        default: 30
+      test_cpu_timeout_minutes:
+        description: 'Timeout in minutes for the CPU test step'
+        required: false
+        type: number
+        default: 10
+      copy_timeout_minutes:
+        description: 'Timeout in minutes for the copy to ACR step'
+        required: false
+        type: number
+        default: 5
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -170,6 +190,7 @@ jobs:
 
       - name: Build Container
         id: build-image
+        timeout-minutes: ${{ inputs.build_timeout_minutes }}
         uses: ./.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
@@ -260,6 +281,7 @@ jobs:
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
+        timeout-minutes: ${{ inputs.test_cpu_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
@@ -275,6 +297,7 @@ jobs:
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
+        timeout-minutes: ${{ inputs.test_gpu_timeout_minutes }}
         if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
@@ -318,6 +341,7 @@ jobs:
           echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Copy image to target registry
+        timeout-minutes: ${{ inputs.copy_timeout_minutes }}
         uses: ./.github/actions/skopeo-copy
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
