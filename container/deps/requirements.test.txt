@@ -13,9 +13,14 @@ boto3==1.42.4
 boto3-stubs[s3]==1.42.9  # Type stubs for boto3 S3 client
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
+# For Kubernetes operations in deploy tests
+kr8s==0.20.13
+kubernetes==32.0.1
+kubernetes_asyncio==32.0.0
 # For NATS object store verification in router tests
 nats-py==2.12.0
 psutil<=7.0.0  # System package, may vary by platform (was >=5.0.0)
+pydantic==2.11.7
 pyright==1.1.407
 pytest==8.4.2
 pytest-asyncio==1.3.0
@@ -29,8 +34,13 @@ pytest-mypy==1.0.1
 pytest-order==1.3.0
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
+pyyaml==6.0.3
+requests==2.32.5
+sniffio==1.3.1
+tabulate==0.9.0
 # Triton client to Dynamo gRPC server
 tritonclient[grpc]<=2.62.0  # May have platform-specific builds
 # add types library stub for PyYAML
 types-PyYAML==6.0.12.20250915
 types-requests==2.32.4.20250913
+websocket-client==1.9.0

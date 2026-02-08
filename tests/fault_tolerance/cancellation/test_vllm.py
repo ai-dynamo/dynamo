@@ -63,8 +63,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.45",
             "--max-model-len",
             "16384",
-            "--migration-limit",
-            "3",
         ]
 
         # Configure health check based on worker type

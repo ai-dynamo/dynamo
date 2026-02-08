@@ -178,3 +178,10 @@ Once logged in, find the Dynamo dashboard under General.
 > **Note:** The metrics described above are for Dynamo **applications** (frontends, workers). The Dynamo **Operator** itself also exposes metrics for monitoring controller reconciliation, webhook validation, and resource inventory.
 >
 > See the **[Operator Metrics Guide](operator-metrics.md)** for details on operator-specific metrics and the operator dashboard.
+
+```{toctree}
+:hidden:
+
+Logging <logging>
+Operator Metrics <operator-metrics>
+```

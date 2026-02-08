@@ -85,6 +85,73 @@ python convert.py \
 | `--num-requests` | Max requests to process | All |
 | `--skip-requests` | Skip first N requests | 0 |
 
+---
+
+# Telemetry Trace Converter
+
+Convert OpenAI-style telemetry JSONL (e.g., from agentic research pipelines) to mooncake format for aiperf benchmarking.
+
+## Overview
+
+This converter transforms `telemetry.jsonl` containing `llm_call` and `tool_call` events into mooncake-style JSONL. It identifies 6 agent types from the telemetry and tags each entry accordingly.
+
+## Input Format
+
+Telemetry JSONL with one event per line:
+```json
+{"event_type": "llm_call", "timestamp": "...", "session_id": "...", "latency_priority": "HIGH", "latency_ms": 738.22, "request_payload": {"messages": [...], "model": "gpt-5.2"}, "response_payload": {"usage": {"prompt_tokens": 256, "completion_tokens": 4}}}
+{"event_type": "tool_call", "tool_name": "tavily_web_search", "session_id": "...", "start_time": "...", "end_time": "...", "duration_ms": 181.08}
+```
+
+Only `llm_call` events are processed; `tool_call` events are dropped.
+
+## Output Format
+
+Mooncake JSONL with agent type and priority:
+```json
+{"session_id": "082e33c7-...", "agent_type": "deep_coordinator", "input_length": 2426, "output_length": 33, "hash_ids": [1, 2, 3], "priority": "HIGH"}
+{"session_id": "082e33c7-...", "agent_type": "research_worker", "input_length": 4800, "output_length": 154, "hash_ids": [1, 2, 3, 4], "priority": "LOW"}
+```
+
+## Agent Types
+
+Agents are identified by system prompt prefix matching:
+
+| Agent Type | System Prompt Prefix |
+|---|---|
+| `deep_coordinator` | `You are a Deep Research agent` |
+| `research_worker` | `Gather and synthesize comprehe` |
+| `research_planner` | `For the given task, generate a` |
+| `shallow_agent` | `Current date and time:` |
+| `classifier` | (no system msg) — "Classify" in user msg |
+| `complexity_analyzer` | (no system msg) — "complexity analyzer" in user msg |
+
+## Usage
+
+Basic conversion:
+```bash
+python convert_telemetry.py --input-file /path/to/telemetry.jsonl
+```
+
+With custom tokenizer:
+```bash
+python convert_telemetry.py \
+    --input-file /path/to/telemetry.jsonl \
+    --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --block-size 128
+```
+
+## Arguments
+
+| Argument | Description | Default |
+|---|---|---|
+| `--input-file` | Path to telemetry JSONL | Required |
+| `--output-file` | Output JSONL path | `<input>_mooncake.jsonl` |
+| `--tokenizer` | HuggingFace tokenizer name | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` |
+| `--block-size` | Block size for hash generation | 64 |
+
+---
+
 ## Running with aiperf
 
 After conversion, use with aiperf:

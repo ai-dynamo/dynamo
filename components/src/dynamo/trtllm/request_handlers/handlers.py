@@ -4,12 +4,12 @@
 import logging
 from typing import Optional
 
-from tensorrt_llm.llmapi import DisaggregatedParams
-
 from dynamo._core import Context
 from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
+from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
+from dynamo.trtllm.request_handlers.aggregated_handler import AggregatedHandler
 from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
@@ -32,33 +32,19 @@ class RequestHandlerFactory:
             raise ValueError(
                 f"Invalid disaggregation_mode '{config.disaggregation_mode.value}'"
             )
+        encoder_cache = None
+        if config.encoder_cache_capacity_gb > 0:
+            capacity_bytes = int(config.encoder_cache_capacity_gb * 1024**3)
+            encoder_cache = EncoderCacheManager(capacity_bytes)
         if config.disaggregation_mode.value == "prefill":
-            encoder_cache = None
-            if config.encoder_cache_capacity_gb > 0:
-                # Create encoder cache for prefill handler
-                capacity_bytes = int(config.encoder_cache_capacity_gb * 1024**3)
-                encoder_cache = EncoderCacheManager(capacity_bytes)
             return PrefillHandler(config, encoder_cache=encoder_cache)
+        if config.disaggregation_mode.value == "prefill_and_decode":
+            return AggregatedHandler(config, encoder_cache=encoder_cache)
         return self.handlers[config.disaggregation_mode.value](config)
 
 
 def get_request_handler(config: RequestHandlerConfig) -> HandlerBase:
     return RequestHandlerFactory().get_request_handler(config)
-
-
-class AggregatedHandler(HandlerBase):
-    """
-    Handler for the aggregated mode.
-    """
-
-    def __init__(self, config: RequestHandlerConfig):
-        super().__init__(config)
-
-    async def generate(self, request: dict, context: Context):
-        logging.debug(f"New Request ID: {context.id()}")
-        # Implement all steps locally.
-        async for res in self.generate_locally(request, context):
-            yield res
 
 
 class EncodeHandler(HandlerBase):
@@ -109,29 +95,6 @@ class PrefillHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
-    async def remote_encode_full_epd(self, request: dict):
-        """
-        Call encode worker for full EPD flow and unpack the response.
-
-        Args:
-            request: Request dict
-
-        Returns:
-            Encoder's DisaggregatedParams to be used by the prefill worker
-        """
-        encode_response = None
-        async for res in await self.encode_client.round_robin(request):
-            encode_response = res.data()
-            break
-
-        if not encode_response:
-            raise RuntimeError("Did not receive a response from the encode worker.")
-
-        ep_disaggregated_params = self._unpack_full_epd_response(
-            encode_response, request
-        )
-        return ep_disaggregated_params
-
     async def remote_encode_with_nixl(self, request: dict):
         """
         Call encode worker for NIXL flow to load embeddings and unpack the response.
@@ -155,43 +118,6 @@ class PrefillHandler(HandlerBase):
         return await EncodeHelper.read_embeddings_from_encode_response(
             encode_response, self.connector
         )
-
-    def _unpack_full_epd_response(
-        self, encode_response: dict, request: dict
-    ) -> Optional[DisaggregatedParams]:
-        """
-        Unpack encode worker response from full EPD flow.
-
-        Extracts DisaggregatedParams and stores EPD metadata in the request
-        for downstream processing (multimodal_processor, decode worker).
-
-        Args:
-            encode_response: Response dict from encode worker
-            request: Request dict to store metadata in (modified in-place)
-
-        Returns:
-            DisaggregatedParams if present in response, None otherwise
-        """
-        if "ep_disaggregated_params" not in encode_response:
-            return None
-
-        params_dict = encode_response["ep_disaggregated_params"]
-        if params_dict is None:
-            return None
-
-        # Reconstruct DisaggregatedParams object from dict
-        ep_disaggregated_params = DisaggregatedParams(**params_dict)
-        ep_disaggregated_params.request_type = "context_only"
-
-        # Store processed prompt from encoder (includes <image> tokens)
-        if "processed_prompt" in encode_response:
-            request["_epd_processed_prompt"] = encode_response["processed_prompt"]
-
-        # Store prompt_token_ids from encoder for decode worker
-        if "prompt_token_ids" in encode_response:
-            request["_epd_prompt_token_ids"] = encode_response["prompt_token_ids"]
-
-        return ep_disaggregated_params
 
     async def generate(self, request: dict, context: Context):
         """
@@ -230,7 +156,19 @@ class PrefillHandler(HandlerBase):
             # Handle image URLs (full E-PD flow with MultimodalEncoder)
             elif image_urls:
                 if self.encode_client:
-                    ep_disaggregated_params = await self.remote_encode_full_epd(request)
+                    logging.info(f"PrefillHandler: image_urls={image_urls}")
+                    result = await fetch_embeddings_from_encoder(
+                        image_urls,
+                        request,
+                        self.encode_client,
+                        self._encoder_cache,
+                    )
+                    if isinstance(result, list):
+                        # Cache path: got List[torch.Tensor]
+                        embeddings_tensor = result
+                    else:
+                        # No-cache path: got DisaggregatedParams
+                        ep_disaggregated_params = result
 
         # Normal flow: Generate the prefill response locally with embeddings
         response_count = 0

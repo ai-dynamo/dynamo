@@ -38,8 +38,8 @@ class Config:
         self.tensor_parallel_size: int = 1
         self.pipeline_parallel_size: int = 1
         self.expert_parallel_size: Optional[int] = None
+        self.enable_attention_dp: bool = False
         self.kv_block_size: int = 32
-        self.migration_limit: int = 0
         self.gpus_per_node: Optional[int] = None
         self.max_batch_size: int = BuildConfig.model_fields["max_batch_size"].default
         self.max_num_tokens: int = BuildConfig.model_fields["max_num_tokens"].default
@@ -77,6 +77,7 @@ class Config:
             f"tensor_parallel_size={self.tensor_parallel_size}, "
             f"pipeline_parallel_size={self.pipeline_parallel_size}, "
             f"expert_parallel_size={self.expert_parallel_size}, "
+            f"enable_attention_dp={self.enable_attention_dp}, "
             f"kv_block_size={self.kv_block_size}, "
             f"gpus_per_node={self.gpus_per_node}, "
             f"max_batch_size={self.max_batch_size}, "
@@ -86,7 +87,6 @@ class Config:
             f"free_gpu_memory_fraction={self.free_gpu_memory_fraction}, "
             f"extra_engine_args={self.extra_engine_args}, "
             f"override_engine_args={self.override_engine_args}, "
-            f"migration_limit={self.migration_limit}, "
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
             f"encode_endpoint={self.encode_endpoint}, "
@@ -183,17 +183,16 @@ def cmd_line_args():
         default=None,
         help="expert parallelism size.",
     )
+    parser.add_argument(
+        "--enable-attention-dp",
+        action="store_true",
+        help="Enable attention data parallelism. When enabled, attention_dp_size equals tensor_parallel_size.",
+    )
 
     # IMPORTANT: We should ideally not expose this to users. We should be able to
     # query the block size from the TRTLLM engine.
     parser.add_argument(
         "--kv-block-size", type=int, default=32, help="Size of a KV cache block."
-    )
-    parser.add_argument(
-        "--migration-limit",
-        type=int,
-        default=0,
-        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
     parser.add_argument(
         "--gpus-per-node",
@@ -399,6 +398,7 @@ def cmd_line_args():
         config.pipeline_parallel_size = args.pipeline_parallel_size
     if args.expert_parallel_size is not None:
         config.expert_parallel_size = args.expert_parallel_size
+    config.enable_attention_dp = args.enable_attention_dp
     if args.gpus_per_node is not None:
         config.gpus_per_node = args.gpus_per_node
     if args.free_gpu_memory_fraction is not None:
@@ -408,7 +408,6 @@ def cmd_line_args():
     config.max_seq_len = args.max_seq_len
     config.max_beam_width = args.max_beam_width
     config.kv_block_size = args.kv_block_size
-    config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
     config.override_engine_args = args.override_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics

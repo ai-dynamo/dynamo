@@ -19,10 +19,10 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     fetch_llm,
     register_llm,
@@ -347,7 +347,7 @@ def setup_kv_event_publisher(
     vllm_config,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
-) -> Optional[ZmqKvEventPublisher]:
+) -> Optional[KvEventPublisher]:
     """
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
@@ -360,7 +360,7 @@ def setup_kv_event_publisher(
         consolidator_port: Port where kv event consolidator publishes (default: 5558)
 
     Returns:
-        List of ZmqKvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
+        List of KvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
     """
     if not config.engine_args.enable_prefix_caching:
         return None
@@ -408,7 +408,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
         )
-        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+        kv_publisher = KvEventPublisher(component=component, zmq_config=zmq_config)
         kv_publishers.append(kv_publisher)
 
         logger.info(
@@ -499,7 +499,6 @@ async def register_vllm_model(
     config: Config,
     engine_client: AsyncLLM,
     vllm_config,
-    migration_limit: int,
 ):
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -511,7 +510,6 @@ async def register_vllm_model(
         config: Configuration object
         engine_client: vLLM engine client
         vllm_config: vLLM configuration
-        migration_limit: Migration limit for the model
     """
     runtime_config = ModelRuntimeConfig()
 
@@ -558,8 +556,7 @@ async def register_vllm_model(
         generate_endpoint,
         config.model,
         config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-        migration_limit=migration_limit,
+        kv_cache_block_size=runtime_values["block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
@@ -660,7 +657,6 @@ async def init_prefill(
         config,
         engine_client,
         vllm_config,
-        migration_limit=0,  # Prefill doesn't support migration
     )
 
     health_check_payload = VllmPrefillHealthCheckPayload(
@@ -813,7 +809,6 @@ async def init(
         config,
         engine_client,
         vllm_config,
-        migration_limit=config.migration_limit,
     )
 
     health_check_payload = VllmHealthCheckPayload(
@@ -827,7 +822,7 @@ async def init(
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown=config.migration_limit <= 0,
+                graceful_shutdown=True,
                 metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
@@ -865,6 +860,7 @@ def get_engine_cache_info(engine: AsyncLLM):
         # Get values directly from vllm_config instead of collective_rpc
         cache_values = {
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
+            "block_size": engine.vllm_config.cache_config.block_size,
         }
 
         scheduler_values = {
@@ -876,6 +872,7 @@ def get_engine_cache_info(engine: AsyncLLM):
         logging.info(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
+            "block_size": cache_values["block_size"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
             "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
         }

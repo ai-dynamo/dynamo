@@ -23,7 +23,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
-- [Quick Start](#tensorrt-llm-quick-start)
+- [Quick Start](#quick-start)
 - [Single Node Examples](#single-node-examples)
 - [Advanced Examples](#advanced-examples)
 - [KV Cache Transfer](#kv-cache-transfer-in-disaggregated-serving)
@@ -31,7 +31,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Benchmarking](#benchmarking)
 - [Multimodal Support](#multimodal-support)
 - [Logits Processing](#logits-processing)
+- [DP Rank Routing](#dp-rank-routing-attention-data-parallelism)
 - [Performance Sweep](#performance-sweep)
+- [Known Issues and Mitigations](#known-issues-and-mitigations)
 
 ## Feature Support Matrix
 
@@ -40,11 +42,11 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../router/kv-cache-routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../planner/sla-planner.md) | ✅ |  |
-| [**Load Based Planner**](../../planner/load-planner.md) | 🚧 | Planned |
-| [**KVBM**](../../kvbm/kvbm-architecture.md) | ✅ | |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md) | 🚧 | Not supported yet |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
+| [**Load Based Planner**](../../components/planner/README.md) | 🚧 | Planned |
+| [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
@@ -97,10 +99,10 @@ apt-get update && apt-get -y install git git-lfs
 
 ## Single Node Examples
 
-> [!WARNING]
+> [!IMPORTANT]
 > Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
-For detailed information about the architecture and how KV-aware routing works, see the [KV Cache Routing documentation](../../router/kv-cache-routing.md).
+For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../components/router/router-guide.md).
 
 ### Aggregated
 ```bash
@@ -123,7 +125,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 
 ### Disaggregated with KV Routing
 
-> [!WARNING]
+> [!IMPORTANT]
 > In disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.
 
 ```bash
@@ -152,10 +154,10 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Multinode Deployment
 
-For comprehensive instructions on multinode serving, see the [multinode-examples.md](multinode/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](llama4-plus-eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
+For comprehensive instructions on multinode serving, see the [multinode-examples.md](./multinode/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](./llama4-plus-eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
 
 ### Speculative Decoding
-- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](llama4-plus-eagle.md)**
+- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4-plus-eagle.md)**
 
 ### Kubernetes Deployment
 
@@ -170,26 +172,16 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 ### Benchmarking
 
 To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/llm/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
 
 ## KV Cache Transfer in Disaggregated Serving
 
-Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](kv-cache-transfer.md).
+Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-transfer.md).
 
 
 ## Request Migration
 
-You can enable [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
-
-```bash
-# For decode and aggregated workers
-python3 -m dynamo.trtllm ... --migration-limit=3
-```
-
-> [!WARNING]
-> **Prefill workers do not support request migration** and must use `--migration-limit=0` (the default). Prefill workers only process prompts and return KV cache state - they don't maintain long-running generation requests that would benefit from migration.
-
-See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for details on how this works.
+Dynamo supports [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for configuration details.
 
 ## Request Cancellation
 
@@ -213,11 +205,11 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 ## Benchmarking
 
 To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/llm/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
 
 ## Multimodal support
 
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../multimodal/trtllm.md).
+Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../features/multimodal/multimodal-trtllm.md).
 
 ## Logits Processing
 
@@ -276,12 +268,67 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 - Processors must modify logits in-place and not return a new tensor.
 - If your processor needs tokenization, ensure the tokenizer is initialized (do not skip tokenizer init).
 
+## DP Rank Routing (Attention Data Parallelism)
+
+TensorRT-LLM supports [attention data parallelism](https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models) (attention DP) for models like DeepSeek. When enabled, multiple attention DP ranks run within a single worker, each with its own KV cache. Dynamo can route requests to specific DP ranks based on KV cache state.
+
+### Dynamo vs TRT-LLM Internal Routing
+
+- **Dynamo DP Rank Routing**: The router selects the optimal DP rank based on KV cache overlap and instructs TRT-LLM to use that rank with strict routing (`attention_dp_relax=False`). Use this with `--router-mode kv` for cache-aware routing.
+- **TRT-LLM Internal Routing**: TRT-LLM's scheduler assigns DP ranks internally. Use this with `--router-mode round-robin` or `random` when KV-aware routing isn't needed.
+
+### Enabling DP Rank Routing
+
+```bash
+# Worker with attention DP
+# (TP=2 acts as the "world size", in effect creating 2 attention DP ranks)
+CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.trtllm \
+  --model-path <MODEL_PATH> \
+  --tensor-parallel-size 2 \
+  --enable-attention-dp \
+  --publish-events-and-metrics
+
+# Frontend with KV routing
+python3 -m dynamo.frontend --router-mode kv
+```
+
+The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size` and configures Dynamo to publish KV events per DP rank. The router automatically creates routing targets for each `(worker_id, dp_rank)` combination.
+
+> [!NOTE]
+> Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.
+
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance-sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 
 Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
 
-Here is the instruction: [Running KVBM in TensorRT-LLM](../../kvbm/trtllm-setup.md) .
+Here is the instruction: [Running KVBM in TensorRT-LLM](../../components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm) .
+
+## Known Issues and Mitigations
+
+### KV Cache Exhaustion Causing Worker Deadlock (Disaggregated Serving)
+
+**Issue:** In disaggregated serving mode, TensorRT-LLM workers can become stuck and unresponsive after sustained high-load traffic. Once in this state, workers require a pod/process restart to recover.
+
+**Symptoms:**
+- Workers function normally initially but hang after heavy load testing
+- Inference requests get stuck and eventually timeout
+- Logs show warnings: `num_fitting_reqs=0 and fitting_disagg_gen_init_requests is empty, may not have enough kvCache`
+- Error logs may contain: `asyncio.exceptions.InvalidStateError: invalid state`
+
+**Root Cause:** When `max_tokens_in_buffer` in the cache transceiver config is smaller than the maximum input sequence length (ISL) being processed, KV cache exhaustion can occur under heavy load. This causes context transfers to timeout, leaving workers stuck waiting for phantom transfers and entering an irrecoverable deadlock state.
+
+**Mitigation:** Ensure `max_tokens_in_buffer` exceeds your maximum expected input sequence length. Update your engine configuration files (e.g., `prefill.yaml` and `decode.yaml`):
+
+```yaml
+cache_transceiver_config:
+  backend: DEFAULT
+  max_tokens_in_buffer: 65536  # Must exceed max ISL
+```
+
+For example, see `examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml`.
+
+**Related Issue:** [#4327](https://github.com/ai-dynamo/dynamo/issues/4327)

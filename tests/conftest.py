@@ -60,11 +60,43 @@ def pytest_configure(config):
         "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
         "k8s: marks tests as requiring Kubernetes",
         "fault_tolerance: marks tests as fault tolerance tests",
+        "deploy: marks tests as deployment tests",
         # Third-party plugin markers
         "timeout: test timeout in seconds (pytest-timeout plugin)",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add shared command-line options for all tests.
+
+    Shared options that apply across multiple test suites are defined here.
+    Suite-specific options (e.g., deploy, fault-tolerance) are defined in
+    their respective subdirectory conftest.py files.
+    """
+    # -------------------------------------------------------------------------
+    # Shared Deployment Options (used by multiple test suites)
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--image",
+        type=str,
+        default=None,
+        help="Container image to use for deployment (overrides YAML default)",
+    )
+    parser.addoption(
+        "--namespace",
+        type=str,
+        default=None,  # No default here - subdirectories provide their own
+        help="Kubernetes namespace for deployment",
+    )
+    parser.addoption(
+        "--skip-service-restart",
+        action="store_true",
+        default=None,  # None = use fixture's default behavior
+        help="Skip restarting NATS and etcd services before deployment. "
+        "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"

@@ -90,6 +90,16 @@ class TensorRTLLMEngine:
             raise RuntimeError("Engine not initialized")
         return self._llm
 
+    def get_attention_dp_size(self) -> int:
+        """Return attention_dp_size (tensor_parallel_size if attention DP enabled, else 1).
+        When attention DP is enabled, each attention DP rank becomes a separate routing target.
+        """
+        if not self._llm:
+            return 1
+        enable_attention_dp = getattr(self.llm.args, "enable_attention_dp", False)
+        tensor_parallel_size = getattr(self.llm.args, "tensor_parallel_size", 1)
+        return tensor_parallel_size if enable_attention_dp else 1
+
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:
         """Remove entries from `self.engine_args` that the autodeploy backend does not support."""
@@ -110,7 +120,7 @@ class TensorRTLLMEngine:
             "moe_cluster_parallel_size",
             "moe_tensor_parallel_size",
             "moe_expert_parallel_size",
-            "enable_attention_dp",
+            "enable_attention_dp",  # AutoDeploy doesn't support attention DP (only pytorch backend does)
             "cp_config",
         ]
         for field_name in unsupported_fields:
