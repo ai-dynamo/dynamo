@@ -96,9 +96,12 @@ def _link_local_model_to_hf_cache(model_id: str, local_models_dir: str) -> bool:
         f.write("local")
 
     snapshot_link = os.path.join(snapshots_dir, "local")
-    if os.path.islink(snapshot_link) or os.path.exists(snapshot_link):
-        os.remove(snapshot_link)
-    os.symlink(os.path.realpath(local_model_path), snapshot_link)
+    # Atomic symlink replacement: create a temporary symlink then rename it
+    # into place.  os.rename is atomic on POSIX, so concurrent xdist workers
+    # racing on the same model won't hit FileNotFoundError/FileExistsError.
+    tmp_link = snapshot_link + f".tmp.{os.getpid()}"
+    os.symlink(os.path.realpath(local_model_path), tmp_link)
+    os.rename(tmp_link, snapshot_link)
 
     return True
 
