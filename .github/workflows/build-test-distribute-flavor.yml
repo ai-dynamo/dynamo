@@ -208,6 +208,7 @@ jobs:
     runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
+      DYNAMO_LOCAL_MODELS_DIR: /models/ci/models
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -271,6 +272,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
+          local_models_dir: ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
 
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
@@ -287,6 +289,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          local_models_dir: ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
 
 # ============================================================================
 # COPY TO ACR

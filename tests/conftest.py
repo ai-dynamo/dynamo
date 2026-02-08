@@ -232,15 +232,14 @@ def download_models(model_list=None, ignore_weights=False):
             if os.path.isdir(LOCAL_MODELS_DIR) and _link_local_model_to_hf_cache(
                 model_id, LOCAL_MODELS_DIR
             ):
-                logging.info(
-                    f"Linked local model to HF cache: {model_id} "
-                    f"(from {LOCAL_MODELS_DIR})"
-                )
+                msg = f"[models] Linked local model to HF cache: {model_id} (from {LOCAL_MODELS_DIR})"
+                logging.info(msg)
+                print(msg, flush=True)
                 continue
 
-            logging.info(
-                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
-            )
+            msg = f"[models] Pre-downloading {'model (no weights)' if ignore_weights else 'model'} from HuggingFace: {model_id}"
+            logging.info(msg)
+            print(msg, flush=True)
 
             try:
                 if ignore_weights:
@@ -265,10 +264,14 @@ def download_models(model_list=None, ignore_weights=False):
                         repo_id=model_id,
                         token=hf_token,
                     )
-                logging.info(f"Successfully pre-downloaded: {model_id}")
+                msg = f"[models] Successfully pre-downloaded: {model_id}"
+                logging.info(msg)
+                print(msg, flush=True)
 
             except Exception as e:
-                logging.error(f"Failed to pre-download {model_id}: {e}")
+                msg = f"[models] Failed to pre-download {model_id}: {e}"
+                logging.error(msg)
+                print(msg, flush=True)
                 # Don't fail the fixture - let individual tests handle missing models
 
     except ImportError:
