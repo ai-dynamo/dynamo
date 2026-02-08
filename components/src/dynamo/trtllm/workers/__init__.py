@@ -8,6 +8,12 @@ This package contains worker initialization functions for different modalities:
 - video_diffusion_worker: Video generation using diffusion models
 
 The init_worker() function dispatches to the appropriate worker based on modality.
+
+Note on import strategy:
+- llm_worker is imported eagerly (standard dependency, always available)
+- video_diffusion_worker is imported lazily because it depends on visual_gen,
+  an optional package only available on TensorRT-LLM's feat/visual_gen branch.
+  Eager import would break text/multimodal users who don't have it installed.
 """
 
 import asyncio
@@ -16,6 +22,7 @@ import logging
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.constants import Modality
 from dynamo.trtllm.utils.trtllm_utils import Config
+from dynamo.trtllm.workers.llm_worker import init_llm_worker
 
 
 async def init_worker(
@@ -45,9 +52,7 @@ async def init_worker(
             return
         # TODO(nv-yna): Add IMAGE_DIFFUSION support in follow-up PR
 
-    # LLM modalities (text, multimodal) use the LLM worker
-    from dynamo.trtllm.workers.llm_worker import init_llm_worker
-
+    # LLM modalities (text, multimodal)
     await init_llm_worker(runtime, config, shutdown_event)
 
 
