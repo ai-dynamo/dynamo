@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import signal
 import sys
 
 import sglang as sgl
@@ -13,6 +12,7 @@ import uvloop
 from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -92,32 +92,13 @@ async def worker():
 
         config.server_args.load_format = setup_gms(config.server_args)
 
-    loop = asyncio.get_running_loop()
-
-    # Set DYN_EVENT_PLANE environment variable based on config
-    os.environ["DYN_EVENT_PLANE"] = config.dynamo_args.event_plane
-
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND use_kv_events is True
-    enable_nats = config.dynamo_args.request_plane == "nats" or (
-        config.dynamo_args.event_plane == "nats" and config.dynamo_args.use_kv_events
+    dynamo_args = config.dynamo_args
+    runtime, _ = create_runtime(
+        store_kv=dynamo_args.store_kv,
+        request_plane=dynamo_args.request_plane,
+        event_plane=dynamo_args.event_plane,
+        use_kv_events=dynamo_args.use_kv_events,
     )
-
-    runtime = DistributedRuntime(
-        loop,
-        config.dynamo_args.store_kv,
-        config.dynamo_args.request_plane,
-        enable_nats,
-    )
-
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     if config.dynamo_args.image_diffusion_worker:
         await init_image_diffusion(runtime, config)
@@ -736,12 +717,6 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
         logging.warning("Prefill warmup timed out after 1800s")
     except Exception as e:
         logging.warning(f"Prefill warmup failed: {e}")
-
-
-async def graceful_shutdown(runtime):
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
 
 
 def main():

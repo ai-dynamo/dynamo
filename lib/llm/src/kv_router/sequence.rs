@@ -424,7 +424,7 @@ impl ActiveSequencesMultiWorker {
     pub async fn new(
         component: Component,
         block_size: usize,
-        workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
+        workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
         replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
@@ -438,7 +438,7 @@ impl ActiveSequencesMultiWorker {
 
         // Expand workers by their dp_rank
         for (worker_id, config) in workers_with_configs {
-            let dp_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1);
+            let dp_size = config.data_parallel_size;
 
             for dp_rank in 0..dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
@@ -710,17 +710,14 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Update the set of workers, adding and removing as needed
-    pub fn update_workers(
-        &self,
-        new_workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
-    ) {
+    pub fn update_workers(&self, new_workers_with_configs: HashMap<u64, ModelRuntimeConfig>) {
         let current_workers: HashSet<WorkerWithDpRank> =
             self.senders.iter().map(|entry| *entry.key()).collect();
 
         // Expand new workers by their dp_rank
         let mut new_workers: HashSet<WorkerWithDpRank> = HashSet::new();
         for (worker_id, config) in &new_workers_with_configs {
-            let dp_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1);
+            let dp_size = config.data_parallel_size;
 
             for dp_rank in 0..dp_size {
                 new_workers.insert(WorkerWithDpRank::new(*worker_id, dp_rank));
@@ -784,10 +781,15 @@ impl ActiveSequencesMultiWorker {
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
     ) -> Result<(), SequenceError> {
-        // Check for worker existence
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+        // Clone the sender upfront so we don't hold the DashMap Ref across
+        // the .await points below. Also eliminates the TOCTOU between
+        // contains_key and a later get().unwrap().
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
 
         // Check for duplicate request
         if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
@@ -825,9 +827,7 @@ impl ActiveSequencesMultiWorker {
             self.request_to_lora.insert(request_id.clone(), lora);
         }
 
-        self.senders
-            .get(&worker)
-            .unwrap()
+        sender
             .send(UpdateSequences::AddRequest {
                 request_id,
                 token_sequence,
@@ -855,25 +855,31 @@ impl ActiveSequencesMultiWorker {
         Ok(())
     }
 
-    /// Free all blocks associated with a request
-    ///
-    /// Note: This operation is idempotent. Calling it multiple times for the same request
-    /// will log a warning but not return an error (double free is allowed).
-    pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
-        // Check if request exists - if not, it's already been freed (idempotent)
-        let Some(worker) = self.request_to_worker.get(request_id).map(|entry| *entry) else {
-            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
-            return Ok(());
-        };
+    /// Send a command to the worker assigned to a request, optionally publishing
+    /// a replica-sync event and cleaning up request mappings afterward.
+    async fn send_to_request_worker(
+        &self,
+        request_id: &RequestId,
+        event_data: ActiveSequenceEventData,
+        command_fn: impl FnOnce(RequestId) -> UpdateSequences,
+        remove_mapping: bool,
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
 
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
 
-        // Publish event only if replica_sync is enabled
         if self.replica_sync {
-            // Look up lora_name from mapping
             let lora_name = self
                 .request_to_lora
                 .get(request_id)
@@ -882,29 +888,44 @@ impl ActiveSequencesMultiWorker {
             let event = ActiveSequenceEvent {
                 request_id: request_id.clone(),
                 worker,
-                data: ActiveSequenceEventData::Free,
+                data: event_data,
                 router_id: self.router_id,
                 lora_name,
             };
             self.event_publisher.publish(&event).await?;
         }
 
-        // Update local state
-        self.senders
-            .get(&worker)
-            .unwrap()
-            .send(UpdateSequences::Free {
-                request_id: request_id.clone(),
-            })
+        sender
+            .send(command_fn(request_id.clone()))
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
-        self.request_to_worker.remove(request_id);
-        self.request_to_lora.remove(request_id);
+        if remove_mapping {
+            self.request_to_worker.remove(request_id);
+            self.request_to_lora.remove(request_id);
+        }
 
-        // Publish ActiveLoad metrics for this worker
         self.publish_active_load_for_worker(worker).await;
 
         Ok(())
+    }
+
+    /// Free all blocks associated with a request
+    ///
+    /// Note: This operation is idempotent. Calling it multiple times for the same request
+    /// will log a warning but not return an error (double free is allowed).
+    pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+        if !self.request_to_worker.contains_key(request_id) {
+            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
+            return Ok(());
+        }
+
+        self.send_to_request_worker(
+            request_id,
+            ActiveSequenceEventData::Free,
+            |rid| UpdateSequences::Free { request_id: rid },
+            true,
+        )
+        .await
     }
 
     /// Mark prefill as completed for a request
@@ -915,50 +936,13 @@ impl ActiveSequencesMultiWorker {
         &self,
         request_id: &RequestId,
     ) -> Result<(), SequenceError> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            })?;
-
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
-
-        // Publish event only if replica_sync is enabled
-        if self.replica_sync {
-            // Look up lora_name from mapping
-            let lora_name = self
-                .request_to_lora
-                .get(request_id)
-                .map(|entry| entry.value().clone());
-
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::MarkPrefillCompleted,
-                router_id: self.router_id,
-                lora_name,
-            };
-            self.event_publisher.publish(&event).await?;
-        }
-
-        // Update local state
-        self.senders
-            .get(&worker)
-            .unwrap()
-            .send(UpdateSequences::MarkPrefillCompleted {
-                request_id: request_id.clone(),
-            })
-            .map_err(|_| SequenceError::WorkerChannelClosed)?;
-
-        // Publish ActiveLoad metrics for this worker
-        self.publish_active_load_for_worker(worker).await;
-
-        Ok(())
+        self.send_to_request_worker(
+            request_id,
+            ActiveSequenceEventData::MarkPrefillCompleted,
+            |rid| UpdateSequences::MarkPrefillCompleted { request_id: rid },
+            false,
+        )
+        .await
     }
 
     /// Add an output block with optional fractional decay weight
@@ -978,18 +962,19 @@ impl ActiveSequencesMultiWorker {
                 request_id: request_id.clone(),
             })?;
 
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+        // Clone sender upfront to avoid TOCTOU between contains_key and get().unwrap()
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
 
         // Create response channel
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
 
         // Send command to worker
-        self.senders
-            .get(&worker)
-            .unwrap()
+        sender
             .send(UpdateSequences::AddOutputBlock {
                 request_id: request_id.clone(),
                 decay_fraction,
@@ -1016,9 +1001,16 @@ impl ActiveSequencesMultiWorker {
 
     /// Helper method to query a single worker for active blocks/tokens and publish ActiveLoad
     async fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank) {
-        let Some(sender) = self.senders.get(&worker) else {
-            tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
-            return;
+        // Clone the sender and drop the DashMap Ref immediately.
+        // Holding a Ref across .await points can deadlock: if the task yields
+        // and update_workers() needs a write lock on the same shard, the
+        // runtime thread blocks forever.
+        let sender = {
+            let Some(entry) = self.senders.get(&worker) else {
+                tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
+                return;
+            };
+            entry.value().clone()
         };
 
         // Query active blocks
@@ -1337,11 +1329,11 @@ mod tests {
         // Create runtime config for worker 0 with dp_size=2
         let mut config_worker_0 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
         config_worker_0.data_parallel_size = 2;
-        workers_with_configs.insert(0, Some(config_worker_0));
+        workers_with_configs.insert(0, config_worker_0);
 
         // Create runtime config for worker 1 with dp_size=1 (default)
         let config_worker_1 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
-        workers_with_configs.insert(1, Some(config_worker_1));
+        workers_with_configs.insert(1, config_worker_1);
 
         let seq_manager_1 = Arc::new(
             ActiveSequencesMultiWorker::new(
@@ -1509,9 +1501,18 @@ mod tests {
         // Create multi-worker sequence managers with ALL workers [0, 1, 2]
         // Both use the same component to ensure event synchronization works
         let mut workers_with_configs = HashMap::new();
-        workers_with_configs.insert(0, None);
-        workers_with_configs.insert(1, None);
-        workers_with_configs.insert(2, None);
+        workers_with_configs.insert(
+            0,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
+        workers_with_configs.insert(
+            1,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
+        workers_with_configs.insert(
+            2,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
 
         let seq_manager_1 = Arc::new(
             ActiveSequencesMultiWorker::new(

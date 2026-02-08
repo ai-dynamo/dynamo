@@ -199,6 +199,13 @@ def parse_args():
         help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
     )
     parser.add_argument(
+        "--durable-kv-events",
+        action="store_true",
+        dest="durable_kv_events",
+        default=False,
+        help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
+    )
+    parser.add_argument(
         "--no-track-active-blocks",
         action="store_false",
         dest="router_track_active_blocks",
@@ -354,11 +361,18 @@ async def async_main():
 
     # NATS is needed when:
     # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    # 2. Durable KV events (JetStream) is explicitly requested, OR
+    # 3. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    # Note: NATS Core (without JetStream) is the default for KV events when durable_kv_events=False
     enable_nats = flags.request_plane == "nats" or (
-        flags.event_plane == "nats"
-        and flags.router_mode == "kv"
-        and (flags.use_kv_events or flags.router_replica_sync)
+        flags.router_mode == "kv"
+        and (
+            flags.durable_kv_events
+            or (
+                flags.event_plane == "nats"
+                and (flags.use_kv_events or flags.router_replica_sync)
+            )
+        )
     )
 
     loop = asyncio.get_running_loop()
@@ -376,6 +390,7 @@ async def async_main():
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
+            durable_kv_events=flags.durable_kv_events,
             router_replica_sync=flags.router_replica_sync,
             router_track_active_blocks=flags.router_track_active_blocks,
             router_track_output_blocks=flags.router_track_output_blocks,
