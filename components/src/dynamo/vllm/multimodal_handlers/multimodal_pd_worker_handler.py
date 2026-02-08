@@ -3,6 +3,7 @@
 
 import copy
 import logging
+import uuid
 from collections import defaultdict
 from typing import Any
 
@@ -10,18 +11,28 @@ import torch
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
+import dynamo.nixl_connect as connect
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
-import dynamo.nixl_connect as connect
 from dynamo.runtime import Client, Component, DistributedRuntime
 
 from ..args import Config
-from ..handlers import BaseWorkerHandler
-from ..multimodal_utils import ImageLoader, MyRequestOutput, vLLMMultimodalRequest
+from ..handlers import BaseWorkerHandler, build_sampling_params
+from ..multimodal_utils import (
+    ImageLoader,
+    MultiModalGroup,
+    MultiModalInput,
+    MyRequestOutput,
+    PatchedTokensPrompt,
+    vLLMMultimodalRequest,
+)
 from ..multimodal_utils.model import is_qwen_vl_model
 from ..multimodal_utils.prefill_worker_utils import (
+    IMAGE_URL_KEY,
     accumulate_embeddings,
+    fetch_ec_connector_embeddings,
+    fetch_embeddings_from_encode_workers,
     load_embeddings,
 )
 
@@ -95,17 +106,103 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self._connector = connect.Connector()
         logger.info("Multimodal PD Worker async initialization completed.")
 
-    async def generate(self, request: vLLMMultimodalRequest, context):
-        logger.debug(f"Got raw request: {request}")
-        if type(request) is not vLLMMultimodalRequest:
-            if type(request) is str:
-                request = vLLMMultimodalRequest.model_validate_json(request)
-            else:
-                request = vLLMMultimodalRequest.model_validate(request)
-        logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
+    async def _build_request_from_frontend(
+        self, raw_request: dict
+    ) -> vLLMMultimodalRequest:
+        """Convert a raw frontend dict into a vLLMMultimodalRequest.
 
+        When the PD worker is the direct frontend endpoint (no separate
+        processor), the Rust frontend sends a dict with ``token_ids`` and
+        ``multi_modal_data``.  This method extracts image URLs, routes them
+        to encode workers if available, and assembles the standard request
+        object that the rest of ``generate()`` expects.
+        """
+        request_id = str(uuid.uuid4().hex)
+
+        # Extract image URLs from the raw frontend dict
+        image_urls: list[str] = []
+        mm_data = raw_request.get("multi_modal_data")
+        if mm_data is not None:
+            for item in mm_data.get(IMAGE_URL_KEY, []):
+                if isinstance(item, dict) and "Url" in item:
+                    image_urls.append(item["Url"])
+
+        # Route to encode workers if available, otherwise build image-URL
+        # groups so the downstream loop loads PIL images for inline encoding.
+        if self.encode_worker_client and image_urls:
+            # Check if we're in ECConnector mode
+            if self._is_ec_connector_mode():
+                # ECConnector encoder: send VLLMNativeEncoderRequest
+                multimodal_groups = await fetch_ec_connector_embeddings(
+                    self.encode_worker_client,
+                    image_urls,
+                    raw_request["token_ids"],
+                    request_id,
+                )
+            else:
+                # Standalone encoder: use existing helper
+                multimodal_groups = await fetch_embeddings_from_encode_workers(
+                    self.encode_worker_client,
+                    image_urls,
+                    request_id,
+                )
+        else:
+            # No encoder: inline encoding
+            multimodal_groups = []
+            for url in image_urls:
+                mi = MultiModalInput()
+                mi.image_url = url
+                multimodal_groups.append(MultiModalGroup(multimodal_input=mi))
+
+        sampling_params = build_sampling_params(
+            raw_request, self.default_sampling_params
+        )
+
+        return vLLMMultimodalRequest(
+            engine_prompt=PatchedTokensPrompt(
+                prompt_token_ids=raw_request["token_ids"]
+            ),
+            sampling_params=sampling_params,
+            request_id=request_id,
+            multimodal_inputs=multimodal_groups,
+        )
+
+    # ── Request parsing ────────────────────────────────────────────────
+
+    async def _parse_request(self, request) -> vLLMMultimodalRequest:
+        """Normalize any incoming format into a validated vLLMMultimodalRequest.
+
+        Handles three input shapes:
+        1. Raw frontend dict  (has ``token_ids`` + ``multi_modal_data``)
+        2. JSON string         (from encode worker or other serializers)
+        3. Plain dict          (Pydantic-compatible mapping)
+        """
+        if isinstance(request, dict) and "token_ids" in request:
+            return await self._build_request_from_frontend(request)
+
+        if type(request) is vLLMMultimodalRequest:
+            return request
+
+        if type(request) is str:
+            return vLLMMultimodalRequest.model_validate_json(request)
+
+        return vLLMMultimodalRequest.model_validate(request)
+
+    # ── Multimodal data loading ──────────────────────────────────────
+
+    async def _load_multimodal_data(
+        self, request: vLLMMultimodalRequest
+    ) -> dict[str, Any]:
+        """Load PIL images or pre-computed embeddings into an engine-ready dict.
+
+        Each ``MultiModalGroup`` in the request is either:
+        * An image URL -> loaded as a PIL image for inline vLLM encoding.
+        * Pre-computed embeddings -> loaded via NIXL RDMA or local safetensors.
+        """
+        multimodal_inputs = request.multimodal_inputs or []
         multi_modal_data: dict[str, Any] = defaultdict(list)
-        for mi in request.multimodal_inputs:
+
+        for mi in multimodal_inputs:
             if mi.multimodal_input.image_url:
                 # PIL image path — used by both EC consumer mode
                 # (vLLM looks up cached embeddings via mm_hash) and
@@ -129,9 +226,35 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     mi.image_grid_thw,
                 )
 
-        # For Qwen VL (mRoPE), capture the accumulated image grid + embedding shape
-        # from the constructed multimodal data so decode can reconstruct its
-        # multi_modal_data consistently for multiple images.
+        return multi_modal_data
+
+    # ── ECConnector encoder support ──────────────────────────────────
+
+    def _is_ec_connector_mode(self) -> bool:
+        """Check if using ECConnector encoder (vLLM-native) mode.
+
+        ECConnector mode is enabled when:
+        - encode_worker_client exists (encoder disaggregation)
+        - ec_consumer_mode is True (PD worker configured as consumer)
+        """
+        return self.encode_worker_client is not None and self.config.ec_consumer_mode
+
+    # ── Request metadata finalization ────────────────────────────────
+
+    def _finalize_request_metadata(
+        self,
+        request: vLLMMultimodalRequest,
+        multi_modal_data: dict[str, Any],
+    ) -> None:
+        """Attach model-specific metadata and strip heavy fields from request.
+
+        For Qwen VL (mRoPE) models, captures image grid dimensions and
+        embedding shapes so the decode worker can reconstruct
+        ``multi_modal_data`` consistently for multiple images.
+
+        Also clears ``multimodal_inputs`` — the raw embeddings / URLs are no
+        longer needed once ``multi_modal_data`` is built.
+        """
         if is_qwen_vl_model(self.config.model) and isinstance(
             multi_modal_data.get("image"), dict
         ):
@@ -147,28 +270,104 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             if image_embeds is not None:
                 request.embeddings_shape = list(image_embeds.shape)
 
-        # Remove the image features from the request as they are not required
-        # Use empty list instead of None to satisfy Pydantic validation on decode worker after vllm upgrade
+        # Use empty list instead of None to satisfy Pydantic validation
+        # on decode worker after vllm upgrade.
         request.multimodal_inputs = []
 
-        logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
-        logger.info(f"{multi_modal_data}")
+    # ── Response serialization ───────────────────────────────────────
 
-        # Deepcopy the request to avoid modifying the original
-        # when we adjust sampling params for prefill
+    @staticmethod
+    def _serialize_response(response) -> str:
+        """Build a JSON-serialized ``MyRequestOutput`` from an engine response."""
+        return MyRequestOutput(
+            request_id=response.request_id,
+            prompt=response.prompt,
+            prompt_token_ids=response.prompt_token_ids,
+            prompt_logprobs=response.prompt_logprobs,
+            outputs=response.outputs,
+            finished=response.finished,
+            metrics=response.metrics,
+            kv_transfer_params=response.kv_transfer_params,
+        ).model_dump_json()
 
-        pd_request = copy.deepcopy(request)
-        # Do prefill and remote decode if enable_disagg is true
-        if self.enable_disagg and self.decode_worker_client:
-            extra_args = pd_request.sampling_params.extra_args or {}
-            extra_args["kv_transfer_params"] = {
-                "do_remote_decode": True,
+    @staticmethod
+    def _format_engine_output(
+        response, num_output_tokens_so_far: int
+    ) -> dict[str, Any]:
+        """Format a vLLM RequestOutput as an LLMEngineOutput-compatible dict.
+
+        This produces the same incremental dict format that the regular
+        (non-multimodal) handler yields, which the Rust frontend expects
+        after model registration.
+        """
+        if not response.outputs:
+            return {
+                "finish_reason": "error: No outputs from vLLM engine",
+                "token_ids": [],
             }
-            pd_request.sampling_params.extra_args = extra_args
-            pd_request.sampling_params.max_tokens = 1
-            pd_request.sampling_params.min_tokens = 1
 
-            logger.debug("Prefill request: %s", pd_request)
+        output = response.outputs[0]
+        out: dict[str, Any] = {
+            "token_ids": output.token_ids[num_output_tokens_so_far:],
+        }
+
+        if output.finish_reason:
+            # Inline normalization: map vLLM's "abort" to Dynamo's "cancelled"
+            finish_reason = output.finish_reason
+            if finish_reason.startswith("abort"):
+                finish_reason = "cancelled"
+            out["finish_reason"] = finish_reason
+            out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
+                request_output=response,
+            )
+        if output.stop_reason:
+            out["stop_reason"] = output.stop_reason
+
+        return out
+
+    # ── Aggregated generation (prefill + decode locally) ─────────────
+
+    async def _generate_agg(
+        self,
+        request: vLLMMultimodalRequest,
+        multi_modal_data: dict[str, Any],
+    ):
+        """Run prefill and decode on this worker (aggregated mode)."""
+        gen = self.engine_client.generate(
+            prompt=TokensPrompt(
+                prompt_token_ids=request.engine_prompt["prompt_token_ids"],
+                multi_modal_data=multi_modal_data,
+            ),
+            sampling_params=request.sampling_params,
+            request_id=request.request_id,
+        )
+
+        num_output_tokens_so_far = 0
+        async for response in gen:
+            logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
+            logger.debug(
+                f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
+            )
+            yield self._format_engine_output(response, num_output_tokens_so_far)
+            if response.outputs:
+                num_output_tokens_so_far = len(response.outputs[0].token_ids)
+
+    # ── Disaggregated generation (prefill here, decode remote) ───────
+
+    async def _generate_disagg(
+        self,
+        request: vLLMMultimodalRequest,
+        multi_modal_data: dict[str, Any],
+    ):
+        """Prefill locally, then forward to a remote decode worker."""
+        # Prepare prefill-only request
+        pd_request = copy.deepcopy(request)
+        extra_args = pd_request.sampling_params.extra_args or {}
+        extra_args["kv_transfer_params"] = {"do_remote_decode": True}
+        pd_request.sampling_params.extra_args = extra_args
+        pd_request.sampling_params.max_tokens = 1
+        pd_request.sampling_params.min_tokens = 1
+        logger.debug("Prefill request: %s", pd_request)
 
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
@@ -179,61 +378,57 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             request_id=pd_request.request_id,
         )
 
-        if self.enable_disagg and self.decode_worker_client:
-            decode_request = copy.deepcopy(request)
-            async for prefill_response in gen:
-                # For Qwen VL models with mRoPE: Keep the ORIGINAL unexpanded prompt.
-                # The decode worker will pass multi_modal_data which causes vLLM to
-                # expand the prompt identically to prefill, ensuring block counts match.
-                #
-                # For other models: Use the expanded prompt from prefill response.
-                # These models don't pass multi_modal_data in decode, so they need
-                # the already-expanded prompt to match the KV cache layout.
-                if not is_qwen_vl_model(self.config.model):
-                    decode_request.engine_prompt[
-                        "prompt_token_ids"
-                    ] = prefill_response.prompt_token_ids
-                logger.debug(
-                    f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}"
-                )
-                extra_args = decode_request.sampling_params.extra_args or {}
-                extra_args["kv_transfer_params"] = prefill_response.kv_transfer_params
-                extra_args.pop("serialized_request", None)
-                decode_request.sampling_params.extra_args = extra_args
-                logger.debug("Decode request: %s", decode_request)
-                async for (
-                    decode_response
-                ) in await self.decode_worker_client.round_robin(
-                    decode_request.model_dump_json()
-                ):
-                    output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore[attr-defined]
-                    yield MyRequestOutput(
-                        request_id=output.request_id,
-                        prompt=output.prompt,
-                        prompt_token_ids=output.prompt_token_ids,
-                        prompt_logprobs=output.prompt_logprobs,
-                        outputs=output.outputs,
-                        finished=output.finished,
-                        metrics=output.metrics,
-                        kv_transfer_params=output.kv_transfer_params,
-                    ).model_dump_json()
+        decode_request = copy.deepcopy(request)
+        async for prefill_response in gen:
+            # Qwen VL (mRoPE): keep the ORIGINAL unexpanded prompt.
+            # The decode worker passes multi_modal_data which causes vLLM to
+            # expand the prompt identically to prefill, ensuring block counts match.
+            #
+            # Other models: use the expanded prompt from prefill response.
+            # They don't pass multi_modal_data in decode, so they need the
+            # already-expanded prompt to match the KV cache layout.
+            if not is_qwen_vl_model(self.config.model):
+                decode_request.engine_prompt[
+                    "prompt_token_ids"
+                ] = prefill_response.prompt_token_ids
 
+            logger.debug(
+                f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}"
+            )
+            extra_args = decode_request.sampling_params.extra_args or {}
+            extra_args["kv_transfer_params"] = prefill_response.kv_transfer_params
+            extra_args.pop("serialized_request", None)
+            decode_request.sampling_params.extra_args = extra_args
+            logger.debug("Decode request: %s", decode_request)
+
+            async for (
+                decode_response
+            ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]
+                decode_request.model_dump_json()
+            ):
+                output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore[attr-defined]
+                yield self._serialize_response(output)
+
+    # ── Public entry point ───────────────────────────────────────────
+
+    async def generate(self, request, context):
+        """Parse the request, load multimodal data, and run inference."""
+        logger.debug(f"Got raw request: {request}")
+
+        request = await self._parse_request(request)
+        logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
+
+        multi_modal_data = await self._load_multimodal_data(request)
+        self._finalize_request_metadata(request, multi_modal_data)
+
+        logger.info(
+            f"Prepared multimodal data size: {len(multi_modal_data.get('image', []))}"
+        )
+        logger.debug(f"{multi_modal_data}")
+
+        if self.enable_disagg and self.decode_worker_client:
+            async for chunk in self._generate_disagg(request, multi_modal_data):
+                yield chunk
         else:
-            async for response in gen:
-                logger.debug(
-                    f"Response kv_transfer_params: {response.kv_transfer_params}"
-                )
-                logger.debug(
-                    f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
-                )
-                # logger.info(f"Response outputs: {response.outputs}")
-                yield MyRequestOutput(
-                    request_id=response.request_id,
-                    prompt=response.prompt,
-                    prompt_token_ids=response.prompt_token_ids,
-                    prompt_logprobs=response.prompt_logprobs,
-                    outputs=response.outputs,
-                    finished=response.finished,
-                    metrics=response.metrics,
-                    kv_transfer_params=response.kv_transfer_params,
-                ).model_dump_json()
+            async for chunk in self._generate_agg(request, multi_modal_data):
+                yield chunk

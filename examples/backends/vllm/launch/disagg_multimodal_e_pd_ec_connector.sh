@@ -31,9 +31,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "This script launches:"
             echo "  - Frontend server"
-            echo "  - Processor component (uses pre-tokenized input with ModelInput.Tokens)"
             echo "  - vLLM-native encoder worker (producer using ECConnector)"
-            echo "  - Multimodal worker (consumer using ECConnector, aggregated P+D)"
+            echo "  - Multimodal worker (routes to encoder + consumer using ECConnector, aggregated P+D)"
             echo ""
             echo "Options:"
             echo "  --model <model_name>              Specify the VLM model to use (default: $MODEL_NAME)"
@@ -67,20 +66,21 @@ echo "ECConnector Backend: $EC_CONNECTOR_BACKEND"
 echo "Storage Path: $EC_STORAGE_PATH"
 echo "=================================================="
 
+# GPU assignments (override via environment variables)
+DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
+DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
+
+# GPU memory utilization for workers
+DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.75}
+DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.85}
+
 # Start frontend
 echo "Starting frontend..."
 python -m dynamo.frontend  &
 
-# Start EC Processor (uses pre-tokenized input with placeholder tokens)
-echo "Starting EC Processor..."
-python -m dynamo.vllm \
-    --ec-processor \
-    --enable-multimodal \
-    --model $MODEL_NAME &
-
 # Start vLLM-native encoder worker (ECConnector producer)
-echo "Starting vLLM-native encoder worker (ECConnector producer) on GPU 0..."
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
+echo "Starting vLLM-native encoder worker (ECConnector producer) on GPU $DYN_ENCODE_WORKER_GPU (mem: $DYN_ENCODE_GPU_MEM)..."
+CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU python -m dynamo.vllm \
     --vllm-native-encoder-worker \
     --enable-multimodal \
     --model $MODEL_NAME \
@@ -88,21 +88,25 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
     --ec-storage-path $EC_STORAGE_PATH \
     --connector none \
     --enforce-eager \
+    --gpu-memory-utilization $DYN_ENCODE_GPU_MEM \
     --max-num-batched-tokens 114688 \
     --no-enable-prefix-caching &
 
-# Start aggregated multimodal worker (ECConnector consumer, P+D combined)
-echo "Starting aggregated multimodal worker (ECConnector consumer) on GPU 1..."
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm \
+# Start aggregated multimodal worker (routes to encoder + ECConnector consumer, P+D combined)
+# The worker handles encoder routing (frontend to encoder workers) and inference
+echo "Starting aggregated multimodal worker (routes to encoder + ECConnector consumer) on GPU $DYN_PD_WORKER_GPU (mem: $DYN_PD_GPU_MEM)..."
+CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU python -m dynamo.vllm \
+    --dyn-route-to-encoder \
     --multimodal-worker \
     --enable-multimodal \
     --model $MODEL_NAME \
-    --ec-consumer-mode \
+    --dyn-ec-consumer-mode \
     --ec-connector-backend $EC_CONNECTOR_BACKEND \
     --ec-storage-path $EC_STORAGE_PATH \
     --enable-mm-embeds \
     --connector none \
-    --enforce-eager &
+    --enforce-eager \
+    --gpu-memory-utilization $DYN_PD_GPU_MEM &
 
 # Wait for all background processes to complete
 wait

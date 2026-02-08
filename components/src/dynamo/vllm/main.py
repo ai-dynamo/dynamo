@@ -41,11 +41,9 @@ except ImportError:
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
-    ECProcessorHandler,
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
-    PreprocessedHandler,
     VLLMEncodeWorkerHandler,
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
@@ -247,12 +245,6 @@ async def worker():
     if config.vllm_native_encoder_worker:
         await init_vllm_native_encoder(runtime, config, shutdown_event)
         logger.debug("init_vllm_native_encoder completed")
-    elif config.ec_processor:
-        await init_ec_processor(runtime, config, shutdown_event)
-        logger.debug("init_ec_processor completed")
-    elif config.multimodal_processor:
-        await init_multimodal_processor(runtime, config, shutdown_event)
-        logger.debug("init_multimodal_processor completed")
     elif config.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config, shutdown_event)
         logger.debug("init_multimodal_encode_worker completed")
@@ -881,63 +873,6 @@ def get_engine_cache_info(engine: AsyncLLM):
         raise
 
 
-async def init_multimodal_processor(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
-    """Initialize multimodal processor component"""
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
-
-    # Get encode worker client
-    encode_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("encoder")
-        .endpoint("generate")
-        .client()
-    )
-
-    pd_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("backend")
-        .endpoint("generate")
-        .client()
-    )
-
-    handler = PreprocessedHandler(
-        config.engine_args,
-        encode_worker_client,
-        pd_worker_client,
-    )
-
-    logger.info("Waiting for Encoder Worker Instances ...")
-    await encode_worker_client.wait_for_instances()
-
-    # Register the endpoint as entrypoint to a model
-    await register_llm(
-        ModelInput.Tokens,
-        ModelType.Chat,
-        generate_endpoint,
-        config.model,
-        config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-    )
-
-    logger.info("Starting to serve the processor endpoint...")
-
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve endpoints: {e}")
-        raise
-    finally:
-        handler.cleanup()
-
-
 async def init_multimodal_encode_worker(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
@@ -946,23 +881,10 @@ async def init_multimodal_encode_worker(
 
     generate_endpoint = component.endpoint(config.endpoint)
 
-    # Get PD worker client
-    # In multimodal mode, the PD worker always registers as "backend"
-    # (even in disaggregated mode with prefill/decode split, we still connect to "backend")
-    pd_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("backend")
-        .endpoint("generate")
-        .client()
-    )
-
     handler = EncodeWorkerHandler(
         config.engine_args,
-        pd_worker_client,
     )
     await handler.async_init(runtime)
-    logger.info("Waiting for PD Worker Instances ...")
-    await pd_worker_client.wait_for_instances()
     logger.info("Starting to serve the encode worker endpoint...")
 
     try:
@@ -1022,9 +944,6 @@ async def init_vllm_native_encoder(
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
-    # 5. No async init needed - vLLM handles everything
-    # await handler.async_init(runtime)  # Not needed for ECConnector mode
-
     logger.info("Starting to serve vLLM-native encoder endpoint...")
 
     # 6. Serve endpoint
@@ -1036,78 +955,6 @@ async def init_vllm_native_encoder(
         )
     except Exception as e:
         logger.error(f"Failed to serve vLLM-native encoder endpoint: {e}")
-        raise
-    finally:
-        handler.cleanup()
-
-
-async def init_ec_processor(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
-    """
-    Initialize ECConnector processor component.
-
-    Simple processor that routes multimodal requests using ECConnector pattern:
-    1. Preprocess request (same as regular processor)
-    2. Send multimodal items to encoder workers (stores to shared storage)
-    3. Forward preprocessed request to PD worker (loads from shared storage)
-    4. Stream response back to client
-    """
-    # Create component and endpoint
-    component = runtime.namespace(config.namespace).component(config.component)
-    generate_endpoint = component.endpoint(config.endpoint)
-
-    # Get encoder worker client
-    encoder_client = (
-        await runtime.namespace(config.namespace)
-        .component("encoder")
-        .endpoint("generate")
-        .client()
-    )
-
-    # Get PD worker client
-    pd_client = (
-        await runtime.namespace(config.namespace)
-        .component("backend")
-        .endpoint("generate")
-        .client()
-    )
-
-    # Get prompt template from args (must be passed via environment or command line)
-    mm_prompt_template = config.mm_prompt_template
-
-    # Create EC processor handler (with preprocessing like regular processor)
-    handler = ECProcessorHandler(
-        config.engine_args,
-        encoder_worker_client=encoder_client,
-        pd_worker_client=pd_client,
-        prompt_template=mm_prompt_template,
-    )
-
-    logger.info("Waiting for encoder and PD worker instances...")
-    await encoder_client.wait_for_instances()
-    await pd_client.wait_for_instances()
-
-    # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
-    await register_llm(
-        ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
-        ModelType.Chat,
-        generate_endpoint,
-        config.model,
-        config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-    )
-
-    logger.info("Starting to serve EC processor endpoint...")
-
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve EC processor endpoint: {e}")
         raise
     finally:
         handler.cleanup()
@@ -1171,6 +1018,23 @@ async def init_multimodal_worker(
             prometheus_temp_dir,
         ) = setup_vllm_engine(config)
 
+    # Set up encode worker client when routing to encoder is enabled
+    # (PD worker handles encode routing directly instead of a separate processor)
+    encode_worker_client = None
+    if config.route_to_encoder:
+        encode_worker_client = (
+            await runtime.namespace(config.namespace)
+            .component("encoder")
+            .endpoint("generate")
+            .client()
+        )
+        logger.info("Waiting for Encoder Worker Instances ...")
+        await encode_worker_client.wait_for_instances()
+        if config.ec_consumer_mode:
+            logger.info("Connected to vLLM-native encoder workers (ECConnector mode)")
+        else:
+            logger.info("Connected to standalone encoder workers")
+
     # Set up decode worker client for disaggregated mode
     decode_worker_client = None
     if config.is_prefill_worker:
@@ -1195,6 +1059,7 @@ async def init_multimodal_worker(
             component,
             engine_client,
             config,
+            encode_worker_client,
             decode_worker_client,
             shutdown_event,
         )
@@ -1209,7 +1074,20 @@ async def init_multimodal_worker(
     if kv_publisher:
         handler.kv_publisher = kv_publisher
 
-    metrics_labels = [("model", config.model)]
+    # Register model with the frontend so it can route requests
+    model_type = parse_endpoint_types(config.dyn_endpoint_types)
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+    await register_vllm_model(
+        model_input,
+        model_type,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+        migration_limit=config.migration_limit,
+    )
+
+    metrics_labels = [("model", config.served_model_name or config.model)]
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(

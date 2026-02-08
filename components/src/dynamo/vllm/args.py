@@ -60,10 +60,7 @@ class Config:
     dyn_endpoint_types: str = "chat,completions"
 
     # multimodal options
-    multimodal_processor: bool = False
-    # Embedding Cache Processor is different from the regular processor
-    # TODO: Have a single processor for all cases and adopting rust based processor
-    ec_processor: bool = False
+    route_to_encoder: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
     multimodal_decode_worker: bool = False
@@ -175,14 +172,9 @@ def parse_args() -> Config:
         help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
     )
     parser.add_argument(
-        "--multimodal-processor",
+        "--dyn-route-to-encoder",
         action="store_true",
-        help="Run as multimodal processor component for handling multimodal requests",
-    )
-    parser.add_argument(
-        "--ec-processor",
-        action="store_true",
-        help="Run as ECConnector processor (routes multimodal requests to encoder then PD workers)",
+        help="Enable routing to separate encoder workers for multimodal processing",
     )
     parser.add_argument(
         "--multimodal-encode-worker",
@@ -261,7 +253,7 @@ def parse_args() -> Config:
         help="Additional ECConnector configuration as JSON string",
     )
     parser.add_argument(
-        "--ec-consumer-mode",
+        "--dyn-ec-consumer-mode",
         action="store_true",
         help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
     )
@@ -368,10 +360,9 @@ def parse_args() -> Config:
     config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
     # Check multimodal role exclusivity
+    # Note: --dyn-route-to-encoder and --dyn-ec-consumer-mode are modifier flags, not worker types
     mm_flags = (
-        int(bool(args.multimodal_processor))
-        + int(bool(args.ec_processor))
-        + int(bool(args.multimodal_encode_worker))
+        int(bool(args.multimodal_encode_worker))
         + int(bool(args.multimodal_worker))
         + int(bool(args.multimodal_decode_worker))
         + int(bool(args.multimodal_encode_prefill_worker))
@@ -379,7 +370,7 @@ def parse_args() -> Config:
     )
     if mm_flags > 1:
         raise ValueError(
-            "Use only one of --multimodal-processor, --ec-processor, --multimodal-encode-worker, --multimodal-worker, "
+            "Use only one of --multimodal-encode-worker, --multimodal-worker, "
             "--multimodal-decode-worker, --multimodal-encode-prefill-worker, or --vllm-native-encoder-worker"
         )
 
@@ -405,7 +396,7 @@ def parse_args() -> Config:
         )
 
     # Set component and endpoint based on worker type
-    if args.multimodal_processor or args.ec_processor:
+    if args.dyn_route_to_encoder:
         config.component = "processor"
         config.endpoint = "generate"
     elif (
@@ -442,8 +433,8 @@ def parse_args() -> Config:
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
     config.dyn_endpoint_types = args.dyn_endpoint_types
-    config.multimodal_processor = args.multimodal_processor
-    config.ec_processor = args.ec_processor
+
+    config.route_to_encoder = args.dyn_route_to_encoder
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_decode_worker = args.multimodal_decode_worker
@@ -458,7 +449,7 @@ def parse_args() -> Config:
     config.ec_connector_backend = args.ec_connector_backend
     config.ec_storage_path = args.ec_storage_path
     config.ec_extra_config = args.ec_extra_config
-    config.ec_consumer_mode = args.ec_consumer_mode
+    config.ec_consumer_mode = args.dyn_ec_consumer_mode
     config.omni = args.omni
     config.stage_configs_path = args.stage_configs_path
     config.store_kv = args.store_kv
