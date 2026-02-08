@@ -50,7 +50,6 @@ from dynamo.vllm.multimodal_handlers import (
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
-
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
@@ -1266,7 +1265,7 @@ async def init_omni(
     # TODO: extend for multi-stage pipelines
     await register_llm(
         ModelInput.Text,
-        ModelType.Images,  # Skips tokenizer extraction, supports chat/completions
+        ModelType.Images,
         generate_endpoint,
         config.model,
         config.served_model_name,
