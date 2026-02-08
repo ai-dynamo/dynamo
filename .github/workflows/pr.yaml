@@ -41,7 +41,7 @@ jobs:
     steps:
       - name: can you see? 
         run: |
-          echo "ls -la /models/ci/models/qwen"
+          ls -la /models/ci/models/qwen
 
 
 #   changed-files:
