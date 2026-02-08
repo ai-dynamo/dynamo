@@ -40,6 +40,9 @@ def env_or_default(env_var: str, default: T) -> T:
         return int(value)  # type: ignore
     elif isinstance(default, float):
         return float(value)  # type: ignore
+    elif isinstance(default, list):
+        # Env vars for list options (e.g. DYN_CONNECTOR) are space-separated; downstream expects a list.
+        return [x.strip() for x in value.split() if x.strip()]  # type: ignore
     else:
         return value  # type: ignore
 
