@@ -8,7 +8,7 @@ A simple LRU cache for encoder embeddings (tensors).
 Maps content hash keys to tensors with capacity-based eviction.
 
 Usage:
-    cache = EncoderCacheManager(capacity_bytes=4 * 1024**3)  # 4GB
+    cache = MultimodalEmbeddingCacheManager(capacity_bytes=4 * 1024**3)  # 4GB
 
     # Store embedding
     cache.set("abc123", embedding_tensor)
@@ -26,7 +26,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-class EncoderCacheManager:
+class MultimodalEmbeddingCacheManager:
     """
     LRU cache for encoder embeddings.
 
@@ -56,7 +56,7 @@ class EncoderCacheManager:
         self._misses = 0
 
         logger.info(
-            f"EncoderCacheManager initialized: capacity={capacity_bytes / 1024**3:.2f}GB"
+            f"MultimodalEmbeddingCacheManager initialized: capacity={capacity_bytes / 1024**3:.2f}GB"
         )
 
     @staticmethod

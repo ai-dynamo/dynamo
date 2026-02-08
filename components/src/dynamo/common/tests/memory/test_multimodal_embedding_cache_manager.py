@@ -1,20 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for EncoderCacheManager."""
+"""Unit tests for MultimodalEmbeddingCacheManager."""
 
 import pytest
 import torch
 
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 
 
-class TestEncoderCacheManagerBasicOperations:
+class TestMultimodalEmbeddingCacheManagerBasicOperations:
     """Tests for basic get/set operations."""
 
     def test_set_and_get(self):
         """Test basic set and get operations."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)  # 1MB
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)  # 1MB
         tensor = torch.randn(100, 100)  # ~40KB for float32
 
         result = cache.set("key1", tensor)
@@ -26,14 +28,14 @@ class TestEncoderCacheManagerBasicOperations:
 
     def test_get_nonexistent_key(self):
         """Test get returns None for nonexistent key."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
 
         result = cache.get("nonexistent")
         assert result is None
 
     def test_set_overwrites_existing_key(self):
         """Test set overwrites existing key."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         tensor1 = torch.randn(10, 10)
         tensor2 = torch.randn(10, 10)
 
@@ -45,7 +47,7 @@ class TestEncoderCacheManagerBasicOperations:
         assert cache.stats["entries"] == 1
 
 
-class TestEncoderCacheManagerLRUEviction:
+class TestMultimodalEmbeddingCacheManagerLRUEviction:
     """Tests for LRU eviction behavior."""
 
     def test_eviction_when_full(self):
@@ -53,7 +55,7 @@ class TestEncoderCacheManagerLRUEviction:
         # Small capacity to force eviction
         tensor_size = 10 * 10 * 4  # 400 bytes for float32
         capacity = tensor_size * 2 + 100  # Room for ~2 tensors
-        cache = EncoderCacheManager(capacity_bytes=capacity)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=capacity)
 
         t1 = torch.randn(10, 10)
         t2 = torch.randn(10, 10)
@@ -73,7 +75,7 @@ class TestEncoderCacheManagerLRUEviction:
         """Test that get() updates LRU order."""
         tensor_size = 10 * 10 * 4  # 400 bytes
         capacity = tensor_size * 2 + 100  # Room for ~2 tensors
-        cache = EncoderCacheManager(capacity_bytes=capacity)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=capacity)
 
         t1 = torch.randn(10, 10)
         t2 = torch.randn(10, 10)
@@ -94,7 +96,7 @@ class TestEncoderCacheManagerLRUEviction:
 
     def test_tensor_too_large_for_cache(self):
         """Test that tensor larger than capacity is not cached."""
-        cache = EncoderCacheManager(capacity_bytes=100)  # Very small
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=100)  # Very small
         tensor = torch.randn(100, 100)  # ~40KB, way larger than capacity
 
         result = cache.set("key1", tensor)
@@ -104,12 +106,12 @@ class TestEncoderCacheManagerLRUEviction:
         assert cache.stats["entries"] == 0
 
 
-class TestEncoderCacheManagerSizeTracking:
+class TestMultimodalEmbeddingCacheManagerSizeTracking:
     """Tests for memory size tracking."""
 
     def test_current_bytes_tracking(self):
         """Test that current_bytes is tracked correctly."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
 
         t1 = torch.randn(10, 10)  # 400 bytes
         t2 = torch.randn(20, 20)  # 1600 bytes
@@ -125,7 +127,7 @@ class TestEncoderCacheManagerSizeTracking:
 
     def test_size_updated_on_overwrite(self):
         """Test that size is updated correctly when overwriting."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
 
         small_tensor = torch.randn(10, 10)  # 400 bytes
         large_tensor = torch.randn(20, 20)  # 1600 bytes
@@ -140,12 +142,12 @@ class TestEncoderCacheManagerSizeTracking:
         assert cache.stats["current_bytes"] > initial_size
 
 
-class TestEncoderCacheManagerStats:
+class TestMultimodalEmbeddingCacheManagerStats:
     """Tests for statistics tracking."""
 
     def test_hit_miss_tracking(self):
         """Test hit and miss counting."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         tensor = torch.randn(10, 10)
 
         cache.set("key1", tensor)
@@ -166,7 +168,7 @@ class TestEncoderCacheManagerStats:
 
     def test_stats_content(self):
         """Test stats dictionary contains expected keys."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         tensor = torch.randn(10, 10)
         cache.set("key1", tensor)
 
@@ -186,7 +188,7 @@ class TestEncoderCacheManagerStats:
     def test_utilization_calculation(self):
         """Test utilization is calculated correctly."""
         capacity = 1000
-        cache = EncoderCacheManager(capacity_bytes=capacity)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=capacity)
 
         # Create tensor of known size
         # float32 = 4 bytes, so 25 elements = 100 bytes
@@ -198,12 +200,12 @@ class TestEncoderCacheManagerStats:
         assert abs(stats["utilization"] - expected_utilization) < 0.001
 
 
-class TestEncoderCacheManagerContiguousTensor:
+class TestMultimodalEmbeddingCacheManagerContiguousTensor:
     """Tests for contiguous tensor requirement."""
 
     def test_set_contiguous_tensor_succeeds(self):
         """Test that contiguous tensors can be cached."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         tensor = torch.randn(10, 10)
 
         assert tensor.is_contiguous()
@@ -212,7 +214,7 @@ class TestEncoderCacheManagerContiguousTensor:
 
     def test_set_non_contiguous_tensor_raises(self):
         """Test that non-contiguous tensors raise AssertionError."""
-        cache = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
 
         # Create a non-contiguous tensor via transpose
         tensor = torch.randn(10, 20).t()
