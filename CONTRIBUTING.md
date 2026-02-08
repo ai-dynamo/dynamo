@@ -221,7 +221,6 @@ The LGTM Bot automates merge readiness tracking for all PRs. Here's what it does
 
 - **`lgtm` label** – Automatically added when your PR passes all CI checks, has at least one approval (not from the author), has no outstanding change requests, and satisfies branch protection (including CODEOWNERS). Removed automatically when new commits are pushed.
 - **Merge checklist** – A live-updating comment on your PR showing the status of every merge gate (CI checks, reviews, CODEOWNERS, conflicts). Updated on every CI completion, review change, and push.
-- **PR size labels** – Your PR is automatically labeled `size/XS`, `size/S`, `size/M`, `size/L`, or `size/XL` based on total lines changed. Updated when you push new commits.
 - **CODEOWNERS review requests** – Reviews are automatically requested from the relevant [CODEOWNERS](CODEOWNERS) teams when your PR is opened. A comment lists which teams are required and which files triggered each team.
 - **Stale review nudge** – If a review has been pending for 48+ hours, the bot posts a reminder tagging the pending reviewers.
 - **Merge reminder** – If your PR has the `lgtm` label for 24+ hours without being merged, the bot posts a reminder.

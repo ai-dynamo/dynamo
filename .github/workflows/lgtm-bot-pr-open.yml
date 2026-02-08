@@ -17,8 +17,9 @@
 # Features:
 #   3. Auto-request reviews from CODEOWNERS teams
 #   4. Post a comment listing required CODEOWNERS teams
-#   5. Apply PR size labels based on lines changed
 #   Plus: Fork CI detection for external contributors
+#
+# Note: PR size labels are managed by an existing integration.
 
 name: LGTM Bot PR Open
 
@@ -46,60 +47,6 @@ jobs:
             const isOpened = ['opened', 'reopened'].includes(context.payload.action);
 
             console.log(`Processing PR #${prNumber} (${context.payload.action}, fork=${isFork})`);
-
-            // ============================================================
-            // Feature 5: PR Size Labels
-            // ============================================================
-
-            const SIZE_LABELS = [
-              { name: 'size/XS', max: 10,       color: '3CBF00', desc: '0-10 lines changed' },
-              { name: 'size/S',  max: 50,       color: '5D9801', desc: '11-50 lines changed' },
-              { name: 'size/M',  max: 200,      color: 'FF9900', desc: '51-200 lines changed' },
-              { name: 'size/L',  max: 500,      color: 'FF5500', desc: '201-500 lines changed' },
-              { name: 'size/XL', max: Infinity, color: 'D40000', desc: '501+ lines changed' },
-            ];
-
-            const totalChanges = pr.additions + pr.deletions;
-            const sizeLabel = SIZE_LABELS.find(s => totalChanges <= s.max);
-
-            // Ensure all size labels exist
-            for (const sl of SIZE_LABELS) {
-              try {
-                await github.rest.issues.createLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: sl.name,
-                  color: sl.color,
-                  description: sl.desc,
-                });
-              } catch (e) {
-                if (e.status !== 422) throw e; // 422 = already exists
-              }
-            }
-
-            // Remove old size labels, add the correct one
-            const currentLabels = pr.labels.map(l => l.name);
-            for (const sl of SIZE_LABELS) {
-              if (sl.name !== sizeLabel.name && currentLabels.includes(sl.name)) {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: prNumber,
-                  name: sl.name,
-                }).catch(() => {});
-              }
-            }
-
-            if (!currentLabels.includes(sizeLabel.name)) {
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                labels: [sizeLabel.name],
-              });
-            }
-
-            console.log(`Applied ${sizeLabel.name} (${totalChanges} lines changed)`);
 
             // ============================================================
             // CODEOWNERS parsing (shared by Features 3 & 4)
