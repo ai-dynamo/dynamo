@@ -26,18 +26,18 @@
 //! # Public guard types
 //!
 //! - [`MutableBlock`] -- guards a block in the **Reset** state.
-//!   - Created by [`BlockManager::allocate_blocks`] or [`CompleteBlock::reset`].
+//!   - Created by [`crate::BlockManager::allocate_blocks`] or [`CompleteBlock::reset`].
 //!   - Transitions to [`CompleteBlock`] via [`stage`](MutableBlock::stage)
 //!     or [`complete`](MutableBlock::complete).
 //!
 //! - [`CompleteBlock`] -- guards a block in the **Staged** state.
 //!   - Created by [`MutableBlock::stage`] or [`MutableBlock::complete`].
 //!   - Transitions to [`MutableBlock`] via [`reset`](CompleteBlock::reset),
-//!     or to [`ImmutableBlock`] via [`BlockManager::register_block`].
+//!     or to [`ImmutableBlock`] via [`crate::BlockManager::register_block`].
 //!
 //! - [`ImmutableBlock`] -- guards a block in the **Registered** state.
-//!   - Created by [`BlockManager::register_block`],
-//!     [`BlockManager::match_blocks`], [`BlockManager::scan_matches`],
+//!   - Created by [`crate::BlockManager::register_block`],
+//!     [`crate::BlockManager::match_blocks`], [`crate::BlockManager::scan_matches`],
 //!     or [`WeakBlock::upgrade`].
 //!   - Transitions to [`WeakBlock`] via [`downgrade`](ImmutableBlock::downgrade).
 //!
