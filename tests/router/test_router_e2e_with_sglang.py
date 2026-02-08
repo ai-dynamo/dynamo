@@ -477,9 +477,9 @@ def test_router_decisions_sglang_dp(
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [
-        ("file", True, "nats"),
+        ("file", False, "tcp"),
     ],
-    ids=["file_jetstream"],
+    ids=["file_local_indexer"],
     indirect=["durable_kv_events", "request_plane"],
 )
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
@@ -498,7 +498,7 @@ def test_sglang_indexers_sync(
     with SGLang workers. This test verifies that both routers converge to the same internal state.
 
     Tests with configuration:
-    - file_jetstream: file backend, durable KV events with JetStream, NATS request plane
+    - file_local_indexer: file backend, local indexer with NATS Core, TCP request plane
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     nats_process, _etcd_process = runtime_services_dynamic_ports
