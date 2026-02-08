@@ -105,8 +105,6 @@ type CheckpointConfig struct {
 	Enabled bool
 	// Storage holds storage backend configuration
 	Storage CheckpointStorageConfig
-	// CRIUTimeout is the CRIU timeout in seconds (required for CUDA checkpoints/restores)
-	CRIUTimeout string
 	// InitContainerImage is the image used for init containers (e.g., signal file cleanup)
 	// Defaults to "busybox:latest" if not specified
 	InitContainerImage string

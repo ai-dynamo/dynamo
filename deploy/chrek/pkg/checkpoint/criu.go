@@ -137,9 +137,9 @@ func AddExternalStrings(criuOpts *criurpc.CriuOpts, externals []string) {
 
 // ConfigureExternalMounts adds all required external mounts to CRIU options.
 // This includes mounts from /proc/pid/mountinfo plus masked/readonly paths from OCI spec.
-func ConfigureExternalMounts(criuOpts *criurpc.CriuOpts, pid int, hostProc string, containerInfo *checkpointk8s.ContainerInfo) error {
+func ConfigureExternalMounts(criuOpts *criurpc.CriuOpts, pid int, containerInfo *checkpointk8s.ContainerInfo) error {
 	// Get all mounts from mountinfo - CRIU needs every mount marked as external
-	allMounts, err := GetAllMountsFromMountinfo(pid, hostProc)
+	allMounts, err := GetAllMountsFromMountinfo(pid)
 	if err != nil {
 		return fmt.Errorf("failed to get all mounts from mountinfo: %w", err)
 	}
@@ -175,12 +175,12 @@ func ConfigureExternalNamespaces(criuOpts *criurpc.CriuOpts, namespaces map[Name
 // skip mount list. This allows cross-node restore by skipping mounts that may not exist
 // on the target node (e.g., NVIDIA runtime mounts like /run/nvidia/driver/...).
 // Returns the list of mounts that will be skipped, for logging purposes.
-func ConfigureSkipMounts(criuOpts *criurpc.CriuOpts, pid int, hostProc string, prefixes []string) ([]string, error) {
+func ConfigureSkipMounts(criuOpts *criurpc.CriuOpts, pid int, prefixes []string) ([]string, error) {
 	if len(prefixes) == 0 {
 		return nil, nil
 	}
 
-	skipMounts, err := GetMountsUnderPrefixes(pid, hostProc, prefixes)
+	skipMounts, err := GetMountsUnderPrefixes(pid, prefixes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to enumerate skip mounts from prefixes: %w", err)
 	}

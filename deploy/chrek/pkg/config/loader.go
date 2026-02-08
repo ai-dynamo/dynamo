@@ -4,7 +4,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,7 +36,6 @@ func LoadConfig(path string) (*FullConfig, error) {
 	// Apply environment variable overrides
 	cfg.Agent.LoadAgentEnvOverrides()
 	cfg.Checkpoint.LoadCheckpointEnvOverrides()
-	cfg.Restore.LoadRestoreEnvOverrides()
 
 	return cfg, nil
 }
@@ -55,7 +53,6 @@ func LoadConfigOrDefault(path string) (*FullConfig, error) {
 			cfg = &FullConfig{}
 			cfg.Agent.LoadAgentEnvOverrides()
 			cfg.Checkpoint.LoadCheckpointEnvOverrides()
-			cfg.Restore.LoadRestoreEnvOverrides()
 			return cfg, nil
 		}
 		// Parse errors and other errors should be surfaced
@@ -91,21 +88,5 @@ func (c *FullConfig) Validate() error {
 	if err := c.Checkpoint.Validate(); err != nil {
 		return err
 	}
-	if err := c.Restore.Validate(); err != nil {
-		return err
-	}
 	return nil
-}
-
-// splitNonEmpty splits a string by separator and returns non-empty parts.
-func splitNonEmpty(s, sep string) []string {
-	parts := strings.Split(s, sep)
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
-		}
-	}
-	return result
 }

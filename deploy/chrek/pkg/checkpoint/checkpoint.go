@@ -39,21 +39,13 @@ type Result struct {
 type Checkpointer struct {
 	discoveryClient *checkpointk8s.DiscoveryClient
 	k8sClient       *checkpointk8s.K8sClient // Optional: for accurate volume type discovery from K8s API
-	hostProc        string
 	log             *logrus.Entry
 }
 
 // NewCheckpointer creates a new checkpointer
-func NewCheckpointer(discoveryClient *checkpointk8s.DiscoveryClient, hostProc string) *Checkpointer {
-	if hostProc == "" {
-		hostProc = os.Getenv("HOST_PROC")
-		if hostProc == "" {
-			hostProc = "/proc"
-		}
-	}
+func NewCheckpointer(discoveryClient *checkpointk8s.DiscoveryClient) *Checkpointer {
 	return &Checkpointer{
 		discoveryClient: discoveryClient,
-		hostProc:        hostProc,
 		log:             logrus.WithField("component", "checkpointer"),
 	}
 }
@@ -90,15 +82,15 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 
 	// 3. Introspect container state
 	introspectStart := time.Now()
-	rootFS, err := GetRootFS(pid, c.hostProc)
+	rootFS, err := GetRootFS(pid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rootfs: %w", err)
 	}
-	mounts, err := GetKubernetesVolumeMounts(pid, c.hostProc)
+	mounts, err := GetKubernetesVolumeMounts(pid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get mounts: %w", err)
 	}
-	namespaces, err := GetAllNamespaces(pid, c.hostProc)
+	namespaces, err := GetAllNamespaces(pid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get namespaces: %w", err)
 	}
@@ -137,7 +129,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	}
 
 	// 7. Configure external mounts and namespaces
-	if err := ConfigureExternalMounts(criuOpts, pid, c.hostProc, containerInfo); err != nil {
+	if err := ConfigureExternalMounts(criuOpts, pid, containerInfo); err != nil {
 		return nil, err
 	}
 	netNsInode := ConfigureExternalNamespaces(criuOpts, namespaces, cfg.CRIU.ExternalMounts)
@@ -149,7 +141,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	}
 
 	// 7b. Configure mounts to skip from configured prefixes (for cross-node restore)
-	skipMounts, err := ConfigureSkipMounts(criuOpts, pid, c.hostProc, cfg.SkipMountPrefixes)
+	skipMounts, err := ConfigureSkipMounts(criuOpts, pid, cfg.SkipMountPrefixes)
 	if err != nil {
 		c.log.WithError(err).Warn("Failed to configure skip mounts")
 	} else if len(skipMounts) > 0 {
@@ -161,7 +153,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	}
 
 	// 8. Get overlay upperdir for rootfs diff capture
-	upperDir, upperDirErr := GetOverlayUpperDir(pid, c.hostProc)
+	upperDir, upperDirErr := GetOverlayUpperDir(pid)
 	if upperDirErr != nil {
 		c.log.WithError(upperDirErr).Warn("Could not get overlay upperdir - rootfs diff will not be captured")
 	} else {
@@ -200,7 +192,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	// 11. Capture /dev/shm contents
 	// This must happen after CRIU dump since we want the final process state
 	shmCaptureStart := time.Now()
-	if err := CaptureDevShm(pid, c.hostProc, checkpointDir, c.log); err != nil {
+	if err := CaptureDevShm(pid, checkpointDir, c.log); err != nil {
 		c.log.WithError(err).Warn("Failed to capture /dev/shm contents")
 	}
 	c.log.WithField("duration", time.Since(shmCaptureStart)).Info("/dev/shm capture completed")
@@ -222,4 +214,3 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 		Data:          data,
 	}, nil
 }
-

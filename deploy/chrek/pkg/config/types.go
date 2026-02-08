@@ -4,16 +4,15 @@
 package config
 
 // FullConfig is the root configuration structure loaded from the ConfigMap.
-// It contains all configuration sections for the agent, checkpoint, and restore operations.
+// It contains configuration for the agent and checkpoint operations.
+// Restore configuration is NOT here - it uses hardcoded defaults + operator env vars
+// since placeholder containers do not mount the ConfigMap.
 type FullConfig struct {
 	// Agent configuration for runtime behavior
 	Agent AgentConfig `yaml:"agent"`
 
 	// Checkpoint configuration for CRIU dump operations
 	Checkpoint CheckpointConfig `yaml:"checkpoint"`
-
-	// Restore configuration for CRIU restore operations
-	Restore RestoreConfig `yaml:"restore"`
 }
 
 // ConfigMapPath is the default path where the ConfigMap is mounted.

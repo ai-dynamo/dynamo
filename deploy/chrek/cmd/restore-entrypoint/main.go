@@ -71,15 +71,8 @@ func main() {
 		TimestampFormat: "2006-01-02 15:04:05",
 	})
 
-	// Load configuration from ConfigMap and environment
-	cfg, err := config.LoadRestoreConfig(config.ConfigMapPath)
-	if err != nil {
-		log.WithError(err).Warn("Could not load config from ConfigMap, using defaults and env vars")
-		cfg, err = config.LoadRestoreConfig("")
-		if err != nil {
-			log.WithError(err).Fatal("Could not load config from defaults/env vars either")
-		}
-	}
+	// Load configuration from hardcoded defaults + operator-injected env vars
+	cfg := config.NewRestoreConfig()
 
 	// Set log level based on DEBUG flag
 	if cfg.Debug {

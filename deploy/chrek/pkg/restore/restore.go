@@ -349,13 +349,11 @@ func logCRIUErrors(checkpointPath, logFile string, log *logrus.Entry) {
 	}
 	log.Error("=== CRIU RESTORE LOG END ===")
 
-	// Copy log to shared directory if CRIU_LOG_DIR is set
-	if logDir := os.Getenv("CRIU_LOG_DIR"); logDir != "" {
-		if err := os.MkdirAll(logDir, 0755); err == nil {
-			destPath := filepath.Join(logDir, fmt.Sprintf("restore-%d.log", time.Now().Unix()))
-			if err := os.WriteFile(destPath, data, 0644); err == nil {
-				log.WithField("path", destPath).Info("CRIU log copied to shared directory")
-			}
+	// Copy log to shared directory for debugging
+	if err := os.MkdirAll(config.CRIULogDir, 0755); err == nil {
+		destPath := filepath.Join(config.CRIULogDir, fmt.Sprintf("restore-%d.log", time.Now().Unix()))
+		if err := os.WriteFile(destPath, data, 0644); err == nil {
+			log.WithField("path", destPath).Info("CRIU log copied to shared directory")
 		}
 	}
 }
@@ -365,9 +363,8 @@ func logCRIUErrors(checkpointPath, logFile string, log *logrus.Entry) {
 func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) error {
 	log.Info("=== Self-Restoring Placeholder Entrypoint ===")
 	log.WithFields(logrus.Fields{
-		"checkpoint_path":     cfg.CheckpointPath,
+		"checkpoint_location": cfg.CheckpointLocation,
 		"checkpoint_hash":     cfg.CheckpointHash,
-		"wait_for_checkpoint": cfg.WaitForCheckpoint,
 	}).Info("Configuration")
 
 	// Check CRIU availability
@@ -387,8 +384,8 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	// Check if we should restore immediately
 	checkpointPath, shouldRestore = config.ShouldRestore(cfg, log)
 
-	// If not and we're configured to wait, wait for checkpoint
-	if !shouldRestore && cfg.WaitForCheckpoint {
+	// If not available yet, wait indefinitely for a checkpoint to appear
+	if !shouldRestore {
 		log.Info("Waiting for checkpoint...")
 		var err error
 		checkpointPath, err = config.WaitForCheckpoint(ctx, cfg, log)
@@ -397,12 +394,6 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 			return RunDefault(cfg, log)
 		}
 		shouldRestore = true
-	}
-
-	// If no checkpoint, run default command
-	if !shouldRestore {
-		log.Info("No checkpoint configured, running default command")
-		return RunDefault(cfg, log)
 	}
 
 	// Perform restore
@@ -442,10 +433,7 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	// Write restore marker file before CRIU restore
 	// This allows the restored process to detect it's been restored
 	// vLLM reads DYN_RESTORE_MARKER_FILE env var which should point to this path
-	restoreMarkerFile := "/tmp/dynamo-restored"
-	if v := os.Getenv("DYN_RESTORE_MARKER_FILE"); v != "" {
-		restoreMarkerFile = v
-	}
+	restoreMarkerFile := config.RestoreMarkerFilePath
 	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(restoreMarkerFile), 0755); err != nil {
 		log.WithError(err).Warn("Failed to create restore marker directory")

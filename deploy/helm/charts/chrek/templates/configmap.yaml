@@ -17,14 +17,8 @@ data:
     agent:
       # How checkpoints are triggered: "http" for REST API, "watcher" for auto-checkpoint
       signalSource: {{ .Values.config.agent.signalSource | quote }}
-      # HTTP server address for health checks and API (when signalSource=http)
+      # Watcher/HTTP server address
       listenAddr: {{ .Values.config.agent.listenAddr | quote }}
-      # Container runtime socket path
-      containerdSocket: {{ .Values.config.agent.containerdSocket | quote }}
-      # Base directory for checkpoint storage
-      checkpointDir: {{ .Values.config.agent.checkpointDir | quote }}
-      # Host proc mount point for CRIU operations
-      hostProc: {{ .Values.config.agent.hostProc | quote }}
 
     checkpoint:
       criu:
@@ -33,7 +27,6 @@ data:
         timeout: {{ .Values.config.checkpoint.criu.timeout }}
         logLevel: {{ .Values.config.checkpoint.criu.logLevel }}
         workDir: {{ .Values.config.checkpoint.criu.workDir | quote }}
-        logDir: {{ .Values.config.checkpoint.criu.logDir | quote }}
         # K8s-specific options
         leaveRunning: {{ .Values.config.checkpoint.criu.leaveRunning }}
         shellJob: {{ .Values.config.checkpoint.criu.shellJob }}
@@ -64,12 +57,6 @@ data:
       skipMountPrefixes:
         {{- toYaml .Values.config.checkpoint.skipMountPrefixes | nindent 8 }}
 
-    restore:
-      # Restore trigger file path (for trigger-based restore)
-      restoreTrigger: {{ .Values.config.restore.restoreTrigger | quote }}
-      # Maximum wait time for checkpoint to appear
-      waitTimeout: {{ .Values.config.restore.waitTimeout | quote }}
-      # Default command if no checkpoint available
-      defaultCmd: {{ .Values.config.restore.defaultCmd | quote }}
-      # NOTE: CRIU options for restore come from the saved CheckpointData (metadata.yaml)
-      # They are NOT configured here - the restore uses the exact config that was saved at checkpoint time
+    # NOTE: Restore configuration is NOT in this ConfigMap.
+    # Placeholder containers do not mount it. Restore uses hardcoded defaults
+    # + operator-injected env vars. CRIU options come from saved CheckpointData.

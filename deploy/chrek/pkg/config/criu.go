@@ -23,9 +23,6 @@ type CRIUConfig struct {
 	// WorkDir is the CRIU work directory for temporary files.
 	WorkDir string `yaml:"workDir"`
 
-	// LogDir is the directory for CRIU log files (for debugging).
-	LogDir string `yaml:"logDir"`
-
 	// AutoDedup enables auto-deduplication of memory pages.
 	AutoDedup bool `yaml:"autoDedup"`
 

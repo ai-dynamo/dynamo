@@ -118,6 +118,11 @@ const (
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
 	// Checkpoint related constants
+	// CROSS-REFERENCE: Some checkpoint constants below are duplicated in the chrek
+	// package at deploy/chrek/pkg/config/constants.go. If you change a value here,
+	// update the corresponding constant there to match.
+	// Duplicated: CheckpointBasePath, RestoreMarkerFilePath, CheckpointReadyFilePath,
+	// and the signal host path default (chrek Helm values.yaml: storage.signalHostPath).
 	KubeLabelCheckpointSource = "nvidia.com/checkpoint-source"
 	KubeLabelCheckpointHash   = "nvidia.com/checkpoint-hash"
 	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"
@@ -145,38 +150,22 @@ const (
 	// The readiness probe watches this file to trigger DaemonSet checkpoint.
 	EnvCheckpointReadyFile = "DYN_CHECKPOINT_READY_FILE"
 
-	// CRIU-related environment variables for restore operations
-	// EnvRestoreMarkerFile is the file created by CRIU after successful restore
+	// EnvRestoreMarkerFile is the file created after successful restore.
+	// Injected so vLLM knows where to check for restore completion.
 	EnvRestoreMarkerFile = "DYN_RESTORE_MARKER_FILE"
-	// EnvCRIUWorkDir is the working directory for CRIU operations
-	EnvCRIUWorkDir = "CRIU_WORK_DIR"
-	// EnvCRIULogDir is the directory where CRIU writes logs
-	EnvCRIULogDir = "CRIU_LOG_DIR"
-	// EnvCUDAPluginDir is the directory containing CRIU CUDA plugins
-	EnvCUDAPluginDir = "CUDA_PLUGIN_DIR"
-	// EnvCRIUTimeout is the timeout for CRIU operations
-	EnvCRIUTimeout = "CRIU_TIMEOUT"
 
-	// CheckpointReadyFilePath is the default path for the ready file
+	// CheckpointReadyFilePath is the default path for the ready file.
 	CheckpointReadyFilePath = "/tmp/checkpoint-ready"
-	// RestoreMarkerFilePath is the default path for the restore marker
+	// RestoreMarkerFilePath is the default path for the restore marker.
 	RestoreMarkerFilePath = "/tmp/dynamo-restored"
-	// CRIUWorkDirPath is the default CRIU work directory
-	CRIUWorkDirPath = "/var/criu-work"
-	// CRIULogDirPath is the default CRIU log directory
-	CRIULogDirPath = "/checkpoints/restore-logs"
-	// CUDAPluginDirPath is the default CUDA plugin directory
-	CUDAPluginDirPath = "/usr/local/lib/criu"
-	// DefaultCRIUTimeout is the default CRIU timeout in seconds (6 hours)
-	DefaultCRIUTimeout = "21600"
 
 	CheckpointVolumeName       = "checkpoint-storage"
 	CheckpointSignalVolumeName = "checkpoint-signal"
 	CheckpointBasePath         = "/checkpoints"
-	CheckpointSignalHostPath   = "/var/lib/dynamo-checkpoint/signals"
+	CheckpointSignalHostPath   = "/var/lib/chrek/signals"
 	CheckpointSignalMountPath  = "/checkpoint-signal"
 
-	// PodInfo volume for Downward API (critical for CRIU restore)
+	// PodInfo volume for Downward API
 	// After CRIU restore, environment variables contain stale values from checkpoint pod.
 	// The Downward API files at /etc/podinfo always have current pod identity.
 	PodInfoVolumeName = "podinfo"

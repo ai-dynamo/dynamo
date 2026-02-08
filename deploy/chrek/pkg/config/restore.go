@@ -1,144 +1,80 @@
 // restore.go defines the RestoreConfig struct for CRIU restore operations.
 // CRIU options come from the saved CheckpointData, not from this config.
+//
+// The restore-entrypoint runs in placeholder containers which do NOT mount the
+// ConfigMap. Static defaults are hardcoded here; per-pod dynamic values come
+// from environment variables injected by the operator.
 package config
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
 
+// Default restore configuration values reference shared constants from constants.go.
+
 // RestoreConfig holds the configuration for the restore entrypoint.
 // CRIU options are NOT stored here - they come from the saved CheckpointData.
 type RestoreConfig struct {
-	// === Environment-only fields (dynamic per pod) ===
+	// === Per-pod dynamic values (from operator-injected env vars) ===
 
-	// CheckpointPath is the base directory containing checkpoints (default: /checkpoints)
-	// From DYN_CHECKPOINT_PATH env var.
-	CheckpointPath string `yaml:"-"`
+	// CheckpointLocation is the full path to the checkpoint directory.
+	// From DYN_CHECKPOINT_LOCATION env var (operator-injected).
+	// Falls back to DYN_CHECKPOINT_PATH + "/" + DYN_CHECKPOINT_HASH for backward compat.
+	CheckpointLocation string
 
 	// CheckpointHash is the ID/hash of the checkpoint to restore.
-	// From DYN_CHECKPOINT_HASH env var.
-	CheckpointHash string `yaml:"-"`
-
-	// StorageType is the checkpoint storage type (pvc, s3, oci).
-	// From DYN_CHECKPOINT_STORAGE_TYPE env var.
-	StorageType string `yaml:"-"`
-
-	// Location is the checkpoint location (varies by storage type).
-	// From DYN_CHECKPOINT_LOCATION env var.
-	Location string `yaml:"-"`
+	// From DYN_CHECKPOINT_HASH env var (operator-injected).
+	CheckpointHash string
 
 	// Debug enables debug logging.
 	// From DEBUG env var.
-	Debug bool `yaml:"-"`
+	Debug bool
 
-	// WaitForCheckpoint indicates whether to wait for a checkpoint to appear.
-	// From WAIT_FOR_CHECKPOINT env var.
-	WaitForCheckpoint bool `yaml:"-"`
-
-	// === Static fields (from ConfigMap) ===
+	// === Static defaults (hardcoded) ===
 
 	// RestoreTrigger is the path to the trigger file that signals restore should start.
-	RestoreTrigger string `yaml:"restoreTrigger"`
+	RestoreTrigger string
 
-	// WaitTimeoutRaw is the raw string from YAML config (e.g., "300s", "5m").
-	// Parsed into WaitTimeout during config loading.
-	WaitTimeoutRaw string `yaml:"waitTimeout"`
-
-	// WaitTimeout is the parsed maximum time to wait for a checkpoint.
+	// WaitTimeout is the maximum time to wait for a checkpoint.
 	// Zero means wait indefinitely.
-	WaitTimeout time.Duration `yaml:"-"`
+	WaitTimeout time.Duration
 
 	// DefaultCmd is the command to run if no checkpoint is available.
-	DefaultCmd string `yaml:"defaultCmd"`
-
-	// NOTE: CRIU options are NOT stored here.
-	// They come from the saved CheckpointData at restore time.
+	DefaultCmd string
 }
 
-// LoadRestoreEnvOverrides applies environment variable overrides to RestoreConfig.
-// This is called after loading the base config from YAML.
-func (c *RestoreConfig) LoadRestoreEnvOverrides() {
-	// Dynamic values from operator/environment
-	if v := os.Getenv("DYN_CHECKPOINT_PATH"); v != "" {
-		c.CheckpointPath = v
-	} else if c.CheckpointPath == "" {
-		c.CheckpointPath = "/checkpoints"
+// NewRestoreConfig creates a RestoreConfig with hardcoded defaults and
+// operator-injected environment variable overrides.
+func NewRestoreConfig() *RestoreConfig {
+	cfg := &RestoreConfig{
+		// Static defaults
+		RestoreTrigger: RestoreTriggerPath,
 	}
 
+	// Per-pod dynamic values from operator-injected env vars
 	if v := os.Getenv("DYN_CHECKPOINT_HASH"); v != "" {
-		c.CheckpointHash = v
+		cfg.CheckpointHash = v
 	}
 
-	if v := os.Getenv("DYN_CHECKPOINT_STORAGE_TYPE"); v != "" {
-		c.StorageType = v
-	}
-
+	// Prefer DYN_CHECKPOINT_LOCATION (full path to checkpoint dir).
+	// Fall back to DYN_CHECKPOINT_PATH + "/" + HASH for backward compat with older operators.
 	if v := os.Getenv("DYN_CHECKPOINT_LOCATION"); v != "" {
-		c.Location = v
+		cfg.CheckpointLocation = v
+	} else if basePath := os.Getenv("DYN_CHECKPOINT_PATH"); basePath != "" && cfg.CheckpointHash != "" {
+		cfg.CheckpointLocation = basePath + "/" + cfg.CheckpointHash
+	} else if cfg.CheckpointHash != "" {
+		cfg.CheckpointLocation = CheckpointBasePath + "/" + cfg.CheckpointHash
 	}
 
-	c.Debug = os.Getenv("DEBUG") == "1"
-	c.WaitForCheckpoint = os.Getenv("WAIT_FOR_CHECKPOINT") == "1"
+	cfg.Debug = os.Getenv("DEBUG") == "1"
 
-	// Parse WaitTimeout from YAML raw string (e.g., "300s", "5m")
-	if c.WaitTimeoutRaw != "" && c.WaitTimeout == 0 {
-		if d, err := time.ParseDuration(c.WaitTimeoutRaw); err == nil {
-			c.WaitTimeout = d
-		}
-	}
-}
-
-// LoadRestoreConfig creates a RestoreConfig from ConfigMap and environment variables.
-// If configPath is empty, uses environment variables only (for backwards compatibility).
-// Returns an error if the config file exists but cannot be parsed.
-func LoadRestoreConfig(configPath string) (*RestoreConfig, error) {
-	var cfg *RestoreConfig
-
-	if configPath != "" {
-		fullCfg, err := LoadConfig(configPath)
-		if err != nil {
-			// Check if the error is "file not found" (acceptable) vs parse error (should be surfaced)
-			if os.IsNotExist(err) {
-				// File not found is acceptable - fall back to zero config
-				cfg = &RestoreConfig{}
-			} else {
-				// Parse errors and other errors should be surfaced
-				return nil, fmt.Errorf("failed to load restore config: %w", err)
-			}
-		} else {
-			cfg = &fullCfg.Restore
-		}
-	} else {
-		// No config path - use zero config
-		// All defaults should come from ConfigMap (values.yaml)
-		cfg = &RestoreConfig{}
-	}
-
-	// Apply environment overrides
-	cfg.LoadRestoreEnvOverrides()
-
-	// Legacy environment variable overrides for backwards compatibility
-	// These override ConfigMap values if set
-	if v := os.Getenv("RESTORE_TRIGGER"); v != "" {
-		cfg.RestoreTrigger = v
-	}
-	if v := os.Getenv("RESTORE_WAIT_TIMEOUT"); v != "" {
-		if seconds, err := strconv.Atoi(v); err == nil {
-			cfg.WaitTimeout = time.Duration(seconds) * time.Second
-		}
-	}
-	if v := os.Getenv("DEFAULT_CMD"); v != "" {
-		cfg.DefaultCmd = v
-	}
-
-	return cfg, nil
+	return cfg
 }
 
 // ShouldRestore checks if a restore should be performed.
@@ -147,22 +83,21 @@ func LoadRestoreConfig(configPath string) (*RestoreConfig, error) {
 // checkpoint.done is written LAST in the checkpoint process, after rootfs-diff.tar completes.
 // Order: metadata.yaml -> CRIU dump (*.img files) -> rootfs-diff.tar -> checkpoint.done
 func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
-	// Method 1: DYN_CHECKPOINT_HASH is set and checkpoint is fully complete
-	if cfg.CheckpointHash != "" {
-		checkpointPath := cfg.CheckpointPath + "/" + cfg.CheckpointHash
+	// Method 1: DYN_CHECKPOINT_LOCATION is set and checkpoint is fully complete
+	if cfg.CheckpointLocation != "" {
 		// Check for checkpoint.done marker (written LAST after rootfs-diff.tar completes)
-		donePath := checkpointPath + "/checkpoint.done"
+		donePath := cfg.CheckpointLocation + "/" + CheckpointDoneFilename
 
 		if _, err := os.Stat(donePath); err == nil {
-			log.WithField("path", checkpointPath).Info("Checkpoint found (checkpoint.done marker present)")
-			return checkpointPath, true
+			log.WithField("path", cfg.CheckpointLocation).Info("Checkpoint found (checkpoint.done marker present)")
+			return cfg.CheckpointLocation, true
 		}
 
 		// Fallback: check for metadata.yaml but warn about potential race condition
-		metadataPath := checkpointPath + "/" + CheckpointDataFilename
+		metadataPath := cfg.CheckpointLocation + "/" + CheckpointDataFilename
 		if _, err := os.Stat(metadataPath); err == nil {
 			log.WithFields(logrus.Fields{
-				"path":    checkpointPath,
+				"path":    cfg.CheckpointLocation,
 				"warning": "checkpoint.done marker not found, checkpoint may be incomplete",
 			}).Warn("Checkpoint metadata found but checkpoint.done missing - checkpoint may still be in progress")
 			// Don't return true here - wait for checkpoint.done
@@ -175,7 +110,7 @@ func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
 		if err == nil {
 			checkpointPath := strings.TrimSpace(string(data))
 			if checkpointPath != "" {
-				donePath := checkpointPath + "/checkpoint.done"
+				donePath := checkpointPath + "/" + CheckpointDoneFilename
 				if _, err := os.Stat(donePath); err == nil {
 					log.WithField("path", checkpointPath).Info("Restore triggered via file (checkpoint.done marker present)")
 					return checkpointPath, true
@@ -224,10 +159,4 @@ func WaitForCheckpoint(ctx context.Context, cfg *RestoreConfig, log *logrus.Entr
 			}
 		}
 	}
-}
-
-// Validate checks that the RestoreConfig has valid values.
-func (c *RestoreConfig) Validate() error {
-	// RestoreConfig no longer contains CRIU options - nothing to validate
-	return nil
 }

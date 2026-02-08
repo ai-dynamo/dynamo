@@ -18,17 +18,8 @@ type AgentConfig struct {
 	// SignalSource determines how checkpoints are triggered: "http" or "watcher"
 	SignalSource string `yaml:"signalSource"`
 
-	// ListenAddr is the HTTP server address (when SignalSource = "http")
+	// ListenAddr is the HTTP server address for health checks and API
 	ListenAddr string `yaml:"listenAddr"`
-
-	// ContainerdSocket is the path to the containerd socket
-	ContainerdSocket string `yaml:"containerdSocket"`
-
-	// CheckpointDir is the base directory for checkpoint storage
-	CheckpointDir string `yaml:"checkpointDir"`
-
-	// HostProc is the path to the host's /proc (usually /host/proc in containers)
-	HostProc string `yaml:"hostProc"`
 
 	// NodeName is the Kubernetes node name (from NODE_NAME env, downward API)
 	// This is not in the ConfigMap - it's set dynamically from environment.
@@ -37,10 +28,6 @@ type AgentConfig struct {
 	// RestrictedNamespace restricts pod watching to this namespace (optional)
 	// This is not in the ConfigMap - it's set dynamically from environment.
 	RestrictedNamespace string `yaml:"-"`
-
-	// ExternalMounts are additional external mount mappings (e.g., "mnt[path]:path")
-	// This is not in the ConfigMap - it can vary per deployment.
-	ExternalMounts []string `yaml:"-"`
 }
 
 // LoadAgentEnvOverrides applies environment variable overrides to the AgentConfig.
@@ -52,11 +39,6 @@ func (c *AgentConfig) LoadAgentEnvOverrides() {
 	}
 	if v := os.Getenv("RESTRICTED_NAMESPACE"); v != "" {
 		c.RestrictedNamespace = v
-	}
-
-	// External mounts can vary per deployment (comma-separated)
-	if v := os.Getenv("EXTERNAL_MOUNTS"); v != "" {
-		c.ExternalMounts = splitNonEmpty(v, ",")
 	}
 }
 
@@ -77,18 +59,6 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{
 			Field:   "listenAddr",
 			Message: "cannot be empty when signalSource is 'http'",
-		}
-	}
-	if c.ContainerdSocket == "" {
-		return &ConfigError{
-			Field:   "containerdSocket",
-			Message: "cannot be empty",
-		}
-	}
-	if c.CheckpointDir == "" {
-		return &ConfigError{
-			Field:   "checkpointDir",
-			Message: "cannot be empty",
 		}
 	}
 	return nil

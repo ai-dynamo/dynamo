@@ -22,13 +22,9 @@ import (
 //
 // The files are saved to <checkpointDir>/dev-shm/ and can be restored
 // using RestoreDevShm before CRIU restore.
-func CaptureDevShm(pid int, hostProc, checkpointDir string, log *logrus.Entry) error {
-    if hostProc == "" {
-        hostProc = "/proc"
-    }
-
+func CaptureDevShm(pid int, checkpointDir string, log *logrus.Entry) error {
     // Access container's /dev/shm via /proc/<pid>/root
-    shmPath := filepath.Join(hostProc, fmt.Sprintf("%d/root/dev/shm", pid))
+    shmPath := filepath.Join(config.HostProcPath, fmt.Sprintf("%d/root/dev/shm", pid))
 
     entries, err := os.ReadDir(shmPath)
     if err != nil {

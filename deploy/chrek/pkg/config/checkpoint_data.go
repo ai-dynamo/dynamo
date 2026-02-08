@@ -12,13 +12,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	// CheckpointDataFilename is the name of the metadata file in checkpoint directories
-	CheckpointDataFilename = "metadata.yaml"
-	// DescriptorsFilename is the name of the file descriptors file
-	DescriptorsFilename = "descriptors.yaml"
-)
-
 // CheckpointData combines static config and dynamic state into one struct.
 // Saved as metadata.yaml at checkpoint time, loaded at restore time.
 // This is the single source of truth for all checkpoint configuration.

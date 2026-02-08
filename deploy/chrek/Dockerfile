@@ -142,14 +142,6 @@ COPY --from=builder /restore-entrypoint /restore-entrypoint
 # Create checkpoint directory
 RUN mkdir -p /checkpoints
 
-# Set environment variables
-ENV HOST_PROC=/host/proc \
-    CONTAINERD_SOCKET=/run/containerd/containerd.sock \
-    CHECKPOINT_DIR=/checkpoints \
-    LISTEN_ADDR=:8080
-
-EXPOSE 8080
-
 USER root
 
 ENTRYPOINT ["/usr/local/bin/chrek-agent"]
@@ -200,14 +192,6 @@ RUN chmod +x /restore-entrypoint
 COPY scripts/smart-entrypoint.sh /smart-entrypoint.sh
 RUN chmod +x /smart-entrypoint.sh
 
-# Set environment variables
-ENV DYN_CHECKPOINT_PATH=/checkpoints \
-    RESTORE_TRIGGER=/tmp/restore-trigger \
-    RESTORE_WAIT_TIMEOUT=300 \
-    CRIU_LOG_LEVEL=4 \
-    WAIT_FOR_CHECKPOINT=0 \
-    CUDA_PLUGIN_DIR=/usr/local/lib/criu \
-    DEBUG=0
 
 ENTRYPOINT ["/smart-entrypoint.sh"]
 CMD []

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // NamespaceType represents a Linux namespace type
@@ -31,12 +33,8 @@ type NamespaceInfo struct {
 }
 
 // GetNamespaceInode returns the inode number for a namespace
-func GetNamespaceInode(pid int, nsType NamespaceType, hostProc string) (uint64, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
-	nsPath := fmt.Sprintf("%s/%d/ns/%s", hostProc, pid, nsType)
+func GetNamespaceInode(pid int, nsType NamespaceType) (uint64, error) {
+	nsPath := fmt.Sprintf("%s/%d/ns/%s", config.HostProcPath, pid, nsType)
 	var stat unix.Stat_t
 	if err := unix.Stat(nsPath, &stat); err != nil {
 		return 0, fmt.Errorf("failed to stat namespace %s: %w", nsPath, err)
@@ -46,12 +44,8 @@ func GetNamespaceInode(pid int, nsType NamespaceType, hostProc string) (uint64, 
 }
 
 // GetNamespaceInfo returns detailed namespace information
-func GetNamespaceInfo(pid int, nsType NamespaceType, hostProc string) (*NamespaceInfo, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
-	nsPath := fmt.Sprintf("%s/%d/ns/%s", hostProc, pid, nsType)
+func GetNamespaceInfo(pid int, nsType NamespaceType) (*NamespaceInfo, error) {
+	nsPath := fmt.Sprintf("%s/%d/ns/%s", config.HostProcPath, pid, nsType)
 
 	// Get inode
 	var stat unix.Stat_t
@@ -66,7 +60,7 @@ func GetNamespaceInfo(pid int, nsType NamespaceType, hostProc string) (*Namespac
 	}
 
 	// Check if this is different from init's namespace (PID 1)
-	initNsPath := fmt.Sprintf("%s/1/ns/%s", hostProc, nsType)
+	initNsPath := fmt.Sprintf("%s/1/ns/%s", config.HostProcPath, nsType)
 	var initStat unix.Stat_t
 	isExternal := false
 	if err := unix.Stat(initNsPath, &initStat); err == nil {
@@ -83,7 +77,7 @@ func GetNamespaceInfo(pid int, nsType NamespaceType, hostProc string) (*Namespac
 }
 
 // GetAllNamespaces returns information about all namespaces for a process
-func GetAllNamespaces(pid int, hostProc string) (map[NamespaceType]*NamespaceInfo, error) {
+func GetAllNamespaces(pid int) (map[NamespaceType]*NamespaceInfo, error) {
 	nsTypes := []NamespaceType{
 		NamespaceNet,
 		NamespacePID,
@@ -96,7 +90,7 @@ func GetAllNamespaces(pid int, hostProc string) (map[NamespaceType]*NamespaceInf
 
 	namespaces := make(map[NamespaceType]*NamespaceInfo)
 	for _, nsType := range nsTypes {
-		info, err := GetNamespaceInfo(pid, nsType, hostProc)
+		info, err := GetNamespaceInfo(pid, nsType)
 		if err != nil {
 			// Some namespaces might not exist, skip them
 			continue
@@ -109,8 +103,8 @@ func GetAllNamespaces(pid int, hostProc string) (map[NamespaceType]*NamespaceInf
 
 // IsNetNamespaceExternal checks if the network namespace is external
 // (i.e., shared with the pause container in Kubernetes)
-func IsNetNamespaceExternal(pid int, hostProc string) (bool, uint64, error) {
-	info, err := GetNamespaceInfo(pid, NamespaceNet, hostProc)
+func IsNetNamespaceExternal(pid int) (bool, uint64, error) {
+	info, err := GetNamespaceInfo(pid, NamespaceNet)
 	if err != nil {
 		return false, 0, err
 	}
@@ -118,8 +112,8 @@ func IsNetNamespaceExternal(pid int, hostProc string) (bool, uint64, error) {
 }
 
 // IsPIDNamespaceExternal checks if the PID namespace is external
-func IsPIDNamespaceExternal(pid int, hostProc string) (bool, uint64, error) {
-	info, err := GetNamespaceInfo(pid, NamespacePID, hostProc)
+func IsPIDNamespaceExternal(pid int) (bool, uint64, error) {
+	info, err := GetNamespaceInfo(pid, NamespacePID)
 	if err != nil {
 		return false, 0, err
 	}
@@ -128,12 +122,8 @@ func IsPIDNamespaceExternal(pid int, hostProc string) (bool, uint64, error) {
 
 // OpenNamespaceFD opens a file descriptor to a namespace
 // The caller is responsible for closing the returned file
-func OpenNamespaceFD(pid int, nsType NamespaceType, hostProc string) (*os.File, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
-	nsPath := fmt.Sprintf("%s/%d/ns/%s", hostProc, pid, nsType)
+func OpenNamespaceFD(pid int, nsType NamespaceType) (*os.File, error) {
+	nsPath := fmt.Sprintf("%s/%d/ns/%s", config.HostProcPath, pid, nsType)
 	return os.Open(nsPath)
 }
 

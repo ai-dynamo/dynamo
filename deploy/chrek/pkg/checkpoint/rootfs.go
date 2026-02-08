@@ -17,14 +17,10 @@ import (
 
 // GetRootFS returns the container's root filesystem path
 // For containers using overlayfs, this extracts the upperdir
-func GetRootFS(pid int, hostProc string) (string, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
+func GetRootFS(pid int) (string, error) {
 	// The rootfs is accessible via /proc/<pid>/root
 	// But for CRIU, we need the actual filesystem path
-	rootPath := fmt.Sprintf("%s/%d/root", hostProc, pid)
+	rootPath := fmt.Sprintf("%s/%d/root", config.HostProcPath, pid)
 
 	// Verify it exists
 	if _, err := os.Stat(rootPath); err != nil {
@@ -36,12 +32,8 @@ func GetRootFS(pid int, hostProc string) (string, error) {
 
 // GetOverlayUpperDir extracts the overlay upperdir from mountinfo
 // This is the writable layer of the container's filesystem
-func GetOverlayUpperDir(pid int, hostProc string) (string, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", hostProc, pid)
+func GetOverlayUpperDir(pid int) (string, error) {
+	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", config.HostProcPath, pid)
 	file, err := os.Open(mountinfoPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open mountinfo: %w", err)
@@ -113,7 +105,7 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions *config.Rootfs
 		return "", fmt.Errorf("upperdir is empty")
 	}
 
-	rootfsDiffPath := filepath.Join(checkpointDir, "rootfs-diff.tar")
+	rootfsDiffPath := filepath.Join(checkpointDir, config.RootfsDiffFilename)
 
 	// Build tar arguments with xattrs and exclusions
 	tarArgs := []string{"--xattrs"}
@@ -157,7 +149,7 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 		return false, nil
 	}
 
-	deletedFilesPath := filepath.Join(checkpointDir, "deleted-files.json")
+	deletedFilesPath := filepath.Join(checkpointDir, config.DeletedFilesFilename)
 	data, err := json.Marshal(whiteouts)
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal whiteouts: %w", err)

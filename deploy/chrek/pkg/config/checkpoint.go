@@ -1,8 +1,6 @@
 // checkpoint.go defines the CheckpointConfig struct for CRIU checkpoint operations.
 package config
 
-import "os"
-
 // CheckpointConfig holds static checkpoint settings that don't change per-checkpoint.
 // This includes CRIU options and exclusion lists.
 type CheckpointConfig struct {
@@ -20,31 +18,11 @@ type CheckpointConfig struct {
 	//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_ga10x.bin
 	// The actual mount paths are enumerated at checkpoint time and passed to CRIU.SkipMounts.
 	SkipMountPrefixes []string `yaml:"skipMountPrefixes"`
-
-	// === Environment-only fields (read by vLLM directly) ===
-	// These fields are populated from environment variables because vLLM
-	// reads these env vars directly to know where to signal checkpoint completion.
-
-	// SignalFile is the path where checkpoint completion signal is written.
-	// From DYN_CHECKPOINT_SIGNAL_FILE env var.
-	SignalFile string `yaml:"-"`
-
-	// ReadyFile is the path where checkpoint ready signal is written.
-	// From DYN_CHECKPOINT_READY_FILE env var.
-	ReadyFile string `yaml:"-"`
 }
 
 // LoadCheckpointEnvOverrides applies environment variable overrides to CheckpointConfig.
-// This is called after loading the base config from YAML.
-func (c *CheckpointConfig) LoadCheckpointEnvOverrides() {
-	// Signal files - vLLM reads these env vars directly
-	if v := os.Getenv("DYN_CHECKPOINT_SIGNAL_FILE"); v != "" {
-		c.SignalFile = v
-	}
-	if v := os.Getenv("DYN_CHECKPOINT_READY_FILE"); v != "" {
-		c.ReadyFile = v
-	}
-}
+// Currently a no-op; retained so the loader call site doesn't need a conditional.
+func (c *CheckpointConfig) LoadCheckpointEnvOverrides() {}
 
 // Validate checks that the CheckpointConfig has valid values.
 func (c *CheckpointConfig) Validate() error {

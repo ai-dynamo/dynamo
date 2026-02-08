@@ -27,13 +27,12 @@ import (
 
 const (
 	// LabelCheckpointSource is the label that triggers automatic checkpointing
+	// Hard-coded by operator
 	LabelCheckpointSource = "nvidia.com/checkpoint-source"
 
 	// LabelCheckpointHash is the label specifying the checkpoint identity hash
+	// Also hard-coded by operator
 	LabelCheckpointHash = "nvidia.com/checkpoint-hash"
-
-	// EnvCheckpointSignalFile is the env var in the pod specifying the signal file path
-	EnvCheckpointSignalFile = "DYN_CHECKPOINT_SIGNAL_FILE"
 )
 
 // SignalFile represents the content of a checkpoint completion signal file
@@ -48,8 +47,6 @@ type SignalFile struct {
 // Config holds watcher configuration
 type Config struct {
 	NodeName            string
-	CheckpointDir       string
-	HostProc            string
 	ListenAddr          string // HTTP server address for health checks (e.g., ":8080")
 	RestrictedNamespace string // Optional: restrict watching to this namespace (empty = cluster-wide)
 
@@ -99,9 +96,8 @@ func NewWatcher(cfg Config, discoveryClient *checkpointk8s.DiscoveryClient, chec
 // Start begins watching for pods and starts the health check server
 func (w *Watcher) Start(ctx context.Context) error {
 	w.log.WithFields(logrus.Fields{
-		"node":            w.config.NodeName,
-		"label":           LabelCheckpointSource,
-		"signal_file_env": EnvCheckpointSignalFile,
+		"node":  w.config.NodeName,
+		"label": LabelCheckpointSource,
 	}).Info("Starting pod watcher")
 
 	// Start health check HTTP server if address is configured
@@ -287,7 +283,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 			containerName = container.Name
 			// Get signal file path from environment
 			for _, env := range container.Env {
-				if env.Name == EnvCheckpointSignalFile {
+				if env.Name == "DYN_CHECKPOINT_SIGNAL_FILE" {
 					signalFilePath = env.Value
 					break
 				}
@@ -349,7 +345,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 		ContainerID:   containerID,
 		ContainerName: containerName,
 		CheckpointID:  checkpointID,
-		CheckpointDir: w.config.CheckpointDir,
+		CheckpointDir: config.CheckpointBasePath,
 		NodeName:      w.config.NodeName,
 		PodName:       pod.Name,
 		PodNamespace:  pod.Namespace,
@@ -359,7 +355,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 	if err != nil {
 		log.WithError(err).Error("Checkpoint failed")
 		// Write failure marker to PVC so restore pods know checkpoint failed
-		checkpointDir := filepath.Join(w.config.CheckpointDir, checkpointID)
+		checkpointDir := filepath.Join(config.CheckpointBasePath, checkpointID)
 		w.writeCheckpointDoneMarker(checkpointDir, checkpointID, false, err.Error(), log)
 		if signalFilePath != "" {
 			w.writeSignalFileToPod(int(containerInfo.PID), signalFilePath, checkpointID, "", false, err.Error())
@@ -407,7 +403,7 @@ func (w *Watcher) writeSignalFileToPod(pid int, signalFilePath, checkpointID, ch
 
 	// Write to the pod's filesystem via /proc/<pid>/root
 	// signalFilePath is the path inside the pod (e.g., /var/lib/dynamo-checkpoint/signal.done)
-	hostSignalPath := fmt.Sprintf("%s/%d/root%s", w.config.HostProc, pid, signalFilePath)
+	hostSignalPath := fmt.Sprintf("%s/%d/root%s", config.HostProcPath, pid, signalFilePath)
 
 	// Ensure signal directory exists in pod's filesystem
 	signalDir := filepath.Dir(hostSignalPath)
@@ -434,7 +430,7 @@ func (w *Watcher) writeSignalFileToPod(pid int, signalFilePath, checkpointID, ch
 // Restore pods on ANY node check for this file to know the checkpoint is complete and safe to restore.
 // This is separate from writeSignalFileToPod which signals the checkpoint job pod to exit.
 func (w *Watcher) writeCheckpointDoneMarker(checkpointDir, checkpointID string, success bool, errMsg string, log *logrus.Entry) {
-	markerPath := filepath.Join(checkpointDir, "checkpoint.done")
+	markerPath := filepath.Join(checkpointDir, config.CheckpointDoneFilename)
 
 	marker := SignalFile{
 		CheckpointID:   checkpointID,

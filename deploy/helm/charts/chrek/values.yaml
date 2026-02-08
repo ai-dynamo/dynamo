@@ -130,12 +130,6 @@ config:
     signalSource: "watcher"
     # HTTP server address for health checks and API
     listenAddr: ":8080"
-    # Container runtime socket path
-    containerdSocket: "/run/containerd/containerd.sock"
-    # Base directory for checkpoint storage
-    checkpointDir: "/checkpoints"
-    # Host proc mount point for CRIU operations
-    hostProc: "/host/proc"
 
   checkpoint:
     criu:
@@ -147,8 +141,6 @@ config:
       logLevel: 4
       # CRIU work directory for temporary files
       workDir: "/var/criu-work"
-      # Directory for CRIU log files (for debugging)
-      logDir: "/checkpoints/restore-logs"
 
       # K8s-specific options (recommended defaults for containers)
       leaveRunning: true      # Keep process running after checkpoint
@@ -196,13 +188,7 @@ config:
       # Additional custom exclusions (application-specific)
       additionalExclusions: []
 
-  restore:
-    # Restore trigger file path
-    restoreTrigger: "/tmp/restore-trigger"
-    # Maximum wait time for checkpoint to appear (Go duration format)
-    waitTimeout: "300s"
-    # Default command if no checkpoint available
-    defaultCmd: ""
-    # NOTE: CRIU options for restore come from the saved CheckpointData (metadata.yaml)
-    # They are NOT configured here - the restore uses the exact config that was saved at checkpoint time
+  # NOTE: Restore configuration is NOT in this ConfigMap.
+  # Placeholder containers do not mount it. Restore defaults are hardcoded in Go.
+  # CRIU options for restore come from the saved CheckpointData (metadata.yaml).
 

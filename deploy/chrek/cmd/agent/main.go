@@ -16,7 +16,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
 	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/server"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/http_api_server"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/watcher"
 )
 
@@ -33,14 +33,14 @@ func main() {
 	}
 
 	// Create discovery client
-	discoveryClient, err := checkpointk8s.NewDiscoveryClient(cfg.Agent.ContainerdSocket)
+	discoveryClient, err := checkpointk8s.NewDiscoveryClient()
 	if err != nil {
 		log.Fatalf("Failed to create discovery client: %v", err)
 	}
 	defer discoveryClient.Close()
 
 	// Create checkpointer
-	checkpointer := checkpoint.NewCheckpointer(discoveryClient, cfg.Agent.HostProc)
+	checkpointer := checkpoint.NewCheckpointer(discoveryClient)
 
 	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -51,12 +51,12 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	log.Printf("CRIU Node Agent starting (node: %s)", cfg.Agent.NodeName)
-	log.Printf("Checkpoint directory: %s", cfg.Agent.CheckpointDir)
+	log.Printf("Checkpoint directory: %s", config.CheckpointBasePath)
 	log.Printf("Signal source: %s", cfg.Agent.SignalSource)
 
 	switch cfg.Agent.GetSignalSource() {
 	case config.SignalFromHTTP:
-		srv := server.NewServer(cfg, discoveryClient, checkpointer)
+		srv := httpApiServer.NewServer(cfg, checkpointer)
 
 		// Handle graceful shutdown
 		go func() {
@@ -75,8 +75,6 @@ func main() {
 	case config.SignalFromWatcher:
 		watcherConfig := watcher.Config{
 			NodeName:            cfg.Agent.NodeName,
-			CheckpointDir:       cfg.Agent.CheckpointDir,
-			HostProc:            cfg.Agent.HostProc,
 			ListenAddr:          cfg.Agent.ListenAddr,
 			RestrictedNamespace: cfg.Agent.RestrictedNamespace,
 			CheckpointConfig:    &cfg.Checkpoint,

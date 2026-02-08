@@ -88,9 +88,6 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             {{- end }}
-            # Storage type (for future S3/OCI support)
-            - name: DYN_CHECKPOINT_STORAGE_TYPE
-              value: {{ .Values.storage.type | quote }}
           volumeMounts:
             # Mount configuration ConfigMap
             - name: config
