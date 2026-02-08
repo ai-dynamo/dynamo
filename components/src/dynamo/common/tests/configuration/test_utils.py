@@ -2,13 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for configuration utility functions."""
-
 import argparse
+
+import pytest
 
 from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     env_or_default,
 )
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.pre_merge,
+]
 
 
 class TestEnvOrDefault:

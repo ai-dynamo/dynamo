@@ -52,9 +52,8 @@ def add_argument(
     default: Any,
     help: str,
     obsolete_flag: Optional[str] = None,
-    dest: Optional[str] = None,
-    choices: Optional[list] = None,
     arg_type: Optional[type] = str,
+    **kwargs: Any,
 ) -> None:
     """
     Add a CLI argument with env var default, optional alias and dest, and help message construction.
@@ -71,7 +70,7 @@ def add_argument(
         choices: Optional list of valid values for the argument.
         arg_type: Type for the argument (default: str)
     """
-    arg_dest = _get_dest_name(flag_name, dest)
+    arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
     default_with_env = env_or_default(env_var, default)
 
     names = [flag_name]
@@ -84,10 +83,9 @@ def add_argument(
         "help": env_help,
         "type": arg_type,
     }
-    if choices is not None:
-        add_arg_opts["choices"] = choices
+    kwargs.update(add_arg_opts)
 
-    parser.add_argument(*names, **add_arg_opts)
+    parser.add_argument(*names, **kwargs)
 
 
 def add_negatable_bool_argument(

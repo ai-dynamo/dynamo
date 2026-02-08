@@ -11,14 +11,13 @@ This module provides a modular, domain-driven configuration architecture where:
 """
 
 from .arg_group import ArgGroup
-from .configuration_builder import ConfigurationBuilder
+from .config_base import ConfigBase
 from .utils import add_argument, add_negatable_bool_argument, env_or_default
 
 __all__ = [
     # Base classes
     "ArgGroup",
-    "ConfigurationBuilder",
-    "DynamoComponent",
+    "ConfigBase",
     # Utilities
     "add_argument",
     "env_or_default",
