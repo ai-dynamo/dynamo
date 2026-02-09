@@ -23,11 +23,6 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# Maximum fraction of GPU VRAM that best-case per-GPU model weight may occupy
-# for DEP candidates. DEP replicates non-expert parameters (TP=1), so actual
-# memory usage is significantly higher than model_size/num_gpus.
-DEP_GPU_MEM_FRAC_MAX = 0.55
-
 
 class ParallelizationStrategy(Enum):
     """Enum for parallelization strategy types."""
@@ -173,57 +168,17 @@ def _validate_intermediate_size(
     return True
 
 
-def _check_dep_memory_feasibility(
-    model_size_mb: float,
-    num_gpus: int,
-    gpu_memory_gib: float,
-    mapping_label: str,
-) -> bool:
-    """
-    Check if a DEP candidate is likely memory-feasible.
-
-    DEP uses TP=1, so non-expert parameters (attention, embeddings, norms) are
-    fully replicated on every GPU. Only expert parameters are split by EP.
-    The minimum per-GPU model memory (assuming 100% expert params, best case)
-    is model_size/num_gpus. In practice, non-expert replication adds 30-100%+
-    on top of that. Combined with activation memory and workspace buffers,
-    DEP requires significantly more GPU memory than TEP/TP.
-
-    We skip DEP when even the best-case per-GPU model weight (model_size/N)
-    exceeds 55% of GPU VRAM, since actual usage including non-expert
-    replication and runtime overhead will be much higher.
-    """
-    model_size_gib = model_size_mb / 1024
-    best_case_per_gpu_gib = model_size_gib / num_gpus
-    threshold = gpu_memory_gib * DEP_GPU_MEM_FRAC_MAX
-
-    if best_case_per_gpu_gib > threshold:
-        logger.warning(
-            f"Skipping {mapping_label}: best-case per-GPU model weight "
-            f"({best_case_per_gpu_gib:.1f} GiB) exceeds "
-            f"{DEP_GPU_MEM_FRAC_MAX:.0%} of GPU memory "
-            f"({gpu_memory_gib:.0f} GiB). DEP replicates non-expert parameters "
-            f"(TP=1), so actual per-GPU memory will be significantly higher."
-        )
-        return False
-
-    return True
-
-
 def get_candidate_parallel_mappings(
     num_gpus: int,
     model_info: ModelInfo,
-    phase: str,
-    gpu_memory_gib: float | None = None,
 ) -> list[ParallelizationMapping]:
     """
-    Return a list of candidate parallelization mappings for a given GPU count and phase,
+    Return a list of candidate parallelization mappings for a given GPU count,
     verified against model properties.
 
     Verification rules:
     - TP and TEP must divide num_kv_heads (if available)
     - TEP and DEP must divide num_experts (if available)
-    - DEP must be memory-feasible (if gpu_memory_gib is provided)
     """
     is_moe = bool(model_info.is_moe)
     num_kv_heads = model_info.num_kv_heads
@@ -260,13 +215,6 @@ def get_candidate_parallel_mappings(
         # Check intermediate size and quantization block
         if not _validate_intermediate_size(m, intermediate_size, quant_block):
             continue
-
-        # Check memory feasibility for DEP candidates
-        if m.dep is not None and gpu_memory_gib is not None and model_info.model_size:
-            if not _check_dep_memory_feasibility(
-                model_info.model_size, num_gpus, gpu_memory_gib, m.label()
-            ):
-                continue
 
         verified.append(m)
 

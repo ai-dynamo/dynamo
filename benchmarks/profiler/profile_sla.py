@@ -245,8 +245,6 @@ async def run_profile(args):
             candidate_mappings = get_candidate_parallel_mappings(
                 num_gpus,
                 args.model_info,
-                EngineType.PREFILL,
-                gpu_memory_gib=getattr(args, "gpu_memory_gib", None),
             )
 
             for mapping in candidate_mappings:
@@ -369,8 +367,6 @@ async def run_profile(args):
             candidate_mappings = get_candidate_parallel_mappings(
                 num_gpus,
                 args.model_info,
-                EngineType.DECODE,
-                gpu_memory_gib=getattr(args, "gpu_memory_gib", None),
             )
 
             for mapping in candidate_mappings:
