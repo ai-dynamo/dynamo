@@ -642,7 +642,6 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
         health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
     else:
         health_check_payload = SglangHealthCheckPayload(engine).to_dict()
-    ready_event = asyncio.Event()
 
     try:
         # Multimodal Worker is an internal component, should not register with Frontend.
