@@ -42,11 +42,14 @@ _logger = logging.getLogger(__name__)
 #      human-readable <org>/<model>/ layout used on the shared volume.
 #
 # Instead we keep the default (writable) HF_HOME and, for each model that
-# exists on the local volume, create a lightweight symlink inside the HF cache
-# that points back to the read-only copy.  This lets from_pretrained() and
-# snapshot_download() resolve the model from local storage with zero network
-# I/O, while still allowing HF to download any model that is *not* staged
-# locally.
+# exists on the local volume, copy its files into the HF cache on local disk.
+# We copy rather than symlink because the S3-backed FUSE mount does not
+# support mmap reliably — safetensors weight loading triggers SIGBUS on
+# un-cached pages.  The copy is skipped when the destination already has
+# files (idempotent across xdist workers and re-runs).  This lets
+# from_pretrained() and snapshot_download() resolve the model without any
+# network I/O, while still allowing HF to download any model that is *not*
+# staged locally.
 #
 # Override the path with DYNAMO_LOCAL_MODELS_DIR if your CI mounts models
 # elsewhere.  On developer machines the default path simply won't exist and
@@ -55,20 +58,29 @@ _logger = logging.getLogger(__name__)
 LOCAL_MODELS_DIR = os.environ.get("DYNAMO_LOCAL_MODELS_DIR", "/models/ci/models")
 
 
-def _link_local_model_to_hf_cache(model_id: str, local_models_dir: str) -> bool:
-    """Create HF cache symlinks for a locally available model.
+def _copy_local_model_to_hf_cache(model_id: str, local_models_dir: str) -> bool:
+    """Copy a locally available model into the HF cache.
 
-    Builds the huggingface_hub cache structure so that from_pretrained() and
-    snapshot_download() resolve the model without a network round-trip.
+    Copies model files from the local (potentially read-only / S3-backed)
+    directory into the writable HF cache so that from_pretrained() and
+    snapshot_download() resolve the model without a network round-trip and
+    model loaders can safely mmap the files.
 
-    The symlink layout created inside HF_HUB_CACHE for a model such as
-    ``Qwen/Qwen3-0.6B``::
+    We copy instead of symlinking because the local directory may be an
+    S3-backed FUSE mount (Mountpoint for S3) where mmap does not work
+    reliably — safetensors weight loading triggers SIGBUS on un-cached
+    pages.
+
+    The layout created inside HF_HUB_CACHE for ``Qwen/Qwen3-0.6B``::
 
         models--Qwen--Qwen3-0.6B/
-          refs/main          -> text file containing "local"
-          snapshots/local/   -> symlink to <local_models_dir>/Qwen/Qwen3-0.6B
+          refs/main             -> text file containing "local"
+          snapshots/local/      -> directory with copied model files
 
-    Returns True if the model was found locally and linked, False otherwise.
+    The copy is skipped when the snapshot directory already exists and
+    contains files (idempotent across xdist workers and re-runs).
+
+    Returns True if the model was found locally and staged, False otherwise.
     """
     local_model_path = os.path.join(local_models_dir, model_id)
     if not os.path.isdir(local_model_path):
@@ -88,6 +100,7 @@ def _link_local_model_to_hf_cache(model_id: str, local_models_dir: str) -> bool:
     cache_model_dir = os.path.join(hf_cache, f"models--{sanitized}")
     refs_dir = os.path.join(cache_model_dir, "refs")
     snapshots_dir = os.path.join(cache_model_dir, "snapshots")
+    snapshot_dest = os.path.join(snapshots_dir, "local")
 
     os.makedirs(refs_dir, exist_ok=True)
     os.makedirs(snapshots_dir, exist_ok=True)
@@ -95,13 +108,21 @@ def _link_local_model_to_hf_cache(model_id: str, local_models_dir: str) -> bool:
     with open(os.path.join(refs_dir, "main"), "w") as f:
         f.write("local")
 
-    snapshot_link = os.path.join(snapshots_dir, "local")
-    # Atomic symlink replacement: create a temporary symlink then rename it
-    # into place.  os.rename is atomic on POSIX, so concurrent xdist workers
-    # racing on the same model won't hit FileNotFoundError/FileExistsError.
-    tmp_link = snapshot_link + f".tmp.{os.getpid()}"
-    os.symlink(os.path.realpath(local_model_path), tmp_link)
-    os.rename(tmp_link, snapshot_link)
+    # Skip copy if the snapshot directory already has files (idempotent).
+    if os.path.isdir(snapshot_dest) and os.listdir(snapshot_dest):
+        return True
+
+    # Copy to a temp directory first, then atomically rename into place.
+    # This prevents partial copies from being visible to concurrent workers.
+    tmp_dest = snapshot_dest + f".tmp.{os.getpid()}"
+    if os.path.exists(tmp_dest):
+        shutil.rmtree(tmp_dest)
+    shutil.copytree(local_model_path, tmp_dest)
+    try:
+        os.rename(tmp_dest, snapshot_dest)
+    except OSError:
+        # Another worker beat us — our copy is redundant, clean up.
+        shutil.rmtree(tmp_dest, ignore_errors=True)
 
     return True
 
@@ -232,10 +253,10 @@ def download_models(model_list=None, ignore_weights=False):
 
         for model_id in model_list:
             # Check local models directory first
-            if os.path.isdir(LOCAL_MODELS_DIR) and _link_local_model_to_hf_cache(
+            if os.path.isdir(LOCAL_MODELS_DIR) and _copy_local_model_to_hf_cache(
                 model_id, LOCAL_MODELS_DIR
             ):
-                msg = f"[models] Linked local model to HF cache: {model_id} (from {LOCAL_MODELS_DIR})"
+                msg = f"[models] Copied local model to HF cache: {model_id} (from {LOCAL_MODELS_DIR})"
                 logging.info(msg)
                 print(msg, flush=True)
                 continue
