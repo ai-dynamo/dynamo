@@ -500,10 +500,10 @@ fn test_concurrent_try_get_block_and_drop() {
     let handle = registry.register_sequence_hash(seq_hash);
 
     let reset_blocks: Vec<_> = (0..10).map(|i| Block::new(i, 4)).collect();
-    let reset_pool = ResetPool::new(reset_blocks, 4);
+    let reset_pool = ResetPool::new(reset_blocks, 4, None);
     let reuse_policy = Box::new(FifoReusePolicy::new());
     let backend = Box::new(HashMapBackend::new(reuse_policy));
-    let registered_pool = InactivePool::new(backend, &reset_pool);
+    let registered_pool = InactivePool::new(backend, &reset_pool, None);
 
     // Create barriers for synchronization
     let barrier1 = Arc::new(Barrier::new(2));

@@ -33,8 +33,8 @@ pub(crate) struct WeakBlockEntry<T: BlockMetadata + Sync> {
 /// On drop the inner `Arc<Block<T, Registered>>` is returned to the
 /// registered (inactive) pool via `return_fn`.
 pub(crate) struct PrimaryBlock<T: BlockMetadata> {
-    pub(crate) block: Option<Arc<Block<T, Registered>>>,
-    pub(crate) return_fn: RegisteredReturnFn<T>,
+    block: Option<Arc<Block<T, Registered>>>,
+    return_fn: RegisteredReturnFn<T>,
 }
 
 /// RAII guard for a duplicate physical block that shares the same sequence
@@ -44,9 +44,9 @@ pub(crate) struct PrimaryBlock<T: BlockMetadata> {
 /// while the duplicate exists. On drop the block is reset and returned to
 /// the reset pool via `return_fn`.
 pub(crate) struct DuplicateBlock<T: BlockMetadata> {
-    pub(crate) block: Option<Block<T, Registered>>,
-    pub(crate) return_fn: ResetReturnFn<T>,
-    pub(crate) _primary: Arc<PrimaryBlock<T>>,
+    block: Option<Block<T, Registered>>,
+    return_fn: ResetReturnFn<T>,
+    _primary: Arc<PrimaryBlock<T>>,
 }
 
 impl<T: BlockMetadata + Sync> PrimaryBlock<T> {

@@ -118,11 +118,11 @@ mod tests {
 
         let reset_blocks: Vec<Block<TestMeta, Reset>> =
             (0..10_usize).map(|i| Block::new(i, 4)).collect();
-        let reset_pool = ResetPool::new(reset_blocks, 4);
+        let reset_pool = ResetPool::new(reset_blocks, 4, None);
 
         let reuse_policy = Box::new(FifoReusePolicy::new());
         let backend = Box::new(HashMapBackend::new(reuse_policy));
-        let inactive_pool = InactivePool::new(backend, &reset_pool);
+        let inactive_pool = InactivePool::new(backend, &reset_pool, None);
 
         let active_pool = ActivePool::new(registry.clone(), inactive_pool.return_fn());
 

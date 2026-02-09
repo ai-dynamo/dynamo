@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use dynamo_tokens::TokenBlockSequence;
 
+use super::config::DEFAULT_TEST_BLOCK_SIZE;
 use crate::BlockId;
 use crate::blocks::{
     Block, BlockMetadata,
@@ -14,7 +15,6 @@ use crate::blocks::{
 };
 use crate::pools::SequenceHash;
 use crate::registry::BlockRegistry;
-use crate::test_config::DEFAULT_TEST_BLOCK_SIZE;
 
 use super::blocks::TestBlockBuilder;
 
@@ -54,7 +54,7 @@ impl<T: BlockMetadata + std::fmt::Debug> BlockSequenceBuilder<T> {
 
     /// Set block size (must be called before building).
     pub(crate) fn with_block_size(mut self, size: usize) -> Self {
-        use crate::test_config::validate_test_block_size;
+        use super::config::validate_test_block_size;
         assert!(
             validate_test_block_size(size),
             "Invalid block size: {}. Must be power of 2 between 1 and 1024",

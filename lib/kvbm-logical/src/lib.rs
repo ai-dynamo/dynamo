@@ -20,9 +20,6 @@ pub mod registry;
 pub mod tinylfu;
 
 #[cfg(any(test, feature = "testing"))]
-pub mod test_config;
-
-#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 use bincode::{Decode, Encode};

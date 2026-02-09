@@ -66,7 +66,7 @@ pub fn validate_test_block_size(size: usize) -> bool {
 ///
 /// # Example
 /// ```
-/// use dynamo_kvbm_logical::test_config::generate_test_tokens;
+/// use dynamo_kvbm_logical::testing::config::generate_test_tokens;
 ///
 /// let tokens = generate_test_tokens(100, 4);
 /// assert_eq!(tokens, vec![100, 101, 102, 103]);
@@ -86,7 +86,7 @@ pub fn generate_test_tokens(base: u32, block_size: usize) -> Vec<u32> {
 ///
 /// # Example
 /// ```
-/// use dynamo_kvbm_logical::test_config::generate_unique_token_sequences;
+/// use dynamo_kvbm_logical::testing::config::generate_unique_token_sequences;
 ///
 /// let sequences = generate_unique_token_sequences(2, 4);
 /// assert_eq!(sequences.len(), 2);

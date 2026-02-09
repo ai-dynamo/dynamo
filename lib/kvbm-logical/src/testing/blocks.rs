@@ -3,6 +3,7 @@
 
 //! Block lifecycle helpers and TestBlockBuilder for tests.
 
+use super::config::DEFAULT_TEST_BLOCK_SIZE;
 use crate::BlockId;
 use crate::blocks::{
     Block, BlockMetadata,
@@ -10,7 +11,6 @@ use crate::blocks::{
 };
 use crate::pools::SequenceHash;
 use crate::registry::BlockRegistry;
-use crate::test_config::DEFAULT_TEST_BLOCK_SIZE;
 
 use super::token_blocks::create_test_token_block;
 
@@ -92,7 +92,7 @@ impl<T: BlockMetadata> TestBlockBuilder<T> {
     ///
     /// The block size must be a power of 2 between 1 and 1024.
     pub(crate) fn with_block_size(mut self, size: usize) -> Self {
-        use crate::test_config::validate_test_block_size;
+        use super::config::validate_test_block_size;
         assert!(
             validate_test_block_size(size),
             "Invalid test block size: {}. Must be power of 2 between 1 and 1024",
@@ -129,7 +129,7 @@ impl<T: BlockMetadata> TestBlockBuilder<T> {
     where
         T: std::fmt::Debug,
     {
-        use crate::test_config::generate_test_tokens;
+        use super::config::generate_test_tokens;
 
         // Auto-generate tokens if not provided
         let tokens = self

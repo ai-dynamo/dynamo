@@ -8,6 +8,8 @@
 //!
 //! Note: `v2/testing/` uses only the public API and remains separate.
 
+pub mod config;
+
 #[allow(dead_code)]
 mod blocks;
 mod managers;

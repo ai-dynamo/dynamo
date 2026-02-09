@@ -85,10 +85,15 @@ struct InactivePoolInner<T: BlockMetadata> {
 
 impl<T: BlockMetadata + Sync> InactivePool<T> {
     /// Create a new InactivePool with the given backend and reset pool
-    pub(crate) fn new(backend: Box<dyn InactivePoolBackend<T>>, reset_pool: &ResetPool<T>) -> Self {
+    pub(crate) fn new(
+        backend: Box<dyn InactivePoolBackend<T>>,
+        reset_pool: &ResetPool<T>,
+        metrics: Option<Arc<BlockPoolMetrics>>,
+    ) -> Self {
         let inner = Arc::new(RwLock::new(InactivePoolInner { backend }));
 
         let inner_clone = inner.clone();
+        let metrics_clone = metrics.clone();
         let return_fn = Arc::new(move |block: Arc<Block<T, Registered>>| {
             let seq_hash = block.sequence_hash();
 
@@ -97,6 +102,9 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
                 Ok(block) => {
                     let block_id = block.block_id();
                     inner.backend.insert(block);
+                    if let Some(ref m) = metrics_clone {
+                        m.inc_inactive_pool_size();
+                    }
                     tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");
                 }
                 Err(block) => {
@@ -115,7 +123,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             reset_return_fn: reset_pool.return_fn(),
             return_fn,
             block_size: reset_pool.block_size(),
-            metrics: reset_pool.metrics().clone(),
+            metrics,
         }
     }
 
@@ -128,6 +136,13 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     ) -> Vec<Arc<dyn RegisteredBlock<T>>> {
         let mut inner = self.inner.write();
         let matched_blocks = inner.backend.find_matches(hashes, touch);
+
+        let count = matched_blocks.len();
+        if let Some(ref m) = self.metrics {
+            for _ in 0..count {
+                m.dec_inactive_pool_size();
+            }
+        }
 
         matched_blocks
             .into_iter()
@@ -148,6 +163,13 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     ) -> Vec<(SequenceHash, Arc<dyn RegisteredBlock<T>>)> {
         let mut inner = self.inner.write();
         let found = inner.backend.scan_matches(hashes, touch);
+
+        let count = found.len();
+        if let Some(ref m) = self.metrics {
+            for _ in 0..count {
+                m.dec_inactive_pool_size();
+            }
+        }
 
         found
             .into_iter()
@@ -174,6 +196,11 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         let allocated_blocks = inner.backend.allocate(count);
 
         if allocated_blocks.len() == count {
+            if let Some(ref m) = self.metrics {
+                for _ in 0..count {
+                    m.dec_inactive_pool_size();
+                }
+            }
             let mut mutable_blocks = Vec::with_capacity(count);
             mutable_blocks.extend(allocated_blocks.into_iter().map(|registered_block| {
                 let reset_block = registered_block.reset();
@@ -215,10 +242,12 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     ) -> Option<Arc<PrimaryBlock<T>>> {
         let mut inner = self.inner.write();
         let matched = inner.backend.find_matches(&[hash], touch);
-        matched
-            .into_iter()
-            .next()
-            .map(|block| PrimaryBlock::new_unattached(Arc::new(block), self.return_fn.clone()))
+        matched.into_iter().next().map(|block| {
+            if let Some(ref m) = self.metrics {
+                m.dec_inactive_pool_size();
+            }
+            PrimaryBlock::new_unattached(Arc::new(block), self.return_fn.clone())
+        })
     }
 
     /// Get the number of blocks in the pool
@@ -243,6 +272,12 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     pub(crate) fn allocate_all_blocks(&self) -> Vec<MutableBlock<T>> {
         let mut inner = self.inner.write();
         let blocks = inner.backend.allocate_all();
+        let count = blocks.len();
+        if let Some(ref m) = self.metrics {
+            for _ in 0..count {
+                m.dec_inactive_pool_size();
+            }
+        }
         blocks
             .into_iter()
             .map(|registered_block| {
@@ -277,9 +312,9 @@ mod tests {
         let backend = Box::new(HashMapBackend::new(reuse_policy));
 
         let reset_blocks: Vec<_> = (0..10_usize).map(|i| Block::new(i, 4)).collect();
-        let reset_pool = ResetPool::new(reset_blocks, 4);
+        let reset_pool = ResetPool::new(reset_blocks, 4, None);
 
-        let inactive_pool = InactivePool::new(backend, &reset_pool);
+        let inactive_pool = InactivePool::new(backend, &reset_pool, None);
         (inactive_pool, reset_pool)
     }
 
