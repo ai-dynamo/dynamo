@@ -25,13 +25,16 @@ Rolling updates are triggered when the **worker spec hash** changes. The hash is
 Example: `myapp-frontend`, `myapp-decode-abc12345`
 
 ### Namespace Strategy
-- **Frontend**: Uses base namespace (`<k8s-ns>-<dgd-name>`) with `DYN_NAMESPACE_PREFIX` env var for prefix-based worker discovery
-- **Workers**: Use hashed namespace (`<k8s-ns>-<dgd-name>-<hash>`) for isolation during rolling updates
+- **All components**: Use base namespace (`<k8s-ns>-<dgd-name>`) for `DYN_NAMESPACE`
+- **Frontend**: Additionally gets `DYN_NAMESPACE_PREFIX` env var for prefix-based worker discovery
+- **Workers**: Additionally get `DYN_NAMESPACE_WORKER_SUFFIX=<hash>` so new runtime composes effective namespace as `<base>-<suffix>` for discovery isolation during rolling updates
+- **Backwards compatibility**: Old runtime images ignore the unknown env vars and use `DYN_NAMESPACE` directly
 
 ### Traffic Routing
 The frontend uses **prefix-based discovery** via the MultiPoolManager runtime component:
 - Frontend discovers all workers whose namespace starts with the base prefix
-- Automatically load balances across workers in both old and new namespaces during rollout
+- Workers register in namespaces composed from `DYN_NAMESPACE` + `DYN_NAMESPACE_WORKER_SUFFIX`
+- Automatically load balances across workers in both old and new pools during rollout
 - No external proxy required - traffic shifting is handled natively by the frontend
 
 ### Resources Generated During Rolling Update
@@ -41,20 +44,20 @@ The frontend uses **prefix-based discovery** via the MultiPoolManager runtime co
 - Discovers workers via prefix matching
 
 **New workers (target):**
-- Worker DCDs with new hash suffix in new hashed namespace
+- Worker DCDs with new hash suffix in name, labeled with `KubeLabelDynamoWorkerHash`
 - Gradually scaled up: `min(desired, newReady + 1)`
 
 **Old workers (current):**
-- Existing worker DCDs with old hash suffix
+- Existing worker DCDs with old hash suffix, identified by worker hash label
 - Gradually scaled down: `max(0, desired - newReady)`
-- Deleted after rollout completes
+- Deleted after rollout completes (found by `KubeLabelDynamoWorkerHash` label)
 
 ### Rollout Phases
 1. **None** → **Pending**: Rollout detected, status initialized
 2. **Pending** → **InProgress**: Begin scaling new workers
 3. **InProgress**: Monitor worker readiness, scale old down as new become ready
 4. **InProgress** → **Completed**: All new workers ready, old workers scaled to 0
-5. **Completed**: Cleanup old namespace DCDs, update active hash
+5. **Completed**: Cleanup old worker DCDs (by hash label), update active hash
 
 ### Key Functions
 
@@ -62,29 +65,27 @@ The frontend uses **prefix-based discovery** via the MultiPoolManager runtime co
 // Detect if rolling update needed
 shouldTriggerRollingUpdate(dgd) bool
 
-// Build context with namespaces, hashes, and replica calculations
+// Build context with hashes and replica calculations
 buildRolloutContext(ctx, dgd) *RolloutContext
 
-// Generate all DCDs (frontend uses base namespace, workers use hashed)
+// Generate all DCDs (all use base namespace, workers get suffix env var)
 GenerateDynamoComponentsDeployments(ctx, dgd, ..., rolloutCtx) map[string]*DCD
 
 // Orchestrate rollout state machine
 reconcileRollingUpdate(ctx, dgd) error
 
-// Clean up old resources after completion
-deleteOldDCDs(ctx, dgd, oldNamespace) error
+// Clean up old worker DCDs by worker hash label
+deleteOldDCDs(ctx, dgd, oldWorkerHash) error
 ```
 
 ### RolloutContext Structure
 ```go
 type RolloutContext struct {
-    InProgress         bool
-    OldDynamoNamespace string           // e.g., "myapp-abc12345..."
-    NewDynamoNamespace string           // e.g., "myapp-def67890..."
-    OldWorkerHash      string           // "abc12345" (8 chars)
-    NewWorkerHash      string           // "def67890" (8 chars)
-    OldWorkerReplicas  map[string]int32 // per-service old replica counts
-    NewWorkerReplicas  map[string]int32 // per-service new replica counts
+    InProgress        bool
+    OldWorkerHash     string           // "abc12345" (8 chars)
+    NewWorkerHash     string           // "def67890" (8 chars)
+    OldWorkerReplicas map[string]int32 // per-service old replica counts
+    NewWorkerReplicas map[string]int32 // per-service new replica counts
 }
 ```
 
@@ -115,6 +116,7 @@ KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
 KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
 KubeLabelDynamoComponentType       = "nvidia.com/dynamo-component-type"
+KubeLabelDynamoWorkerHash          = "nvidia.com/dynamo-worker-hash"  // Worker DCDs only, for rollout cleanup
 
 // Annotations
 AnnotationActiveWorkerHash = "nvidia.com/active-worker-hash"
@@ -124,10 +126,13 @@ AnnotationActiveWorkerHash = "nvidia.com/active-worker-hash"
 
 ```go
 // Set on all components
-DynamoNamespaceEnvVar = "DYN_NAMESPACE"  // Component's dynamo namespace
+DynamoNamespaceEnvVar = "DYN_NAMESPACE"  // Base dynamo namespace (<k8s-ns>-<dgd-name>)
 
 // Set on frontend only (for prefix-based discovery)
 DynamoNamespacePrefixEnvVar = "DYN_NAMESPACE_PREFIX"  // Base prefix for worker discovery
+
+// Set on workers only (for discovery isolation during rolling updates)
+DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"  // Hash suffix, new runtime composes <base>-<suffix>
 ```
 
 ## Testing
@@ -154,8 +159,6 @@ if component.ComponentType == consts.ComponentTypeFrontend {
 
 ### Computing Hashes and Namespaces
 ```go
-hash := dynamo.ComputeWorkerSpecHash(dgd)
-baseNamespace := dynamo.ComputeBaseDynamoNamespace(dgd)           // For frontend
-hashedNamespace := dynamo.ComputeHashedDynamoNamespace(dgd)       // For workers
-namespaceWithHash := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, hash)
+hash := dynamo.ComputeWorkerSpecHash(dgd)                         // 8-char hash from worker specs
+baseNamespace := dynamo.ComputeBaseDynamoNamespace(dgd)            // For all components: <k8s-ns>-<dgd-name>
 ```

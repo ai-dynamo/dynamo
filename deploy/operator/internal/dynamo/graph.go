@@ -257,10 +257,6 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 type RolloutContext struct {
 	// InProgress indicates whether a rolling update is currently in progress
 	InProgress bool
-	// OldDynamoNamespace is the dynamo namespace for the old (current) deployment
-	OldDynamoNamespace string
-	// NewDynamoNamespace is the dynamo namespace for the new (target) deployment
-	NewDynamoNamespace string
 	// OldWorkerHash is the short hash (8 chars) for the old worker spec, used for DCD naming
 	OldWorkerHash string
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
@@ -277,14 +273,13 @@ type RolloutContext struct {
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
 // The map key is a unique identifier for each DCD (serviceName).
 //
-// Frontend components use the base namespace (<k8s-ns>-<dgd-name>) and do not have a hash suffix.
-// This allows the frontend to use prefix-based discovery to find workers across multiple namespaces
-// during rolling updates.
+// All components use the base namespace (<k8s-ns>-<dgd-name>) for DYN_NAMESPACE.
+// Frontend components do not have a hash suffix in their DCD name, and get DYN_NAMESPACE_PREFIX
+// for prefix-based discovery of workers across multiple pools during rolling updates.
+// Worker components include a hash suffix in their DCD name and get DYN_NAMESPACE_WORKER_SUFFIX
+// so the new runtime composes an effective namespace of "<base>-<suffix>" for discovery isolation.
 //
-// Worker components use the hashed namespace (<k8s-ns>-<dgd-name>-<hash>) and include the hash suffix
-// in their DCD name for stable naming during rolling updates.
-//
-// When rolloutCtx.InProgress is true, this generates DCDs only for the NEW worker namespace.
+// When rolloutCtx.InProgress is true, this generates DCDs only for the NEW worker hash.
 // Old worker DCDs are NOT generated to avoid overwriting their original spec with the new spec.
 func GenerateDynamoComponentsDeployments(
 	ctx context.Context,
@@ -296,55 +291,46 @@ func GenerateDynamoComponentsDeployments(
 ) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 
-	// Base namespace is used for frontend (prefix-based discovery)
-	baseNamespace := ComputeBaseDynamoNamespace(parentDGD)
+	dynamoNamespace := ComputeDynamoNamespace(parentDGD)
 
-	// Determine the worker namespace and hash suffix
-	var workerNamespace string
+	// Determine the hash suffix for worker DCD naming
 	var hashSuffix string
 	if rolloutCtx != nil && rolloutCtx.InProgress {
-		workerNamespace = rolloutCtx.NewDynamoNamespace
 		hashSuffix = rolloutCtx.NewWorkerHash
-	} else if parentDGD.HasAnyMultinodeService() {
-		// LWS/multinode pathway doesn't support rolling updates, so use base namespace
-		workerNamespace = baseNamespace
-		hashSuffix = ComputeWorkerSpecHash(parentDGD)
 	} else {
-		// Standard Deployment pathway supports rolling updates, use hashed namespace
-		workerNamespace = ComputeHashedDynamoNamespace(parentDGD)
 		hashSuffix = ComputeWorkerSpecHash(parentDGD)
 	}
 
 	// Generate DCDs for each service
 	for componentName, component := range parentDGD.Spec.Services {
-		// Determine namespace based on component type:
-		// - Frontend uses base namespace for prefix-based worker discovery
-		// - Workers use hashed namespace for isolation during rolling updates
-		var componentNamespace string
 		isFrontend := component.ComponentType == commonconsts.ComponentTypeFrontend
-		if isFrontend {
-			componentNamespace = baseNamespace
-		} else {
-			componentNamespace = workerNamespace
-		}
 
-		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, componentNamespace, defaultIngressSpec, restartState, existingRestartAnnotations)
+		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, defaultIngressSpec, restartState, existingRestartAnnotations)
 		if err != nil {
 			return nil, err
 		}
 
-		// Only add hash suffix to worker DCDs, not frontend
-		// Frontend DCD name stays stable across rollouts
-		if !isFrontend {
-			dcd.Name = dcd.Name + "-" + hashSuffix
-		}
-
-		// For frontend, add DYN_NAMESPACE_PREFIX env var for prefix-based discovery
 		if isFrontend {
+			// Frontend gets DYN_NAMESPACE_PREFIX for prefix-based worker discovery
 			dcd.Spec.Envs = MergeEnvs(dcd.Spec.Envs, []corev1.EnvVar{
 				{
 					Name:  commonconsts.DynamoNamespacePrefixEnvVar,
-					Value: baseNamespace,
+					Value: dynamoNamespace,
+				},
+			})
+		} else {
+			// Workers get a hash suffix in their DCD name for stable naming during rolling updates
+			dcd.Name = dcd.Name + "-" + hashSuffix
+
+			// Label worker DCDs with their hash for cleanup during rolling updates
+			dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash] = hashSuffix
+
+			// Workers get DYN_NAMESPACE_WORKER_SUFFIX so new runtimes compose
+			// the effective namespace as "<DYN_NAMESPACE>-<suffix>"
+			dcd.Spec.Envs = MergeEnvs(dcd.Spec.Envs, []corev1.EnvVar{
+				{
+					Name:  commonconsts.DynamoNamespaceWorkerSuffixEnvVar,
+					Value: hashSuffix,
 				},
 			})
 		}

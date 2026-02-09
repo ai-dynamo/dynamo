@@ -532,21 +532,21 @@ func TestGetWorkerServices(t *testing.T) {
 }
 
 func TestDeleteOldDCDs(t *testing.T) {
-	oldNamespace := "default-test-dgd-oldhash1"
-	newNamespace := "default-test-dgd-newhash2"
+	oldWorkerHash := "oldhash1"
+	newWorkerHash := "newhash2"
 
 	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 
-	// Create DCDs with old namespace
+	// Create DCD with old worker hash
 	oldDCD1 := &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-old",
+			Name:      "test-dgd-worker-oldhash1",
 			Namespace: "default",
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoNamespace:           oldNamespace,
+				consts.KubeLabelDynamoWorkerHash:          oldWorkerHash,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
@@ -556,14 +556,14 @@ func TestDeleteOldDCDs(t *testing.T) {
 		},
 	}
 
-	// Create DCD with new namespace (should not be deleted)
+	// Create DCD with new worker hash (should not be deleted)
 	newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-new",
+			Name:      "test-dgd-worker-newhash2",
 			Namespace: "default",
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoNamespace:           newNamespace,
+				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
@@ -576,8 +576,8 @@ func TestDeleteOldDCDs(t *testing.T) {
 	r := createTestReconciler(dgd, oldDCD1, newDCD)
 	ctx := context.Background()
 
-	// Delete old DCDs
-	err := r.deleteOldDCDs(ctx, dgd, oldNamespace)
+	// Delete old DCDs by worker hash
+	err := r.deleteOldDCDs(ctx, dgd, oldWorkerHash)
 	require.NoError(t, err)
 
 	// Verify old DCD is deleted
@@ -587,11 +587,11 @@ func TestDeleteOldDCDs(t *testing.T) {
 
 	// Should only have the new DCD remaining
 	assert.Len(t, dcdList.Items, 1)
-	assert.Equal(t, "test-dgd-worker-new", dcdList.Items[0].Name)
+	assert.Equal(t, "test-dgd-worker-newhash2", dcdList.Items[0].Name)
 }
 
 func TestDeleteOldDCDs_NoDCDsToDelete(t *testing.T) {
-	oldNamespace := "default-test-dgd-oldhash1"
+	oldWorkerHash := "oldhash1"
 
 	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
@@ -601,12 +601,12 @@ func TestDeleteOldDCDs_NoDCDsToDelete(t *testing.T) {
 	ctx := context.Background()
 
 	// Delete old DCDs when there are none - should not error
-	err := r.deleteOldDCDs(ctx, dgd, oldNamespace)
+	err := r.deleteOldDCDs(ctx, dgd, oldWorkerHash)
 	require.NoError(t, err)
 }
 
-func TestGetWorkerStatusForNamespace(t *testing.T) {
-	namespace := "default-test-dgd-hash123"
+func TestGetWorkerInfoForWorkerHash(t *testing.T) {
+	workerHash := "hash1234"
 
 	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: consts.ComponentTypePrefill},
@@ -616,11 +616,11 @@ func TestGetWorkerStatusForNamespace(t *testing.T) {
 	// Create DCDs for prefill and decode with different ready counts
 	prefillDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-prefill",
+			Name:      "test-dgd-prefill-hash1234",
 			Namespace: "default",
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoNamespace:           namespace,
+				consts.KubeLabelDynamoWorkerHash:          workerHash,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
@@ -639,11 +639,11 @@ func TestGetWorkerStatusForNamespace(t *testing.T) {
 
 	decodeDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-decode",
+			Name:      "test-dgd-decode-hash1234",
 			Namespace: "default",
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoNamespace:           namespace,
+				consts.KubeLabelDynamoWorkerHash:          workerHash,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
@@ -663,7 +663,7 @@ func TestGetWorkerStatusForNamespace(t *testing.T) {
 	r := createTestReconciler(dgd, prefillDCD, decodeDCD)
 	ctx := context.Background()
 
-	status, err := r.getWorkerInfoForDynamoNamespace(ctx, dgd, namespace)
+	status, err := r.getWorkerInfoForWorkerHash(ctx, dgd, workerHash)
 	require.NoError(t, err)
 
 	assert.Len(t, status.services, 2)

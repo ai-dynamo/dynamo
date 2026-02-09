@@ -120,21 +120,6 @@ func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	return sorted
 }
 
-// ComputeBaseDynamoNamespace returns the Dynamo namespace without hash suffix.
-// This is used for deployment pathways that don't support rolling updates
-// (Grove and LWS/multinode),
-func ComputeBaseDynamoNamespace(dgd *v1alpha1.DynamoGraphDeployment) string {
+func ComputeDynamoNamespace(dgd *v1alpha1.DynamoGraphDeployment) string {
 	return dgd.Namespace + "-" + dgd.Name
-}
-
-// ComputeHashedDynamoNamespace returns the Dynamo namespace with worker spec hash suffix.
-// Format: <k8sNamespace>-<dgdName>-<workerSpecHash>
-func ComputeHashedDynamoNamespace(dgd *v1alpha1.DynamoGraphDeployment) string {
-	workerSpecHash := ComputeWorkerSpecHash(dgd)
-	return ComputeHashedDynamoNamespaceWithHash(dgd, workerSpecHash)
-}
-
-// ComputeHashedDynamoNamespaceWithHash returns the Dynamo namespace for a specific hash.
-func ComputeHashedDynamoNamespaceWithHash(dgd *v1alpha1.DynamoGraphDeployment, hash string) string {
-	return dgd.Namespace + "-" + dgd.Name + "-" + hash
 }
