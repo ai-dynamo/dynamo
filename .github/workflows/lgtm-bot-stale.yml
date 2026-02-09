@@ -120,7 +120,7 @@ jobs:
                       issue_number: prNumber,
                       body: [
                         NUDGE_MARKER,
-                        `**Review Reminder** — This PR has been waiting for review for ${daysWaiting} day${daysWaiting !== 1 ? 's' : ''}.`,
+                        `**🤖 LGTM Bot — Review Reminder** — This PR has been waiting for review for ${daysWaiting} day${daysWaiting !== 1 ? 's' : ''}.`,
                         '',
                         `Pending reviewers: ${reviewers.join(', ')}`,
                         '',
@@ -177,7 +177,7 @@ jobs:
                         issue_number: prNumber,
                         body: [
                           MERGE_MARKER,
-                          `**Merge Reminder** — This PR has had the \`lgtm\` label for over ${Math.floor(hoursSinceLabel)} hours and is ready to merge.`,
+                          `**🤖 LGTM Bot — Merge Reminder** — This PR has had the \`lgtm\` label for over ${Math.floor(hoursSinceLabel)} hours and is ready to merge.`,
                           '',
                           `@${pr.user.login}, did you forget to merge this?`,
                         ].join('\n'),

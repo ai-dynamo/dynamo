@@ -114,13 +114,22 @@ jobs:
             }
 
             async function updateChecklist(prNumber, body) {
-              const { data: comments } = await github.rest.issues.listComments({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                per_page: 100,
-              });
-              const existing = comments.find(c => c.body && c.body.includes(CHECKLIST_MARKER));
+              // Search from newest first — checklist comment is frequently updated
+              let existing = null;
+              let page = 1;
+              while (!existing) {
+                const { data: comments } = await github.rest.issues.listComments({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  per_page: 100,
+                  page,
+                  direction: 'desc',
+                });
+                if (comments.length === 0) break;
+                existing = comments.find(c => c.body && c.body.includes(CHECKLIST_MARKER));
+                page++;
+              }
               if (existing) {
                 await github.rest.issues.updateComment({
                   owner: context.repo.owner,
@@ -139,7 +148,7 @@ jobs:
             }
 
             function buildChecklist(checks, reviewStatus, bpState, headSha, ciTriggered) {
-              const lines = [CHECKLIST_MARKER, '## Merge Checklist', ''];
+              const lines = [CHECKLIST_MARKER, '## 🤖 LGTM Bot — Merge Checklist', ''];
 
               for (const name of REQUIRED_CHECKS) {
                 const display = CHECK_DISPLAY[name] || name;
@@ -334,8 +343,15 @@ jobs:
               );
 
               if (statusMatch) {
-                checkResults[name] = statusMatch.state === 'success' ? 'pass' : 'fail';
-                if (statusMatch.state !== 'success') allChecksPassing = false;
+                if (statusMatch.state === 'success') {
+                  checkResults[name] = 'pass';
+                } else if (statusMatch.state === 'pending') {
+                  checkResults[name] = 'pending';
+                  allChecksPassing = false;
+                } else {
+                  checkResults[name] = 'fail';
+                  allChecksPassing = false;
+                }
                 continue;
               }
 

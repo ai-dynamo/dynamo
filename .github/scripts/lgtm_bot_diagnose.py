@@ -252,6 +252,11 @@ def diagnose_ci(head_sha: str) -> tuple[dict, list[str]]:
                     "status": "pass",
                     "url": status_match.get("target_url", ""),
                 }
+            elif status_match["state"] == "pending":
+                results[name] = {
+                    "status": "pending",
+                    "url": status_match.get("target_url", ""),
+                }
             else:
                 results[name] = {
                     "status": "fail",
@@ -474,7 +479,7 @@ def build_diagnostic_comment(
     llm_response: str | None,
 ) -> str:
     """Build the diagnostic markdown comment."""
-    lines = [DIAGNOSIS_MARKER, "## LGTM Bot Diagnosis", ""]
+    lines = [DIAGNOSIS_MARKER, "## 🤖 LGTM Bot — Diagnosis", ""]
 
     # Count blockers
     blockers: list[str] = []

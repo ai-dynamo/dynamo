@@ -221,7 +221,7 @@ jobs:
 
             let commentLines = [
               CODEOWNERS_MARKER,
-              '## Required Reviewers',
+              '## 🤖 LGTM Bot — Required Reviewers',
               '',
               'Based on the files changed in this PR, the following teams need to review:',
               '',
@@ -249,15 +249,22 @@ jobs:
 
             const commentBody = commentLines.join('\n');
 
-            // Find existing comment or create new one
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              per_page: 100,
-            });
-
-            const existingComment = comments.find(c => c.body && c.body.includes(CODEOWNERS_MARKER));
+            // Find existing comment or create new one (search newest first)
+            let existingComment = null;
+            let commentPage = 1;
+            while (!existingComment) {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+                page: commentPage,
+                direction: 'desc',
+              });
+              if (comments.length === 0) break;
+              existingComment = comments.find(c => c.body && c.body.includes(CODEOWNERS_MARKER));
+              commentPage++;
+            }
             if (existingComment) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
