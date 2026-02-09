@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, AsyncIterator
@@ -85,6 +86,10 @@ class EncodeWorkerHandler:
         self._processed_requests = 0
         self.readables = []
         self.embedding_cache = EmbeddingCache()
+
+        # Use system temp directory for encoder cache files
+        self._cache_dir = os.path.join(tempfile.gettempdir(), "encoder_cache")
+        os.makedirs(self._cache_dir, exist_ok=True)
 
     def cleanup(self):
         pass
@@ -240,16 +245,12 @@ class EncodeWorkerHandler:
                         f"ENCODER: saving local safetensors file with key {embedding_item.key}, {embedding_item.embeddings_cpu.numel()} * {embedding_item.embeddings_cpu.element_size()} bytes"
                     )
                     tensors = {"ec_cache": embedding_item.embeddings_cpu}
-                    safetensors.torch.save_file(
-                        tensors,
-                        f"/tmp/encoder_cache.{embedding_item.key}.safetensors",
+                    cache_path = os.path.join(
+                        self._cache_dir, f"{embedding_item.key}.safetensors"
                     )
+                    safetensors.torch.save_file(tensors, cache_path)
                     # [gluo FIXME] need mechanism to clean up local files
-                    request.multimodal_inputs[
-                        idx
-                    ].serialized_request = (
-                        f"/tmp/encoder_cache.{embedding_item.key}.safetensors"
-                    )
+                    request.multimodal_inputs[idx].serialized_request = cache_path
                 else:
                     descriptor = connect.Descriptor(embedding_item.embeddings_cpu)
                     self.readables.append(
