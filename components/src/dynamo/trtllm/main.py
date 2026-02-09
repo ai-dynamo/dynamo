@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import sys
 
 # Configure TLLM_LOG_LEVEL before importing tensorrt_llm
@@ -39,11 +38,12 @@ import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.runtime import create_runtime, parse_endpoint
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
 )
@@ -58,24 +58,12 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import (
-    Config,
-    cmd_line_args,
-    deep_update,
-    parse_endpoint,
-)
+from dynamo.trtllm.utils.trtllm_utils import Config, cmd_line_args, deep_update
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 configure_dynamo_logging()
-
-
-async def graceful_shutdown(runtime, shutdown_event):
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    shutdown_event.set()
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
 
 
 async def get_engine_runtime_config(
@@ -128,33 +116,14 @@ def build_kv_connector_config(config: Config):
 async def worker():
     config = cmd_line_args()
 
-    loop = asyncio.get_running_loop()
-    # Create shutdown event
     shutdown_event = asyncio.Event()
-
-    # Set DYN_EVENT_PLANE environment variable based on config
-    os.environ["DYN_EVENT_PLANE"] = config.event_plane
-
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND use_kv_events is True
-    enable_nats = config.request_plane == "nats" or (
-        config.event_plane == "nats" and config.use_kv_events
+    runtime, _ = create_runtime(
+        store_kv=config.store_kv,
+        request_plane=config.request_plane,
+        event_plane=config.event_plane,
+        use_kv_events=config.use_kv_events,
+        shutdown_event=shutdown_event,
     )
-
-    runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, enable_nats
-    )
-
-    # Set up signal handler for graceful shutdown
-    def signal_handler():
-        # Schedule the shutdown coroutine instead of calling it directly
-        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers set up for graceful shutdown")
 
     await init(runtime, config, shutdown_event)
 
@@ -219,6 +188,7 @@ async def init(
         "tensor_parallel_size": config.tensor_parallel_size,
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
+        "enable_attention_dp": config.enable_attention_dp,
         "backend": Backend.PYTORCH,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
@@ -390,12 +360,22 @@ async def init(
         runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
-        runtime_config.enable_local_indexer = config.enable_local_indexer
+        # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+        runtime_config.enable_local_indexer = (
+            config.enable_local_indexer
+            and config.disaggregation_mode != DisaggregationMode.DECODE
+        )
+        # Set data_parallel_size for attention DP mode
+        # This enables the router's scheduler to correctly iterate over all dp_ranks
+        # Need to name ADP as `data_parallel_size` for parity with other frameworks
+        attention_dp_size = engine.get_attention_dp_size()
+        runtime_config.data_parallel_size = attention_dp_size
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
         )
+        logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
 
         # The get_engine_runtime_config function exists but is not called here due to:
         # 1. get_stats_async requires active requests to work properly
@@ -441,6 +421,7 @@ async def init(
             metrics_collector=metrics_collector,
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
+            encoder_cache_capacity_gb=config.encoder_cache_capacity_gb,
         )
 
         # Register the model with runtime config
@@ -454,7 +435,6 @@ async def init(
                 config.model_path,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
-                migration_limit=config.migration_limit,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
             )
@@ -483,8 +463,8 @@ async def init(
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",  # Empty topic = all topics
                 )
-                consolidator_publisher = ZmqKvEventPublisher(
-                    component, consolidator_config
+                consolidator_publisher = KvEventPublisher(
+                    component, zmq_config=consolidator_config
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "

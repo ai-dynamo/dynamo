@@ -54,7 +54,6 @@ import (
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
@@ -68,7 +67,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -119,6 +120,8 @@ func init() {
 	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
+
+	utilruntime.Must(gaiev1.Install(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -146,11 +149,24 @@ func main() {
 	var mpiRunSecretNamespace string
 	var plannerClusterRoleName string
 	var dgdrProfilingClusterRoleName string
+	var eppClusterRoleName string
 	var namespaceScopeLeaseDuration time.Duration
 	var namespaceScopeLeaseRenewInterval time.Duration
 	var operatorVersion string
 	var discoveryBackend string
 	var enableWebhooks bool
+	// Checkpoint configuration
+	var checkpointEnabled bool
+	var checkpointStorageType string
+	var checkpointSignalHostPath string
+	var checkpointCRIUTimeout string
+	var checkpointPVCName string
+	var checkpointPVCBasePath string
+	var checkpointS3URI string
+	var checkpointS3CredentialsSecret string
+	var checkpointOCIURI string
+	var checkpointOCICredentialsSecret string
+	var checkpointInitContainerImage string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -196,6 +212,8 @@ func main() {
 		"Name of the ClusterRole for planner (cluster-wide mode only)")
 	flag.StringVar(&dgdrProfilingClusterRoleName, "dgdr-profiling-cluster-role-name", "",
 		"Name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)")
+	flag.StringVar(&eppClusterRoleName, "epp-cluster-role-name", "",
+		"Name of the ClusterRole for EPP (cluster-wide mode only)")
 	flag.DurationVar(&namespaceScopeLeaseDuration, "namespace-scope-lease-duration", 30*time.Second,
 		"Duration of namespace scope marker lease before expiration (namespace-restricted mode only)")
 	flag.DurationVar(&namespaceScopeLeaseRenewInterval, "namespace-scope-lease-renew-interval", 10*time.Second,
@@ -204,6 +222,29 @@ func main() {
 		"Version of the operator (used in lease holder identity)")
 	flag.StringVar(&discoveryBackend, "discovery-backend", "kubernetes",
 		"Discovery backend to use: 'kubernetes' (default, uses Kubernetes API) or 'etcd' (uses ETCD)")
+	// Checkpoint flags
+	flag.BoolVar(&checkpointEnabled, "checkpoint-enabled", false,
+		"Enable checkpoint/restore functionality")
+	flag.StringVar(&checkpointStorageType, "checkpoint-storage-type", commonController.CheckpointStorageTypePVC,
+		"Checkpoint storage backend type: pvc, s3, or oci")
+	flag.StringVar(&checkpointSignalHostPath, "checkpoint-signal-host-path", "",
+		"Host path for signal files used for checkpoint job coordination")
+	flag.StringVar(&checkpointCRIUTimeout, "checkpoint-criu-timeout", "21600",
+		"CRIU timeout in seconds (required for CUDA checkpoints/restores, default: 21600 = 6 hours)")
+	flag.StringVar(&checkpointPVCName, "checkpoint-pvc-name", "checkpoint-storage",
+		"Name of the PVC for checkpoint storage (used when storage-type=pvc)")
+	flag.StringVar(&checkpointPVCBasePath, "checkpoint-pvc-base-path", "/checkpoints",
+		"Base path within the PVC for storing checkpoints (used when storage-type=pvc)")
+	flag.StringVar(&checkpointS3URI, "checkpoint-s3-uri", "",
+		"S3 URI for checkpoint storage: s3://[endpoint/]bucket/prefix (used when storage-type=s3)")
+	flag.StringVar(&checkpointS3CredentialsSecret, "checkpoint-s3-credentials-secret", "",
+		"Secret name containing AWS credentials (used when storage-type=s3)")
+	flag.StringVar(&checkpointOCIURI, "checkpoint-oci-uri", "",
+		"OCI URI for checkpoint storage: oci://registry/repository (used when storage-type=oci)")
+	flag.StringVar(&checkpointOCICredentialsSecret, "checkpoint-oci-credentials-secret", "",
+		"Docker config secret name for OCI registry auth (used when storage-type=oci)")
+	flag.StringVar(&checkpointInitContainerImage, "checkpoint-init-container-image", "busybox:latest",
+		"Image to use for checkpoint init containers (e.g., signal file cleanup)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -270,8 +311,30 @@ func main() {
 		RBAC: commonController.RBACConfig{
 			PlannerClusterRoleName:       plannerClusterRoleName,
 			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
+			EPPClusterRoleName:           eppClusterRoleName,
 		},
 		DiscoveryBackend: discoveryBackend,
+		Checkpoint: commonController.CheckpointConfig{
+			Enabled:            checkpointEnabled,
+			CRIUTimeout:        checkpointCRIUTimeout,
+			InitContainerImage: checkpointInitContainerImage,
+			Storage: commonController.CheckpointStorageConfig{
+				Type:           checkpointStorageType,
+				SignalHostPath: checkpointSignalHostPath,
+				PVC: commonController.CheckpointPVCConfig{
+					PVCName:  checkpointPVCName,
+					BasePath: checkpointPVCBasePath,
+				},
+				S3: commonController.CheckpointS3Config{
+					URI:                  checkpointS3URI,
+					CredentialsSecretRef: checkpointS3CredentialsSecret,
+				},
+				OCI: commonController.CheckpointOCIConfig{
+					URI:                  checkpointOCIURI,
+					CredentialsSecretRef: checkpointOCICredentialsSecret,
+				},
+			},
+		},
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -613,6 +676,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&controller.CheckpointReconciler{
+		Client:   mgr.GetClient(),
+		Config:   ctrlConfig,
+		Recorder: mgr.GetEventRecorderFor("checkpoint"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoCheckpoint")
+		os.Exit(1)
+	}
+
 	// Set webhooks enabled flag in config
 	ctrlConfig.WebhooksEnabled = enableWebhooks
 
@@ -647,7 +719,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler()
+		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
 		if err = dgdHandler.RegisterWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
 			os.Exit(1)

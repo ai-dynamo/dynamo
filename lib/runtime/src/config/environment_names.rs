@@ -20,6 +20,7 @@
 //! - **Model**: Model loading and caching
 //! - **Worker**: Worker lifecycle and shutdown
 //! - **Testing**: Test-specific configuration
+//! - **Mocker**: Mocker (mock scheduler/KV manager) configuration
 
 /// Logging and tracing environment variables
 pub mod logging {
@@ -301,6 +302,10 @@ pub mod model {
 
         /// Hugging Face home directory
         pub const HF_HOME: &str = "HF_HOME";
+
+        /// Offline mode - skip API calls when model is cached
+        /// Set to "1" or "true" to enable
+        pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
 }
 
@@ -350,6 +355,12 @@ pub mod build {
     /// which requires a string literal at compile time.
     /// Build scripts (build.rs) also cannot import this constant.
     pub const OUT_DIR: &str = "OUT_DIR";
+}
+
+/// Mocker (mock scheduler/KV manager) environment variables
+pub mod mocker {
+    /// Enable structured KV cache allocation/eviction trace logs (set to "1" or "true" to enable)
+    pub const DYN_MOCKER_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
 }
 
 /// Testing environment variables
@@ -436,6 +447,7 @@ mod tests {
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            model::huggingface::HF_HUB_OFFLINE,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
@@ -449,6 +461,8 @@ mod tests {
             cuda::DYNAMO_FATBIN_PATH,
             // Build
             build::OUT_DIR,
+            // Mocker
+            mocker::DYN_MOCKER_KV_CACHE_TRACE,
             // Testing
             testing::DYN_QUEUED_UP_PROCESSING,
             testing::DYN_SOAK_RUN_DURATION,

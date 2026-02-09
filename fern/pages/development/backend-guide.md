@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Writing Python Workers in Dynamo"
 ---
+
+# Writing Python Workers in Dynamo
 
 This guide explains how to create your own Python worker in Dynamo.
 
@@ -71,7 +72,6 @@ The `model_type` can be:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name or the folder name.
 - `context_length`: Max model length in tokens. Defaults to the model's set max. Only set this if you need to reduce KV cache allocation to fit into VRAM.
 - `kv_cache_block_size`: Size of a KV block for the engine, in tokens. Defaults to 16.
-- `migration_limit`: Maximum number of times a request may be [migrated to another Instance](../fault-tolerance/request-migration.md). Defaults to 0.
 - `user_data`: Optional dictionary containing custom metadata for worker behavior (e.g., LoRA configuration). Defaults to None.
 
 See `examples/backends` for full code examples.
@@ -115,9 +115,8 @@ A Python worker may need to be shut down promptly, for example when the node run
 
 In such cases, you can signal incomplete responses by raising a `GeneratorExit` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
 
-<Warning>
-We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
-</Warning>
+> [!WARNING]
+> We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
 
 Here's an example of how to implement this in your `RequestHandler`:
 
