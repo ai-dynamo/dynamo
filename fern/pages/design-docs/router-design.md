@@ -146,16 +146,21 @@ Each event carries a unique router ID to prevent self-event processing. This asy
 
 The router supports two event transport modes for KV cache state synchronization:
 
-- **JetStream (default)**: Persistent event stream with durable consumers. State persists across router restarts via snapshots in NATS object store. Best for production with multi-replica consistency.
+- **NATS Core / Event Plane with Local Indexer (default)**: Fire-and-forget pub/sub where workers maintain local radix trees (enabled by default). Router rebuilds state by querying workers on startup. Lower latency, simpler setup. Works with both NATS Core and ZMQ event planes.
 
-- **NATS Core with Local Indexer** (`--enable-local-indexer` on workers): Fire-and-forget pub/sub where workers maintain local radix trees. Router rebuilds state by querying workers on startup. Lower latency, simpler setup.
+- **JetStream** (`--durable-kv-events` on **both** frontend **and** workers): Persistent event stream with durable consumers. State persists across router restarts via snapshots in NATS object store. Best for production with multi-replica consistency. **Important:** Both the frontend and all workers must specify `--durable-kv-events` for JetStream mode to work correctly.
 
-### JetStream Mode
+### JetStream Mode (Opt-in)
 
 KV events are sent to a persistent NATS JetStream. Each KV router/indexer replica acts as a durable consumer, pulling messages from this shared stream. This architecture ensures consistency across router replicas and persistence across restarts.
 
 - **Best for**: Production deployments requiring durability and multi-replica router consistency
 - **Tradeoffs**: Requires JetStream setup; slightly higher latency due to persistence guarantees
+- **Enable with**: `--durable-kv-events` flag on **both** the frontend **and** all workers
+
+<Note>
+**Both frontend and workers must specify `--durable-kv-events`** for JetStream mode to work correctly. The frontend uses this flag to consume from JetStream, while workers use it to publish to JetStream instead of the local indexer.
+</Note>
 
 ```mermaid
 graph TD
@@ -197,13 +202,13 @@ graph TD
     linkStyle 0,1,2,3,4,5 stroke:#2196f3,stroke-width:2px
 ```
 
-### NATS Core with Local Indexer
+### NATS Core / Event Plane with Local Indexer (Default)
 
-When workers are started with `--enable-local-indexer`, each worker maintains its own local radix tree (local indexer) and publishes events over NATS Core (fire-and-forget pub/sub) instead of JetStream. Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
+By default, workers have local indexer enabled. Each worker maintains its own local radix tree (local indexer) and publishes events over the generic event plane (NATS Core or ZMQ, depending on `--event-plane`). Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
 
-- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios
+- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios; deployments without NATS (using ZMQ event plane)
 - **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
-- **Enable with**: `--enable-local-indexer` flag on workers (vLLM, mocker)
+- **Switch to JetStream**: Use `--durable-kv-events` flag on **both** workers (vLLM, SGLang, TRT-LLM, mocker) **and** frontend
 
 ```mermaid
 graph TD
@@ -251,7 +256,7 @@ graph TD
 - When a worker is removed, the router removes all its blocks from the global radix tree
 
 <Note>
-The router automatically selects the transport mode based on worker configuration. If all connected workers have `enable_local_indexer=true`, the router uses NATS Core mode. Otherwise, it uses JetStream mode.
+By default, all workers have `enable_local_indexer=true`, so the router uses NATS Core / Event Plane mode with local indexer. To use JetStream mode instead, specify `--durable-kv-events` on **both** the frontend and all workers.
 </Note>
 
 ### Local Active Block Management with Replica Sync
