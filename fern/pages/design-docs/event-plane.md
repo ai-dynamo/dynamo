@@ -18,26 +18,7 @@ Dynamo's coordination layer adapts to the deployment environment:
 
 > **Note:** The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Coordination Layer                                │
-│                                                                      │
-│  ┌─────────────────────────┐    ┌─────────────────────────────────┐ │
-│  │   Service Discovery     │    │            NATS                 │ │
-│  │                         │    │         (Optional)              │ │
-│  │  • K8s: CRDs + API      │    │  • KV Cache Events              │ │
-│  │  • Bare metal: etcd     │    │  • Router Replica Sync          │ │
-│  │                         │    │  • JetStream Persistence        │ │
-│  └─────────────────────────┘    └─────────────────────────────────┘ │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
-                    │                          │
-         ┌──────────┴──────────┐    ┌─────────┴──────────┐
-         ▼                     ▼    ▼                    ▼
-    ┌─────────┐          ┌─────────┐              ┌─────────┐
-    │Frontend │          │ Planner │              │ Worker  │
-    └─────────┘          └─────────┘              └─────────┘
-```
+![Coordination Layer showing Service Discovery and NATS connecting to Frontend, Planner, and Worker](/assets/img/event-plane-coordination.svg)
 
 ## Kubernetes-Native Service Discovery
 
@@ -102,19 +83,7 @@ export ETCD_ENDPOINTS=http://etcd-0:2379,http://etcd-1:2379,http://etcd-2:2379
 
 Each `DistributedRuntime` maintains a primary lease with etcd:
 
-```
-┌────────────────────┐         ┌──────────────┐
-│ DistributedRuntime │◄────────│ Primary Lease │
-│                    │         │  TTL: 10s     │
-│  • Namespace       │         └───────┬───────┘
-│  • Components      │                 │
-│  • Endpoints       │                 │ Keep-Alive
-│                    │                 │ Heartbeat
-└────────────────────┘                 ▼
-                               ┌──────────────┐
-                               │     etcd     │
-                               └──────────────┘
-```
+![DistributedRuntime connected to Primary Lease with Keep-Alive Heartbeat to etcd](/assets/img/event-plane-lease.svg)
 
 **Lease Lifecycle:**
 
