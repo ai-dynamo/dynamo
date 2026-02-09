@@ -246,6 +246,7 @@ jobs:
             commentLines.push('> **Triggering CI**: A maintainer must comment');
             commentLines.push(`> \`/ok to test ${headSha.slice(0, 7)}\` to trigger the full CI suite.`);
             commentLines.push('> This must be re-issued after every new push (per-commit, not per-PR).');
+            commentLines.push('> Org members with GPG-signed commits trigger CI automatically.');
 
             const commentBody = commentLines.join('\n');
 

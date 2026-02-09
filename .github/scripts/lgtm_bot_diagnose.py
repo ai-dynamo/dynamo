@@ -552,7 +552,8 @@ def build_diagnostic_comment(
         lines.append("")
         lines.append(
             "> **Note**: `/ok to test` must be re-issued after every "
-            "new push — the approval is per-commit, not per-PR."
+            "new push — the approval is per-commit, not per-PR. "
+            "Org members with GPG-signed commits trigger CI automatically."
         )
         lines.append("")
 
