@@ -11,6 +11,7 @@ from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.load_based_regression import LoadBasedRegressionModel
 from dynamo.planner.utils.planner_argparse import validate_sla_planner_args
 from dynamo.planner.utils.planner_core import PlannerSharedState
+from dynamo.planner.utils.prometheus import CachedLoadMetrics
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.planner.utils.prometheus import DirectRouterMetricsClient
 
@@ -42,13 +43,28 @@ class TestLoadBasedRegressionModel:
         assert result is not None
         assert abs(result - 45.0) < 0.5
 
-    def test_negative_slope_returns_none(self):
+    def test_negative_slope_fallback_points_below_sla(self):
         model = LoadBasedRegressionModel(window_size=50, min_observations=3)
         # Negative slope: higher x => lower y
+        # x=1 -> y=98, x=2 -> y=96, x=3 -> y=94, x=4 -> y=92, x=5 -> y=90
         for x in range(1, 6):
             model.add_observation(float(x), 100.0 - 2.0 * x)
+        # target_y=95 => points below: x=3(y=94), x=4(y=92), x=5(y=90)
+        # min x among those is 3
+        result = model.predict_x_from_sla(95.0)
+        assert result is not None
+        assert abs(result - 3.0) < 0.01
+
+    def test_negative_slope_fallback_all_above_sla(self):
+        model = LoadBasedRegressionModel(window_size=50, min_observations=3)
+        # Negative slope: x=1 -> y=98, x=2 -> y=96, ..., x=5 -> y=90
+        for x in range(1, 6):
+            model.add_observation(float(x), 100.0 - 2.0 * x)
+        # target_y=50 => all points have y >= 90 > 50, none below
+        # fallback returns smallest x overall = 1
         result = model.predict_x_from_sla(50.0)
-        assert result is None
+        assert result is not None
+        assert abs(result - 1.0) < 0.01
 
     def test_sliding_window_evicts_old(self):
         model = LoadBasedRegressionModel(window_size=5, min_observations=3)
@@ -81,93 +97,128 @@ class TestLoadBasedRegressionModel:
 
 class TestDirectRouterMetricsClient:
     def test_parse_prometheus_text_basic(self):
+        """Metrics with dynamo_namespace/model labels are grouped by worker_type."""
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "test-ns")
         text = (
             "# HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens\n"
             "# TYPE dynamo_frontend_worker_active_prefill_tokens gauge\n"
-            'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="test-ns",model="TestModel",worker_id="w1"} 1234\n'
-            'dynamo_frontend_worker_active_decode_blocks{dynamo_namespace="test-ns",model="TestModel",worker_id="w1"} 56\n'
-            'dynamo_frontend_worker_last_time_to_first_token_seconds{dynamo_namespace="test-ns",model="TestModel",worker_id="w1"} 0.25\n'
-            'dynamo_frontend_worker_last_input_sequence_tokens{dynamo_namespace="test-ns",model="TestModel",worker_id="w1"} 3000\n'
-            'dynamo_frontend_worker_last_inter_token_latency_seconds{dynamo_namespace="test-ns",model="TestModel",worker_id="w1"} 0.04\n'
+            'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="test-ns",model="TestModel",worker_type="prefill",worker_id="w1"} 1234\n'
+            'dynamo_frontend_worker_active_decode_blocks{dynamo_namespace="test-ns",model="TestModel",worker_type="decode",worker_id="w2"} 56\n'
+            'dynamo_frontend_worker_last_time_to_first_token_seconds{dynamo_namespace="test-ns",model="TestModel",worker_type="prefill",worker_id="w1"} 0.25\n'
+            'dynamo_frontend_worker_last_input_sequence_tokens{dynamo_namespace="test-ns",model="TestModel",worker_type="prefill",worker_id="w1"} 3000\n'
+            'dynamo_frontend_worker_last_inter_token_latency_seconds{dynamo_namespace="test-ns",model="TestModel",worker_type="decode",worker_id="w2"} 0.04\n'
         )
         result = client._parse_prometheus_text(text, "TestModel")
-        assert "w1" in result
-        assert result["w1"]["active_prefill_tokens"] == 1234.0
-        assert result["w1"]["active_decode_blocks"] == 56.0
-        assert abs(result["w1"]["last_ttft"] - 0.25) < 1e-6
-        assert result["w1"]["last_isl"] == 3000.0
-        assert abs(result["w1"]["last_itl"] - 0.04) < 1e-6
+        assert "prefill" in result
+        assert "w1" in result["prefill"]
+        assert result["prefill"]["w1"]["active_prefill_tokens"] == 1234.0
+        assert abs(result["prefill"]["w1"]["last_ttft"] - 0.25) < 1e-6
+        assert result["prefill"]["w1"]["last_isl"] == 3000.0
+        assert "decode" in result
+        assert "w2" in result["decode"]
+        assert result["decode"]["w2"]["active_decode_blocks"] == 56.0
+        assert abs(result["decode"]["w2"]["last_itl"] - 0.04) < 1e-6
 
     def test_parse_filters_by_namespace(self):
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "my-ns")
-        text = 'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="other-ns",model="M",worker_id="w1"} 100\n'
+        text = 'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="other-ns",model="M",worker_type="prefill",worker_id="w1"} 100\n'
         result = client._parse_prometheus_text(text, "M")
         assert len(result) == 0
 
     def test_parse_case_insensitive_model(self):
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
-        text = 'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="mymodel",worker_id="w1"} 100\n'
+        text = 'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="mymodel",worker_type="prefill",worker_id="w1"} 100\n'
         result = client._parse_prometheus_text(text, "MyModel")
-        assert "w1" in result
-        assert result["w1"]["active_prefill_tokens"] == 100.0
+        assert "prefill" in result
+        assert "w1" in result["prefill"]
+        assert result["prefill"]["w1"]["active_prefill_tokens"] == 100.0
 
-    def test_get_averaged_metrics_empty_buffer(self):
+    def test_get_recent_and_averaged_empty_buffer(self):
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
-        assert client.get_averaged_metrics() is None
+        assert client.get_recent_and_averaged_metrics("prefill") is None
 
-    def test_get_averaged_metrics_single_sample(self):
-        client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
-        client._sample_buffer = [
-            {"w1": {"active_prefill_tokens": 100.0, "active_decode_blocks": 50.0}}
-        ]
-        result = client.get_averaged_metrics()
-        assert result is not None
-        assert result["w1"]["active_prefill_tokens"] == 100.0
-        assert result["w1"]["active_decode_blocks"] == 50.0
-
-    def test_get_averaged_metrics_multiple_samples(self):
+    def test_get_recent_and_averaged_single_sample(self):
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
         client._sample_buffer = [
-            {"w1": {"active_prefill_tokens": 100.0}},
-            {"w1": {"active_prefill_tokens": 200.0}},
-            {"w1": {"active_prefill_tokens": 300.0}},
+            {
+                "prefill": {"w1": {"active_prefill_tokens": 100.0}},
+                "decode": {"w2": {"active_decode_blocks": 50.0}},
+            }
         ]
-        result = client.get_averaged_metrics()
+        result = client.get_recent_and_averaged_metrics("prefill")
         assert result is not None
-        assert abs(result["w1"]["active_prefill_tokens"] - 200.0) < 1e-6
+        recent, averaged = result
+        assert recent["w1"]["active_prefill_tokens"] == 100.0
+        # averaged is now flat (across workers)
+        assert averaged["active_prefill_tokens"] == 100.0
+        # decode workers not included
+        assert "w2" not in recent
+
+        result_d = client.get_recent_and_averaged_metrics("decode")
+        assert result_d is not None
+        recent_d, averaged_d = result_d
+        assert recent_d["w2"]["active_decode_blocks"] == 50.0
+        assert averaged_d["active_decode_blocks"] == 50.0
+
+    def test_get_recent_and_averaged_multiple_samples(self):
+        client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
+        client._sample_buffer = [
+            {"prefill": {"w1": {"active_prefill_tokens": 100.0}}},
+            {"prefill": {"w1": {"active_prefill_tokens": 200.0}}},
+            {"prefill": {"w1": {"active_prefill_tokens": 300.0}}},
+        ]
+        result = client.get_recent_and_averaged_metrics("prefill")
+        assert result is not None
+        recent, averaged = result
+        # Recent should be the last sample
+        assert abs(recent["w1"]["active_prefill_tokens"] - 300.0) < 1e-6
+        # Averaged is flat across all samples and workers
+        assert abs(averaged["active_prefill_tokens"] - 200.0) < 1e-6
 
     def test_parse_multiple_workers(self):
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
         text = (
-            'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="M",worker_id="w1"} 100\n'
-            'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="M",worker_id="w2"} 200\n'
+            'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="M",worker_type="prefill",worker_id="w1"} 100\n'
+            'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="M",worker_type="prefill",worker_id="w2"} 200\n'
         )
         result = client._parse_prometheus_text(text, "M")
-        assert len(result) == 2
-        assert result["w1"]["active_prefill_tokens"] == 100.0
-        assert result["w2"]["active_prefill_tokens"] == 200.0
+        assert len(result.get("prefill", {})) == 2
+        assert result["prefill"]["w1"]["active_prefill_tokens"] == 100.0
+        assert result["prefill"]["w2"]["active_prefill_tokens"] == 200.0
 
-    def test_parse_rust_labels_without_namespace_model(self):
-        """Rust KV router emits metrics with worker_id/dp_rank/worker_type but no dynamo_namespace/model."""
+    def test_parse_rust_labels_separates_worker_types(self):
+        """Rust KV router emits all metrics for all workers; parser must separate by worker_type."""
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
         text = (
             "# HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens\n"
             "# TYPE dynamo_frontend_worker_active_prefill_tokens gauge\n"
             'dynamo_frontend_worker_active_prefill_tokens{worker_id="123",dp_rank="0",worker_type="prefill"} 500\n'
+            'dynamo_frontend_worker_active_prefill_tokens{worker_id="456",dp_rank="0",worker_type="decode"} 0\n'
+            'dynamo_frontend_worker_active_decode_blocks{worker_id="123",dp_rank="0",worker_type="prefill"} 0\n'
             'dynamo_frontend_worker_active_decode_blocks{worker_id="456",dp_rank="0",worker_type="decode"} 30\n'
             'dynamo_frontend_worker_last_time_to_first_token_seconds{worker_id="123",dp_rank="0",worker_type="prefill"} 0.15\n'
             'dynamo_frontend_worker_last_input_sequence_tokens{worker_id="123",dp_rank="0",worker_type="prefill"} 2000\n'
             'dynamo_frontend_worker_last_inter_token_latency_seconds{worker_id="456",dp_rank="0",worker_type="decode"} 0.03\n'
         )
         result = client._parse_prometheus_text(text, "any-model")
-        assert "123" in result
-        assert "456" in result
-        assert result["123"]["active_prefill_tokens"] == 500.0
-        assert result["123"]["last_ttft"] == 0.15
-        assert result["123"]["last_isl"] == 2000.0
-        assert result["456"]["active_decode_blocks"] == 30.0
-        assert abs(result["456"]["last_itl"] - 0.03) < 1e-6
+
+        # Prefill worker 123 grouped under "prefill"
+        assert "prefill" in result
+        assert "123" in result["prefill"]
+        assert result["prefill"]["123"]["active_prefill_tokens"] == 500.0
+        assert result["prefill"]["123"]["last_ttft"] == 0.15
+        assert result["prefill"]["123"]["last_isl"] == 2000.0
+
+        # Decode worker 456 grouped under "decode"
+        assert "decode" in result
+        assert "456" in result["decode"]
+        assert result["decode"]["456"]["active_decode_blocks"] == 30.0
+        assert abs(result["decode"]["456"]["last_itl"] - 0.03) < 1e-6
+
+        # Cross-type metrics are stored under the correct worker_type
+        # (prefill worker's decode_blocks=0 stored under "prefill", not "decode")
+        assert "456" not in result["prefill"]
+        assert "123" not in result["decode"]
 
 
 # ── PrefillPlanner load-based scaling tests ─────────────────────────────
@@ -218,6 +269,17 @@ def _build_loadbased_args():
     return args
 
 
+def _avg(per_worker: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Compute flat averaged metrics from per-worker dicts (for test convenience)."""
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for metrics in per_worker.values():
+        for k, v in metrics.items():
+            sums[k] = sums.get(k, 0.0) + v
+            counts[k] = counts.get(k, 0) + 1
+    return {k: sums[k] / counts[k] for k in sums}
+
+
 class TestPrefillLoadBasedScaling:
     def test_scale_up_all_workers_above_target(self):
         """When all workers have active_prefill_tokens above the regression target, scale up."""
@@ -237,7 +299,7 @@ class TestPrefillLoadBasedScaling:
             planner.ttft_regression.add_observation(x, y)
 
         # Set per-worker metrics: all workers ABOVE target (1000)
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {
                 "active_prefill_tokens": 1500.0,
                 "last_isl": 3000.0,
@@ -249,6 +311,7 @@ class TestPrefillLoadBasedScaling:
                 "last_ttft": 0.30,
             },
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result == 3  # scale up from 2 to 3
@@ -272,7 +335,7 @@ class TestPrefillLoadBasedScaling:
             planner.ttft_regression.add_observation(x, y)
 
         # All workers below boundary (666.67)
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {
                 "active_prefill_tokens": 100.0,
                 "last_isl": 3000.0,
@@ -289,6 +352,7 @@ class TestPrefillLoadBasedScaling:
                 "last_ttft": 0.15,
             },
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result == 2  # scale down from 3 to 2
@@ -308,7 +372,7 @@ class TestPrefillLoadBasedScaling:
             planner.ttft_regression.add_observation(x, y)
 
         # Mixed: one above target, one below
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {
                 "active_prefill_tokens": 1500.0,
                 "last_isl": 3000.0,
@@ -320,6 +384,7 @@ class TestPrefillLoadBasedScaling:
                 "last_ttft": 0.15,
             },
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result is None
@@ -337,13 +402,14 @@ class TestPrefillLoadBasedScaling:
         planner.ttft_regression.add_observation(1000.0, 200.0)
         planner.ttft_regression.add_observation(2000.0, 300.0)
 
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {
                 "active_prefill_tokens": 5000.0,
                 "last_isl": 3000.0,
                 "last_ttft": 0.5,
             },
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result is None
@@ -367,10 +433,11 @@ class TestDecodeLoadBasedScaling:
             planner.itl_regression.add_observation(x, y)
 
         # All workers above x_sla (80)
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {"active_decode_blocks": 100.0, "last_itl": 0.06},
             "w2": {"active_decode_blocks": 95.0, "last_itl": 0.055},
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result == 3
@@ -393,11 +460,12 @@ class TestDecodeLoadBasedScaling:
             planner.itl_regression.add_observation(x, y)
 
         # All workers below boundary (53.33)
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {"active_decode_blocks": 10.0, "last_itl": 0.02},
             "w2": {"active_decode_blocks": 15.0, "last_itl": 0.025},
             "w3": {"active_decode_blocks": 20.0, "last_itl": 0.03},
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result == 2
@@ -413,9 +481,10 @@ class TestDecodeLoadBasedScaling:
 
         planner.itl_regression.add_observation(10.0, 15.0)
 
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {"active_decode_blocks": 200.0, "last_itl": 0.1},
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result is None
@@ -440,7 +509,7 @@ class TestLowerBoundEnforcement:
             planner.ttft_regression.add_observation(x, y)
 
         # Workers all lightly loaded => wants to scale down to 4
-        planner.cached_per_worker_metrics = {
+        metrics = {
             f"w{i}": {
                 "active_prefill_tokens": 50.0,
                 "last_isl": 3000.0,
@@ -448,6 +517,7 @@ class TestLowerBoundEnforcement:
             }
             for i in range(5)
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         # Even though load-based wants to scale down, the result should be
@@ -472,7 +542,7 @@ class TestLowerBoundEnforcement:
             planner.ttft_regression.add_observation(x, y)
 
         # All workers at zero load
-        planner.cached_per_worker_metrics = {
+        metrics = {
             f"w{i}": {
                 "active_prefill_tokens": 0.0,
                 "last_isl": 3000.0,
@@ -480,6 +550,7 @@ class TestLowerBoundEnforcement:
             }
             for i in range(3)
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         # boundary = target * (3-1)/3 * 0/100 = 0
         # all workers at 0 which is NOT less than 0 (it's equal)
@@ -518,8 +589,8 @@ class TestCorrectionFactorAutoDisable:
 
 
 class TestWorkerCountReconciliation:
-    async def test_prefill_observe_filters_workers(self):
-        """observe_engine_load_stats should filter to workers with prefill metrics."""
+    async def test_prefill_observe_gets_only_prefill_workers(self):
+        """observe_engine_load_stats for prefill queries get_recent_and_averaged_metrics('prefill')."""
         args = _build_loadbased_args()
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 1
@@ -527,27 +598,28 @@ class TestWorkerCountReconciliation:
         planner = PrefillPlanner(None, args, shared_state=shared_state)
         planner.model_name = "test-model"
 
-        # Simulate router_metrics_client returning both prefill and decode workers
-        all_metrics = {
+        # get_recent_and_averaged_metrics("prefill") returns (recent, averaged)
+        prefill_metrics = {
             "w1": {
                 "active_prefill_tokens": 500.0,
                 "last_ttft": 0.2,
                 "last_isl": 3000.0,
             },
-            "w2": {"active_decode_blocks": 50.0, "last_itl": 0.04},  # decode worker
         }
         planner.router_metrics_client = Mock()
-        planner.router_metrics_client.get_averaged_metrics.return_value = all_metrics
+        planner.router_metrics_client.get_recent_and_averaged_metrics.return_value = (
+            prefill_metrics,
+            _avg(prefill_metrics),
+        )
 
         await planner.observe_engine_load_stats()
 
-        # Only the prefill worker should be in cached metrics
-        assert len(planner.cached_per_worker_metrics) == 1
-        assert "w1" in planner.cached_per_worker_metrics
-        assert "w2" not in planner.cached_per_worker_metrics
+        planner.router_metrics_client.get_recent_and_averaged_metrics.assert_called_once_with("prefill")
+        assert len(planner.cached_load_metrics.recent) == 1
+        assert "w1" in planner.cached_load_metrics.recent
 
-    async def test_decode_observe_filters_workers(self):
-        """observe_engine_load_stats should filter to workers with decode metrics."""
+    async def test_decode_observe_gets_only_decode_workers(self):
+        """observe_engine_load_stats for decode queries get_recent_and_averaged_metrics('decode')."""
         args = _build_loadbased_args()
         shared_state = PlannerSharedState()
         shared_state.num_d_workers = 1
@@ -555,23 +627,20 @@ class TestWorkerCountReconciliation:
         planner = DecodePlanner(None, args, shared_state=shared_state)
         planner.model_name = "test-model"
 
-        all_metrics = {
-            "w1": {
-                "active_prefill_tokens": 500.0,
-                "last_ttft": 0.2,
-                "last_isl": 3000.0,
-            },
+        decode_metrics = {
             "w2": {"active_decode_blocks": 50.0, "last_itl": 0.04},
         }
         planner.router_metrics_client = Mock()
-        planner.router_metrics_client.get_averaged_metrics.return_value = all_metrics
+        planner.router_metrics_client.get_recent_and_averaged_metrics.return_value = (
+            decode_metrics,
+            _avg(decode_metrics),
+        )
 
         await planner.observe_engine_load_stats()
 
-        # Only the decode worker should be in cached metrics
-        assert len(planner.cached_per_worker_metrics) == 1
-        assert "w2" in planner.cached_per_worker_metrics
-        assert "w1" not in planner.cached_per_worker_metrics
+        planner.router_metrics_client.get_recent_and_averaged_metrics.assert_called_once_with("decode")
+        assert len(planner.cached_load_metrics.recent) == 1
+        assert "w2" in planner.cached_load_metrics.recent
 
     def test_worker_count_mismatch_detected(self):
         """When DGD and Prometheus worker counts differ, the mismatch should be detectable."""
@@ -584,7 +653,7 @@ class TestWorkerCountReconciliation:
         planner.model_name = "test-model"
 
         # But router only reports 2 prefill workers
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {
                 "active_prefill_tokens": 500.0,
                 "last_isl": 3000.0,
@@ -596,9 +665,10 @@ class TestWorkerCountReconciliation:
                 "last_ttft": 0.25,
             },
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
         # The mismatch should be detectable by comparing counts
-        prom_count = len(planner.cached_per_worker_metrics)
+        prom_count = len(planner.cached_load_metrics.recent)
         dgd_count = shared_state.num_p_workers
         assert prom_count != dgd_count
         assert prom_count == 2
@@ -613,7 +683,7 @@ class TestWorkerCountReconciliation:
         planner = PrefillPlanner(None, args, shared_state=shared_state)
         planner.model_name = "test-model"
 
-        planner.cached_per_worker_metrics = {
+        metrics = {
             "w1": {
                 "active_prefill_tokens": 1500.0,
                 "last_isl": 3000.0,
@@ -625,8 +695,9 @@ class TestWorkerCountReconciliation:
                 "last_ttft": 0.30,
             },
         }
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
 
-        prom_count = len(planner.cached_per_worker_metrics)
+        prom_count = len(planner.cached_load_metrics.recent)
         dgd_count = shared_state.num_p_workers
         assert prom_count == dgd_count
 
