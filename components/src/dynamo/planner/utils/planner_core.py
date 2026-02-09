@@ -345,35 +345,44 @@ class BasePlanner:
                     if hasattr(p, "reset_idle_skip"):
                         p.reset_idle_skip()
 
-        if "use-pre-swept-results" in args.profile_results_dir:
-            config_list = args.profile_results_dir.split(":")
-            configs = {
-                "gpu_type": config_list[1],
-                "model": config_list[2],
-                "framework": config_list[3],
-                "framework_version": config_list[4],
-                "tp": int(config_list[5]),
-                "dp": int(config_list[6]),
-                "pp": int(config_list[7]),
-                "block_size": int(config_list[8]),
-                "max_batch_size": int(config_list[9]),
-                "gpu_count": int(config_list[10]),
-            }
-            if self.dryrun:
-                pre_swept_results_helper = PreSweptResultsHelper(
-                    configs["gpu_type"], configs["framework"], configs["model"]
-                )
-                raw_data = pre_swept_results_helper.select_data("prefill", configs)
-                self.prefill_interpolator = PrefillInterpolator(raw_data=raw_data)
-                raw_data = pre_swept_results_helper.select_data("decode", configs)
-                self.decode_interpolator = DecodeInterpolator(raw_data=raw_data)
+        # Load-based scaling flags.
+        # Argument validation (flag resolution, constraint checks, correction factor
+        # auto-disable) is handled by validate_sla_planner_args() in planner_argparse.
+        self.enable_loadbased = getattr(args, "enable_loadbased_scaling", False)
+        self.enable_throughput = getattr(args, "enable_throughput_scaling", True)
+
+        # Only create interpolators when throughput-based scaling is enabled
+        # (they require profiling data that isn't needed for load-based-only mode)
+        if self.enable_throughput:
+            if "use-pre-swept-results" in args.profile_results_dir:
+                config_list = args.profile_results_dir.split(":")
+                configs = {
+                    "gpu_type": config_list[1],
+                    "model": config_list[2],
+                    "framework": config_list[3],
+                    "framework_version": config_list[4],
+                    "tp": int(config_list[5]),
+                    "dp": int(config_list[6]),
+                    "pp": int(config_list[7]),
+                    "block_size": int(config_list[8]),
+                    "max_batch_size": int(config_list[9]),
+                    "gpu_count": int(config_list[10]),
+                }
+                if self.dryrun:
+                    pre_swept_results_helper = PreSweptResultsHelper(
+                        configs["gpu_type"], configs["framework"], configs["model"]
+                    )
+                    raw_data = pre_swept_results_helper.select_data("prefill", configs)
+                    self.prefill_interpolator = PrefillInterpolator(raw_data=raw_data)
+                    raw_data = pre_swept_results_helper.select_data("decode", configs)
+                    self.decode_interpolator = DecodeInterpolator(raw_data=raw_data)
+                else:
+                    raise ValueError(
+                        "Cannot set profile_results_dir to 'use-pre-swept-results' in non-dryrun mode"
+                    )
             else:
-                raise ValueError(
-                    "Cannot set profile_results_dir to 'use-pre-swept-results' in non-dryrun mode"
-                )
-        else:
-            self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
-            self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
+                self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
+                self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
 
         self.prefill_component_name = WORKER_COMPONENT_NAMES[
             self.args.backend
@@ -412,12 +421,6 @@ class BasePlanner:
             self.no_correction = True
         else:
             self.no_correction = args.no_correction
-
-        # Load-based scaling flags.
-        # Argument validation (flag resolution, constraint checks, correction factor
-        # auto-disable) is handled by validate_sla_planner_args() in planner_argparse.
-        self.enable_loadbased = getattr(args, "enable_loadbased_scaling", False)
-        self.enable_throughput = getattr(args, "enable_throughput_scaling", True)
 
         if self.enable_loadbased:
             # Auto-discover frontend metrics URL in Kubernetes mode
