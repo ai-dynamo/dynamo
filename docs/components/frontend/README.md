@@ -79,3 +79,9 @@ See the [Frontend Guide](frontend_guide.md) for full configuration options.
 |----------|-------------|
 | [Frontend Guide](frontend_guide.md) | KServe gRPC configuration and integration |
 | [Router Documentation](../router/README.md) | KV-aware routing configuration |
+
+```{toctree}
+:hidden:
+
+frontend_guide
+```

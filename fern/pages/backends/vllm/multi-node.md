@@ -80,7 +80,7 @@ python -m dynamo.frontend --router-mode kv &
 
 # Start prefill worker
 python -m dynamo.vllm \
-  --model meta-llama/Llama-3.3-70B-Instruct \
+  --model meta-llama/Llama-3.3-70B-Instruct
   --tensor-parallel-size 8 \
   --enforce-eager
 ```
@@ -89,7 +89,7 @@ python -m dynamo.vllm \
 ```bash
 # Start decode worker
 python -m dynamo.vllm \
-  --model meta-llama/Llama-3.3-70B-Instruct \
+  --model meta-llama/Llama-3.3-70B-Instruct
   --tensor-parallel-size 8 \
   --enforce-eager \
   --is-prefill-worker
