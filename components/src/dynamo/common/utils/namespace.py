@@ -5,11 +5,11 @@ import os
 
 
 def get_namespace(default="dynamo"):
-    """Get the effective Dynamo namespace for a worker.
+    """Get the Dynamo namespace for a worker.
 
-    If DYN_NAMESPACE_WORKER_SUFFIX is set, the effective namespace becomes
-    "{DYN_NAMESPACE}-{suffix}". This enables rolling updates where different
-    worker versions register in different namespaces.
+    If DYN_NAMESPACE_WORKER_SUFFIX is set, the namespace becomes
+    "{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}". This enables supporting
+    multiple sets of workers for the same model.
     """
     namespace = os.environ.get("DYN_NAMESPACE", default)
     suffix = os.environ.get("DYN_NAMESPACE_WORKER_SUFFIX")

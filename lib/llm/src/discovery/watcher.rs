@@ -449,7 +449,8 @@ impl ModelWatcher {
                         card.kv_cache_block_size,
                         Some(prefill_config),
                         self.router_config.enforce_disagg,
-                        model_name.clone(), // Pass model name for worker monitor lookup
+                        model_name.clone(),
+                        namespace.clone(),
                     )
                 });
 

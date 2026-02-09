@@ -211,11 +211,11 @@ impl Model {
         result
     }
 
-    /// Get a worker monitor from the first WorkerSet that has one.
-    pub fn get_worker_monitor(&self) -> Option<KvWorkerMonitor> {
+    /// Get the worker monitor for a specific namespace's WorkerSet.
+    pub fn get_worker_monitor_for_namespace(&self, namespace: &str) -> Option<KvWorkerMonitor> {
         self.worker_sets
-            .iter()
-            .find_map(|entry| entry.value().worker_monitor.clone())
+            .get(namespace)
+            .and_then(|entry| entry.value().worker_monitor.clone())
     }
 
     /// Total worker count across all WorkerSets.
