@@ -1000,6 +1000,8 @@ mod tests {
     // ========================================================================
 
     mod thread_pool_indexer_tests {
+        use tokio::time::Duration;
+
         use super::*;
         use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
 
@@ -1024,7 +1026,7 @@ mod tests {
                 .apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None))
                 .await;
 
-            indexer.flush().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             let scores = indexer
                 .find_matches(vec![
@@ -1067,7 +1069,7 @@ mod tests {
                 .apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
                 .await;
 
-            indexer.flush().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             assert_eq!(indexer.backend().get_workers().len(), 2);
 
@@ -1089,7 +1091,7 @@ mod tests {
                 .apply_event(create_store_event(0, 1, vec![1, 2, 3], None))
                 .await;
 
-            indexer.flush().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             let events = indexer.dump_events().await.unwrap();
             assert_eq!(events.len(), 3);
@@ -1105,7 +1107,7 @@ mod tests {
                 .apply_event(create_store_event(0, 1, vec![100, 200, 300], None))
                 .await;
 
-            indexer.flush().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             let scores = indexer.find_matches_for_request(&[100, 200, 300]).await;
             assert!(scores.is_ok());
@@ -1123,7 +1125,7 @@ mod tests {
                     .await;
             }
 
-            indexer.flush().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             assert_eq!(indexer.backend().current_size(), 10);
 
@@ -1145,7 +1147,7 @@ mod tests {
                     .await;
             }
 
-            indexer.flush().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             assert_eq!(indexer.backend().get_workers().len(), 8);
 
@@ -1170,7 +1172,7 @@ mod tests {
                 .apply_event(create_store_event(0, 1, vec![1, 2, 3], None))
                 .await;
 
-            indexer.flush().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             indexer.shutdown();
             indexer.shutdown();
@@ -1187,7 +1189,7 @@ mod tests {
                     .apply_event(create_store_event(worker_id, 1, vec![1, 2, 3, 4, 5], None))
                     .await;
             }
-            indexer.flush().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             let sequence = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
 

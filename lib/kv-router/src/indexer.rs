@@ -487,10 +487,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// have been picked up by workers before checking results.
     pub async fn flush(&self) {
         loop {
-            let all_empty = self
-                .worker_event_channels
-                .iter()
-                .all(|ch| ch.is_empty());
+            let all_empty = self.worker_event_channels.iter().all(|ch| ch.is_empty());
 
             if all_empty {
                 break;
@@ -580,16 +577,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn flush(&self) -> usize {
-        let curr_size: usize = self
-            .worker_event_channels
-            .iter()
-            .map(|ch| ch.len())
-            .sum();
+        let curr_size: usize = self.worker_event_channels.iter().map(|ch| ch.len()).sum();
         loop {
-            let all_empty = self
-                .worker_event_channels
-                .iter()
-                .all(|ch| ch.is_empty());
+            let all_empty = self.worker_event_channels.iter().all(|ch| ch.is_empty());
 
             if all_empty {
                 break;
@@ -2108,7 +2098,7 @@ mod tests {
         // Store a sequence for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Find matches using local hashes
         let scores = index
@@ -2131,7 +2121,7 @@ mod tests {
         // Store [1, 2, 3] for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Find matches for [1, 2, 999] - should match first 2 then stop
         let scores = index
@@ -2156,7 +2146,7 @@ mod tests {
         // Remove all blocks
         index.apply_event(make_remove_event(0, &[1, 2, 3])).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Find should return nothing
         let scores = index
@@ -2181,7 +2171,7 @@ mod tests {
         index.apply_event(make_store_event(0, &[1, 2])).await;
         index.apply_event(make_store_event(1, &[1, 3])).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query [1] - both workers should match
         let scores = index.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
@@ -2208,12 +2198,12 @@ mod tests {
         index.apply_event(make_store_event(1, &[1, 2, 3])).await;
 
         // Allow time for async event processing
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         index.remove_worker(0).await;
 
         // Allow time for async remove_worker processing
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let scores = index
             .find_matches(vec![
@@ -2242,7 +2232,7 @@ mod tests {
                 .await;
         }
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify we can find matches for the last stored sequence
         let last_seq: Vec<LocalBlockHash> = (1..=512u64)
@@ -2301,7 +2291,7 @@ mod tests {
         // Clear worker 0's blocks using the Cleared event
         index.apply_event(make_clear_event(0)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Worker 0's blocks should be gone, worker 1's remain
         let scores = index
@@ -2460,7 +2450,7 @@ mod tests {
         // Store [1, 2, 3]
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify all 3 blocks match
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2486,7 +2476,7 @@ mod tests {
         };
         index.apply_event(remove_event).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query [1, 2, 3] - should only match 2 blocks now (block 3 is removed)
         let scores = index.find_matches(seq).await.unwrap();
@@ -2506,13 +2496,13 @@ mod tests {
         // Store data for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Remove non-existent worker 999 - should not error or affect worker 0
         index.remove_worker(999).await;
 
         // Allow time for async processing
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Worker 0's data should still be there
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2551,7 +2541,7 @@ mod tests {
         // Clear the worker
         index.apply_event(make_clear_event(0)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify data is gone
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2561,7 +2551,7 @@ mod tests {
         // Store new data for the same worker
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify new data is accessible
         let scores = index.find_matches(seq).await.unwrap();
@@ -2614,7 +2604,7 @@ mod tests {
             .apply_event(make_store_event_with_dp_rank(0, &[1, 2, 3], 1))
             .await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify both dp_ranks are present
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2624,7 +2614,7 @@ mod tests {
         // Clear event clears ALL blocks for the worker_id, regardless of dp_rank
         index.apply_event(make_clear_event_with_dp_rank(0, 0)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Both dp_ranks should be cleared
         let scores = index.find_matches(seq).await.unwrap();
@@ -2648,7 +2638,7 @@ mod tests {
         let sequence: Vec<u64> = (1..=seq_len).collect();
         index.apply_event(make_store_event(0, &sequence)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query full sequence - should match all blocks
         let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -2701,7 +2691,7 @@ mod tests {
             .apply_event(make_store_event_with_parent(0, &prefix_1_2, &third_chunk))
             .await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query full sequence - should match all 150 blocks
         let full_query: Vec<LocalBlockHash> = (1..=150).map(|i| LocalBlockHash(i)).collect();
@@ -2784,7 +2774,7 @@ mod tests {
         let sequence: Vec<u64> = (1..=100).collect();
         index.apply_event(make_store_event(0, &sequence)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify full match
         let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -2814,7 +2804,7 @@ mod tests {
         };
         index.apply_event(remove_event).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query should now only match first 79 blocks
         let scores = index.find_matches(full_query).await.unwrap();
@@ -2845,7 +2835,7 @@ mod tests {
         index.apply_event(make_store_event(2, &seq_50)).await;
         index.apply_event(make_store_event(3, &seq_25)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query for 60 blocks - workers 0,1 match 60, worker 2 matches 50, worker 3 matches 25
         let query_60: Vec<LocalBlockHash> = (1..=60).map(|i| LocalBlockHash(i)).collect();
@@ -2889,7 +2879,7 @@ mod tests {
         let seq_96: Vec<u64> = (2001..=2096).collect();
         index.apply_event(make_store_event(2, &seq_96)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify all sequences match correctly
         let query_32: Vec<LocalBlockHash> = seq_32.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -2930,7 +2920,7 @@ mod tests {
         index.apply_event(make_store_event(2, &seq_63)).await;
         index.apply_event(make_store_event(3, &seq_65)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify all sequences match correctly
         let query_31: Vec<LocalBlockHash> = seq_31.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -2971,7 +2961,7 @@ mod tests {
         let sequence: Vec<u64> = (1..=128).collect();
         index.apply_event(make_store_event(0, &sequence)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Test divergence exactly at jump boundaries (position 31, 32, 33, 63, 64, 65)
         for diverge_pos in [31usize, 32, 33, 63, 64, 65, 95, 96, 97] {
@@ -3018,7 +3008,7 @@ mod tests {
             full_prefix.extend(&chunk);
         }
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query full sequence
         let full_query: Vec<LocalBlockHash> = (1..=200).map(|i| LocalBlockHash(i)).collect();
@@ -3046,7 +3036,7 @@ mod tests {
         let sequence: Vec<u64> = (1..=100).collect();
         index.apply_event(make_store_event(0, &sequence)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify it's stored
         let query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -3059,7 +3049,7 @@ mod tests {
         // Clear the worker
         index.apply_event(make_clear_event(0)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify it's cleared
         let scores = index.find_matches(query.clone()).await.unwrap();
@@ -3069,7 +3059,7 @@ mod tests {
         let new_sequence: Vec<u64> = (1001..=1100).collect();
         index.apply_event(make_store_event(0, &new_sequence)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify new sequence works
         let new_query: Vec<LocalBlockHash> =
@@ -3126,7 +3116,7 @@ mod tests {
             ))
             .await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query 1-100 - worker 0 matches 100, workers 1&2 match 40
         let query: Vec<LocalBlockHash> = worker_0_full.iter().map(|&i| LocalBlockHash(i)).collect();
@@ -3165,7 +3155,7 @@ mod tests {
                 .await;
         }
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query for 100 blocks - each worker should match their stored length
         let query: Vec<LocalBlockHash> = (1..=100).map(|i| LocalBlockHash(i)).collect();
@@ -3203,7 +3193,7 @@ mod tests {
         let sequence: Vec<u64> = (1..=seq_len).collect();
         index.apply_event(make_store_event(0, &sequence)).await;
 
-        index.flush().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Full match
         let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
