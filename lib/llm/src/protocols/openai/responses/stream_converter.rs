@@ -50,6 +50,8 @@ pub struct ResponseStreamConverter {
     next_output_index: u32,
     // Usage stats from the backend's final chunk
     usage: Option<ResponseUsage>,
+    // Optional callback for storing completed response
+    storage_callback: Option<Box<dyn FnOnce(serde_json::Value) + Send>>,
 }
 
 struct FunctionCallState {
@@ -85,6 +87,7 @@ impl ResponseStreamConverter {
             function_call_items: Vec::new(),
             next_output_index: 0,
             usage: None,
+            storage_callback: None,
         }
     }
 
@@ -94,13 +97,67 @@ impl ResponseStreamConverter {
         converter
     }
 
+    /// Builder method to set a storage callback that will be invoked with the
+    /// completed response JSON after the stream ends.
+    pub fn with_storage_callback<F>(mut self, callback: F) -> Self
+    where
+        F: FnOnce(serde_json::Value) + Send + 'static,
+    {
+        self.storage_callback = Some(Box::new(callback));
+        self
+    }
+
+    /// Returns the response ID that will be used for this response.
+    pub fn response_id(&self) -> &str {
+        &self.response_id
+    }
+    }
+
     fn next_seq(&mut self) -> u64 {
         let seq = self.sequence_number;
         self.sequence_number += 1;
         seq
     }
 
-    fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
+    /// Build output items from accumulated state for storage.
+    fn build_output_items(&self) -> Vec<OutputItem> {
+        let mut output = Vec::new();
+
+        // Add text message if started
+        if self.message_started {
+            output.push(OutputItem::Message(OutputMessage {
+                id: self.message_item_id.clone(),
+                content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                })],
+                role: AssistantRole::Assistant,
+                status: OutputStatus::Completed,
+            }));
+        }
+
+        // Add function calls
+        for fc in &self.function_call_items {
+            if fc.started {
+                output.push(OutputItem::FunctionCall(FunctionToolCall {
+                    id: Some(fc.item_id.clone()),
+                    call_id: fc.call_id.clone(),
+                    name: fc.name.clone(),
+                    arguments: fc.accumulated_args.clone(),
+                    status: Some(OutputStatus::Completed),
+                }));
+            }
+        }
+
+        output
+    }
+
+    fn make_response(&self, status: Status) -> Response {
+        self.make_response_with_output(status, vec![])
+    }
+
+    fn make_response_with_output(&self, status: Status, output: Vec<OutputItem>) -> Response {
         let completed_at = if status == Status::Completed {
             Some(
                 SystemTime::now()
@@ -125,7 +182,8 @@ impl ResponseStreamConverter {
             metadata: Some(serde_json::Value::Object(Default::default())),
             parallel_tool_calls: Some(true),
             presence_penalty: Some(0.0),
-            // store: false because this branch does not persist responses.
+            // Prefer api_context.store (which reflects the actual store state),
+            // fall back to request param, default to false.
             store: self
                 .api_context
                 .as_ref()
@@ -180,13 +238,13 @@ impl ResponseStreamConverter {
 
         let created = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::InProgress, vec![]),
+            response: self.make_response(Status::InProgress),
         });
         events.push(make_sse_event(&created));
 
         let in_progress = ResponseStreamEvent::ResponseInProgress(ResponseInProgressEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::InProgress, vec![]),
+            response: self.make_response(Status::InProgress),
         });
         events.push(make_sse_event(&in_progress));
 
@@ -534,9 +592,18 @@ impl ResponseStreamConverter {
         // Emit response.completed
         let completed = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::Completed, output),
+            response: final_response.clone(),
         });
         events.push(make_sse_event(&completed));
+
+        // Invoke storage callback if set
+        if let Some(callback) = self.storage_callback.take() {
+            if let Ok(response_json) = serde_json::to_value(&final_response) {
+                callback(response_json);
+            } else {
+                tracing::warn!("Failed to serialize streaming response for storage");
+            }
+        }
 
         events
     }
@@ -547,7 +614,7 @@ impl ResponseStreamConverter {
 
         let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::Failed, vec![]),
+            response: self.make_response(Status::Failed),
         });
         events.push(make_sse_event(&failed));
 
