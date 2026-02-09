@@ -20,24 +20,15 @@
 //! synchronous and thread-safe (via `DashMap` and `RwLock`). To get the full
 //! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
 //! in a `ThreadPoolIndexer`.
-use async_trait::async_trait;
 use dashmap::DashMap;
-use flume::unbounded;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread::JoinHandle;
-
-use std::time::Duration;
+use std::sync::RwLock;
 
 use crate::indexer::SyncIndexer;
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
 };
-
-use crate::compute_block_hash_for_seq;
-use crate::indexer::{KvIndexerInterface, KvRouterError};
 
 /// Entry for the innermost level of the index.
 ///
@@ -150,7 +141,6 @@ impl SyncIndexer for PositionalIndexer {
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.jump_search_matches(sequence, early_exit)
     }
-}
 
     fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
         Self::apply_event_impl(&self.index, &self.worker_blocks, event)
