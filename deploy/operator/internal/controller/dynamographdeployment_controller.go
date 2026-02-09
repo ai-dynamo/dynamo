@@ -1022,7 +1022,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
 
-	// Build rolling update context if rolling update is in progress
 	rollingUpdateCtx := r.buildRollingUpdateContext(ctx, dynamoDeployment)
 	if rollingUpdateCtx.InProgress() {
 		logger.Info("Rolling update in progress",

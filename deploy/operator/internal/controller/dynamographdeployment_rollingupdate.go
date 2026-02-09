@@ -129,20 +129,7 @@ func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
 		phase == nvidiacomv1alpha1.RollingUpdatePhaseInProgress
 }
 
-// getWorkerServices returns all worker service names from the DGD.
-// Worker services are identified by ComponentType: "worker", "prefill", or "decode".
-func (r *DynamoGraphDeploymentReconciler) getWorkerServices(
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) []string {
-	var workers []string
-	for name, spec := range dgd.Spec.Services {
-		if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) {
-			workers = append(workers, name)
-		}
-	}
-	return workers
-}
-
+// reconcileRollingUpdate handles the rolling update lifecycle.
 func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
@@ -238,12 +225,6 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 ) error {
 	logger := log.FromContext(ctx)
 
-	workerServices := r.getWorkerServices(dgd)
-	if len(workerServices) == 0 {
-		logger.Info("No worker services found, completing rolling update")
-		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
-	}
-
 	oldInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, oldWorkerHash)
 	if err != nil {
 		logger.Error(err, "Failed to get old worker hash status")
@@ -269,11 +250,6 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	// Check if rolling update is complete: all new workers ready and all old workers scaled down
 	if newInfo.TotalReadyWorkers() >= desiredReplicas && oldInfo.TotalReadyWorkers() == 0 {
 		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
-	}
-
-	// Update status
-	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update rolling update status: %w", err)
 	}
 
 	return nil
