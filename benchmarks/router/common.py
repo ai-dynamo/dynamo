@@ -190,6 +190,7 @@ def get_aiperf_cmd_for_trace(
         f"{input_dataset}",
         "--custom-dataset-type",
         "mooncake_trace",
+        "--fixed-schedule",
         "--fixed-schedule-auto-offset",
         "--prompt-input-tokens-block-size",
         str(block_size),
