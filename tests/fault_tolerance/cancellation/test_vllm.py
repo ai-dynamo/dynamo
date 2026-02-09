@@ -63,8 +63,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.45",
             "--max-model-len",
             "16384",
-            "--migration-limit",
-            "3",
         ]
 
         # Configure health check based on worker type
@@ -123,7 +121,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
             stragglers=[
                 "VLLM::EngineCore",

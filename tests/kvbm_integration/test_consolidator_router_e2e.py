@@ -13,7 +13,6 @@ This test validates that:
 """
 
 import concurrent.futures
-import importlib.util
 import logging
 import os
 import re
@@ -27,22 +26,11 @@ import yaml
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
 
-
 # Check if engines are available and build list of available engines
-# Use find_spec first (fast check), then verify import works (functional check)
-def _check_engine_available(module_name: str) -> bool:
-    """Check if an engine module is available and importable."""
-    if importlib.util.find_spec(module_name) is None:
-        return False
-    try:
-        importlib.import_module(module_name)
-        return True
-    except ImportError:
-        return False
+from .common import check_module_available
 
-
-HAS_VLLM = _check_engine_available("vllm")
-HAS_TRTLLM = _check_engine_available("tensorrt_llm")
+HAS_VLLM = check_module_available("vllm")
+HAS_TRTLLM = check_module_available("tensorrt_llm")
 
 # Build list of available engines for parameterization
 AVAILABLE_ENGINES = []
@@ -324,6 +312,7 @@ def frontend_server(test_directory, runtime_services):
         working_dir=str(test_directory),
         display_output=False,
         log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
+        terminate_all_matching_process_names=False,  # Don't kill nats-server/etcd started by runtime_services
     ) as frontend_process:
         # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
         log_file = Path(frontend_process._log_path)
@@ -416,7 +405,7 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         working_dir=str(test_directory),
         display_output=False,
         log_dir=str(worker_log_dir),  # Absolute path keeps logs in test directory
-        terminate_existing=False,
+        terminate_all_matching_process_names=False,
     ) as worker_process:
         # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
         log_file = Path(worker_process._log_path)
@@ -754,6 +743,7 @@ class TestConsolidatorRouterE2E:
             working_dir=str(test_directory),
             display_output=False,
             log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
+            terminate_all_matching_process_names=False,  # Don't kill nats-server/etcd started by runtime_services
         ) as _frontend_process:
             # Get actual log file path from ManagedProcess
             frontend_log = Path(_frontend_process._log_path)
@@ -839,7 +829,7 @@ class TestConsolidatorRouterE2E:
                 log_dir=str(
                     worker_log_dir
                 ),  # Absolute path keeps logs in test directory
-                terminate_existing=False,
+                terminate_all_matching_process_names=False,
             ) as _worker_process:
                 # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
                 worker_log = Path(_worker_process._log_path)

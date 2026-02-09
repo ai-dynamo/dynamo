@@ -10,7 +10,6 @@ from pydantic import BaseModel, ValidationError
 
 # List all the classes in the _core module for re-export
 # import * causes "unable to detect undefined names"
-from dynamo._core import Backend as Backend
 from dynamo._core import Client as Client
 from dynamo._core import Component as Component
 from dynamo._core import Context as Context
@@ -18,7 +17,6 @@ from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import Namespace as Namespace
-from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
 def dynamo_worker(enable_nats: bool = True):

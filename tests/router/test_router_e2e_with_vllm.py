@@ -87,6 +87,7 @@ class VLLMProcess:
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
+        durable_kv_events: bool = False,
     ):
         """Initialize vLLM workers with dynamo integration.
 
@@ -104,6 +105,7 @@ class VLLMProcess:
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -195,6 +197,10 @@ class VLLMProcess:
                     ]
                 )
 
+            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
+            if durable_kv_events:
+                command.append("--durable-kv-events")
+
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
                 "CUDA_VISIBLE_DEVICES": gpu_device,
@@ -220,7 +226,7 @@ class VLLMProcess:
                 health_check_ports=[],
                 health_check_urls=[],
                 log_dir=request.node.name,
-                terminate_existing=False,
+                terminate_all_matching_process_names=False,
             )
             self.worker_processes.append(process)
             if data_parallel_size is not None:
@@ -262,7 +268,7 @@ class VLLMProcess:
                 if process.data_dir:
                     process._remove_directory(process.data_dir)
 
-                process._terminate_existing()
+                process._terminate_all_matching_process_names()
                 logger.info(
                     f"[VLLMProcess] Launching process {i} (pid will be assigned)..."
                 )
@@ -329,7 +335,7 @@ class VLLMProcess:
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -383,7 +389,7 @@ def test_vllm_kv_router_basic(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
@@ -428,7 +434,7 @@ def test_router_decisions_vllm_multiple_workers(
 
 @pytest.mark.gpu_2
 @pytest.mark.nightly
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_vllm_dp(
     request,
@@ -481,13 +487,12 @@ def test_router_decisions_vllm_dp(
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize(
-    "store_backend,use_nats_core,request_plane",
+    "store_backend,durable_kv_events,request_plane",
     [
-        ("etcd", False, "nats"),  # JetStream mode
-        ("etcd", True, "tcp"),  # nats_core mode
-        # ("file", False, "nats"),  # File backend
+        ("etcd", False, "tcp"),
     ],
-    ids=["jetstream", "tcp_nats_core"],
+    ids=["nats_core"],
+    indirect=["durable_kv_events", "request_plane"],
 )
 def test_vllm_indexers_sync(
     request,
@@ -496,7 +501,7 @@ def test_vllm_indexers_sync(
     file_storage_backend,
     set_ucx_tls_no_mm,
     store_backend,
-    use_nats_core,
+    durable_kv_events,
     request_plane,
 ):
     """
@@ -504,13 +509,15 @@ def test_vllm_indexers_sync(
     with vLLM workers. This test verifies that both routers converge to the same internal state.
 
     Tests with configuration:
-    - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - tcp_nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+                 (includes NATS interruption/recovery testing)
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
+    nats_process, _etcd_process = runtime_services_dynamic_ports
+
     logger.info(
         f"Starting vLLM indexers sync test: store_backend={store_backend}, "
-        f"use_nats_core={use_nats_core}, request_plane={request_plane}"
+        f"durable_kv_events={durable_kv_events}, request_plane={request_plane}"
     )
 
     N_VLLM_WORKERS = 2
@@ -525,12 +532,14 @@ def test_vllm_indexers_sync(
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
             store_backend=store_backend,
+            durable_kv_events=durable_kv_events,
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)
         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+        # When using durable_kv_events=True, use JetStream mode for the router
         _test_router_indexers_sync(
             engine_workers=vllm_workers,
             block_size=BLOCK_SIZE,
@@ -538,6 +547,9 @@ def test_vllm_indexers_sync(
             num_workers=N_VLLM_WORKERS,
             store_backend=store_backend,
             request_plane=request_plane,
+            test_nats_interruption=not durable_kv_events,
+            nats_server=nats_process if not durable_kv_events else None,
+            durable_kv_events=durable_kv_events,
         )
 
         logger.info("vLLM indexers sync test completed successfully")

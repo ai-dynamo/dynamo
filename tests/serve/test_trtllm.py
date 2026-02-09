@@ -199,6 +199,22 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
+    "epd_multimodal_image_and_embeddings": TRTLLMConfig(
+        name="epd_multimodal_image_and_embeddings",
+        directory=trtllm_dir,
+        script_name="epd_multimodal_image_and_embeddings.sh",
+        marks=[
+            pytest.mark.gpu_4,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
+        model="llava-hf/llava-v1.6-mistral-7b-hf",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=1200,
+        delayed_start=120,
+        request_payloads=[multimodal_payload_default()],
+    ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,

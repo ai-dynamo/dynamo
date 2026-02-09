@@ -12,6 +12,8 @@ pub enum EndpointType {
     Completion,
     /// Embeddings API
     Embedding,
+    /// Images API (Diffusion/DALL-E)
+    Images,
     /// Responses API
     Responses,
 }
@@ -22,6 +24,7 @@ impl EndpointType {
             Self::Chat => "chat",
             Self::Completion => "completion",
             Self::Embedding => "embedding",
+            Self::Images => "images",
             Self::Responses => "responses",
         }
     }
@@ -31,6 +34,7 @@ impl EndpointType {
             Self::Chat,
             Self::Completion,
             Self::Embedding,
+            Self::Images,
             Self::Responses,
         ]
     }
