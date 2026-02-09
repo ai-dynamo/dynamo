@@ -34,6 +34,7 @@ import (
 
 	"emperror.dev/errors"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -154,7 +155,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		validator := webhookvalidation.NewDynamoComponentDeploymentValidator(dynamoComponentDeployment)
-		if _, validationErr := validator.Validate(); validationErr != nil {
+		if _, validationErr := validator.Validate(ctx); validationErr != nil {
 			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
 
 			// Set validation error condition
@@ -459,14 +460,31 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
-	condition := metav1.Condition{
+	availableCondition := metav1.Condition{
 		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
 		Status:  componentReconcileResult.status,
 		Reason:  componentReconcileResult.reason,
 		Message: componentReconcileResult.message,
 	}
 
-	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, condition)
+	var componentReadyReason, componentReadyMessage string
+	if componentReconcileResult.status == metav1.ConditionTrue {
+		componentReadyReason = "ComponentReady"
+		componentReadyMessage = "DynamoComponent is ready"
+	} else {
+		componentReadyReason = "ComponentNotReady"
+		componentReadyMessage = "DynamoComponent is not ready"
+	}
+
+	componentReadyCondition := metav1.Condition{
+		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+		Status:  componentReconcileResult.status,
+		Reason:  componentReadyReason,
+		Message: componentReadyMessage,
+	}
+
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, availableCondition)
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, componentReadyCondition)
 	dynamoComponentDeployment.Status.Service = componentReconcileResult.serviceReplicaStatus
 	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
 
@@ -738,6 +756,13 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Finalizing the DynamoComponentDeployment", "dynamoComponentDeployment", dynamoComponentDeployment)
+
+	// Only delete etcd keys if using etcd discovery backend
+	// When using Kubernetes discovery (the default), skip etcd cleanup to avoid hangs
+	if r.Config.DiscoveryBackend != "etcd" {
+		return nil
+	}
+
 	if dynamoComponentDeployment.Spec.ServiceName != "" && dynamoComponentDeployment.Spec.DynamoNamespace != nil && *dynamoComponentDeployment.Spec.DynamoNamespace != "" {
 		logger.Info("Deleting the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
 		err := r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *dynamoComponentDeployment.Spec.DynamoNamespace, dynamoComponentDeployment.Spec.ServiceName))
@@ -1193,7 +1218,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS)
+	// Resolve checkpoint for this component
+	var checkpointInfo *checkpoint.CheckpointInfo
+	if opt.dynamoComponentDeployment.Spec.Checkpoint != nil && opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to resolve checkpoint")
+		}
+		checkpointInfo = info
+	}
+
+	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
@@ -1336,14 +1371,24 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 
 	var servicePort corev1.ServicePort
-	if opt.dynamoComponentDeployment.IsFrontendComponent() {
+	switch opt.dynamoComponentDeployment.Spec.ComponentType {
+	case commonconsts.ComponentTypeFrontend:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoServicePortName,
 			Port:       commonconsts.DynamoServicePort,
 			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}
-	} else { // TODO: only for worker components
+	case commonconsts.ComponentTypeEPP:
+		// EPP exposes the gRPC endpoint for InferencePool communication
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.EPPGRPCPortName,
+			Port:       commonconsts.EPPGRPCPort,
+			TargetPort: intstr.FromInt(commonconsts.EPPGRPCPort),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	default:
+		// Worker and other components use the system port for metrics/health
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoSystemPortName,
 			Port:       commonconsts.DynamoSystemPort,

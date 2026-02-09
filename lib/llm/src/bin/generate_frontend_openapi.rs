@@ -3,7 +3,7 @@
 
 //! Helper binary to generate the Dynamo HTTP frontend OpenAPI specification.
 //!
-//! This allows CI, documentation tooling, and NIM to obtain the exact same
+//! This allows CI and documentation tooling to obtain the exact same
 //! OpenAPI document that is served at `/openapi.json` by the frontend
 //! without having to start the HTTP service and scrape the endpoint.
 //!
