@@ -206,26 +206,29 @@ class DirectRouterMetricsClient:
     def __init__(self, router_metrics_url: str, dynamo_namespace: str):
         self.router_metrics_url = router_metrics_url
         self.dynamo_namespace = dynamo_namespace
-        self._sample_buffer: list[dict[str, dict[str, float]]] = []
+        self._sample_buffer: list[dict[str, dict[str, dict[str, float]]]] = []
         self._num_samples: int = 10
 
     def _parse_prometheus_text(
         self, text: str, model_name: str
-    ) -> dict[str, dict[str, float]]:
+    ) -> dict[str, dict[str, dict[str, float]]]:
         """Parse Prometheus text exposition format and extract per-worker metrics.
 
         Uses prometheus_client.parser to parse the text exposition format.
+        Groups results by worker_type label (prefill/decode) so callers
+        can access only the workers they care about.
 
         Args:
             text: Raw Prometheus text from /metrics endpoint
             model_name: Model name for filtering (case-insensitive)
 
         Returns:
-            {worker_id: {"active_prefill_tokens": float, "active_decode_blocks": float, ...}}
+            {"prefill": {worker_id: {metric: float, ...}},
+             "decode":  {worker_id: {metric: float, ...}}}
         """
         target_metrics = set(_WORKER_METRIC_NAMES.values())
         reverse_map = {v: k for k, v in _WORKER_METRIC_NAMES.items()}
-        result: dict[str, dict[str, float]] = {}
+        result: dict[str, dict[str, dict[str, float]]] = {}
 
         for family in text_string_to_metric_families(text):
             if family.name not in target_metrics:
@@ -246,16 +249,21 @@ class DirectRouterMetricsClient:
                 if model_label is not None and model_label.lower() != model_name.lower():
                     continue
 
+                worker_type = labels.get("worker_type", "unknown")
                 worker_id = labels.get("worker_id", "unknown")
                 value = sample.value
 
-                if worker_id not in result:
-                    result[worker_id] = {}
-                result[worker_id][field_name] = value
+                if worker_type not in result:
+                    result[worker_type] = {}
+                if worker_id not in result[worker_type]:
+                    result[worker_type][worker_id] = {}
+                result[worker_type][worker_id][field_name] = value
 
         return result
 
-    async def _fetch_and_parse(self, model_name: str) -> dict[str, dict[str, float]]:
+    async def _fetch_and_parse(
+        self, model_name: str
+    ) -> dict[str, dict[str, dict[str, float]]]:
         """Fetch /metrics from router and parse into per-worker metrics."""
         try:
             async with aiohttp.ClientSession() as session:
@@ -287,10 +295,16 @@ class DirectRouterMetricsClient:
                     self._sample_buffer.pop(0)
             await asyncio.sleep(sample_interval)
 
-    def get_averaged_metrics(self) -> typing.Optional[dict[str, dict[str, float]]]:
-        """Return averaged per-worker metrics from the sample buffer.
+    def get_averaged_metrics(
+        self, worker_type: str
+    ) -> typing.Optional[dict[str, dict[str, float]]]:
+        """Return averaged per-worker metrics for the given worker_type.
 
         Called by the load-based loop at decision time. Non-blocking.
+
+        Args:
+            worker_type: "prefill" or "decode" — only workers matching
+                         the worker_type label are included.
 
         Returns:
             {worker_id: {"active_prefill_tokens": float, ...}} or None if empty.
@@ -303,7 +317,8 @@ class DirectRouterMetricsClient:
         worker_counts: dict[str, dict[str, int]] = {}
 
         for sample in self._sample_buffer:
-            for worker_id, metrics in sample.items():
+            typed_workers = sample.get(worker_type, {})
+            for worker_id, metrics in typed_workers.items():
                 if worker_id not in worker_sums:
                     worker_sums[worker_id] = {}
                     worker_counts[worker_id] = {}
@@ -314,6 +329,9 @@ class DirectRouterMetricsClient:
                     worker_counts[worker_id][metric_name] = (
                         worker_counts[worker_id].get(metric_name, 0) + 1
                     )
+
+        if not worker_sums:
+            return None
 
         # Average
         result: dict[str, dict[str, float]] = {}

@@ -771,15 +771,17 @@ class BasePlanner:
 
     async def observe_engine_load_stats(self) -> None:
         """Query DirectRouterMetricsClient for per-worker metrics, update regression."""
-        all_metrics = self.router_metrics_client.get_averaged_metrics()
-        if all_metrics is None:
-            logger.warning("No per-worker metrics available yet (buffer empty)")
+        worker_type = self.component_type.value  # "prefill" or "decode"
+        typed_metrics = self.router_metrics_client.get_averaged_metrics(worker_type)
+        if typed_metrics is None:
+            logger.warning(
+                f"No per-worker metrics available yet for {worker_type} (buffer empty)"
+            )
             return
 
+        self.cached_per_worker_metrics = typed_metrics
+
         if self.component_type == SubComponentType.PREFILL:
-            self.cached_per_worker_metrics = {
-                wid: m for wid, m in all_metrics.items() if "active_prefill_tokens" in m
-            }
             for wid, m in self.cached_per_worker_metrics.items():
                 active_prefill = m.get("active_prefill_tokens", 0.0)
                 last_isl = m.get("last_isl", 0.0)
@@ -791,9 +793,6 @@ class BasePlanner:
                     self.ttft_regression.add_observation(x, y)
 
         elif self.component_type == SubComponentType.DECODE:
-            self.cached_per_worker_metrics = {
-                wid: m for wid, m in all_metrics.items() if "active_decode_blocks" in m
-            }
             for wid, m in self.cached_per_worker_metrics.items():
                 active_decode = m.get("active_decode_blocks", 0.0)
                 last_itl = m.get("last_itl", 0.0)

@@ -206,32 +206,18 @@ class DisaggPlanner:
                     await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
                     continue
 
-                # Make separate decisions
+                # Scale prefill and decode independently
                 p_desired = self.prefill_planner.loadbased_plan_adjustment()
                 d_desired = self.decode_planner.loadbased_plan_adjustment()
 
-                p_current = self.shared_state.num_p_workers
-                d_current = self.shared_state.num_d_workers
-
-                # Aggregated mode logic:
-                # Scale up if EITHER needs scale up
-                # Scale down only if BOTH need scale down
-                p_scale_up = p_desired is not None and p_desired > p_current
-                d_scale_up = d_desired is not None and d_desired > d_current
-                p_scale_down = p_desired is not None and p_desired < p_current
-                d_scale_down = d_desired is not None and d_desired < d_current
-
-                final_p, final_d = p_current, d_current
-                if p_scale_up or d_scale_up:
-                    final_p = p_desired if p_scale_up else p_current
-                    final_d = d_desired if d_scale_up else d_current
-                elif p_scale_down and d_scale_down:
-                    final_p = p_desired
-                    final_d = d_desired
-                else:
-                    # No action needed
+                if p_desired is None and d_desired is None:
                     await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
                     continue
+
+                p_current = self.shared_state.num_p_workers
+                d_current = self.shared_state.num_d_workers
+                final_p = p_desired if p_desired is not None else p_current
+                final_d = d_desired if d_desired is not None else d_current
 
                 # Enforce lower bounds from throughput-based
                 if self.enable_throughput:
