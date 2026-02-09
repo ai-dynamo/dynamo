@@ -39,7 +39,8 @@ dynamo_github_url_reg = re.compile(
 )
 # relpath_patn = r"]\s*\(\s*([^)]+)\)"
 # Hyperlink in a .md file, excluding embedded images.
-hyperlink_reg = re.compile(r"((?<!\!)\[[^\]]+\]\s*\(\s*)([^)]+?)(\s*\))")
+# Uses greedy [^)]+ instead of lazy [^)]+? to avoid backtracking with \s*
+hyperlink_reg = re.compile(r"((?<!\!)\[[^\]]+\]\s*\(\s*)([^)]+)(\))")
 
 exclusions = None
 with open(f"{dynamo_docs_abspath}/exclusions.txt", "r") as f:
@@ -225,7 +226,8 @@ def replace_hyperlink(m, src_doc_path):
     should be safe for now.
     """
 
-    hyperlink_str = m.group(2)
+    # Strip trailing whitespace since the greedy regex includes it
+    hyperlink_str = m.group(2).rstrip()
     match = http_reg.match(hyperlink_str)
 
     if match:
