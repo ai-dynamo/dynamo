@@ -3,18 +3,16 @@
 
 """Unit tests for video diffusion components.
 
-Tests for Modality enum, DiffusionConfig, DiffusionEngine auto-detection,
-VideoGenerationHandler helpers, video protocol types, and concurrency safety.
+Tests for Modality enum, DiffusionConfig, VideoGenerationHandler helpers,
+video protocol types, and concurrency safety.
 
-These tests do NOT require visual_gen or GPU - they test logic only.
+These tests do NOT require visual_gen, torch, or GPU - they test logic only.
 """
 
 import asyncio
-import json
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
@@ -22,7 +20,6 @@ import pytest
 
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.constants import Modality
-from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
@@ -144,129 +141,7 @@ class TestDiffusionConfig:
 
 
 # =============================================================================
-# Part 3: DiffusionEngine Auto-Detection Tests (no visual_gen needed)
-# =============================================================================
-
-
-class TestDetectPipelineInfo:
-    """Tests for DiffusionEngine.detect_pipeline_info() auto-detection."""
-
-    def _make_model_dir(self, tmp_path: Path, model_index: dict) -> str:
-        """Create a temp model directory with model_index.json."""
-        model_dir = tmp_path / "test_model"
-        model_dir.mkdir()
-        with open(model_dir / "model_index.json", "w") as f:
-            json.dump(model_index, f)
-        return str(model_dir)
-
-    def test_detect_wan_pipeline_single_transformer(self, tmp_path):
-        """Test WanPipeline with single transformer -> ditWanPipeline."""
-        model_path = self._make_model_dir(
-            tmp_path,
-            {
-                "_class_name": "WanPipeline",
-                "_diffusers_version": "0.32.2",
-                "scheduler": ["diffusers", "UniPCMultistepScheduler"],
-                "text_encoder": ["transformers", "UMT5EncoderModel"],
-                "tokenizer": ["transformers", "AutoTokenizer"],
-                "transformer": ["diffusers", "WanTransformer3DModel"],
-                "vae": ["diffusers", "AutoencoderKLWan"],
-            },
-        )
-
-        info = DiffusionEngine.detect_pipeline_info(model_path)
-
-        assert info.module_path == "visual_gen.pipelines.wan_pipeline"
-        assert info.class_name == "ditWanPipeline"
-        assert "video_diffusion" in info.modalities
-        assert info.config_overrides["torch_compile_models"] == "transformer"
-
-    def test_detect_wan_pipeline_dual_transformer(self, tmp_path):
-        """Test WanPipeline with dual transformer -> Wan 2.2 config."""
-        model_path = self._make_model_dir(
-            tmp_path,
-            {
-                "_class_name": "WanPipeline",
-                "_diffusers_version": "0.32.2",
-                "transformer": ["diffusers", "WanTransformer3DModel"],
-                "transformer_2": ["diffusers", "WanTransformer3DModel"],
-                "vae": ["diffusers", "AutoencoderKLWan"],
-            },
-        )
-
-        info = DiffusionEngine.detect_pipeline_info(model_path)
-
-        assert info.class_name == "ditWanPipeline"
-        # Dual transformer detected from model_index.json keys
-        assert (
-            info.config_overrides["torch_compile_models"] == "transformer,transformer_2"
-        )
-
-    def test_detect_unknown_class_raises_valueerror(self, tmp_path):
-        """Test that unknown _class_name raises ValueError with helpful message."""
-        model_path = self._make_model_dir(
-            tmp_path,
-            {
-                "_class_name": "SomeUnknownPipeline",
-            },
-        )
-
-        with pytest.raises(ValueError) as exc_info:
-            DiffusionEngine.detect_pipeline_info(model_path)
-
-        error_msg = str(exc_info.value)
-        assert "Unsupported diffusion pipeline 'SomeUnknownPipeline'" in error_msg
-        assert "Supported pipelines:" in error_msg
-        assert "WanPipeline" in error_msg
-
-    def test_detect_missing_model_index_raises_error(self, tmp_path):
-        """Test that missing model_index.json for local path raises appropriate error."""
-        # Create empty dir with no model_index.json and a non-HF path
-        empty_dir = tmp_path / "empty_model"
-        empty_dir.mkdir()
-
-        # Local path without model_index.json will try HF Hub download
-        # which should fail for a local path that doesn't exist on HF
-        with pytest.raises(Exception):
-            DiffusionEngine.detect_pipeline_info(str(empty_dir))
-
-    def test_pipeline_registry_has_wan_pipeline(self):
-        """Test that WanPipeline entry exists with correct structure."""
-        assert "WanPipeline" in DiffusionEngine.PIPELINE_REGISTRY
-
-        entry = DiffusionEngine.PIPELINE_REGISTRY["WanPipeline"]
-        assert len(entry) == 3  # (module_path, class_name, modalities)
-        module_path, class_name, modalities = entry
-
-        assert "visual_gen" in module_path
-        assert class_name == "ditWanPipeline"
-        assert "video_diffusion" in modalities
-
-
-class TestDiffusionEngineDevice:
-    """Tests for DiffusionEngine.device property.
-
-    These tests verify device selection aligns with enable_async_cpu_offload config.
-    We create engine instances without initializing (no visual_gen import needed).
-    """
-
-    def test_device_cuda_by_default(self):
-        """Test device is 'cuda' when CPU offload is disabled (default)."""
-        config = DiffusionConfig(enable_async_cpu_offload=False)
-        engine = object.__new__(DiffusionEngine)
-        engine.config = config
-        assert engine.device == "cuda"
-
-    def test_device_cpu_when_offload_enabled(self):
-        """Test device is 'cpu' when CPU offload is enabled."""
-        config = DiffusionConfig(enable_async_cpu_offload=True)
-        engine = object.__new__(DiffusionEngine)
-        engine.config = config
-        assert engine.device == "cpu"
-
-
-# =============================================================================
-# Part 4: VideoGenerationHandler Helper Tests
+# Part 3: VideoGenerationHandler Helper Tests
 # =============================================================================
 
 
@@ -443,7 +318,7 @@ class TestVideoHandlerComputeNumFrames:
 
 
 # =============================================================================
-# Part 5: Video Protocol Tests
+# Part 4: Video Protocol Tests
 # =============================================================================
 
 
@@ -608,7 +483,7 @@ class TestNvVideosResponse:
 
 
 # =============================================================================
-# Part 6: Concurrency Safety Tests
+# Part 5: Concurrency Safety Tests
 # =============================================================================
 
 
