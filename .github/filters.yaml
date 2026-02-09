@@ -98,11 +98,11 @@ operator:
   - 'docs/kubernetes/api_reference.md'
 
 deploy:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/chrek/**'
-  - '!**/*.md'
-  - '!**/*.rst'
 
 planner:
   - 'components/src/dynamo/planner/**'
@@ -110,31 +110,33 @@ planner:
   - 'components/src/dynamo/global_router/**'
 
 vllm:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/Dockerfile.vllm'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
-  - '!**/*.md'
-  - '!**/*.rst'
 
 sglang:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/Dockerfile.sglang'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
-  - '!**/*.md'
-  - '!**/*.rst'
 
 trtllm:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/Dockerfile.trtllm'
   - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
-  - '!**/*.md'
-  - '!**/*.rst'
 
 frontend:
+  - '!**/*.md'
+  - '!**/*.rst'
   - *ci
   - '.cargo/config.toml'
   - 'lib/**'
@@ -148,8 +150,6 @@ frontend:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
-  - '!**/*.md'
-  - '!**/*.rst'
 
 rust:
   - '.github/workflows/pre-merge.yml'
