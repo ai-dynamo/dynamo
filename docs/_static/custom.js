@@ -5,6 +5,10 @@ document.addEventListener("DOMContentLoaded", function () {
     script.id = "runllm-widget-script";
 
     script.src = "https://widget.runllm.com";
+<<<<<<< HEAD
+=======
+    script.crossOrigin = "true";
+>>>>>>> 72ebebea8 (fix: remove SRI hash incompatible with mutable stable version)
 
     script.setAttribute("version", "stable");
     script.setAttribute("runllm-keyboard-shortcut", "Mod+j"); // cmd-j or ctrl-j to open the widget.
