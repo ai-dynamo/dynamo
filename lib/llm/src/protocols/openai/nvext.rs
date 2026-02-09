@@ -186,11 +186,20 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_output_tokens: Option<u32>,
 
-    /// Priority jump in seconds for queue ordering.
+    /// Agent-provided hints for request handling.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_hints: Option<AgentHints>,
+}
+
+/// Hints from the agent/caller about request characteristics.
+#[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone, Default)]
+pub struct AgentHints {
+    /// Latency sensitivity in seconds for queue ordering.
     /// Higher values cause the request to be scheduled sooner when the router queue is enabled.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority_jump: Option<f64>,
+    pub latency_sensitivity: Option<f64>,
 }
 
 impl Default for NvExt {

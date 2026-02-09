@@ -276,7 +276,10 @@ impl OpenAIPreprocessor {
                 dp_rank: None, // dp_rank is set later in the pipeline
                 enable_local_updates: nvext.enable_local_updates,
                 expected_output_tokens: nvext.expected_output_tokens,
-                priority_jump: nvext.priority_jump,
+                priority_jump: nvext
+                    .agent_hints
+                    .as_ref()
+                    .and_then(|h| h.latency_sensitivity),
                 lora_name,
             };
             builder.routing(Some(routing));

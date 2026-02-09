@@ -57,7 +57,7 @@ def run_concurrent_streams(
     """Launch concurrent aiperf subprocesses for each tier.
 
     Args:
-        tag_priority: If True, inject nvext.priority_jump per tier.
+        tag_priority: If True, inject nvext.agent_hints.latency_sensitivity per tier.
     """
     processes = []
     log_files = []
@@ -81,14 +81,19 @@ def run_concurrent_streams(
             args.url,
         )
         if tag_priority:
-            cmd.extend(["--extra-inputs", json.dumps({"nvext": {"priority_jump": pj}})])
+            cmd.extend(
+                [
+                    "--extra-inputs",
+                    json.dumps({"nvext": {"agent_hints": {"latency_sensitivity": pj}}}),
+                ]
+            )
 
         log_path = os.path.join(tier_dir, "aiperf.log")
         log_file = open(log_path, "w")
         log_files.append(log_file)
 
         label = "priority" if tag_priority else "baseline"
-        logger.info(f"Launching {tier} tier ({label}, priority_jump={pj})")
+        logger.info(f"Launching {tier} tier ({label}, latency_sensitivity={pj})")
         logger.info(f"  Command: {' '.join(cmd)}")
 
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
@@ -162,12 +167,12 @@ def plot_ttft_comparison(baseline_dir, priority_dir, output_path, priority_value
         priority_medians,
         width,
         yerr=[priority_lo, priority_hi],
-        label="With priority_jump",
+        label="With latency_sensitivity",
         capsize=4,
     )
 
     tier_labels = [
-        f"{tier.capitalize()}\n(pj={pj})" for tier, pj in zip(TIERS, priority_values)
+        f"{tier.capitalize()}\n(ls={pj})" for tier, pj in zip(TIERS, priority_values)
     ]
     ax.set_xticks(x)
     ax.set_xticklabels(tier_labels)
@@ -200,7 +205,7 @@ def main():
         "--priority-values",
         type=str,
         default="0.0,0.4,0.8",
-        help="Comma-separated priority_jump values for low/medium/high tiers (default: 0.0,0.4,0.8)",
+        help="Comma-separated latency_sensitivity values for low/medium/high tiers (default: 0.0,0.4,0.8)",
     )
 
     args = parser.parse_args()
