@@ -1164,7 +1164,7 @@ async fn handler_responses(
             .await
             .map_err(|e| {
                 ErrorMessage::internal_server_error(&format!(
-                    "Failed to await chat completions task: {:?}",
+                    "Failed to await responses task: {:?}",
                     e,
                 ))
             })?;
@@ -1181,7 +1181,7 @@ async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
-    stream_handle: ConnectionHandle,
+    mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -1267,6 +1267,8 @@ async fn responses(
             .create_inflight_guard(&model, Endpoint::Responses, streaming);
 
     if streaming {
+        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
         // inner stream response data and convert it to Responses API events.
@@ -1564,6 +1566,7 @@ pub fn responses_router(
     let router = Router::new()
         .route(&path, post(handler_responses))
         .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
 }

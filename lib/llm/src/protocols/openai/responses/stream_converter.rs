@@ -81,7 +81,7 @@ impl ResponseStreamConverter {
         seq
     }
 
-    fn make_response(&self, status: Status) -> Response {
+    fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
         let completed_at = if status == Status::Completed {
             Some(
                 SystemTime::now()
@@ -99,7 +99,7 @@ impl ResponseStreamConverter {
             completed_at,
             status,
             model: self.model.clone(),
-            output: vec![],
+            output,
             // Spec-required defaults
             background: Some(false),
             frequency_penalty: Some(0.0),
@@ -142,13 +142,13 @@ impl ResponseStreamConverter {
 
         let created = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::InProgress),
+            response: self.make_response(Status::InProgress, vec![]),
         });
         events.push(make_sse_event(&created));
 
         let in_progress = ResponseStreamEvent::ResponseInProgress(ResponseInProgressEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::InProgress),
+            response: self.make_response(Status::InProgress, vec![]),
         });
         events.push(make_sse_event(&in_progress));
 
@@ -389,10 +389,36 @@ impl ResponseStreamConverter {
             events.push(make_sse_event(&item_done));
         }
 
+        // Build accumulated output items for the completed response
+        let mut completed_output = Vec::new();
+        if self.message_started {
+            completed_output.push(OutputItem::Message(OutputMessage {
+                id: self.message_item_id.clone(),
+                content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                })],
+                role: AssistantRole::Assistant,
+                status: OutputStatus::Completed,
+            }));
+        }
+        for fc in &self.function_call_items {
+            if fc.started {
+                completed_output.push(OutputItem::FunctionCall(FunctionToolCall {
+                    id: Some(fc.item_id.clone()),
+                    call_id: fc.call_id.clone(),
+                    name: fc.name.clone(),
+                    arguments: fc.accumulated_args.clone(),
+                    status: Some(OutputStatus::Completed),
+                }));
+            }
+        }
+
         // Emit response.completed
         let completed = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::Completed),
+            response: self.make_response(Status::Completed, completed_output),
         });
         events.push(make_sse_event(&completed));
 

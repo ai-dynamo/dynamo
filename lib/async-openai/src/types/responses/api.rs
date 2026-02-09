@@ -41,7 +41,7 @@ pub enum ListInputItemsOrder {
 }
 
 /// Query parameters for getting a response.
-#[derive(Debug, Serialize, Default, Clone, Builder, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
 #[builder(name = "GetResponseQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -63,7 +63,7 @@ pub struct GetResponseQuery {
 }
 
 /// Query parameters for listing input items.
-#[derive(Debug, Serialize, Default, Clone, Builder, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
 #[builder(name = "ListInputItemsQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -85,7 +85,7 @@ pub struct ListInputItemsQuery {
 }
 
 /// Query parameters for getting a conversation item.
-#[derive(Debug, Serialize, Default, Clone, Builder, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
 #[builder(name = "GetConversationItemQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -98,7 +98,7 @@ pub struct GetConversationItemQuery {
 }
 
 /// Query parameters for creating conversation items.
-#[derive(Debug, Serialize, Default, Clone, Builder, PartialEq, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
 #[builder(name = "CreateConversationItemsQueryArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
