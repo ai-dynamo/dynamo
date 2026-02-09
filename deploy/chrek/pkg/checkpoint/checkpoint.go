@@ -240,6 +240,7 @@ func (c *Checkpointer) capture(
 	criuClient := criu.MakeCriu()
 	if err := criuClient.Dump(criuOpts, nil); err != nil {
 		c.log.WithField("duration", time.Since(criuDumpStart)).Error("CRIU dump failed")
+		c.logDumpFailureArtifacts(checkpointDir)
 		return 0, fmt.Errorf("CRIU dump failed: %w", err)
 	}
 	criuDumpDuration := time.Since(criuDumpStart)
@@ -254,4 +255,37 @@ func (c *Checkpointer) capture(
 	CaptureRootfsState(state.UpperDir, checkpointDir, data, c.log)
 
 	return criuDumpDuration, nil
+}
+
+func (c *Checkpointer) logDumpFailureArtifacts(checkpointDir string) {
+	dumpLogPath := filepath.Join(checkpointDir, DumpLogFilename)
+	dumpLog, err := os.ReadFile(dumpLogPath)
+	if err != nil {
+		c.log.WithError(err).WithField("path", dumpLogPath).Warn("Could not read CRIU dump log")
+	} else {
+		c.log.Error("=== CRIU DUMP LOG START ===")
+		c.log.Error(string(dumpLog))
+		c.log.Error("=== CRIU DUMP LOG END ===")
+	}
+
+	entries, err := os.ReadDir(checkpointDir)
+	if err != nil {
+		c.log.WithError(err).WithField("path", checkpointDir).Warn("Could not list checkpoint directory")
+		return
+	}
+
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			files = append(files, entry.Name())
+			continue
+		}
+		files = append(files, fmt.Sprintf("%s (%d bytes)", entry.Name(), info.Size()))
+	}
+
+	c.log.WithFields(logrus.Fields{
+		"checkpoint_dir": checkpointDir,
+		"files":          files,
+	}).Error("Checkpoint artifacts present after CRIU dump failure")
 }

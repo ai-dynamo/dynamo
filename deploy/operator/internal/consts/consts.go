@@ -136,8 +136,6 @@ const (
 	EnvReadyForCheckpointFile   = "DYN_READY_FOR_CHECKPOINT_FILE"   // Ready-for-checkpoint file path — checkpoint job pods
 	EnvRestoreMarkerFile        = "DYN_RESTORE_MARKER_FILE"         // Restore marker path — injected into restore and checkpoint job pods
 	EnvSkipWaitForCheckpoint    = "SKIP_WAIT_FOR_CHECKPOINT"        // Skip polling, check once — restored/DGD pods
-	EnvCheckpointVLLMSleepLevel = "DYN_CHECKPOINT_VLLM_SLEEP_LEVEL" // vLLM sleep level before checkpoint (1=CPU offload, 2=discard KV, 3=discard weights)
-
 	// Checkpoint pod-internal constants
 	CheckpointVolumeName               = "checkpoint-storage"  // Pod-internal volume name for checkpoint PVC
 	CheckpointSignalVolumeName         = "checkpoint-signal"   // Pod-internal volume name for signal hostPath

@@ -17,10 +17,10 @@ Environment variables (all required in checkpoint mode, no fallbacks):
 - DYN_CHECKPOINT_STORAGE_TYPE: Storage backend (pvc, s3, oci)
 - DYN_CHECKPOINT_LOCATION: Full checkpoint path (for idempotency check)
 - DYN_RESTORE_MARKER_FILE: Path written by restore-entrypoint before CRIU restore
-- DYN_CHECKPOINT_VLLM_SLEEP_LEVEL: Sleep level before checkpoint (1=CPU, 2=discard KV, 3=discard weights)
 """
 
 import asyncio
+import json
 import logging
 import os
 from typing import Optional
@@ -33,7 +33,6 @@ _REQUIRED_ENV_VARS = [
     "DYN_CHECKPOINT_STORAGE_TYPE",
     "DYN_CHECKPOINT_LOCATION",
     "DYN_RESTORE_MARKER_FILE",
-    "DYN_CHECKPOINT_VLLM_SLEEP_LEVEL",
 ]
 
 
@@ -46,7 +45,15 @@ class CheckpointConfig:
         self.storage_type = os.environ["DYN_CHECKPOINT_STORAGE_TYPE"]
         self.location = os.environ["DYN_CHECKPOINT_LOCATION"]
         self.restore_marker = os.environ["DYN_RESTORE_MARKER_FILE"]
-        self.sleep_level = int(os.environ["DYN_CHECKPOINT_VLLM_SLEEP_LEVEL"])
+
+    def _read_status_file(self, path: str) -> dict:
+        with open(path) as f:
+            status = json.load(f)
+
+        success = status.get("success")
+        if not isinstance(success, bool):
+            raise ValueError(f"missing or invalid success field in {path}")
+        return status
 
     def checkpoint_exists(self) -> bool:
         """Check if a completed checkpoint already exists (idempotency).
@@ -58,12 +65,28 @@ class CheckpointConfig:
         if self.storage_type == "pvc" and self.location:
             done_marker = f"{self.location}/checkpoint.done"
             if os.path.exists(done_marker):
-                logger.info(f"Existing checkpoint found at {self.location}, skipping")
-                return True
+                try:
+                    status = self._read_status_file(done_marker)
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    logger.warning(
+                        f"Invalid checkpoint.done marker at {done_marker}, ignoring stale checkpoint: {exc}"
+                    )
+                    return False
+
+                if status["success"]:
+                    logger.info(f"Existing successful checkpoint found at {self.location}, skipping")
+                    return True
+
+                logger.warning(
+                    f"Existing checkpoint marker reports failure at {self.location}: "
+                    f"{status.get('error', 'unknown error')}"
+                )
+                return False
+
             logger.info(f"No checkpoint at {self.location}, creating new one")
         return False
 
-    async def run_lifecycle(self, engine_client) -> bool:
+    async def run_lifecycle(self, engine_client, sleep_level: int) -> bool:
         """Run the full checkpoint lifecycle after the engine is loaded.
 
         1. Put model to sleep (CRIU-friendly GPU state)
@@ -73,8 +96,8 @@ class CheckpointConfig:
         5. If checkpoint done: return False (caller should exit)
         """
         # Sleep model for checkpoint
-        logger.info(f"Putting model to sleep (level={self.sleep_level})")
-        await engine_client.sleep(level=self.sleep_level)
+        logger.info(f"Putting model to sleep (level={sleep_level})")
+        await engine_client.sleep(level=sleep_level)
 
         # Signal readiness
         with open(self.ready_file, "w") as f:
@@ -93,8 +116,21 @@ class CheckpointConfig:
                 return True
 
             if os.path.exists(self.signal_file):
-                logger.info(f"Checkpoint complete (signal: {self.signal_file})")
-                return False
+                try:
+                    signal = self._read_status_file(self.signal_file)
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    raise RuntimeError(
+                        f"Invalid checkpoint signal file {self.signal_file}: {exc}"
+                    ) from exc
+
+                if signal["success"]:
+                    logger.info(f"Checkpoint complete (signal: {self.signal_file})")
+                    return False
+
+                raise RuntimeError(
+                    f"Checkpoint failed (signal: {self.signal_file}): "
+                    f"{signal.get('error', 'unknown error')}"
+                )
 
             await asyncio.sleep(1)
 

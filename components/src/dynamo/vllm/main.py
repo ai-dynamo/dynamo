@@ -67,6 +67,7 @@ from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+CHECKPOINT_SLEEP_MODE_LEVEL = 1
 
 
 async def _handle_non_leader_node(dp_rank: int) -> None:
@@ -137,7 +138,9 @@ async def worker():
         pre_created_engine = setup_vllm_engine(config)
         engine_client = pre_created_engine[0]
 
-        if not await checkpoint_cfg.run_lifecycle(engine_client):
+        if not await checkpoint_cfg.run_lifecycle(
+            engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
+        ):
             return
 
     shutdown_event = asyncio.Event()

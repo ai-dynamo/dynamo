@@ -8,6 +8,7 @@ package restore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -109,6 +110,36 @@ func NewRestoreConfig(args []string) (*RestoreConfig, error) {
 	return cfg, nil
 }
 
+type checkpointDoneMarker struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+func checkpointDoneSucceeded(donePath string, log *logrus.Entry) bool {
+	data, err := os.ReadFile(donePath)
+	if err != nil {
+		log.WithError(err).WithField("path", donePath).Warn("Failed to read checkpoint.done marker")
+		return false
+	}
+
+	var marker checkpointDoneMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		log.WithError(err).WithField("path", donePath).Warn("Failed to parse checkpoint.done marker")
+		return false
+	}
+
+	if !marker.Success {
+		fields := logrus.Fields{"path": donePath}
+		if marker.Error != "" {
+			fields["error"] = marker.Error
+		}
+		log.WithFields(fields).Warn("checkpoint.done marker reports failed checkpoint")
+		return false
+	}
+
+	return true
+}
+
 // ShouldRestore checks if a restore should be performed.
 // Returns the checkpoint path and true if restore should proceed.
 func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
@@ -117,8 +148,10 @@ func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
 		donePath := cfg.CheckpointLocation + "/" + checkpoint.CheckpointDoneFilename
 
 		if _, err := os.Stat(donePath); err == nil {
-			log.WithField("path", cfg.CheckpointLocation).Info("Checkpoint found (checkpoint.done marker present)")
-			return cfg.CheckpointLocation, true
+			if checkpointDoneSucceeded(donePath, log) {
+				log.WithField("path", cfg.CheckpointLocation).Info("Checkpoint found (checkpoint.done success=true)")
+				return cfg.CheckpointLocation, true
+			}
 		}
 
 		// Fallback: check for metadata.yaml but warn about potential race condition
@@ -139,8 +172,10 @@ func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
 			if checkpointPath != "" {
 				donePath := checkpointPath + "/" + checkpoint.CheckpointDoneFilename
 				if _, err := os.Stat(donePath); err == nil {
-					log.WithField("path", checkpointPath).Info("Restore triggered via file (checkpoint.done marker present)")
-					return checkpointPath, true
+					if checkpointDoneSucceeded(donePath, log) {
+						log.WithField("path", checkpointPath).Info("Restore triggered via file (checkpoint.done success=true)")
+						return checkpointPath, true
+					}
 				}
 			}
 		}
