@@ -5,8 +5,6 @@
 
 # Deploying Dynamo on Kubernetes
 
-[Link to installation](../getting-started/installation.md)
-
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
 ## Important Terminology
@@ -47,7 +45,7 @@ Before deploying the platform, run the pre-deployment checks to ensure the clust
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for more details.
+This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README) for more details.
 
 ## 1. Install Platform First
 
@@ -80,9 +78,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend      | Aggregated | Aggregated + Router | Disaggregated | Disaggregated + Router | Disaggregated + Planner | Disaggregated Multi-node |
 |--------------|:----------:|:-------------------:|:-------------:|:----------------------:|:-----------------------:|:------------------------:|
-| **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
-| **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
+| **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## 3. Deploy Your First Model
 
@@ -107,7 +105,7 @@ kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-For SLA-based autoscaling, see [SLA Planner Quick Start Guide](../planner/sla-planner-quickstart.md).
+For SLA-based autoscaling, see [SLA Planner Guide](../components/planner/planner-guide.md).
 
 ## Understanding Dynamo's Custom Resources
 
@@ -228,13 +226,13 @@ Key customization points include:
 
 ## Additional Resources
 
-- **[Examples](../getting-started/examples.md)** - Complete working examples
+- **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/README.md)** - Complete working examples
 - **[Create Custom Deployments](deployment/create-deployment.md)** - Build your own CRDs
 - **[Managing Models with DynamoModel](deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
 - **[Operator Documentation](dynamo-operator.md)** - How the platform works
 - **[Service Discovery](service-discovery.md)** - Discovery backends and configuration
-- **[Helm Charts](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/README.md)** - For advanced users
-- **[Checkpointing](chrek/dynamo.md)** - Fast pod startup with checkpoint/restore
+- **[Helm Charts](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/README)** - For advanced users
+- **[Checkpointing](chrek/README.md)** - Fast pod startup with checkpoint/restore
 - **[GitOps Deployment with FluxCD](fluxcd.md)** - For advanced users
 - **[Logging](observability/logging.md)** - For logging setup
 - **[Multinode Deployment](deployment/multinode-deployment.md)** - For multinode deployment

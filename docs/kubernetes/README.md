@@ -251,3 +251,16 @@ Key customization points include:
 - **[Grove](/docs/kubernetes/grove.md)** - For grove details and custom installation
 - **[Monitoring](/docs/kubernetes/observability/metrics.md)** - For monitoring setup
 - **[Model Caching with Fluid](/docs/kubernetes/model_caching_with_fluid.md)** - For model caching with Fluid
+
+```{toctree}
+:hidden:
+
+Detailed Installation Guide <installation_guide>
+Dynamo Operator <dynamo_operator>
+Service Discovery <service_discovery>
+Webhooks <webhooks>
+Minikube Setup <deployment/minikube>
+Managing Models with DynamoModel <deployment/dynamomodel-guide>
+Autoscaling <autoscaling>
+Checkpointing <chrek/README>
+```
