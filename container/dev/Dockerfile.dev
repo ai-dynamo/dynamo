@@ -72,7 +72,9 @@ SHELL ["/bin/bash", "-c"]
 # This stage only installs generic developer tools that are available from Ubuntu repos, so CUDA repos are unnecessary.
 #
 # We also add a small retry/backoff to make transient apt metadata issues less disruptive.
-RUN set -eux; \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    set -eux; \
     if [ -d /etc/apt/sources.list.d ]; then \
         mkdir -p /tmp/apt-disabled; \
         for f in /etc/apt/sources.list.d/*.list; do \
@@ -156,7 +158,9 @@ RUN set -eux; \
 
 # Install awk separately with fault tolerance.
 # awk is a virtual package with multiple implementations (gawk, mawk, original-awk).
-RUN (apt-get update && \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    (apt-get update && \
      (apt-get install -y --no-install-recommends gawk || \
       apt-get install -y --no-install-recommends mawk || \
       apt-get install -y --no-install-recommends original-awk || \
@@ -165,7 +169,9 @@ RUN (apt-get update && \
     (command -v awk >/dev/null 2>&1 && echo "awk available: $(command -v awk)" || echo "awk not available")
 
 # Add NVIDIA devtools repository and install development tools (nsight-systems).
-RUN wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" | \
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" | \
         gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
     echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH} /" | \
         tee /etc/apt/sources.list.d/nvidia-devtools.list && \
@@ -280,6 +286,7 @@ RUN if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretool
 COPY --from=dynamo_tools /usr/bin/ /usr/bin/
 COPY --from=dynamo_tools /usr/sbin/ /usr/sbin/
 COPY --from=dynamo_tools /usr/lib/ /usr/lib/
+COPY --from=dynamo_tools /usr/libexec/ /usr/libexec/
 COPY --from=dynamo_tools /lib/ /lib/
 COPY --from=dynamo_tools /usr/share/ /usr/share/
 COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
@@ -323,8 +330,8 @@ RUN if [ "${FRAMEWORK}" = "sglang" ]; then \
         # Copy all packages from runtime stage system site-packages into venv
         # This includes ai-dynamo-runtime, kubernetes, and all other dependencies
         # Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
-        cp -r --no-preserve=mode /usr/local/lib/python3.12/dist-packages/* \
-              /opt/dynamo/venv/lib/python3.12/site-packages/; \
+        cp -r --no-preserve=mode /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
+              /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/; \
         # Ensure `uv` is available on PATH for subsequent `uv pip ...` steps.
         cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
         chmod +x /opt/dynamo/venv/bin/uv && \
@@ -345,13 +352,14 @@ RUN git lfs install
 ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
-    UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 uv pip install \
+    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt \
-        cupy-cuda13x && \
+        --requirement /tmp/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
     fi
@@ -364,8 +372,10 @@ COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
 RUN chmod g+w ${WORKSPACE_DIR}
 
 # Install benchmarks package (includes prefix_data_generator, tabulate, etc.)
-RUN cd ${WORKSPACE_DIR}/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    cd ${WORKSPACE_DIR}/benchmarks && \
+    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install .
 
 # Install maturin and create editable install entry points.
 #
@@ -374,11 +384,15 @@ RUN cd ${WORKSPACE_DIR}/benchmarks && \
 #   /opt/dynamo/venv/bin and put that venv on PATH, so `uv` is expected to be available here in normal builds.
 # - The `command -v uv` guard is defensive: on SGLang, `uv` needs to "disappear" from PATH and we fall back to
 #   `python3 -m pip` so the editable install can still proceed (instead of failing mid-layer with a confusing error).
-RUN if [ -f pyproject.toml ]; then \
+# Cache uv downloads; uv handles its own locking for this cache.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 PIP_CACHE_DIR=/root/.cache/pip && \
+    if [ -f pyproject.toml ]; then \
         if command -v uv >/dev/null 2>&1; then \
-            uv pip install --no-cache maturin[patchelf] && uv pip install --no-deps -e . ; \
+            uv pip install maturin[patchelf] && uv pip install --no-deps -e . ; \
         else \
-            python3 -m pip install --no-cache-dir maturin[patchelf] && python3 -m pip install --no-deps -e . ; \
+            python3 -m pip install maturin[patchelf] && python3 -m pip install --no-deps -e . ; \
         fi; \
     else \
         echo "ERROR: pyproject.toml not found in ${WORKSPACE_DIR}; expected to build from the Dynamo repo root." >&2; \
@@ -463,7 +477,9 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
 RUN mkdir -p /home/$USERNAME/.cache/ \
-    && chmod g+w /home/$USERNAME/.cache/
+    && mkdir -p /home/$USERNAME/.cache/pre-commit \
+    && chmod g+w /home/$USERNAME/.cache/ \
+    && chmod g+w /home/$USERNAME/.cache/pre-commit
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

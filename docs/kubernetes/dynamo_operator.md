@@ -86,6 +86,7 @@ helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
   --create-namespace \
   --set dynamo-operator.namespaceRestriction.enabled=true \
   --set dynamo-operator.controllerManager.manager.image.tag=v2.0.0-beta
+```
 
 **Observability:**
 
@@ -130,6 +131,32 @@ For complete documentation on webhooks, certificate management, and troubleshoot
 
 **📖 [Webhooks Guide](./webhooks.md)**
 
+## Observability
+
+The Dynamo Operator provides comprehensive observability through Prometheus metrics and Grafana dashboards. This allows you to monitor:
+
+- **Controller Performance**: Reconciliation loop duration, success rates, and error rates by resource type
+- **Webhook Activity**: Validation performance, admission rates, and denial patterns
+- **Resource Inventory**: Current count of managed resources by state and namespace
+- **Operational Health**: Success rates and health indicators for controllers and webhooks
+
+### Metrics Collection
+
+Metrics are automatically exposed on the operator's `/metrics` endpoint (port 8443 by default) and collected by Prometheus via a ServiceMonitor. The ServiceMonitor is automatically created when you install the operator via Helm (controlled by `metricsService.enabled`, which defaults to `true`).
+
+### Grafana Dashboard
+
+A pre-built Grafana dashboard is available for visualizing operator metrics. The dashboard includes:
+
+- **Reconciliation Metrics**: Rate, duration (P95), and errors by resource type
+- **Webhook Metrics**: Request rate, duration (P95), and denials by resource type and operation
+- **Resource Inventory**: Count of DynamoGraphDeployments by state and namespace
+- **Operational Health**: Success rate gauges for controllers and webhooks
+
+For complete setup instructions and metrics reference, see:
+
+**📖 [Operator Metrics Guide](./observability/operator-metrics.md)**
+
 ## Installation
 
 ### Quick Install with Helm
@@ -169,7 +196,9 @@ helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --create-namespace \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}"
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set etcd.enabled=false \
+  --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 ```
 
 For detailed installation options, see the [Installation Guide](./installation_guide.md)

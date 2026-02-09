@@ -15,7 +15,6 @@
 
 from enum import Enum
 
-DEFAULT_MODEL_NAME = "Qwen/Qwen3-0.6B"
 DYNAMO_RUN_DEFAULT_PORT = 8000
 
 # set a decode maximum concurrency due to limits of profiling tools

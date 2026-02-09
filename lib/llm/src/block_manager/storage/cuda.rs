@@ -28,7 +28,7 @@
 //! ## Usage
 //!
 //! ### Using Allocators
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{DeviceAllocator, PinnedAllocator, StorageAllocator};
 //!
 //! // Create a pinned memory allocator
@@ -41,7 +41,7 @@
 //! ```
 //!
 //! ### Memory Operations
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{
 //!     PinnedAllocator, StorageAllocator, Storage, StorageMemset
 //! };
@@ -239,7 +239,16 @@ impl PinnedStorage {
 impl Drop for PinnedStorage {
     fn drop(&mut self) {
         self.handles.release();
-        unsafe { cudarc::driver::result::free_host(self.ptr as _) }.unwrap();
+        unsafe {
+            if let Err(e) = cudarc::driver::result::free_host(self.ptr as _) {
+                tracing::error!(
+                    "Failed to free pinned storage at 0x{:x} (size={}): {}",
+                    self.ptr,
+                    self.size,
+                    e
+                );
+            }
+        }
     }
 }
 

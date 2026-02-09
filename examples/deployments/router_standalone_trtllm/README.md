@@ -245,5 +245,4 @@ When processing multimodal requests:
 
 ## See Also
 
-- [vLLM Router Standalone](../router_standalone/) - Original vLLM version
 - [TensorRT-LLM KV Event Documentation](https://nvidia.github.io/TensorRT-LLM/0.21.0/examples/llm_inference_kv_events.html)
