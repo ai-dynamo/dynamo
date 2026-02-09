@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub const GLOBAL_NAMESPACE: &str = "default";
+pub const GLOBAL_NAMESPACE: &str = "dynamo";
 
 /// Determines how namespaces are filtered during model discovery.
 ///
