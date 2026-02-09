@@ -436,6 +436,8 @@ class BasePlanner:
                         "No service with componentType 'frontend' found. "
                         "Please provide --loadbased-router-metrics-url explicitly."
                     )
+                else:
+                    logger.info(f"Auto-discovered frontend metrics URL: {args.loadbased_router_metrics_url}")
 
             self.router_metrics_client = DirectRouterMetricsClient(
                 args.loadbased_router_metrics_url, args.namespace

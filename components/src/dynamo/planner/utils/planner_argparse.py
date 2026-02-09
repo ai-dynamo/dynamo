@@ -202,8 +202,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         "--loadbased-router-metrics-url",
         type=str,
         default=SLAPlannerDefaults.loadbased_router_metrics_url,
-        help="URL to router's /metrics endpoint for direct load metric queries "
-        "(required when load-based scaling is enabled, e.g., 'http://frontend-svc:8000/metrics')",
+        help="URL to router's /metrics endpoint for direct load metric queries, default is auto-discovered from the DGD)",
     )
     parser.add_argument(
         "--loadbased-adjustment-interval",
