@@ -9,7 +9,7 @@
 
 This guide shows how to set up Prometheus and Grafana for visualizing Dynamo metrics on a single machine for demo purposes.
 
-![Grafana Dynamo Dashboard](../../assets/img/grafana-dynamo-composite.png)
+![Grafana Dynamo Dashboard](/assets/img/grafana-dynamo-composite.png)
 
 **Components:**
 - **Prometheus Server** - Collects and stores metrics from Dynamo services

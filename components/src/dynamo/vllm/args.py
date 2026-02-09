@@ -36,12 +36,11 @@ class Config:
     endpoint: str
     is_prefill_worker: bool
     is_decode_worker: bool
-    migration_limit: int = 0
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
     event_plane: str
-    enable_local_indexer: bool = False
+    enable_local_indexer: bool = True
 
     # mirror vLLM
     model: str
@@ -137,12 +136,6 @@ def parse_args() -> Config:
         "--is-decode-worker",
         action="store_true",
         help="Mark this as a decode worker which does not publish KV events.",
-    )
-    parser.add_argument(
-        "--migration-limit",
-        type=int,
-        default=0,
-        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
     parser.add_argument(
         "--connector",
@@ -296,11 +289,11 @@ def parse_args() -> Config:
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--enable-local-indexer",
-        type=str,
-        choices=["true", "false"],
-        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+        "--durable-kv-events",
+        action="store_true",
+        dest="durable_kv_events",
+        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     )
     parser.add_argument(
         "--use-vllm-tokenizer",
@@ -319,7 +312,6 @@ def parse_args() -> Config:
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
-    args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     if hasattr(engine_args, "stream_interval") and engine_args.stream_interval != 1:
@@ -436,7 +428,6 @@ def parse_args() -> Config:
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.is_decode_worker = args.is_decode_worker
-    config.migration_limit = args.migration_limit
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
@@ -460,7 +451,7 @@ def parse_args() -> Config:
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
-    config.enable_local_indexer = args.enable_local_indexer
+    config.enable_local_indexer = not args.durable_kv_events
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
     config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config
