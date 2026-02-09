@@ -613,11 +613,31 @@ class TestNvVideosResponse:
 
 
 class ConcurrencyTracker:
-    """Tracks concurrent access to a mock engine.generate() call.
+    """Mock replacement for ``DiffusionEngine.generate()`` that records
+    the peak number of threads executing it simultaneously.
 
-    Simulates what visual_gen does: single-threaded pipeline that is unsafe
-    for concurrent access. Records the max number of simultaneous callers
-    to prove whether concurrent access occurs.
+    What it mocks:
+        ``engine.generate(**kwargs)`` — the blocking GPU call inside
+        ``VideoGenerationHandler``.  The handler dispatches this via
+        ``asyncio.to_thread()``, so each request runs ``generate()``
+        in a separate OS thread.
+
+    What it focuses on:
+        Detecting *concurrent* entry into ``generate()``.  It does NOT
+        test correctness of generated frames, GPU memory, or CUDA
+        streams — only whether multiple threads overlap inside the call.
+
+    How it works:
+        1. On entry: atomically increment ``_active_count`` and update
+           the high-water mark ``max_concurrent``.
+        2. Sleep for ``sleep_seconds`` to hold the thread inside the
+           function, creating a window where other threads *would*
+           overlap if nothing serializes them.
+        3. On exit: atomically decrement ``_active_count``.
+
+    After the test, inspect ``max_concurrent``:
+        - 1  → accesses were serialized (lock is working).
+        - >1 → concurrent access occurred (lock is missing/broken).
     """
 
     def __init__(self, sleep_seconds: float = 0.1):
@@ -633,24 +653,55 @@ class ConcurrencyTracker:
             if self._active_count > self.max_concurrent:
                 self.max_concurrent = self._active_count
 
-        # Simulate GPU work — gives other threads a window to enter
+        # Hold the thread here to widen the overlap window.  Without
+        # serialization, other threads will enter generate() during
+        # this sleep and bump _active_count above 1.
         time.sleep(self.sleep_seconds)
 
         with self._lock:
             self._active_count -= 1
 
-        # Return fake frames (numpy-like shape)
+        # Return fake frames (shape: [num_frames, H, W, C])
         import numpy as np
 
         return np.zeros((4, 64, 64, 3), dtype=np.uint8)
 
 
 class TestVideoHandlerConcurrency:
-    """Tests that VideoGenerationHandler serializes pipeline access.
+    """Verifies that ``VideoGenerationHandler`` serializes access to the
+    underlying ``engine.generate()`` call.
 
-    The visual_gen pipeline is not thread-safe. Without a lock, concurrent
-    requests via asyncio.to_thread() would enter engine.generate()
-    simultaneously, corrupting shared state.
+    Why this matters:
+        The visual_gen pipeline is a global singleton with mutable state,
+        unprotected CUDA graph caches, and shared config objects.  It is
+        NOT thread-safe.  ``VideoGenerationHandler`` dispatches generate()
+        via ``asyncio.to_thread()``, which runs each request in a
+        separate OS thread.  Without an ``asyncio.Lock`` guarding the
+        call, concurrent requests would enter generate() simultaneously
+        and corrupt shared pipeline state.
+
+    How the test works:
+        1. Wires a ``ConcurrencyTracker`` as the mock engine so that
+           each generate() call sleeps long enough for overlapping
+           threads to be observable.
+        2. Fires N requests concurrently with ``asyncio.gather()``,
+           each of which calls ``handler.generate()`` → ``asyncio.to_thread()``
+           → ``tracker.generate()``.
+        3. Asserts ``tracker.max_concurrent == 1``: only one thread was
+           inside generate() at any point.
+
+    Why it works:
+        - ``asyncio.gather()`` schedules all coroutines on the same
+          event loop, so they all reach ``asyncio.to_thread()``
+          nearly simultaneously.
+        - Without the handler's ``asyncio.Lock``, each coroutine
+          immediately spawns a thread, and those threads overlap
+          inside ``tracker.generate()`` during the sleep window →
+          ``max_concurrent > 1``.
+        - With the lock, only one coroutine enters the
+          ``async with self._generate_lock`` block at a time; the
+          others suspend cooperatively on the event loop.  So only
+          one thread is ever inside generate() → ``max_concurrent == 1``.
     """
 
     def _make_handler(self):
@@ -691,10 +742,12 @@ class TestVideoHandlerConcurrency:
             pass
 
     def test_concurrent_requests_are_serialized(self):
-        """Test that concurrent requests don't enter engine.generate() simultaneously.
+        """Fires 3 concurrent requests and asserts only one thread enters
+        engine.generate() at a time (max_concurrent == 1).
 
-        Fires 3 requests concurrently. With proper serialization (asyncio.Lock),
-        max_concurrent should be 1. Without it, max_concurrent would be > 1.
+        If the asyncio.Lock in VideoGenerationHandler is removed, the 3
+        asyncio.to_thread() calls run in parallel OS threads, overlapping
+        inside the tracker's sleep window, and max_concurrent rises to 3.
         """
 
         async def run():
