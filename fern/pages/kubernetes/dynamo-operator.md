@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Working with Dynamo Kubernetes Operator
-
 ## Overview
 
 Dynamo operator is a Kubernetes operator that simplifies the deployment, configuration, and lifecycle management of DynamoGraphs. It automates the reconciliation of custom resources to ensure your desired state is always achieved. This operator is ideal for users who want to manage complex deployments using declarative YAML definitions and Kubernetes-native tooling.
@@ -91,6 +89,7 @@ helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
   --create-namespace \
   --set dynamo-operator.namespaceRestriction.enabled=true \
   --set dynamo-operator.controllerManager.manager.image.tag=v2.0.0-beta
+```
 
 **Observability:**
 
@@ -114,11 +113,11 @@ Dynamo provides the following Custom Resources:
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](api-reference.md)**
+**📖 [Dynamo CRD API Reference](./api-reference.md)**
 
 For a user-focused guide on deploying and managing models with DynamoModel, see:
 
-**📖 [Managing Models with DynamoModel Guide](deployment/dynamomodel-guide.md)**
+**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 
 ## Webhooks
 
@@ -133,7 +132,7 @@ The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validat
 
 For complete documentation on webhooks, certificate management, and troubleshooting, see:
 
-**[Webhooks Guide](webhooks.md)**
+**📖 [Webhooks Guide](./webhooks.md)**
 
 ## Observability
 
@@ -159,7 +158,7 @@ A pre-built Grafana dashboard is available for visualizing operator metrics. The
 
 For complete setup instructions and metrics reference, see:
 
-**[Operator Metrics Guide](observability/operator-metrics.md)**
+**📖 [Operator Metrics Guide](./observability/operator-metrics.md)**
 
 ## Installation
 
@@ -200,10 +199,12 @@ helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --create-namespace \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}"
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set etcd.enabled=false \
+  --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 ```
 
-For detailed installation options, see the [Installation Guide](installation-guide.md)
+For detailed installation options, see the [Installation Guide](./installation-guide.md)
 
 
 ## Development

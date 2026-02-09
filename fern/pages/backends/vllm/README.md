@@ -23,7 +23,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
-- [Quick Start](#vllm-quick-start)
+- [Quick Start](#quick-start)
 - [Single Node Examples](#run-single-node-examples)
 - [Advanced Examples](#advanced-examples)
 - [Deploy on Kubernetes](#kubernetes-deployment)
@@ -36,13 +36,13 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | Feature | vLLM | Notes |
 |---------|------|-------|
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../router/kv-cache-routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../planner/sla-planner.md) | ✅ |  |
-| [**Load Based Planner**](../../planner/load-planner.md) | 🚧 | WIP |
-| [**KVBM**](../../kvbm/kvbm-architecture.md) | ✅ |  |
-| [**LMCache**](LMCache-Integration.md) | ✅ |  |
-| [**Prompt Embeddings**](prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md) | 🚧 | WIP |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
+| [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |
+| [**KVBM**](../../components/kvbm/README.md) | ✅ |  |
+| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
+| [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
 
@@ -87,7 +87,7 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 
 ## Run Single Node Examples
 
-> [!WARNING]
+> [!IMPORTANT]
 > Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
 
 ### Aggregated Serving
@@ -144,7 +144,9 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
 This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
 
-**Guide:** [Speculative Decoding Quickstart](speculative-decoding.md)
+**Guide:** [Speculative Decoding Quickstart](../../features/speculative-decoding/speculative-decoding-vllm.md)
+
+> **See also:** [Speculative Decoding Feature Overview](../../features/speculative-decoding/README.md) for cross-backend documentation.
 
 ### Kubernetes Deployment
 
@@ -177,17 +179,11 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [KV Cache Routing](../../router/kv-cache-routing.md) on deterministic event IDs.
+See the high-level notes in [Router Design](../../design-docs/router-design.md#deterministic-event-ids) on deterministic event IDs.
 
 ## Request Migration
 
-You can enable [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
-
-```bash
-python3 -m dynamo.vllm ... --migration-limit=3
-```
-
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for details on how this works.
+Dynamo supports [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for configuration details.
 
 ## Request Cancellation
 

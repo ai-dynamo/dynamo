@@ -473,8 +473,8 @@ RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
-# cleanup unnecessary libs
-RUN apt remove -y python3-apt &&\
+# cleanup unnecessary libs (python3-blinker conflicts with pip-installed blinker from Flask/dash)
+RUN apt remove -y python3-apt python3-blinker &&\
     pip uninstall -y termplotlib
 
 # This ARG is still utilized for SGLANG Version extraction

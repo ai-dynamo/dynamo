@@ -3,52 +3,143 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Welcome to NVIDIA Dynamo
+This guide covers running Dynamo **using the CLI on your local machine or VM**.
 
-The NVIDIA Dynamo Platform is a high-performance, low-latency inference framework designed to serve all AI models—across any framework, architecture, or deployment scale.
+<Info>
+**Looking to deploy on Kubernetes instead?**
+See the [Kubernetes Installation Guide](../kubernetes/installation-guide.md)
+and [Kubernetes Quickstart](../kubernetes/README.md) for cluster deployments.
+</Info>
 
-> [!TIP]
-> **Discover the Latest Developments!**
->
-> This guide is a snapshot of a specific point in time. For the latest information, examples, and Release Assets, see the [Dynamo GitHub repository](https://github.com/ai-dynamo/dynamo/releases/latest).
+## Install Dynamo
 
-## Quickstart
+**Option A: Containers (Recommended)**
 
-Get started with Dynamo locally in just a few commands:
+Containers have all dependencies pre-installed. No setup required.
 
-### 1. Install Dynamo
+```bash
+# SGLang
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+
+# TensorRT-LLM
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+
+# vLLM
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+```
+
+<Tip>
+To run frontend and worker in the same container, either:
+
+- Run processes in background with `&` (see Run Dynamo section below), or
+- Open a second terminal and use `docker exec -it <container_id> bash`
+</Tip>
+
+See [Release Artifacts](../reference/release-artifacts.md#container-images) for available
+versions and backend guides for run instructions: [SGLang](../backends/sglang/README.md) |
+[TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md)
+
+**Option B: Install from PyPI**
 
 ```bash
 # Install uv (recommended Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Create virtual environment and install Dynamo
+# Create virtual environment
 uv venv venv
 source venv/bin/activate
-# Use prerelease flag to install RC versions of flashinfer and/or other dependencies
-uv pip install --prerelease=allow "ai-dynamo[sglang]"  # or [vllm], [trtllm]
+uv pip install pip
 ```
 
-### 2. Start etcd/NATS
+Install system dependencies and the Dynamo wheel for your chosen backend:
+
+**SGLang**
 
 ```bash
-# Fetch and start etcd and NATS using Docker Compose
-VERSION=$(uv pip show ai-dynamo | grep Version | cut -d' ' -f2)
-curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/ai-dynamo/dynamo/refs/tags/v${VERSION}/deploy/docker-compose.yml
-docker compose -f docker-compose.yml up -d
+sudo apt install python3-dev
+uv pip install --prerelease=allow "ai-dynamo[sglang]"
 ```
 
-### 3. Run Dynamo
+<Note>
+For CUDA 13 (B300/GB300), the container is recommended. See
+[SGLang install docs](https://docs.sglang.io/get_started/install.html) for details.
+</Note>
+
+**TensorRT-LLM**
+
+```bash
+sudo apt install python3-dev
+pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
+pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
+```
+
+<Note>
+TensorRT-LLM requires `pip` due to a transitive Git URL dependency that
+`uv` doesn't resolve. We recommend using the TensorRT-LLM container for
+broader compatibility. See the [TRT-LLM backend guide](../backends/trtllm/README.md)
+for details.
+</Note>
+
+**vLLM**
+
+```bash
+sudo apt install python3-dev libxcb1
+uv pip install --prerelease=allow "ai-dynamo[vllm]"
+```
+
+## Run Dynamo
+
+<Tip>
+**(Optional)** Before running Dynamo, verify your system configuration:
+`python3 deploy/sanity_check.py`
+</Tip>
+
+Start the frontend, then start a worker for your chosen backend.
+
+<Tip>
+To run in a single terminal (useful in containers), append `> logfile.log 2>&1 &`
+to run processes in background. Example: `python3 -m dynamo.frontend --store-kv file > dynamo.frontend.log 2>&1 &`
+</Tip>
 
 ```bash
 # Start the OpenAI compatible frontend (default port is 8000)
-python -m dynamo.frontend
-
-# In another terminal, start an SGLang worker
-python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B
+# --store-kv file avoids needing etcd (frontend and workers must share a disk)
+python3 -m dynamo.frontend --store-kv file
 ```
 
-### 4. Test Your Deployment
+In another terminal (or same terminal if using background mode), start a worker:
+
+**SGLang**
+
+```bash
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --store-kv file
+```
+
+**TensorRT-LLM**
+
+```bash
+python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --store-kv file
+```
+
+**vLLM**
+
+```bash
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --store-kv file \
+  --kv-events-config '{"enable_kv_cache_events": false}'
+```
+
+<Note>
+For dependency-free local development, disable KV event publishing (avoids NATS):
+
+- **vLLM:** Add `--kv-events-config '{"enable_kv_cache_events": false}'`
+- **SGLang:** No flag needed (KV events disabled by default)
+- **TensorRT-LLM:** No flag needed (KV events disabled by default)
+
+**TensorRT-LLM only:** The warning `Cannot connect to ModelExpress server/transport error. Using direct download.`
+is expected and can be safely ignored.
+</Note>
+
+## Test Your Deployment
 
 ```bash
 curl localhost:8000/v1/chat/completions \
@@ -57,41 +148,3 @@ curl localhost:8000/v1/chat/completions \
        "messages": [{"role": "user", "content": "Hello!"}],
        "max_tokens": 50}'
 ```
-
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **Multi-Backend Support** | vLLM, SGLang, and TensorRT-LLM backends |
-| **Disaggregated Serving** | Separate prefill and decode for optimal performance |
-| **KV Cache Routing** | Intelligent request routing based on KV cache state |
-| **Kubernetes Native** | Full operator and Helm chart support |
-| **Observability** | Prometheus metrics, Grafana dashboards, and tracing |
-
-## Documentation Overview
-
-### Backends
-- [vLLM Backend](../backends/vllm/README.md) - High-throughput serving with vLLM
-- [SGLang Backend](../backends/sglang/README.md) - Fast inference with SGLang
-- [TensorRT-LLM Backend](../backends/trtllm/README.md) - Optimized inference with TensorRT-LLM
-
-### Kubernetes Deployment
-- [Installation Guide updated](../kubernetes/installation-guide.md) - Deploy Dynamo on Kubernetes
-- [Operator Guide](../kubernetes/dynamo-operator.md) - Using the Dynamo Operator
-- [Autoscaling](../kubernetes/autoscaling.md) - Automatic scaling configuration
-
-### Architecture
-- [System Architecture](../design-docs/architecture.md) - Overall system design
-- [Disaggregated Serving](../design-docs/disagg-serving.md) - P/D separation architecture
-- [Distributed Runtime](../design-docs/distributed-runtime.md) - Runtime internals
-
-### Performance & Tuning
-- [Performance Tuning](../performance/tuning.md) - Optimize your deployment
-- [Benchmarking](../benchmarks/benchmarking.md) - Measure and compare performance
-- [AI Configurator](../performance/aiconfigurator.md) - Automated configuration
-
-## Getting Help
-
-- **GitHub Issues**: [Report bugs or request features](https://github.com/ai-dynamo/dynamo/issues)
-- **Discussions**: [Ask questions and share ideas](https://github.com/ai-dynamo/dynamo/discussions)
-- **Reference**: [CLI Reference](../reference/cli.md) | [Glossary](../reference/glossary.md) | [Support Matrix](../reference/support-matrix.md)

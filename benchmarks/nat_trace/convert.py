@@ -19,7 +19,7 @@ import re
 from collections import defaultdict
 
 from aiperf.common.tokenizer import Tokenizer
-from aiperf.dataset.synthesis.rolling_hasher import RollingHasher
+from common import DEFAULT_BLOCK_SIZE, DEFAULT_TOKENIZER, texts_to_hashes_and_lengths
 from tqdm import tqdm
 
 
@@ -49,8 +49,8 @@ def parse_args():
     parser.add_argument(
         "--block-size",
         type=int,
-        default=64,
-        help="Block size for hash generation (default: 64)",
+        default=DEFAULT_BLOCK_SIZE,
+        help=f"Block size for hash generation (default: {DEFAULT_BLOCK_SIZE})",
     )
     parser.add_argument(
         "--num-requests",
@@ -177,39 +177,6 @@ def extract_llm_calls(request: dict) -> list[dict]:
     llm_calls.sort(key=lambda x: x.get("event_timestamp", 0) or 0)
 
     return llm_calls
-
-
-def texts_to_hashes_and_lengths(
-    tokenizer: Tokenizer,
-    texts: list[str],
-    block_size: int,
-) -> tuple[list[list[int]], list[int]]:
-    """
-    Convert texts to hash IDs and token lengths.
-
-    Returns:
-        Tuple of (hash_ids_list, token_lengths) where:
-        - hash_ids_list: List of hash ID sequences, one per input text
-        - token_lengths: List of token counts, one per input text
-    """
-    hasher = RollingHasher(block_size=block_size)
-    hash_results: list[list[int]] = []
-    length_results: list[int] = []
-
-    for text in texts:
-        tokens = tokenizer.encode(text)
-        length_results.append(len(tokens))
-
-        blocks: list[list[int]] = [
-            tokens[i : i + block_size] for i in range(0, len(tokens), block_size)
-        ]
-        if blocks:
-            hashes = hasher.hash_token_blocks(blocks)
-            hash_results.append(hashes)
-        else:
-            hash_results.append([])
-
-    return hash_results, length_results
 
 
 def chat_inputs_to_text(chat_inputs: list) -> str:
@@ -353,10 +320,8 @@ def infer_tokenizer(requests: list) -> str:
                     print(f"Inferred tokenizer from model '{model_name}': {tokenizer}")
                     return tokenizer
 
-    # Default fallback
-    default = "meta-llama/Llama-3.1-8B-Instruct"
-    print(f"Could not infer tokenizer, using default: {default}")
-    return default
+    print(f"Could not infer tokenizer, using default: {DEFAULT_TOKENIZER}")
+    return DEFAULT_TOKENIZER
 
 
 def print_statistics(mooncake_data: list):
