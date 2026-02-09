@@ -91,6 +91,8 @@ async def init_video_diffusion_worker(
 
     logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
 
+    # register_llm is a misnomer — it's actually Dynamo's generic model
+    # registration function and the video diffisuion model is not an llm
     await register_llm(
         ModelInput.Text,
         model_type,
