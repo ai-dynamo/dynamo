@@ -3,42 +3,75 @@
 
 """Unit tests for PrefillHandler."""
 
-from unittest.mock import MagicMock
-
 import pytest
+import torch
+from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.trtllm.request_handlers.handlers import PrefillHandler
+from dynamo.trtllm.tests.request_handlers.utils import (
+    create_mock_encoder_cache,
+    run_generate_with_mock_fetch,
+    setup_multimodal_config,
+)
 from dynamo.trtllm.tests.utils import create_mock_request_handler_config
 
 pytestmark = [
     pytest.mark.pre_merge,
+    pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.gpu_0,
 ]
 
-
-@pytest.fixture
-def mock_config():
-    """Create a mock RequestHandlerConfig."""
-    return create_mock_request_handler_config(disaggregation_mode="prefill")
-
-
-@pytest.fixture
-def mock_encoder_cache():
-    """Create a mock EncoderCacheManager."""
-    cache = MagicMock()
-    cache.get = MagicMock(return_value=None)
-    cache.set = MagicMock(return_value=True)
-    cache.stats = {"hits": 0, "misses": 0, "entries": 0}
-    return cache
+FETCH_PATCH_PATH = (
+    "dynamo.trtllm.request_handlers.handlers.fetch_embeddings_from_encoder"
+)
 
 
 class TestPrefillHandlerInit:
     """Tests for PrefillHandler initialization."""
 
-    def test_init_with_encoder_cache(self, mock_config, mock_encoder_cache):
+    def test_init_with_encoder_cache(self):
         """Test PrefillHandler can be initialized with encoder_cache."""
-        handler = PrefillHandler(mock_config, encoder_cache=mock_encoder_cache)
+        config = create_mock_request_handler_config(disaggregation_mode="prefill")
+        cache = create_mock_encoder_cache()
 
-        assert handler.engine == mock_config.engine
-        assert handler._encoder_cache == mock_encoder_cache
+        handler = PrefillHandler(config, encoder_cache=cache)
+
+        assert handler.engine == config.engine
+        assert handler._encoder_cache == cache
+
+
+class TestPrefillHandlerGenerate:
+    """Tests for PrefillHandler.generate method."""
+
+    @pytest.mark.asyncio
+    async def test_embeddings_passed_to_generate_locally(self):
+        """Cache path: List[Tensor] passed as embeddings."""
+        config = create_mock_request_handler_config(disaggregation_mode="prefill")
+        setup_multimodal_config(config, ["http://example.com/image.jpg"])
+        handler = PrefillHandler(config, encoder_cache=create_mock_encoder_cache())
+
+        expected_embeddings = [torch.randn(10, 256)]
+
+        embeddings, ep_params = await run_generate_with_mock_fetch(
+            handler, FETCH_PATCH_PATH, expected_embeddings
+        )
+
+        assert embeddings is expected_embeddings
+        assert ep_params is None
+
+    @pytest.mark.asyncio
+    async def test_disaggregated_params_passed_to_generate_locally(self):
+        """No-cache path: DisaggregatedParams passed as ep_params."""
+        config = create_mock_request_handler_config(disaggregation_mode="prefill")
+        setup_multimodal_config(config, ["http://example.com/image.jpg"])
+        handler = PrefillHandler(config, encoder_cache=None)
+
+        expected_params = DisaggregatedParams(request_type="context_only")
+
+        embeddings, ep_params = await run_generate_with_mock_fetch(
+            handler, FETCH_PATCH_PATH, expected_params
+        )
+
+        assert embeddings is None
+        assert ep_params is expected_params

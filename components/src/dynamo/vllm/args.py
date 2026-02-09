@@ -36,12 +36,11 @@ class Config:
     endpoint: str
     is_prefill_worker: bool
     is_decode_worker: bool
-    migration_limit: int = 0
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
     event_plane: str
-    enable_local_indexer: bool = False
+    enable_local_indexer: bool = True
 
     # mirror vLLM
     model: str
@@ -79,6 +78,11 @@ class Config:
     ec_storage_path: Optional[str] = None
     ec_extra_config: Optional[str] = None
     ec_consumer_mode: bool = False
+
+    # vLLM-Omni worker for multi-stage pipelines
+    omni: bool = False
+    # Path to vLLM-Omni stage configuration YAML
+    stage_configs_path: Optional[str] = None
 
     # dump config to file
     dump_config_to: Optional[str] = None
@@ -132,12 +136,6 @@ def parse_args() -> Config:
         "--is-decode-worker",
         action="store_true",
         help="Mark this as a decode worker which does not publish KV events.",
-    )
-    parser.add_argument(
-        "--migration-limit",
-        type=int,
-        default=0,
-        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
     parser.add_argument(
         "--connector",
@@ -259,6 +257,17 @@ def parse_args() -> Config:
         help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
     )
     parser.add_argument(
+        "--omni",
+        action="store_true",
+        help="Run as vLLM-Omni worker for multi-stage pipelines (supports text-to-text, text-to-image, etc.)",
+    )
+    parser.add_argument(
+        "--stage-configs-path",
+        type=str,
+        default=None,
+        help="Path to vLLM-Omni stage configuration YAML file. Required for --omni.",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -280,11 +289,11 @@ def parse_args() -> Config:
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--enable-local-indexer",
-        type=str,
-        choices=["true", "false"],
-        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+        "--durable-kv-events",
+        action="store_true",
+        dest="durable_kv_events",
+        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     )
     parser.add_argument(
         "--use-vllm-tokenizer",
@@ -303,7 +312,6 @@ def parse_args() -> Config:
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
-    args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     if hasattr(engine_args, "stream_interval") and engine_args.stream_interval != 1:
@@ -379,6 +387,13 @@ def parse_args() -> Config:
                 "Specify a shared storage path for encoder cache."
             )
 
+    # Validate omni worker requirements
+    if args.omni and not args.stage_configs_path:
+        raise ValueError(
+            "--stage-configs-path is required when using --omni. "
+            "Specify a YAML file containing stage configurations for the multi-stage pipeline."
+        )
+
     # Set component and endpoint based on worker type
     if args.multimodal_processor or args.ec_processor:
         config.component = "processor"
@@ -399,6 +414,10 @@ def parse_args() -> Config:
         # Multimodal prefill worker stays as "backend" to maintain encoder connection
         config.component = "backend"
         config.endpoint = "generate"
+    elif args.omni:
+        # Omni worker uses "backend" component for multi-stage pipeline orchestration
+        config.component = "backend"
+        config.endpoint = "generate"
     elif args.is_prefill_worker:
         config.component = "prefill"
         config.endpoint = "generate"
@@ -409,7 +428,6 @@ def parse_args() -> Config:
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.is_decode_worker = args.is_decode_worker
-    config.migration_limit = args.migration_limit
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
@@ -428,10 +446,12 @@ def parse_args() -> Config:
     config.ec_storage_path = args.ec_storage_path
     config.ec_extra_config = args.ec_extra_config
     config.ec_consumer_mode = args.ec_consumer_mode
+    config.omni = args.omni
+    config.stage_configs_path = args.stage_configs_path
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
-    config.enable_local_indexer = args.enable_local_indexer
+    config.enable_local_indexer = not args.durable_kv_events
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
     config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config

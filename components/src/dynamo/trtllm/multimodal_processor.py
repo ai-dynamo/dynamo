@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import time
 from io import BytesIO
@@ -211,18 +212,20 @@ class MultimodalRequestProcessor:
             ]
             logging.info(f"Using embedding paths: {embedding_paths}")
 
-        # Process with default_multimodal_input_loader
-        # Pass self.tokenizer to reuse the pre-initialized tokenizer instead of
-        # creating a new one per request
-        processed_inputs = default_multimodal_input_loader(
-            tokenizer=self.tokenizer,
-            model_dir=self.model_dir,
-            model_type=self.model_type,
-            modality=self.modality,
-            prompts=[text_prompt],
-            image_data_format="pt",
-            device="cuda",
-            **loader_kwargs,
+        # NOTE: default_multimodal_input_loader downloads images and preprocesses them
+        # synchronously. Wrap in asyncio.to_thread to allow concurrent image loading
+        # across multiple requests, improving throughput at high concurrency.
+        processed_inputs = await asyncio.to_thread(
+            lambda: default_multimodal_input_loader(
+                tokenizer=self.tokenizer,
+                model_dir=self.model_dir,
+                model_type=self.model_type,
+                modality=self.modality,
+                prompts=[text_prompt],
+                image_data_format="pt",
+                device="cuda",
+                **loader_kwargs,
+            )
         )
 
         # Return the first processed input if available

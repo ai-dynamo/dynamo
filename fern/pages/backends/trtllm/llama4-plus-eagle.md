@@ -5,7 +5,7 @@
 
 # Llama 4 Maverick Instruct with Eagle Speculative Decoding on SLURM
 
-This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Speculative Decoding on GB200x4 nodes. We will be following the [multi-node deployment instructions](multinode/multinode-examples.md) to set up the environment for the following scenarios:
+This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Speculative Decoding on GB200x4 nodes. We will be following the [multi-node deployment instructions](./multinode/multinode-examples.md) to set up the environment for the following scenarios:
 
 - **Aggregated Serving:**
   Deploy the entire Llama 4 model on a single GB200x4 node for end-to-end serving.
@@ -34,7 +34,7 @@ export MODEL_PATH="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
 export SERVED_MODEL_NAME="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
 ```
 
-See [this](multinode/multinode-examples.md#setup) section from multinode guide to learn more about the above options.
+See [this](./multinode/multinode-examples.md#setup) section from multinode guide to learn more about the above options.
 
 
 ## Aggregated Serving
@@ -56,7 +56,7 @@ export DECODE_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/llama4
 
 ## Example Request
 
-See [here](multinode/multinode-examples.md#example-request) to learn how to send a request to the deployment.
+See [here](./multinode/multinode-examples.md#example-request) to learn how to send a request to the deployment.
 
 ```
 curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{

@@ -145,77 +145,83 @@ This section shows how trace and span information appears in JSONL logs. These l
 When viewing the corresponding trace in Grafana, you should be able to see something like the following:
 
 ![Disaggregated Trace Example](grafana-disagg-trace.png)
-
 ### Trace Overview
 
-| Attribute | Value |
-|-----------|-------|
-| **Trace ID** | b672ccf48683b392891c5cb4163d4b51 |
-| **Start Time** | 2025-10-31 13:52:10.706 |
-| **Duration** | 4.04s |
-| **Request** | `POST /v1/chat/completions` |
+Dynamo creates distributed traces that span across multiple services in a disaggregated serving setup. The following sections describe the key spans you'll see in Grafana when viewing traces for chat completion requests.
 
-### Root Span (Frontend): `http-request`
+#### Available Spans in Disaggregated Mode
 
-| Attribute | Value |
-|-----------|-------|
-| **Service** | frontend |
-| **Span ID** | 5c20cc08e6afb2b7 |
-| **Duration** | 4.04s |
-| **Start Time** | 13:52:10.706 |
-| **Status** | unset |
-| **Method** | POST |
-| **URI** | `/v1/chat/completions` |
-| **HTTP Version** | HTTP/1.1 |
-| **Parent ID** | (none) |
-| **Child Count** | 2 |
-| **Busy Time** | 18,101,350 ns (18.10ms) |
-| **Idle Time** | 4,022,100,356 ns (4.02s) |
+When running Dynamo in disaggregated mode, a typical request creates the following spans:
 
-### Child Span (Prefill): `handle_payload`
+##### 1. `http-request` (Frontend - Root Span)
 
-| Attribute | Value |
-|-----------|-------|
-| **Service** | prefill |
-| **Duration** | 39.65ms |
-| **Start Time** | 13:52:10.707 |
-| **Status** | unset |
-| **Component** | prefill |
-| **Endpoint** | generate |
-| **Namespace** | vllm-disagg |
-| **Instance ID** | 3866790875219207267 |
-| **Trace ID** | b672ccf48683b392891c5cb4163d4b51 |
-| **Parent ID** | 5c20cc08e6afb2b7 |
-| **Busy Time** | 613,633 ns (0.61ms) |
-| **Idle Time** | 36,340,242 ns (36.34ms) |
+The root span for the entire request lifecycle, created in the **dynamo-frontend** service.
 
-### Child Span (Decode): `handle_payload`
+**Key Attributes:**
+- **Service**: `dynamo-frontend`
+- **Operation**: Handles the HTTP request from client to completion
+- **Duration**: Total end-to-end request time (includes prefill + decode)
+- **Method**: HTTP method (typically `POST`)
+- **URI**: Request endpoint (e.g., `/v1/chat/completions`)
+- **Status**: Request completion status
+- **Children**: Typically 2-3 child spans (routing span + worker spans)
 
-| Attribute | Value |
-|-----------|-------|
-| **Service** | decode |
-| **Duration** | 4s |
-| **Start Time** | 13:52:10.745 |
-| **Status** | unset |
-| **Component** | backend |
-| **Endpoint** | generate |
-| **Namespace** | vllm-disagg |
-| **Instance ID** | 3866790875219207263 |
-| **Trace ID** | b672ccf48683b392891c5cb4163d4b51 |
-| **Parent ID** | 5c20cc08e6afb2b7 |
-| **Busy Time** | 3,795,258 ns (3.79ms) |
-| **Idle Time** | 3,996,532,471 ns (3.99s) |
+This span represents the complete request flow from when the frontend receives the HTTP request until the final response is sent back to the client.
 
-### Frontend Logs with Trace Context
+##### 2. `prefill_routing` (Frontend - Routing Span)
 
-The following shows the JSONL logs from the frontend service for the same request. Note the `trace_id` field (`b672ccf48683b392891c5cb4163d4b51`) that correlates all logs for this request, and the `span_id` field that identifies individual operations:
+A child span of `http-request`, created in the **dynamo-frontend** service during the routing phase.
 
-```
-{"time":"2025-10-31T20:52:07.707164Z","level":"INFO","file":"/opt/dynamo/lib/runtime/src/logging.rs","line":806,"target":"dynamo_runtime::logging","message":"OTLP export enabled","endpoint":"http://tempo.tm.svc.cluster.local:4317","service":"frontend"}
-{"time":"2025-10-31T20:52:10.707164Z","level":"DEBUG","file":"/opt/dynamo/lib/runtime/src/pipeline/network/tcp/server.rs","line":230,"target":"dynamo_runtime::pipeline::network::tcp::server","message":"Registering new TcpStream on 10.0.4.65:41959","method":"POST","span_id":"5c20cc08e6afb2b7","span_name":"http-request","trace_id":"b672ccf48683b392891c5cb4163d4b51","uri":"/v1/chat/completions","version":"HTTP/1.1"}
-{"time":"2025-10-31T20:52:10.745264Z","level":"DEBUG","file":"/opt/dynamo/lib/llm/src/kv_router/prefill_router.rs","line":232,"target":"dynamo_llm::kv_router::prefill_router","message":"Prefill succeeded, using disaggregated params for decode","method":"POST","span_id":"5c20cc08e6afb2b7","span_name":"http-request","trace_id":"b672ccf48683b392891c5cb4163d4b51","uri":"/v1/chat/completions","version":"HTTP/1.1"}
-{"time":"2025-10-31T20:52:10.745545Z","level":"DEBUG","file":"/opt/dynamo/lib/runtime/src/pipeline/network/tcp/server.rs","line":230,"target":"dynamo_runtime::pipeline::network::tcp::server","message":"Registering new TcpStream on 10.0.4.65:41959","method":"POST","span_id":"5c20cc08e6afb2b7","span_name":"http-request","trace_id":"b672ccf48683b392891c5cb4163d4b51","uri":"/v1/chat/completions","version":"HTTP/1.1"}
-```
+**Key Attributes:**
+- **Service**: `dynamo-frontend`
+- **Operation**: Routes the prefill request to an appropriate prefill worker
+- **Duration**: Time spent selecting and the span of prefill.
+- **Parent**: `http-request` span
+
+This span captures the routing logic and decision-making process and the request sent to the prefill worker.
+
+##### 3. `handle_payload` (Prefill Worker Span)
+
+A child span of `http-request`, created in the **dynamo-worker-vllm-prefill** service.
+
+**Key Attributes:**
+- **Service**: `dynamo-worker-vllm-prefill` (or `dynamo-worker-sglang-prefill` for SGLang)
+- **Operation**: Processes the prefill phase of generation
+- **Duration**: Time to compute prefill (typically milliseconds to seconds)
+- **Component**: `prefill`
+- **Endpoint**: `generate`
+- **Parent**: `http-request` span
+
+This span represents the actual prefill computation on a prefill-specialized worker, including prompt processing and initial KV cache generation.
+
+##### 4. `handle_payload` (Decode Worker Span)
+
+A child span of `http-request`, created in the **dynamo-worker-vllm-decode** service.
+
+**Key Attributes:**
+- **Service**: `dynamo-worker-vllm-decode` (or `dynamo-worker-sglang-decode` for SGLang)
+- **Operation**: Processes the decode phase of generation
+- **Duration**: Time to generate all output tokens (typically seconds)
+- **Component**: `decode` or `backend`
+- **Endpoint**: `generate`
+- **Parent**: `http-request` span
+
+This span represents the iterative token generation phase on a decode-specialized worker, which consumes the KV cache from prefill and produces output tokens.
+
+
+#### Understanding Span Metrics
+
+Each span provides several useful metrics:
+
+| Metric | Description |
+|--------|-------------|
+| **Duration** | Total time from span start to end |
+| **Busy Time** | Time actively processing (excluding waiting) |
+| **Idle Time** | Time spent waiting (e.g., for network, other services) |
+| **Start Time** | When the span began |
+| **Child Count** | Number of direct child spans |
+
+The relationship **Duration = Busy Time + Idle Time** helps identify where time is spent and potential bottlenecks.
 
 ## Custom Request IDs in Logs
 

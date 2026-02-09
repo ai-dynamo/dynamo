@@ -27,7 +27,8 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-nixl = ["dep:nixl-sys", "dep:flate2"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
-kv-router-stress = ["dep:clap", "dep:indicatif"]
+bench = ["dynamo-kv-router/bench"]
+kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 
 [[bench]]
 name = "tokenizer"
@@ -38,12 +39,18 @@ name = "transfer_context_v2"
 harness = false
 required-features = ["block-manager", "testing-cuda"]
 
+[[bench]]
+name = "kv_router_bench"
+harness = false
+required-features = ["kv-router-stress"]
+
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics"] }
 dynamo-memory = { workspace = true }
+dynamo-mocker = { workspace = true }
 
 # workspace
 aho-corasick = "1.1"

@@ -20,6 +20,7 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
+from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_llm
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
@@ -34,12 +35,6 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--endpoint"],
         "type": str,
         "help": f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: {DEFAULT_ENDPOINT}",
-    },
-    "migration-limit": {
-        "flags": ["--migration-limit"],
-        "type": int,
-        "default": 0,
-        "help": "Maximum number of times a request may be migrated to a different engine worker",
     },
     "tool-call-parser": {
         "flags": ["--dyn-tool-call-parser"],
@@ -124,12 +119,11 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_EVENT_PLANE", "nats"),
         "help": "Determines how events are published [nats|zmq]",
     },
-    "enable-local-indexer": {
-        "flags": ["--enable-local-indexer"],
-        "type": str,
-        "choices": ["true", "false"],
-        "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
-        "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+    "durable-kv-events": {
+        "flags": ["--durable-kv-events"],
+        "action": "store_true",
+        "default": os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        "help": "Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     },
     "image-diffusion-worker": {
         "flags": ["--image-diffusion-worker"],
@@ -159,7 +153,6 @@ class DynamoArgs:
     namespace: str
     component: str
     endpoint: str
-    migration_limit: int
     store_kv: str
     request_plane: str
     event_plane: str
@@ -189,7 +182,7 @@ class DynamoArgs:
     # config dump options
     dump_config_to: Optional[str] = None
     # local indexer option
-    enable_local_indexer: bool = False
+    enable_local_indexer: bool = True
     # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
     use_kv_events: bool = False
 
@@ -239,47 +232,13 @@ def _preprocess_for_encode_config(
     }
 
 
-def _set_parser(
-    sglang_str: Optional[str],
-    dynamo_str: Optional[str],
-    arg_name: str = "tool-call-parser",
-) -> Optional[str]:
-    """Resolve parser name from SGLang and Dynamo arguments.
-
-    Args:
-        sglang_str: Parser value from SGLang argument.
-        dynamo_str: Parser value from Dynamo argument.
-        arg_name: Name of the parser argument for logging.
-
-    Returns:
-        Resolved parser name, preferring Dynamo's value if both set.
-
-    Raises:
-        ValueError: If parser name is not valid.
-    """
-    # If both are present, give preference to dynamo_str
-    if sglang_str is not None and dynamo_str is not None:
-        logging.warning(
-            f"--dyn-{arg_name} and --{arg_name} are both set. Giving preference to --dyn-{arg_name}"
-        )
-        return dynamo_str
-    # If dynamo_str is not set, use try to use sglang_str if it matches with the allowed parsers
-    elif sglang_str is not None:
-        logging.warning(f"--dyn-{arg_name} is not set. Using --{arg_name}.")
-        if arg_name == "tool-call-parser" and sglang_str not in get_tool_parser_names():
-            raise ValueError(
-                f"--{arg_name} is not a valid tool call parser. Valid parsers are: {get_tool_parser_names()}"
-            )
-        elif (
-            arg_name == "reasoning-parser"
-            and sglang_str not in get_reasoning_parser_names()
-        ):
-            raise ValueError(
-                f"--{arg_name} is not a valid reasoning parser. Valid parsers are: {get_reasoning_parser_names()}"
-            )
-        return sglang_str
-    else:
-        return dynamo_str
+def _validate_parser_flags(
+    sglang_val: Optional[str], dynamo_val: Optional[str], name: str
+) -> None:
+    """Validate that --{name} (SGLang) and --dyn-{name} (Dynamo) are not both set."""
+    if sglang_val and dynamo_val:
+        logging.error(f"Cannot use both --{name} and --dyn-{name}.")
+        sys.exit(1)
 
 
 def _extract_config_section(
@@ -376,7 +335,12 @@ async def parse_args(args: list[str]) -> Config:
         if "choices" in info:
             kwargs["choices"] = info["choices"]
         if "action" in info:
-            kwargs["action"] = info["action"]
+            action = info["action"]
+            # Handle string "BooleanOptionalAction" for dict-based config
+            if action == "BooleanOptionalAction":
+                kwargs["action"] = argparse.BooleanOptionalAction
+            else:
+                kwargs["action"] = action
 
         parser.add_argument(*info["flags"], **kwargs)
 
@@ -488,26 +452,24 @@ async def parse_args(args: list[str]) -> Config:
             endpoint = f"dyn://{namespace}.backend.generate"
 
     # Always parse the endpoint (whether auto-generated or user-provided)
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        logging.error(
-            f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        sys.exit(1)
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+        endpoint
+    )
 
-    parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
-
-    tool_call_parser = _set_parser(
+    # Validate parser flags: error if both --{name} and --dyn-{name} are set.
+    # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
+    _validate_parser_flags(
         parsed_args.tool_call_parser,
         parsed_args.dyn_tool_call_parser,
         "tool-call-parser",
     )
-    reasoning_parser = _set_parser(
+    _validate_parser_flags(
         parsed_args.reasoning_parser,
         parsed_args.dyn_reasoning_parser,
         "reasoning-parser",
     )
+    tool_call_parser = parsed_args.dyn_tool_call_parser
+    reasoning_parser = parsed_args.dyn_reasoning_parser
 
     if parsed_args.custom_jinja_template and parsed_args.use_sglang_tokenizer:
         logging.error(
@@ -618,7 +580,6 @@ async def parse_args(args: list[str]) -> Config:
         namespace=parsed_namespace,
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
-        migration_limit=parsed_args.migration_limit,
         store_kv=parsed_args.store_kv,
         request_plane=parsed_args.request_plane,
         event_plane=parsed_args.event_plane,
@@ -636,7 +597,7 @@ async def parse_args(args: list[str]) -> Config:
         image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
         image_diffusion_base_url=getattr(parsed_args, "image_diffusion_base_url", None),
         dump_config_to=parsed_args.dump_config_to,
-        enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
+        enable_local_indexer=not parsed_args.durable_kv_events,
         use_kv_events=use_kv_events,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
@@ -661,31 +622,6 @@ def reserve_free_port(host: str = "localhost") -> Generator[int, None, None]:
         yield port
     finally:
         sock.close()
-
-
-def parse_endpoint(endpoint: str) -> List[str]:
-    """Parse endpoint string into namespace, component, and endpoint parts.
-
-    Args:
-        endpoint: Endpoint string in 'dyn://namespace.component.endpoint' format.
-
-    Returns:
-        List of [namespace, component, endpoint] strings.
-
-    Raises:
-        ValueError: If endpoint format is invalid.
-    """
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        error_msg = (
-            f"Invalid endpoint format: '{endpoint}'. "
-            f"Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        logging.error(error_msg)
-        raise ValueError(error_msg)
-
-    return endpoint_parts
 
 
 def _reserve_disaggregation_bootstrap_port() -> int:

@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import signal
 import tempfile
 from typing import Optional
 
@@ -18,11 +17,12 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     fetch_llm,
     register_llm,
@@ -52,7 +52,11 @@ from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .health_check import (
+    VllmHealthCheckPayload,
+    VllmOmniHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
@@ -114,23 +118,9 @@ async def await_checkpoint_and_was_restored(signal_file: str) -> bool:
         await asyncio.sleep(1)
 
 
-async def graceful_shutdown(runtime, shutdown_event):
-    """
-    Shutdown dynamo distributed runtime.
-    The endpoints will be immediately invalidated so no new requests will be accepted.
-    For endpoints served with graceful_shutdown=True, the serving function will wait until all in-flight requests are finished.
-    For endpoints served with graceful_shutdown=False, the serving function will return immediately.
-    """
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    shutdown_event.set()
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
-
-
 async def worker():
     config = parse_args()
 
-    loop = asyncio.get_running_loop()
     overwrite_args(config)
     dump_config(config.dump_config_to, config)
 
@@ -213,31 +203,14 @@ async def worker():
             logger.info("Exiting after checkpoint completion")
             return
 
-    # Create shutdown event
     shutdown_event = asyncio.Event()
-
-    # Set DYN_EVENT_PLANE environment variable based on config
-    os.environ["DYN_EVENT_PLANE"] = config.event_plane
-
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND use_kv_events is True
-    enable_nats = config.request_plane == "nats" or (
-        config.event_plane == "nats" and config.use_kv_events
+    runtime, _ = create_runtime(
+        store_kv=config.store_kv,
+        request_plane=config.request_plane,
+        event_plane=config.event_plane,
+        use_kv_events=config.use_kv_events,
+        shutdown_event=shutdown_event,
     )
-
-    runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, enable_nats
-    )
-
-    # Set up signal handler for graceful shutdown
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.debug("Signal handlers set up for graceful shutdown")
 
     # Route to appropriate initialization based on config flags
     if config.vllm_native_encoder_worker:
@@ -261,6 +234,9 @@ async def worker():
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
         logger.debug("init_multimodal_worker completed")
+    elif config.omni:
+        await init_omni(runtime, config, shutdown_event)
+        logger.debug("init_omni completed")
     elif config.is_prefill_worker:
         await init_prefill(
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
@@ -340,7 +316,7 @@ def setup_kv_event_publisher(
     vllm_config,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
-) -> Optional[ZmqKvEventPublisher]:
+) -> Optional[KvEventPublisher]:
     """
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
@@ -353,7 +329,7 @@ def setup_kv_event_publisher(
         consolidator_port: Port where kv event consolidator publishes (default: 5558)
 
     Returns:
-        List of ZmqKvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
+        List of KvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
     """
     if not config.engine_args.enable_prefix_caching:
         return None
@@ -401,7 +377,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
         )
-        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+        kv_publisher = KvEventPublisher(component=component, zmq_config=zmq_config)
         kv_publishers.append(kv_publisher)
 
         logger.info(
@@ -492,7 +468,6 @@ async def register_vllm_model(
     config: Config,
     engine_client: AsyncLLM,
     vllm_config,
-    migration_limit: int,
 ):
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -504,7 +479,6 @@ async def register_vllm_model(
         config: Configuration object
         engine_client: vLLM engine client
         vllm_config: vLLM configuration
-        migration_limit: Migration limit for the model
     """
     runtime_config = ModelRuntimeConfig()
 
@@ -516,7 +490,10 @@ async def register_vllm_model(
     runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
-    runtime_config.enable_local_indexer = config.enable_local_indexer
+    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+    runtime_config.enable_local_indexer = (
+        config.enable_local_indexer and not config.is_decode_worker
+    )
 
     # Add tool/reasoning parsers for decode models
     if model_type != ModelType.Prefill:
@@ -551,8 +528,7 @@ async def register_vllm_model(
         generate_endpoint,
         config.model,
         config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-        migration_limit=migration_limit,
+        kv_cache_block_size=runtime_values["block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
@@ -653,7 +629,6 @@ async def init_prefill(
         config,
         engine_client,
         vllm_config,
-        migration_limit=0,  # Prefill doesn't support migration
     )
 
     health_check_payload = VllmPrefillHealthCheckPayload(
@@ -806,7 +781,6 @@ async def init(
         config,
         engine_client,
         vllm_config,
-        migration_limit=config.migration_limit,
     )
 
     health_check_payload = VllmHealthCheckPayload(
@@ -820,7 +794,7 @@ async def init(
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown=config.migration_limit <= 0,
+                graceful_shutdown=True,
                 metrics_labels=[("model", config.served_model_name or config.model)],
                 health_check_payload=health_check_payload,
             ),
@@ -858,6 +832,7 @@ def get_engine_cache_info(engine: AsyncLLM):
         # Get values directly from vllm_config instead of collective_rpc
         cache_values = {
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
+            "block_size": engine.vllm_config.cache_config.block_size,
         }
 
         scheduler_values = {
@@ -869,6 +844,7 @@ def get_engine_cache_info(engine: AsyncLLM):
         logging.info(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
+            "block_size": cache_values["block_size"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
             "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
         }
@@ -1221,6 +1197,80 @@ async def init_multimodal_worker(
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        handler.cleanup()
+
+
+async def init_omni(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
+    """
+    Initialize Omni worker for text-to-text generation using vLLM-Omni orchestrator.
+
+    Uses vLLM-Omni's Omni class for single-stage text generation pipeline.
+    For now, supports text-to-text only (no multimodal).
+    """
+    # Lazy import to avoid loading vllm-omni unless explicitly needed
+    from dynamo.vllm.omni import OmniHandler
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Load default sampling params from model config (same as other workers)
+    default_sampling_params = (
+        config.engine_args.create_model_config().get_diff_sampling_param()
+    )
+    logger.info(f"Loaded default sampling params: {default_sampling_params}")
+
+    # Initialize OmniHandler with Omni orchestrator
+    handler = OmniHandler(
+        runtime=runtime,
+        component=component,
+        config=config,
+        default_sampling_params=default_sampling_params,
+        shutdown_event=shutdown_event,
+    )
+
+    logger.info(f"Omni worker initialized for model: {config.model}")
+
+    # Set up metrics collection for vLLM and LMCache metrics
+    setup_metrics_collection(config, generate_endpoint, logger)
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
+    # TODO: extend for multi-stage pipelines
+    # Register as Chat endpoint for text-to-text generation
+    # Use Tokens input since we're doing token-based processing
+    await register_llm(
+        ModelInput.Tokens,
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info("Starting to serve Omni worker endpoint...")
+
+    # Create health check payload (extracts BOS token from AsyncOmni)
+    health_check_payload = (
+        await VllmOmniHealthCheckPayload.create(handler.engine_client)
+    ).to_dict()
+
+    try:
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", config.served_model_name or config.model)],
+            health_check_payload=health_check_payload,
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve Omni endpoint: {e}")
+        raise
+    finally:
+        logger.debug("Cleaning up Omni worker")
         handler.cleanup()
 
 
