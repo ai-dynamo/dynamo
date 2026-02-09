@@ -25,7 +25,10 @@ from dynamo.planner.utils.perf_interpolation import (
     PrefillInterpolator,
 )
 from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
-from dynamo.planner.utils.prometheus import DirectRouterMetricsClient, PrometheusAPIClient
+from dynamo.planner.utils.prometheus import (
+    DirectRouterMetricsClient,
+    PrometheusAPIClient,
+)
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -669,7 +672,9 @@ class BasePlanner:
             logger.error(f"Failed to predict load: {e}")
             return None, None, None
 
-    def dryrun_observe_traffic_stats(self, num_req: int, isl_avg: float, osl_avg: float):
+    def dryrun_observe_traffic_stats(
+        self, num_req: int, isl_avg: float, osl_avg: float
+    ):
         self.num_req_predictor.add_data_point(num_req)
         self.isl_predictor.add_data_point(isl_avg)
         self.osl_predictor.add_data_point(osl_avg)
@@ -768,9 +773,7 @@ class BasePlanner:
 
         if self.component_type == SubComponentType.PREFILL:
             self.cached_per_worker_metrics = {
-                wid: m
-                for wid, m in all_metrics.items()
-                if "active_prefill_tokens" in m
+                wid: m for wid, m in all_metrics.items() if "active_prefill_tokens" in m
             }
             for wid, m in self.cached_per_worker_metrics.items():
                 active_prefill = m.get("active_prefill_tokens", 0.0)
@@ -784,9 +787,7 @@ class BasePlanner:
 
         elif self.component_type == SubComponentType.DECODE:
             self.cached_per_worker_metrics = {
-                wid: m
-                for wid, m in all_metrics.items()
-                if "active_decode_blocks" in m
+                wid: m for wid, m in all_metrics.items() if "active_decode_blocks" in m
             }
             for wid, m in self.cached_per_worker_metrics.items():
                 active_decode = m.get("active_decode_blocks", 0.0)
@@ -823,9 +824,13 @@ class BasePlanner:
                     if self.enable_loadbased:
                         # When load-based is also enabled: just set lower bound
                         if self.component_type == SubComponentType.PREFILL:
-                            self.shared_state.throughput_lower_bound_p = desired_replicas
+                            self.shared_state.throughput_lower_bound_p = (
+                                desired_replicas
+                            )
                         else:
-                            self.shared_state.throughput_lower_bound_d = desired_replicas
+                            self.shared_state.throughput_lower_bound_d = (
+                                desired_replicas
+                            )
                         logger.info(
                             f"Throughput lower bound set to {desired_replicas} for {self.component_type.value}"
                         )
@@ -864,9 +869,7 @@ class BasePlanner:
                 # Reconcile DGD worker count with router Prometheus count
                 prom_count = len(self.cached_per_worker_metrics)
                 dgd_count = (
-                    num_p
-                    if self.component_type == SubComponentType.PREFILL
-                    else num_d
+                    num_p if self.component_type == SubComponentType.PREFILL else num_d
                 )
                 if prom_count != dgd_count:
                     logger.warning(
@@ -874,9 +877,7 @@ class BasePlanner:
                         f"router metrics reports {prom_count} workers. "
                         "Skipping load-based scaling adjustment."
                     )
-                    await asyncio.sleep(
-                        self.args.loadbased_adjustment_interval / 10
-                    )
+                    await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
                     continue
 
                 desired_replicas = self.loadbased_plan_adjustment()

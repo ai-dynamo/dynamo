@@ -66,7 +66,9 @@ class PrefillPlanner(BasePlanner):
         # Scale down: ALL workers below boundary
         if num_workers > 1:
             sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
-            boundary = target_active_tokens * (num_workers - 1) / num_workers * sensitivity
+            boundary = (
+                target_active_tokens * (num_workers - 1) / num_workers * sensitivity
+            )
             all_below = all(
                 m.get("active_prefill_tokens", 0.0) < boundary
                 for m in self.cached_per_worker_metrics.values()

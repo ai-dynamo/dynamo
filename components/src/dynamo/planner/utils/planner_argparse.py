@@ -267,7 +267,10 @@ def validate_sla_planner_args(args: argparse.Namespace) -> None:
         # Router metrics URL is required for load-based scaling unless in
         # kubernetes mode where it can be auto-discovered from the DGD.
         environment = getattr(args, "environment", "kubernetes")
-        if not getattr(args, "loadbased_router_metrics_url", None) and environment != "kubernetes":
+        if (
+            not getattr(args, "loadbased_router_metrics_url", None)
+            and environment != "kubernetes"
+        ):
             raise ValueError(
                 "--loadbased-router-metrics-url is required when "
                 "load-based scaling is enabled outside kubernetes mode"

@@ -295,9 +295,7 @@ class KubernetesConnector(PlannerConnector):
             if service_spec.get("componentType", "") == "frontend":
                 service_name = f"{self.graph_deployment_name}-{service_key.lower()}"
                 url = f"http://{service_name}:{port}/metrics"
-                logger.info(
-                    f"Auto-discovered frontend metrics URL: {url}"
-                )
+                logger.info(f"Auto-discovered frontend metrics URL: {url}")
                 return url
 
         return None

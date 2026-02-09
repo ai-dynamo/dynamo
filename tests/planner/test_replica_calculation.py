@@ -47,13 +47,14 @@ sys.modules["prometheus_client.parser"] = MagicMock()
 sys.modules["dynamo.runtime"] = mock_runtime
 sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
 
+from dynamo.planner.utils.decode_planner import DecodePlanner  # noqa: E402
+
 # Now import after mocking
 from dynamo.planner.utils.planner_core import (  # noqa: E402
     Metrics,
     PlannerSharedState,
     _apply_global_gpu_budget,
 )
-from dynamo.planner.utils.decode_planner import DecodePlanner  # noqa: E402
 from dynamo.planner.utils.prefill_planner import PrefillPlanner  # noqa: E402
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -68,10 +69,11 @@ for _key, _original in _saved_modules.items():
     else:
         sys.modules[_key] = _original
 
-import dynamo.planner.utils.prometheus as _prom_mod  # noqa: E402
 from prometheus_client.parser import (  # noqa: E402
     text_string_to_metric_families as _real_parser_fn,
 )
+
+import dynamo.planner.utils.prometheus as _prom_mod  # noqa: E402
 
 _prom_mod.text_string_to_metric_families = _real_parser_fn
 

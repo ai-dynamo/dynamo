@@ -194,6 +194,7 @@ _WORKER_METRIC_NAMES = {
     "last_itl": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS}",
 }
 
+
 class DirectRouterMetricsClient:
     """Query router's /metrics endpoint directly for real-time per-worker metrics.
 
@@ -250,9 +251,7 @@ class DirectRouterMetricsClient:
 
         return result
 
-    async def _fetch_and_parse(
-        self, model_name: str
-    ) -> dict[str, dict[str, float]]:
+    async def _fetch_and_parse(self, model_name: str) -> dict[str, dict[str, float]]:
         """Fetch /metrics from router and parse into per-worker metrics."""
         try:
             async with aiohttp.ClientSession() as session:

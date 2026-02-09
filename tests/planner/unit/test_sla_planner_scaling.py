@@ -9,12 +9,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from dynamo.planner.utils.exceptions import DeploymentValidationError
-from dynamo.planner.utils.planner_core import (
-    PlannerSharedState,
-    _initialize_gpu_counts,
-)
 from dynamo.planner.utils.decode_planner import DecodePlanner
+from dynamo.planner.utils.exceptions import DeploymentValidationError
+from dynamo.planner.utils.planner_core import PlannerSharedState, _initialize_gpu_counts
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 
 pytestmark = [

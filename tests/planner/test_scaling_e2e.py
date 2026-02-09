@@ -311,7 +311,9 @@ class ScalingE2ETest:
 
         try:
             # Use the load generator's built-in scaling test
-            logger.info(f"Running scaling scenario (8 req/s -> 18 req/s, mode={self.mode})")
+            logger.info(
+                f"Running scaling scenario (8 req/s -> 18 req/s, mode={self.mode})"
+            )
             load_results = await self.load_generator.run_scaling_test(mode=self.mode)
 
             # Extract load results for analysis (2-phase structure)

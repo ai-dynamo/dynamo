@@ -8,13 +8,13 @@ import time
 from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.planner_core import (
     PlannerPrometheusMetrics,
     PlannerSharedState,
     _apply_global_gpu_budget,
     _initialize_gpu_counts,
 )
-from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -54,7 +54,9 @@ class DisaggPlanner:
         )
 
         # In disagg mode, both planners share the same router metrics client
-        if self.enable_loadbased and hasattr(self.prefill_planner, "router_metrics_client"):
+        if self.enable_loadbased and hasattr(
+            self.prefill_planner, "router_metrics_client"
+        ):
             self.decode_planner.router_metrics_client = (
                 self.prefill_planner.router_metrics_client
             )
@@ -201,9 +203,7 @@ class DisaggPlanner:
                         f"router metrics reports P={p_prom_count}, D={d_prom_count}. "
                         "Skipping load-based scaling adjustment."
                     )
-                    await asyncio.sleep(
-                        self.args.loadbased_adjustment_interval / 10
-                    )
+                    await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
                     continue
 
                 # Make separate decisions
@@ -239,9 +239,7 @@ class DisaggPlanner:
                     final_d = max(final_d, self.shared_state.throughput_lower_bound_d)
 
                 # Apply GPU budget
-                final_p, final_d = _apply_global_gpu_budget(
-                    final_p, final_d, self.args
-                )
+                final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.args)
 
                 logger.info(
                     f"Load-based disagg scaling: prefill {p_current}->{final_p}, "
@@ -269,5 +267,3 @@ class DisaggPlanner:
                     )
 
             await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
-
-

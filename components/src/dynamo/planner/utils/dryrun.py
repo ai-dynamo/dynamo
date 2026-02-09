@@ -4,13 +4,13 @@
 import argparse
 from typing import Optional
 
+from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.dryrun_plot_utils import create_dryrun_plot
 from dynamo.planner.utils.planner_core import (
     PlannerSharedState,
     _apply_component_gpu_budget,
     _apply_global_gpu_budget,
 )
-from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 
