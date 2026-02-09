@@ -6,8 +6,8 @@ use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
 };
-use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
 use dynamo_kv_router::protocols::RouterEvent;
+use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
 use rand::prelude::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
