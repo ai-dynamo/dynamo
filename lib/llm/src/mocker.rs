@@ -132,27 +132,25 @@ impl MockVllmEngine {
     }
 
     /// Send a request to the appropriate scheduler.
-    /// Set `MOCKER_DIRECT_SYNC=1` to use the original synchronous code path.
+    ///
+    /// Set `DYN_MOCKER_SYNC_DIRECT=1` to use the original direct path.
+    /// - `DYN_MOCKER_SYNC_DIRECT=1` (original, race-condition prone):  922/1000 pass
+    /// - `DYN_MOCKER_SYNC_DIRECT=0` (use timeout to wait for init):   1000/1000 pass
     pub async fn direct(&self, request: DirectRequest, dp_rank: usize) {
-        let original_code = std::env::var("MOCKER_DIRECT_SYNC")
+        let original_code = std::env::var("DYN_MOCKER_SYNC_DIRECT")
             .map(|v| matches!(v.as_str(), "1" | "true"))
             .unwrap_or(false);
 
-        // Original code: expects request_senders to always be initialized by
-        // the time direct() is called, but under heavy load a request can
-        // arrive before start() -> start_schedulers() finishes populating it!
-        // Then, .expect() panics immediately, causing ~8% ERR_MOCKER_PANIC
-        // failures (tested, 922/1000 pass rate at p=10 parallel (indenpendent) containers).
+        // `direct()` can be called before `start_schedulers()` finishes populating
+        // `request_senders` under load. The original path panics immediately; the
+        // default path waits briefly for initialization to complete.
         if original_code {
             let senders = self.request_senders.get().expect("Not initialized");
             let _ = senders[dp_rank].send(request);
             return;
         }
 
-        // New code: polls request_senders every 50ms for up to 10s, giving
-        // start_schedulers() time to finish (typically <1s). Eliminates the
-        // startup race entirely -- tested at 1000/1000 pass rate on
-        // test_router_decisions[jetstream-tcp] with 10 parallel (independent) containers.
+        // Poll request_senders until initialized (or time out) to avoid the startup race.
         let start = std::time::Instant::now();
         loop {
             if let Some(senders) = self.request_senders.get() {
