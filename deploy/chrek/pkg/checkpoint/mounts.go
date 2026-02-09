@@ -7,9 +7,20 @@ import (
 	"fmt"
 	"os"
 	"strings"
-
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
+
+// MountMetadata stores information about a mount for remapping during restore.
+type MountMetadata struct {
+	ContainerPath string   `yaml:"containerPath"`           // Path inside container (e.g., /usr/share/nginx/html)
+	HostPath      string   `yaml:"hostPath"`                // Original host path from mountinfo
+	OCISource     string   `yaml:"ociSource,omitempty"`     // Source path from OCI spec (may differ from HostPath)
+	OCIType       string   `yaml:"ociType,omitempty"`       // Mount type from OCI spec (bind, tmpfs, etc.)
+	OCIOptions    []string `yaml:"ociOptions,omitempty"`    // Mount options from OCI spec
+	VolumeType    string   `yaml:"volumeType"`              // emptyDir, pvc, configMap, secret, hostPath (best-effort)
+	VolumeName    string   `yaml:"volumeName"`              // Kubernetes volume name (best-effort from path parsing)
+	FSType        string   `yaml:"fsType"`                  // Filesystem type from mountinfo
+	ReadOnly      bool     `yaml:"readOnly"`                // Whether mount is read-only
+}
 
 // MountMapping represents an external mount for CRIU
 type MountMapping struct {
@@ -18,6 +29,34 @@ type MountMapping struct {
 	FSType      string // Filesystem type
 	Source      string // Mount source
 	Options     string // Mount options
+}
+
+// NewMountMetadata constructs mount metadata from introspected mounts and OCI state.
+func NewMountMetadata(mounts []MountMapping, oci *ociState) []MountMetadata {
+	if len(mounts) == 0 {
+		return nil
+	}
+
+	var ociMounts map[string]OCIMountInfo
+	if oci != nil {
+		ociMounts = oci.MountsByDest
+	}
+
+	result := make([]MountMetadata, 0, len(mounts))
+	for _, mount := range mounts {
+		volumeType, volumeName := DetectVolumeTypeFromPath(mount.OutsidePath)
+		meta := MountMetadata{
+			ContainerPath: mount.InsidePath,
+			HostPath:      mount.OutsidePath,
+			VolumeType:    volumeType,
+			VolumeName:    volumeName,
+			FSType:        mount.FSType,
+			ReadOnly:      strings.Contains(mount.Options, "ro"),
+		}
+		enrichMountWithOCI(&meta, ociMounts)
+		result = append(result, meta)
+	}
+	return result
 }
 
 // System mount types that should be filtered out
@@ -55,7 +94,7 @@ var systemMountPaths = map[string]bool{
 // ParseMountInfo parses /proc/<pid>/mountinfo and returns bind mounts
 // that need to be handled by CRIU as external mounts
 func ParseMountInfo(pid int) ([]MountMapping, error) {
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", config.HostProcPath, pid)
+	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", HostProcPath, pid)
 	file, err := os.Open(mountinfoPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open mountinfo: %w", err)
@@ -87,18 +126,6 @@ func ParseMountInfo(pid int) ([]MountMapping, error) {
 // mountinfo format:
 // 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
 // (1)(2)(3)   (4)   (5)      (6)     (7)   (8) (9)   (10)         (11)
-//
-// (1) mount ID
-// (2) parent ID
-// (3) major:minor
-// (4) root: root of the mount within the filesystem (host-side path for bind mounts)
-// (5) mount point: mount point relative to process's root
-// (6) mount options
-// (7) optional fields (terminated by single hyphen)
-// (8) separator (hyphen)
-// (9) filesystem type
-// (10) mount source (device)
-// (11) super options
 func parseMountInfoLine(line string) (MountMapping, bool) {
 	fields := strings.Fields(line)
 	if len(fields) < 10 {
@@ -175,8 +202,6 @@ func GetBindMounts(pid int) ([]MountMapping, error) {
 
 	var bindMounts []MountMapping
 	for _, m := range mounts {
-		// Bind mounts typically show the underlying filesystem type
-		// and have paths that look like kubelet volume paths
 		if strings.Contains(m.OutsidePath, "/var/lib/kubelet/pods/") ||
 			strings.Contains(m.OutsidePath, "/volumes/") ||
 			strings.Contains(m.Options, "bind") {
@@ -196,10 +221,6 @@ func GetKubernetesVolumeMounts(pid int) ([]MountMapping, error) {
 
 	var k8sMounts []MountMapping
 	for _, m := range mounts {
-		// Kubernetes volumes are identified by:
-		// 1. Standard kubelet paths: /var/lib/kubelet/pods/
-		// 2. Minikube/Docker paths: /var/lib/docker/volumes/minikube/_data/lib/kubelet/pods/
-		// 3. Kubernetes volume markers: kubernetes.io~empty-dir, kubernetes.io~configmap, etc.
 		if strings.Contains(m.OutsidePath, "/kubelet/pods/") ||
 			strings.Contains(m.OutsidePath, "/kubernetes.io~") ||
 			strings.Contains(m.OutsidePath, "/containerd/io.containerd") {
@@ -224,12 +245,9 @@ type AllMountInfo struct {
 }
 
 // GetAllMountsFromMountinfo parses /proc/<pid>/mountinfo and returns ALL mounts.
-// This is used for CRIU checkpoint to mark ALL mounts as external, since CRIU
-// captures everything from mountinfo, not just the filtered subset.
-// Without marking ALL mounts as external, CRIU restore fails with
-// "No mapping for <mount_id>:(null) mountpoint" errors.
+// This is used for CRIU checkpoint to mark ALL mounts as external.
 func GetAllMountsFromMountinfo(pid int) ([]AllMountInfo, error) {
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", config.HostProcPath, pid)
+	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", HostProcPath, pid)
 	file, err := os.Open(mountinfoPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open mountinfo: %w", err)
@@ -256,15 +274,7 @@ func GetAllMountsFromMountinfo(pid int) ([]AllMountInfo, error) {
 }
 
 // GetMountsUnderPrefixes returns all mount points that fall under any of the given
-// directory prefixes. This is used to enumerate mounts to skip during checkpoint,
-// allowing cross-node restore when certain mounts (e.g., nvidia runtime mounts)
-// don't exist on the target node.
-//
-// For example, with prefixes ["/run/nvidia/driver", "/proc/driver/nvidia"]:
-//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_tu10x.bin -> included
-//   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_ga10x.bin -> included
-//   - /proc/driver/nvidia/params -> included
-//   - /run/nvidia-ctk-hook -> NOT included (doesn't match prefix)
+// directory prefixes. This is used to enumerate mounts to skip during checkpoint.
 func GetMountsUnderPrefixes(pid int, prefixes []string) ([]string, error) {
 	if len(prefixes) == 0 {
 		return nil, nil
@@ -278,9 +288,6 @@ func GetMountsUnderPrefixes(pid int, prefixes []string) ([]string, error) {
 	var matchedMounts []string
 	for _, m := range mounts {
 		for _, prefix := range prefixes {
-			// Check if mount point starts with prefix
-			// Use HasPrefix with trailing slash check to avoid partial matches
-			// e.g., "/run/nvidia" should match "/run/nvidia/driver/..." but not "/run/nvidia-ctk-hook"
 			if strings.HasPrefix(m.MountPoint, prefix+"/") || m.MountPoint == prefix {
 				matchedMounts = append(matchedMounts, m.MountPoint)
 				break // Don't add same mount twice if it matches multiple prefixes
@@ -292,9 +299,6 @@ func GetMountsUnderPrefixes(pid int, prefixes []string) ([]string, error) {
 }
 
 // parseAllMountInfoLine parses a single line from mountinfo without filtering.
-// mountinfo format:
-// 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
-// (1)(2)(3)   (4)   (5)      (6)     (7)   (8) (9)   (10)         (11)
 func parseAllMountInfoLine(line string) (AllMountInfo, error) {
 	fields := strings.Fields(line)
 	if len(fields) < 10 {

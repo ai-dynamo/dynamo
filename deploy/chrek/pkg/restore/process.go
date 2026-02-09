@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // MonitorProcess monitors the restored process and returns its exit code.
@@ -236,7 +234,7 @@ func WaitForPidFile(pidFile string, timeout time.Duration, log *logrus.Entry) (i
 
 // ExecColdStart execs the cold start command (ColdStartArgs), replacing the current process.
 // If no args are provided, falls back to sleep infinity.
-func ExecColdStart(cfg *config.RestoreConfig, log *logrus.Entry) error {
+func ExecColdStart(cfg *RestoreConfig, log *logrus.Entry) error {
 	if len(cfg.ColdStartArgs) == 0 {
 		log.Warn("No cold start command provided, sleeping indefinitely")
 		return ExecArgs([]string{"sleep", "infinity"}, log)

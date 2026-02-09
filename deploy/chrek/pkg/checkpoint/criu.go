@@ -3,15 +3,108 @@ package checkpoint
 
 import (
 	"fmt"
-	"os"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v7/rpc"
+	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
-
-	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
+
+// CRIUConfig holds CRIU-specific configuration options.
+// Options are categorized by how they are passed to CRIU:
+//   - RPC options: Passed via go-criu CriuOpts protobuf
+//   - Config file options: Written to criu.conf (NOT available via RPC)
+type CRIUConfig struct {
+	// === RPC Options (passed via go-criu CriuOpts) ===
+
+	// GhostLimit is the maximum ghost file size in bytes.
+	// Ghost files are deleted-but-open files that CRIU needs to checkpoint.
+	// 512MB is recommended for GPU workloads with large memory allocations.
+	GhostLimit uint32 `yaml:"ghostLimit"`
+
+	// Timeout is the CRIU operation timeout in seconds.
+	// 6 hours (21600s) is recommended for large GPU model checkpoints.
+	Timeout uint32 `yaml:"timeout"`
+
+	// LogLevel is the CRIU logging verbosity (0-4).
+	LogLevel int32 `yaml:"logLevel"`
+
+	// WorkDir is the CRIU work directory for temporary files.
+	WorkDir string `yaml:"workDir"`
+
+	// AutoDedup enables auto-deduplication of memory pages.
+	AutoDedup bool `yaml:"autoDedup"`
+
+	// LazyPages enables lazy page migration (experimental).
+	LazyPages bool `yaml:"lazyPages"`
+
+	// LeaveRunning keeps the process running after checkpoint (dump only).
+	LeaveRunning bool `yaml:"leaveRunning"`
+
+	// ShellJob allows checkpointing session leaders (containers are often session leaders).
+	ShellJob bool `yaml:"shellJob"`
+
+	// TcpClose closes TCP connections instead of preserving them (pod IPs change on restore).
+	TcpClose bool `yaml:"tcpClose"`
+
+	// FileLocks allows checkpointing processes with file locks.
+	FileLocks bool `yaml:"fileLocks"`
+
+	// OrphanPtsMaster allows checkpointing containers with TTYs.
+	OrphanPtsMaster bool `yaml:"orphanPtsMaster"`
+
+	// ExtUnixSk allows external Unix sockets.
+	ExtUnixSk bool `yaml:"extUnixSk"`
+
+	// LinkRemap handles deleted-but-open files.
+	LinkRemap bool `yaml:"linkRemap"`
+
+	// ExtMasters allows external bind mount masters.
+	ExtMasters bool `yaml:"extMasters"`
+
+	// ManageCgroupsMode controls cgroup handling: "ignore" lets K8s manage cgroups.
+	ManageCgroupsMode string `yaml:"manageCgroupsMode"`
+
+	// SkipMounts is a list of mount paths to skip during checkpoint.
+	// These are passed to CRIU's --skip-mnt option. This allows cross-node restore
+	// when certain mounts (e.g., nvidia runtime mounts) don't exist on the target node.
+	// Typically populated dynamically from SkipMountPrefixes in Config.
+	SkipMounts []string `yaml:"skipMounts,omitempty"`
+
+	// ExternalMounts are additional external mount mappings (e.g., "mnt[path]:path").
+	// Populated dynamically at checkpoint time from container introspection.
+	// Serialized to metadata.yaml so restore can use the exact same mappings.
+	ExternalMounts []string `yaml:"externalMounts,omitempty"`
+
+	// === Config File Options (NOT available via RPC - written to criu.conf) ===
+
+	// LibDir is the path to CRIU plugin directory (e.g., /usr/local/lib/criu).
+	// Required for CUDA checkpoint/restore.
+	LibDir string `yaml:"libDir"`
+
+	// AllowUprobes allows user-space probes (required for CUDA checkpoints).
+	AllowUprobes bool `yaml:"allowUprobes"`
+
+	// SkipInFlight skips in-flight TCP connections during checkpoint/restore.
+	SkipInFlight bool `yaml:"skipInFlight"`
+}
+
+// GenerateCRIUConfContent generates the criu.conf file content for options
+// that cannot be passed via RPC.
+func (c *CRIUConfig) GenerateCRIUConfContent() string {
+	var content string
+
+	if c.LibDir != "" {
+		content += "libdir " + c.LibDir + "\n"
+	}
+	if c.AllowUprobes {
+		content += "allow-uprobes\n"
+	}
+	if c.SkipInFlight {
+		content += "skip-in-flight\n"
+	}
+
+	return content
+}
 
 // CRIUDumpParams holds per-checkpoint dynamic parameters for CRIU dump.
 // These are values that change per checkpoint operation, not configuration.
@@ -21,22 +114,14 @@ type CRIUDumpParams struct {
 	RootFS     string
 }
 
-// OpenImageDir opens a checkpoint directory and prepares it for CRIU.
-// Returns the opened file and its FD. The caller must close the file when done.
-// The file descriptor has CLOEXEC cleared so it can be inherited by CRIU.
-func OpenImageDir(checkpointDir string) (*os.File, int32, error) {
-	return common.OpenPathForCRIU(checkpointDir)
-}
-
 // BuildCRIUOpts creates CRIU options from config and per-checkpoint parameters.
 // This sets up the base options; external mounts and namespaces are added separately.
-// All options come from config (values.yaml) - nothing is hardcoded here.
-func BuildCRIUOpts(cfg *config.CRIUConfig, params CRIUDumpParams) *criurpc.CriuOpts {
+func BuildCRIUOpts(cfg *CRIUConfig, params CRIUDumpParams) *criurpc.CriuOpts {
 	criuOpts := &criurpc.CriuOpts{
 		Pid:         proto.Int32(int32(params.PID)),
 		ImagesDirFd: proto.Int32(params.ImageDirFD),
 		Root:        proto.String(params.RootFS),
-		LogFile:     proto.String(config.DumpLogFilename),
+		LogFile:     proto.String(DumpLogFilename),
 	}
 
 	if cfg == nil {
@@ -122,22 +207,9 @@ func AddExternalPaths(criuOpts *criurpc.CriuOpts, paths []string) {
 	}
 }
 
-// AddExternalNamespace adds a namespace as external to CRIU options.
-// Format: "<type>[<inode>]:<key>"
-func AddExternalNamespace(criuOpts *criurpc.CriuOpts, nsType NamespaceType, inode uint64, key string) {
-	extNs := fmt.Sprintf("%s[%d]:%s", nsType, inode, key)
-	criuOpts.External = append(criuOpts.External, extNs)
-}
-
-// AddExternalStrings adds raw external strings to CRIU options.
-// Used for additional external mount mappings (e.g., NVIDIA firmware files).
-func AddExternalStrings(criuOpts *criurpc.CriuOpts, externals []string) {
-	criuOpts.External = append(criuOpts.External, externals...)
-}
-
 // ConfigureExternalMounts adds all required external mounts to CRIU options.
 // This includes mounts from /proc/pid/mountinfo plus masked/readonly paths from OCI spec.
-func ConfigureExternalMounts(criuOpts *criurpc.CriuOpts, pid int, containerInfo *checkpointk8s.ContainerInfo) error {
+func ConfigureExternalMounts(criuOpts *criurpc.CriuOpts, pid int, containerInfo *ContainerInfo) error {
 	// Get all mounts from mountinfo - CRIU needs every mount marked as external
 	allMounts, err := GetAllMountsFromMountinfo(pid)
 	if err != nil {
@@ -161,12 +233,13 @@ func ConfigureExternalNamespaces(criuOpts *criurpc.CriuOpts, namespaces map[Name
 
 	// Mark network namespace as external for socket binding preservation
 	if netNs, ok := namespaces[NamespaceNet]; ok {
-		AddExternalNamespace(criuOpts, NamespaceNet, netNs.Inode, "extNetNs")
+		criuOpts.External = append(criuOpts.External, fmt.Sprintf("%s[%d]:%s", NamespaceNet, netNs.Inode, "extNetNs"))
 		netNsInode = netNs.Inode
+		logrus.WithField("inode", netNsInode).Debug("Marked network namespace as external")
 	}
 
 	// Add additional external mounts (e.g., for NVIDIA firmware files)
-	AddExternalStrings(criuOpts, externalMounts)
+	criuOpts.External = append(criuOpts.External, externalMounts...)
 
 	return netNsInode
 }
@@ -187,8 +260,11 @@ func ConfigureSkipMounts(criuOpts *criurpc.CriuOpts, pid int, prefixes []string)
 
 	if len(skipMounts) > 0 {
 		criuOpts.SkipMnt = skipMounts
+		logrus.WithFields(logrus.Fields{
+			"prefixes": prefixes,
+			"count":    len(skipMounts),
+		}).Debug("Configured mounts to skip for cross-node restore")
 	}
 
 	return skipMounts, nil
 }
-

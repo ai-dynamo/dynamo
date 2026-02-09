@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 
 	"github.com/sirupsen/logrus"
-
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // CaptureDevShm captures files from /dev/shm to the checkpoint directory.
@@ -24,7 +22,7 @@ import (
 // using RestoreDevShm before CRIU restore.
 func CaptureDevShm(pid int, checkpointDir string, log *logrus.Entry) error {
     // Access container's /dev/shm via /proc/<pid>/root
-    shmPath := filepath.Join(config.HostProcPath, fmt.Sprintf("%d/root/dev/shm", pid))
+    shmPath := filepath.Join(HostProcPath, fmt.Sprintf("%d/root/dev/shm", pid))
 
     entries, err := os.ReadDir(shmPath)
     if err != nil {
@@ -53,7 +51,7 @@ func CaptureDevShm(pid int, checkpointDir string, log *logrus.Entry) error {
     }
 
     // Create destination directory
-    destDir := filepath.Join(checkpointDir, config.DevShmDirName)
+    destDir := filepath.Join(checkpointDir, DevShmDirName)
     if err := os.MkdirAll(destDir, 0755); err != nil {
         return fmt.Errorf("failed to create dev-shm directory: %w", err)
     }

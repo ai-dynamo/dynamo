@@ -16,7 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
 )
 
 // LogGPUDiagnostics logs nvidia-smi and /dev/nvidia* for debugging GPU visibility.
@@ -198,18 +198,18 @@ func LogRestoreBoundaryDiagnostics(label string, restoredPID int, log *logrus.En
 }
 
 // Restore performs the CRIU restore operation using go-criu.
-// All CRIU options are read from the saved CheckpointData - no hardcoding.
+// All CRIU options are read from the saved CheckpointMetadata - no hardcoding.
 // Returns the PID of the restored process.
-func Restore(ctx context.Context, checkpointPath string, data *config.CheckpointData, log *logrus.Entry) (int, error) {
+func Restore(ctx context.Context, checkpointPath string, data *checkpoint.CheckpointMetadata, log *logrus.Entry) (int, error) {
 	if data == nil {
-		return 0, fmt.Errorf("checkpoint data is required")
+		return 0, fmt.Errorf("checkpoint metadata is required")
 	}
 
 	// Hardcoded restore constants
 	const (
 		rootPath = "/"
 		pidFile  = "/tmp/restored.pid"
-		logFile  = config.RestoreLogFilename
+		logFile  = RestoreLogFilename
 	)
 
 	log.WithField("checkpoint", checkpointPath).Info("Starting CRIU restore")
@@ -220,14 +220,12 @@ func Restore(ctx context.Context, checkpointPath string, data *config.Checkpoint
 		return 0, err
 	}
 	defer imageDir.Close()
-	log.WithField("fd", imageDirFD).Debug("Opened checkpoint directory")
 
-	// 2. Generate external mount mappings from saved CheckpointData
+	// 2. Generate external mount mappings from saved CheckpointMetadata
 	extMounts, err := GenerateExtMountMaps(data)
 	if err != nil {
 		return 0, fmt.Errorf("failed to generate mount maps: %w", err)
 	}
-	log.WithField("mount_count", len(extMounts)).Debug("External mount maps ready")
 
 	// 3. Open target network namespace
 	netNsFile, netNsFD, err := OpenNetworkNamespace("/proc/1/ns/net")
@@ -235,7 +233,6 @@ func Restore(ctx context.Context, checkpointPath string, data *config.Checkpoint
 		return 0, err
 	}
 	defer netNsFile.Close()
-	log.WithField("fd", netNsFD).Debug("Opened target network namespace")
 
 	// 4. Open work directory if specified in checkpoint data
 	var workDirFile *os.File
@@ -256,7 +253,7 @@ func Restore(ctx context.Context, checkpointPath string, data *config.Checkpoint
 		// Paths
 		RootPath: rootPath,
 		LogFile:  logFile,
-		// Options from CheckpointData.CRIU
+		// Options from CheckpointMetadata.CRIU
 		LogLevel:          data.CRIU.LogLevel,
 		Timeout:           data.CRIU.Timeout,
 		ShellJob:          data.CRIU.ShellJob,
@@ -270,12 +267,9 @@ func Restore(ctx context.Context, checkpointPath string, data *config.Checkpoint
 	criuOpts := BuildRestoreCRIUOpts(cfg)
 
 	// 6. Reuse criu.conf from checkpoint time if it exists.
-	// The config file contains options not available via RPC (libdir, allow-uprobes, skip-in-flight).
-	// It was written at checkpoint time and is preserved in the checkpoint directory.
-	criuConfPath := filepath.Join(checkpointPath, config.CheckpointCRIUConfFilename)
+	criuConfPath := filepath.Join(checkpointPath, checkpoint.CheckpointCRIUConfFilename)
 	if _, err := os.Stat(criuConfPath); err == nil {
 		criuOpts.ConfigFile = proto.String(criuConfPath)
-		log.WithField("config_path", criuConfPath).Info("Using existing criu.conf from checkpoint")
 	}
 
 	// 7. Execute CRIU restore
@@ -326,8 +320,8 @@ func logCRIUErrors(checkpointPath, logFile string, log *logrus.Entry) {
 	log.Error("=== CRIU RESTORE LOG END ===")
 
 	// Copy log to shared directory for debugging
-	if err := os.MkdirAll(config.CRIULogDir, 0755); err == nil {
-		destPath := filepath.Join(config.CRIULogDir, fmt.Sprintf("restore-%d.log", time.Now().Unix()))
+	if err := os.MkdirAll(CRIULogDir, 0755); err == nil {
+		destPath := filepath.Join(CRIULogDir, fmt.Sprintf("restore-%d.log", time.Now().Unix()))
 		if err := os.WriteFile(destPath, data, 0644); err == nil {
 			log.WithField("path", destPath).Info("CRIU log copied to shared directory")
 		}
@@ -336,11 +330,7 @@ func logCRIUErrors(checkpointPath, logFile string, log *logrus.Entry) {
 
 // Run is the main entry point for the restore entrypoint.
 // It orchestrates the entire restore process.
-//
-// Two modes controlled by SKIP_WAIT_FOR_CHECKPOINT:
-//   - Unset (default, standalone/DaemonSet): poll for checkpoint.done, then restore.
-//   - "1" (operator path): check once — if ready, restore; if not, exec ColdStartArgs.
-func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) error {
+func Run(ctx context.Context, cfg *RestoreConfig, log *logrus.Entry) error {
 	log.Info("=== Restore Entrypoint ===")
 	log.WithFields(logrus.Fields{
 		"checkpoint_path":          cfg.CheckpointPath,
@@ -348,16 +338,14 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 		"checkpoint_location":      cfg.CheckpointLocation,
 		"skip_wait_for_checkpoint": cfg.SkipWaitForCheckpoint,
 		"cold_start_args":          cfg.ColdStartArgs,
-	}).Info("Configuration")
+	}).Debug("Configuration")
 
 	// Check CRIU availability
 	c := criu.MakeCriu()
-	version, err := c.GetCriuVersion()
-	if err != nil {
+	if _, err := c.GetCriuVersion(); err != nil {
 		log.WithError(err).Error("CRIU is not available")
 		return ExecColdStart(cfg, log)
 	}
-	log.WithField("version", version).Info("CRIU version")
 
 	// Determine checkpoint path based on mode
 	var checkpointPath string
@@ -365,7 +353,7 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	if cfg.SkipWaitForCheckpoint {
 		// Operator path: check once, restore if ready, otherwise cold start
 		var ready bool
-		checkpointPath, ready = config.ShouldRestore(cfg, log)
+		checkpointPath, ready = ShouldRestore(cfg, log)
 		if !ready {
 			log.Info("No checkpoint ready, executing cold start command")
 			return ExecColdStart(cfg, log)
@@ -373,11 +361,11 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	} else {
 		// Standalone/DaemonSet path: check first, then poll if needed
 		var ready bool
-		checkpointPath, ready = config.ShouldRestore(cfg, log)
+		checkpointPath, ready = ShouldRestore(cfg, log)
 		if !ready {
 			log.Info("Waiting for checkpoint...")
 			var err error
-			checkpointPath, err = config.WaitForCheckpoint(ctx, cfg, log)
+			checkpointPath, err = WaitForCheckpoint(ctx, cfg, log)
 			if err != nil {
 				log.WithError(err).Info("No checkpoint received")
 				return ExecColdStart(cfg, log)
@@ -390,65 +378,38 @@ func Run(ctx context.Context, cfg *config.RestoreConfig, log *logrus.Entry) erro
 	restoreStart := time.Now()
 
 	// Apply filesystem changes
-	rootfsDiffStart := time.Now()
 	if err := ApplyRootfsDiff(checkpointPath, "/", log); err != nil {
 		log.WithError(err).Error("Failed to apply rootfs diff")
 	}
-	log.WithField("duration", time.Since(rootfsDiffStart)).Info("ApplyRootfsDiff completed")
-
-	deletedFilesStart := time.Now()
 	if err := ApplyDeletedFiles(checkpointPath, "/", log); err != nil {
 		log.WithError(err).Error("Failed to apply deleted files")
 	}
-	log.WithField("duration", time.Since(deletedFilesStart)).Info("ApplyDeletedFiles completed")
 
-	// Load checkpoint data (contains CRIU config + mounts + namespaces)
-	// This is required - no fallback to defaults
-	loadDataStart := time.Now()
-	data, err := config.LoadCheckpointData(checkpointPath)
+	// Load checkpoint metadata (contains CRIU config + mounts + namespaces)
+	data, err := checkpoint.LoadCheckpointMetadata(checkpointPath)
 	if err != nil {
-		log.WithError(err).Error("Failed to load checkpoint data")
+		log.WithError(err).Error("Failed to load checkpoint metadata")
 		return ExecColdStart(cfg, log)
 	}
-	log.WithField("duration", time.Since(loadDataStart)).Info("LoadCheckpointData completed")
-
-	// Log CRIU options being used (from checkpoint data)
-	log.WithFields(logrus.Fields{
-		"lib_dir":   data.CRIU.LibDir,
-		"timeout":   data.CRIU.Timeout,
-		"log_level": data.CRIU.LogLevel,
-	}).Info("Using CRIU options from saved checkpoint data")
 
 	// Write restore marker file before CRIU restore
-	// This allows the restored process to detect it's been restored
-	// vLLM reads DYN_RESTORE_MARKER_FILE env var which should point to this path
 	restoreMarkerFile := cfg.RestoreMarkerFilePath
-	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(restoreMarkerFile), 0755); err != nil {
 		log.WithError(err).Warn("Failed to create restore marker directory")
 	}
 	if err := os.WriteFile(restoreMarkerFile, []byte("restored"), 0644); err != nil {
 		log.WithError(err).Warn("Failed to write restore marker file")
-	} else {
-		log.WithField("path", restoreMarkerFile).Info("Wrote restore marker file")
 	}
 
 	// Restore /dev/shm contents before CRIU restore
-	// This is critical for processes that use POSIX shared memory (e.g., Python multiprocessing)
-	// The files must exist before CRIU tries to restore file descriptors pointing to them
-	shmRestoreStart := time.Now()
 	if err := RestoreDevShm(checkpointPath, log); err != nil {
 		log.WithError(err).Error("Failed to restore /dev/shm contents - CRIU restore may fail with missing FD errors")
 	}
-	log.WithField("duration", time.Since(shmRestoreStart)).Info("RestoreDevShm completed")
 
 	// Create link_remap stub files for unlinked files referenced in CRIU images
-	// This handles files (e.g., semaphores) that were unlink()'d before checkpoint but still had open FDs
-	linkRemapStart := time.Now()
 	if err := CreateLinkRemapStubs(checkpointPath, log); err != nil {
 		log.WithError(err).Warn("Failed to create link_remap stubs")
 	}
-	log.WithField("duration", time.Since(linkRemapStart)).Info("CreateLinkRemapStubs completed")
 
 	// Log GPU diagnostics right before CRIU restore to track device visibility changes
 	LogGPUDiagnostics("PRE-CRIU-RESTORE", log)

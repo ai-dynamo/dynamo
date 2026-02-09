@@ -8,18 +8,24 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
+
+// ServerConfig holds the configuration for the HTTP API server.
+type ServerConfig struct {
+	ListenAddr    string
+	NodeName      string
+	CheckpointCfg *checkpoint.Config
+}
 
 // Server is the HTTP API server for checkpoint operations.
 type Server struct {
-	cfg        *config.FullConfig
+	cfg        ServerConfig
 	handlers   *Handlers
 	httpServer *http.Server
 }
 
 // NewServer creates a new Server instance.
-func NewServer(cfg *config.FullConfig, checkpointer *checkpoint.Checkpointer) *Server {
+func NewServer(cfg ServerConfig, checkpointer *checkpoint.Checkpointer) *Server {
 	handlers := NewHandlers(cfg, checkpointer)
 
 	// Setup routes
@@ -30,13 +36,13 @@ func NewServer(cfg *config.FullConfig, checkpointer *checkpoint.Checkpointer) *S
 
 	// WriteTimeout must exceed the CRIU checkpoint timeout since /checkpoint
 	// blocks until the dump completes. Add 60s buffer for pre/post work.
-	writeTimeout := time.Duration(cfg.Checkpoint.CRIU.Timeout)*time.Second + 60*time.Second
+	writeTimeout := time.Duration(cfg.CheckpointCfg.CRIU.Timeout)*time.Second + 60*time.Second
 	if writeTimeout < 300*time.Second {
 		writeTimeout = 300 * time.Second
 	}
 
 	httpServer := &http.Server{
-		Addr:         cfg.Agent.ListenAddr,
+		Addr:         cfg.ListenAddr,
 		Handler:      LoggingMiddleware(mux),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: writeTimeout,
@@ -53,7 +59,7 @@ func NewServer(cfg *config.FullConfig, checkpointer *checkpoint.Checkpointer) *S
 // Start starts the HTTP server.
 // This method blocks until the server is shut down.
 func (s *Server) Start() error {
-	log.Printf("HTTP API server listening on %s", s.cfg.Agent.ListenAddr)
+	log.Printf("HTTP API server listening on %s", s.cfg.ListenAddr)
 	return s.httpServer.ListenAndServe()
 }
 
@@ -65,5 +71,5 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // Addr returns the server's listen address.
 func (s *Server) Addr() string {
-	return s.cfg.Agent.ListenAddr
+	return s.cfg.ListenAddr
 }

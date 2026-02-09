@@ -1,4 +1,5 @@
-// rootfs provides container rootfs introspection via /proc for CRIU checkpoint.
+// filesystem.go provides container rootfs introspection, filesystem config/metadata types,
+// and rootfs diff capture for CRIU checkpoint.
 package checkpoint
 
 import (
@@ -11,18 +12,88 @@ import (
 	"strings"
 
 	"github.com/sirupsen/logrus"
-
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
-// GetRootFS returns the container's root filesystem path
-// For containers using overlayfs, this extracts the upperdir
-func GetRootFS(pid int) (string, error) {
-	// The rootfs is accessible via /proc/<pid>/root
-	// But for CRIU, we need the actual filesystem path
-	rootPath := fmt.Sprintf("%s/%d/root", config.HostProcPath, pid)
+// FilesystemConfig is the static config for rootfs exclusions (from values.yaml).
+type FilesystemConfig struct {
+	// SystemDirs are system directories that should be excluded from rootfs diff.
+	// These directories are typically injected/bind-mounted by NVIDIA GPU Operator
+	// at container start time, so they already exist in the restore target.
+	// Excluding them prevents conflicts (especially socket files which cannot be overwritten).
+	// Default: ["./usr", "./etc", "./opt", "./var", "./run"]
+	SystemDirs []string `yaml:"systemDirs"`
 
-	// Verify it exists
+	// CacheDirs are cache directories that can safely be excluded to reduce checkpoint size.
+	// Model weights and other cached data are typically re-downloaded if needed.
+	// Default: ["./.cache/huggingface", "./.cache/torch"]
+	CacheDirs []string `yaml:"cacheDirs"`
+
+	// AdditionalExclusions are custom paths to exclude from the rootfs diff.
+	// Use this for application-specific exclusions.
+	// Paths should be relative with "./" prefix (e.g., "./data/temp").
+	AdditionalExclusions []string `yaml:"additionalExclusions"`
+}
+
+// GetAllExclusions returns all exclusion paths combined.
+// This is used when building tar arguments for rootfs diff capture.
+func (c *FilesystemConfig) GetAllExclusions() []string {
+	if c == nil {
+		return nil
+	}
+	total := len(c.SystemDirs) + len(c.CacheDirs) + len(c.AdditionalExclusions)
+	exclusions := make([]string, 0, total)
+	exclusions = append(exclusions, c.SystemDirs...)
+	exclusions = append(exclusions, c.CacheDirs...)
+	exclusions = append(exclusions, c.AdditionalExclusions...)
+	return exclusions
+}
+
+// Validate checks that the FilesystemConfig has valid values.
+func (c *FilesystemConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+	// All paths should start with "./" for tar relative path handling
+	for _, path := range c.GetAllExclusions() {
+		if !strings.HasPrefix(path, "./") {
+			return &ConfigError{
+				Field:   "rootfsExclusions",
+				Message: "all exclusion paths must start with './' (got: " + path + ")",
+			}
+		}
+	}
+	return nil
+}
+
+// FilesystemMetadata holds runtime filesystem state captured at checkpoint time.
+type FilesystemMetadata struct {
+	Exclusions      FilesystemConfig `yaml:"exclusions"`
+	UpperDir        string           `yaml:"upperDir,omitempty"`
+	MaskedPaths     []string         `yaml:"maskedPaths,omitempty"`
+	ReadonlyPaths   []string         `yaml:"readonlyPaths,omitempty"`
+	BindMountDests  []string         `yaml:"bindMountDests,omitempty"`
+	HasRootfsDiff   bool             `yaml:"hasRootfsDiff"`
+	HasDeletedFiles bool             `yaml:"hasDeletedFiles"`
+}
+
+// NewFilesystemMetadata constructs FilesystemMetadata from config, overlay state, and OCI spec.
+func NewFilesystemMetadata(exclusions FilesystemConfig, upperDir string, oci *ociState) FilesystemMetadata {
+	meta := FilesystemMetadata{
+		Exclusions: exclusions,
+		UpperDir:   upperDir,
+	}
+	if oci != nil {
+		meta.MaskedPaths = oci.MaskedPaths
+		meta.ReadonlyPaths = oci.ReadonlyPaths
+		meta.BindMountDests = oci.BindMountDests
+	}
+	return meta
+}
+
+// GetRootFS returns the container's root filesystem path.
+func GetRootFS(pid int) (string, error) {
+	rootPath := fmt.Sprintf("%s/%d/root", HostProcPath, pid)
+
 	if _, err := os.Stat(rootPath); err != nil {
 		return "", fmt.Errorf("rootfs not accessible at %s: %w", rootPath, err)
 	}
@@ -30,10 +101,10 @@ func GetRootFS(pid int) (string, error) {
 	return rootPath, nil
 }
 
-// GetOverlayUpperDir extracts the overlay upperdir from mountinfo
-// This is the writable layer of the container's filesystem
+// GetOverlayUpperDir extracts the overlay upperdir from mountinfo.
+// This is the writable layer of the container's filesystem.
 func GetOverlayUpperDir(pid int) (string, error) {
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", config.HostProcPath, pid)
+	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", HostProcPath, pid)
 	file, err := os.Open(mountinfoPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open mountinfo: %w", err)
@@ -45,8 +116,6 @@ func GetOverlayUpperDir(pid int) (string, error) {
 		line := scanner.Text()
 		fields := strings.Fields(line)
 
-		// Look for the root mount (mount point is /)
-		// mountinfo format: id parent major:minor root mount-point options ... - fstype source super-options
 		if len(fields) < 5 {
 			continue
 		}
@@ -94,18 +163,12 @@ func GetOverlayUpperDir(pid int) (string, error) {
 // The upperdir contains all filesystem modifications made by the container.
 // Excludes bind mount destinations and configured directories to avoid conflicts during restore.
 // Returns the path to the tar file or empty string if capture failed.
-//
-// Parameters:
-//   - upperDir: the overlay upperdir path containing filesystem modifications
-//   - checkpointDir: directory to store the rootfs-diff.tar
-//   - exclusions: configured exclusions from values.yaml (nil = no exclusions)
-//   - bindMountDests: bind mount destinations to exclude (converted to relative paths)
-func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions *config.RootfsExclusionConfig, bindMountDests []string) (string, error) {
+func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions *FilesystemConfig, bindMountDests []string) (string, error) {
 	if upperDir == "" {
 		return "", fmt.Errorf("upperdir is empty")
 	}
 
-	rootfsDiffPath := filepath.Join(checkpointDir, config.RootfsDiffFilename)
+	rootfsDiffPath := filepath.Join(checkpointDir, RootfsDiffFilename)
 
 	// Build tar arguments with xattrs and exclusions
 	tarArgs := []string{"--xattrs"}
@@ -149,7 +212,7 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 		return false, nil
 	}
 
-	deletedFilesPath := filepath.Join(checkpointDir, config.DeletedFilesFilename)
+	deletedFilesPath := filepath.Join(checkpointDir, DeletedFilesFilename)
 	data, err := json.Marshal(whiteouts)
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal whiteouts: %w", err)
@@ -192,24 +255,23 @@ func FindWhiteoutFiles(upperDir string) ([]string, error) {
 }
 
 // CaptureRootfsState captures the overlay upperdir and deleted files after CRIU dump.
-// Updates the checkpoint data with rootfs diff information and saves it.
-func CaptureRootfsState(upperDir, checkpointDir string, data *config.CheckpointData, log *logrus.Entry) {
+// Updates the checkpoint metadata with rootfs diff information and saves it.
+func CaptureRootfsState(upperDir, checkpointDir string, data *CheckpointMetadata, log *logrus.Entry) {
 	if upperDir == "" || data == nil {
 		return
 	}
 
-	// Capture rootfs diff using exclusions from the checkpoint data
-	configuredExclusions := data.RootfsExclusions.GetAllExclusions()
+	// Capture rootfs diff using exclusions from the checkpoint metadata
+	configuredExclusions := data.Filesystem.Exclusions.GetAllExclusions()
 	log.WithFields(logrus.Fields{
 		"configured_exclusions": configuredExclusions,
-		"bind_mount_exclusions": data.BindMountDests,
+		"bind_mount_exclusions": data.Filesystem.BindMountDests,
 	}).Debug("Rootfs diff exclusions")
-	rootfsDiffPath, err := CaptureRootfsDiff(upperDir, checkpointDir, &data.RootfsExclusions, data.BindMountDests)
+	rootfsDiffPath, err := CaptureRootfsDiff(upperDir, checkpointDir, &data.Filesystem.Exclusions, data.Filesystem.BindMountDests)
 	if err != nil {
 		log.WithError(err).Warn("Failed to capture rootfs diff")
 	} else {
-		data.RootfsDiffPath = rootfsDiffPath
-		data.HasRootfsDiff = true
+		data.Filesystem.HasRootfsDiff = true
 		log.WithFields(logrus.Fields{
 			"upperdir": upperDir,
 			"tar_path": rootfsDiffPath,
@@ -221,12 +283,12 @@ func CaptureRootfsState(upperDir, checkpointDir string, data *config.CheckpointD
 	if err != nil {
 		log.WithError(err).Warn("Failed to capture deleted files")
 	} else if hasDeletedFiles {
-		data.HasDeletedFiles = true
+		data.Filesystem.HasDeletedFiles = true
 		log.Info("Recorded deleted files (whiteouts)")
 	}
 
-	// Update checkpoint data with rootfs diff info
-	if err := config.SaveCheckpointData(checkpointDir, data); err != nil {
-		log.WithError(err).Warn("Failed to update checkpoint data with rootfs diff info")
+	// Update checkpoint metadata with rootfs diff info
+	if err := SaveCheckpointMetadata(checkpointDir, data); err != nil {
+		log.WithError(err).Warn("Failed to update checkpoint metadata with rootfs diff info")
 	}
 }

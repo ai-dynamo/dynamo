@@ -9,13 +9,13 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
 )
 
 // ApplyRootfsDiff extracts the rootfs-diff.tar from the checkpoint to the target root.
 // This restores filesystem changes that were made in the original container.
 func ApplyRootfsDiff(checkpointPath, targetRoot string, log *logrus.Entry) error {
-	rootfsDiffPath := filepath.Join(checkpointPath, config.RootfsDiffFilename)
+	rootfsDiffPath := filepath.Join(checkpointPath, checkpoint.RootfsDiffFilename)
 
 	// Check if rootfs-diff.tar exists
 	if _, err := os.Stat(rootfsDiffPath); os.IsNotExist(err) {
@@ -25,15 +25,10 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log *logrus.Entry) error
 
 	log.WithField("path", rootfsDiffPath).Info("Applying rootfs diff")
 
-	// Build tar command with options to handle conflicts:
-	// --keep-old-files: Don't overwrite existing files (may already be mounted)
-	// Exclude paths that are typically mounted read-only by the container runtime
+	// Exclusions are already applied at checkpoint time (bind mounts, system dirs, etc.)
+	// so we just extract with --keep-old-files to avoid overwriting existing files.
 	cmd := exec.Command("tar",
 		"--keep-old-files",
-		"--exclude=./run/secrets",
-		"--exclude=./etc/resolv.conf",
-		"--exclude=./etc/hostname",
-		"--exclude=./etc/hosts",
 		"-C", targetRoot,
 		"-xf", rootfsDiffPath,
 	)
@@ -56,7 +51,7 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log *logrus.Entry) error
 // ApplyDeletedFiles removes files that were deleted in the original container.
 // These are tracked via overlay whiteout markers (.wh.<filename>).
 func ApplyDeletedFiles(checkpointPath, targetRoot string, log *logrus.Entry) error {
-	deletedFilesPath := filepath.Join(checkpointPath, config.DeletedFilesFilename)
+	deletedFilesPath := filepath.Join(checkpointPath, checkpoint.DeletedFilesFilename)
 
 	// Check if deleted-files.json exists
 	data, err := os.ReadFile(deletedFilesPath)

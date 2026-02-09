@@ -21,8 +21,6 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
-	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // SignalFile represents the content of a checkpoint completion signal file
@@ -41,14 +39,14 @@ type Config struct {
 	RestrictedNamespace string // Optional: restrict watching to this namespace (empty = cluster-wide)
 
 	// Checkpoint configuration (from ConfigMap)
-	CheckpointConfig *config.CheckpointConfig
+	CheckpointConfig *checkpoint.Config
 }
 
 // Watcher watches for pods with checkpoint labels and triggers checkpoints
 type Watcher struct {
 	config          Config
 	clientset       kubernetes.Interface
-	discoveryClient *checkpointk8s.DiscoveryClient
+	discoveryClient *checkpoint.DiscoveryClient
 	checkpointer    *checkpoint.Checkpointer
 	log             *logrus.Entry
 
@@ -60,7 +58,7 @@ type Watcher struct {
 }
 
 // NewWatcher creates a new pod watcher
-func NewWatcher(cfg Config, discoveryClient *checkpointk8s.DiscoveryClient, checkpointer *checkpoint.Checkpointer) (*Watcher, error) {
+func NewWatcher(cfg Config, discoveryClient *checkpoint.DiscoveryClient, checkpointer *checkpoint.Checkpointer) (*Watcher, error) {
 	// Create in-cluster Kubernetes client
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -91,7 +89,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 	w.log.WithFields(logrus.Fields{
 		"node":  w.config.NodeName,
-		"label": config.KubeLabelCheckpointSource,
+		"label": checkpoint.KubeLabelCheckpointSource,
 	}).Info("Starting pod watcher")
 
 	// Start health check HTTP server if address is configured
@@ -106,7 +104,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 	// Create informer factory with label selector and optional namespace restriction
 	labelSelector := labels.SelectorFromSet(labels.Set{
-		config.KubeLabelCheckpointSource: "true",
+		checkpoint.KubeLabelCheckpointSource: "true",
 	}).String()
 
 	factoryOptions := []informers.SharedInformerOption{
@@ -220,7 +218,7 @@ func (w *Watcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 
 	// Get checkpoint ID from label (uses the checkpoint hash)
-	checkpointID, ok := pod.Labels[config.KubeLabelCheckpointHash]
+	checkpointID, ok := pod.Labels[checkpoint.KubeLabelCheckpointHash]
 	if !ok || checkpointID == "" {
 		w.log.WithField("pod", podKey).Warn("Pod has checkpoint label but no checkpoint-hash label")
 		return
@@ -364,7 +362,6 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 	log.WithField("checkpoint_dir", result.CheckpointDir).Info("Checkpoint completed successfully")
 
 	// Write checkpoint.done marker to PVC for cross-node restore detection
-	// This is written AFTER rootfs-diff.tar is complete, so it's safe to use as a completion marker
 	w.writeCheckpointDoneMarker(result.CheckpointDir, checkpointID, true, "", log)
 
 	// Write signal file to pod's hostPath for checkpoint job pod to exit
@@ -396,8 +393,7 @@ func (w *Watcher) writeSignalFileToPod(pid int, signalFilePath, checkpointID, ch
 	}
 
 	// Write to the pod's filesystem via /proc/<pid>/root
-	// signalFilePath is the path inside the pod (e.g. /var/lib/chrek/signals)
-	hostSignalPath := fmt.Sprintf("%s/%d/root%s", config.HostProcPath, pid, signalFilePath)
+	hostSignalPath := fmt.Sprintf("%s/%d/root%s", checkpoint.HostProcPath, pid, signalFilePath)
 
 	// Ensure signal directory exists in pod's filesystem
 	signalDir := filepath.Dir(hostSignalPath)
@@ -420,11 +416,8 @@ func (w *Watcher) writeSignalFileToPod(pid int, signalFilePath, checkpointID, ch
 }
 
 // writeCheckpointDoneMarker writes a checkpoint.done marker file to the checkpoint directory on shared PVC.
-// This file is written AFTER all checkpoint steps complete (including rootfs-diff.tar).
-// Restore pods on ANY node check for this file to know the checkpoint is complete and safe to restore.
-// This is separate from writeSignalFileToPod which signals the checkpoint job pod to exit.
 func (w *Watcher) writeCheckpointDoneMarker(checkpointDir, checkpointID string, success bool, errMsg string, log *logrus.Entry) {
-	markerPath := filepath.Join(checkpointDir, config.CheckpointDoneFilename)
+	markerPath := filepath.Join(checkpointDir, checkpoint.CheckpointDoneFilename)
 
 	marker := SignalFile{
 		CheckpointID:   checkpointID,

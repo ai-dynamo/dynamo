@@ -14,15 +14,13 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
-	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/http_api_server"
+	httpApiServer "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/http_api_server"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/watcher"
 )
 
 func main() {
 	// Load configuration from ConfigMap (or use defaults if not found)
-	cfg, err := config.LoadConfigOrDefault(config.ConfigMapPath)
+	cfg, err := LoadConfigOrDefault(ConfigMapPath)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
@@ -33,7 +31,7 @@ func main() {
 	}
 
 	// Create discovery client
-	discoveryClient, err := checkpointk8s.NewDiscoveryClient()
+	discoveryClient, err := checkpoint.NewDiscoveryClient()
 	if err != nil {
 		log.Fatalf("Failed to create discovery client: %v", err)
 	}
@@ -55,8 +53,13 @@ func main() {
 	log.Printf("Signal source: %s", cfg.Agent.SignalSource)
 
 	switch cfg.Agent.GetSignalSource() {
-	case config.SignalFromHTTP:
-		srv := httpApiServer.NewServer(cfg, checkpointer)
+	case SignalFromHTTP:
+		serverCfg := httpApiServer.ServerConfig{
+			ListenAddr:    cfg.Agent.ListenAddr,
+			NodeName:      cfg.Agent.NodeName,
+			CheckpointCfg: &cfg.Checkpoint,
+		}
+		srv := httpApiServer.NewServer(serverCfg, checkpointer)
 
 		// Handle graceful shutdown
 		go func() {
@@ -72,7 +75,7 @@ func main() {
 			log.Fatalf("HTTP server error: %v", err)
 		}
 
-	case config.SignalFromWatcher:
+	case SignalFromWatcher:
 		watcherConfig := watcher.Config{
 			NodeName:            cfg.Agent.NodeName,
 			ListenAddr:          cfg.Agent.ListenAddr,
@@ -92,7 +95,7 @@ func main() {
 			cancel()
 		}()
 
-		log.Printf("Pod watcher started (watching for label: %s=true)", config.KubeLabelCheckpointSource)
+		log.Printf("Pod watcher started (watching for label: %s=true)", checkpoint.KubeLabelCheckpointSource)
 		log.Printf("Health check endpoint: http://0.0.0.0%s/health", cfg.Agent.ListenAddr)
 		if err := podWatcher.Start(ctx); err != nil {
 			log.Printf("Pod watcher error: %v", err)

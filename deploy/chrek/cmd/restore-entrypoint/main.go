@@ -15,7 +15,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/restore"
 )
 
@@ -73,7 +72,7 @@ func main() {
 
 	// Load configuration from hardcoded defaults + operator-injected env vars.
 	// os.Args[1:] are the cold start command args (passed by the operator via pod spec).
-	cfg, err := config.NewRestoreConfig(os.Args[1:])
+	cfg, err := restore.NewRestoreConfig(os.Args[1:])
 	if err != nil {
 		log.WithError(err).Fatal("Failed to load restore configuration")
 	}

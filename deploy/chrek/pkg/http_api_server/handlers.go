@@ -7,20 +7,20 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/config"
 )
 
 // Handlers holds dependencies for HTTP handlers.
 type Handlers struct {
-	cfg          *config.FullConfig
+	cfg          ServerConfig
 	checkpointer *checkpoint.Checkpointer
 }
 
 // NewHandlers creates a new Handlers instance.
-func NewHandlers(cfg *config.FullConfig, checkpointer *checkpoint.Checkpointer) *Handlers {
+func NewHandlers(cfg ServerConfig, checkpointer *checkpoint.Checkpointer) *Handlers {
 	return &Handlers{
 		cfg:          cfg,
 		checkpointer: checkpointer,
@@ -36,7 +36,7 @@ func (h *Handlers) HandleHealth(w http.ResponseWriter, r *http.Request) {
 
 	resp := HealthResponse{
 		Status:   "healthy",
-		NodeName: h.cfg.Agent.NodeName,
+		NodeName: h.cfg.NodeName,
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -75,14 +75,14 @@ func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		ContainerID:   req.ContainerID,
 		ContainerName: req.ContainerName,
 		CheckpointID:  req.CheckpointID,
-		CheckpointDir: h.cfg.Checkpoint.BasePath,
-		NodeName:      h.cfg.Agent.NodeName,
+		CheckpointDir: h.cfg.CheckpointCfg.BasePath,
+		NodeName:      h.cfg.NodeName,
 		PodName:       req.PodName,
 		PodNamespace:  req.PodNamespace,
 	}
 
 	// Copy checkpoint config and disable CUDA if requested
-	checkpointCfg := h.cfg.Checkpoint
+	checkpointCfg := *h.cfg.CheckpointCfg
 	if req.DisableCUDA {
 		checkpointCfg.CRIU.LibDir = ""
 	}
@@ -99,7 +99,7 @@ func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write checkpoint.done marker so restore-entrypoint can detect this checkpoint
-	checkpointDonePath := result.CheckpointDir + "/" + config.CheckpointDoneFilename
+	checkpointDonePath := result.CheckpointDir + "/" + checkpoint.CheckpointDoneFilename
 	if err := os.WriteFile(checkpointDonePath, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
 		log.Printf("Failed to write checkpoint.done marker: %v", err)
 		writeJSON(w, http.StatusInternalServerError, CheckpointResponse{
@@ -125,7 +125,7 @@ func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	checkpointIDs, err := config.ListCheckpoints(h.cfg.Checkpoint.BasePath)
+	checkpointIDs, err := checkpoint.ListCheckpoints(h.cfg.CheckpointCfg.BasePath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": err.Error(),
@@ -135,18 +135,18 @@ func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request)
 
 	var checkpoints []CheckpointInfo
 	for _, id := range checkpointIDs {
-		meta, err := config.GetCheckpointInfo(h.cfg.Checkpoint.BasePath, id)
+		meta, err := checkpoint.LoadCheckpointMetadata(filepath.Join(h.cfg.CheckpointCfg.BasePath, id))
 		if err != nil {
 			continue
 		}
 		checkpoints = append(checkpoints, CheckpointInfo{
 			ID:           meta.CheckpointID,
 			CreatedAt:    meta.CreatedAt,
-			SourceNode:   meta.SourceNode,
-			ContainerID:  meta.ContainerID,
-			PodName:      meta.PodName,
-			PodNamespace: meta.PodNamespace,
-			Image:        meta.Image,
+			SourceNode:   meta.K8s.SourceNode,
+			ContainerID:  meta.K8s.ContainerID,
+			PodName:      meta.K8s.PodName,
+			PodNamespace: meta.K8s.PodNamespace,
+			Image:        meta.K8s.Image,
 		})
 	}
 
