@@ -128,9 +128,9 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 
 			if tt.existingHash == "compute" {
 				hash := dynamo.ComputeWorkerSpecHash(dgd)
-				dgd.Annotations = map[string]string{consts.AnnotationActiveWorkerHash: hash}
+				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 			} else if tt.existingHash != "" {
-				dgd.Annotations = map[string]string{consts.AnnotationActiveWorkerHash: tt.existingHash}
+				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: tt.existingHash}
 			}
 
 			r := createTestReconciler(dgd)
@@ -162,7 +162,7 @@ func TestInitializeWorkerHashIfNeeded_FirstDeploy(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the hash was set
-	hash := r.getCurrentActiveWorkerHash(dgd)
+	hash := r.getCurrentWorkerHash(dgd)
 	assert.NotEmpty(t, hash, "Hash should be set after initialization")
 
 	// Verify the hash is correct
@@ -181,7 +181,7 @@ func TestInitializeWorkerHashIfNeeded_AlreadyInitialized(t *testing.T) {
 		},
 	})
 	dgd.Annotations = map[string]string{
-		consts.AnnotationActiveWorkerHash: existingHash,
+		consts.AnnotationCurrentWorkerHash: existingHash,
 	}
 
 	// Create reconciler with DGD already in the fake client
@@ -193,7 +193,7 @@ func TestInitializeWorkerHashIfNeeded_AlreadyInitialized(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the hash was NOT changed
-	hash := r.getCurrentActiveWorkerHash(dgd)
+	hash := r.getCurrentWorkerHash(dgd)
 	assert.Equal(t, existingHash, hash, "Hash should not change when already initialized")
 }
 
@@ -382,21 +382,6 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-func TestClearRollingUpdateStatus(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
-		Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
-	}
-
-	r := createTestReconciler(dgd)
-	r.clearRollingUpdateStatus(dgd)
-
-	assert.NotNil(t, dgd.Status.RollingUpdate)
-	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseNone, dgd.Status.RollingUpdate.Phase)
 }
 
 func TestGetDesiredWorkerReplicas(t *testing.T) {

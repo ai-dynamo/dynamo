@@ -92,5 +92,14 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 	}...)
 
+	if context.WorkerHashSuffix != "" {
+		container.Env = append(container.Env, []corev1.EnvVar{
+			{
+				Name:  commonconsts.DynamoNamespaceWorkerSuffixEnvVar,
+				Value: context.WorkerHashSuffix,
+			},
+		}...)
+	}
+
 	return container, nil
 }

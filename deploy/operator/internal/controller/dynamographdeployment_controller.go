@@ -31,7 +31,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -215,7 +214,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 			// Update the hash to prevent repeated warnings
 			hash := dynamo.ComputeWorkerSpecHash(dynamoDeployment)
-			r.setActiveWorkerHash(dynamoDeployment, hash)
+			r.setCurrentWorkerHash(dynamoDeployment, hash)
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
 			}
@@ -1024,9 +1023,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
 
 	// Build rolling update context if rolling update is in progress
-	var rollingUpdateCtx *dynamo.RollingUpdateContext
-	if r.isRollingUpdateInProgress(dynamoDeployment) {
-		rollingUpdateCtx = r.buildRollingUpdateContext(ctx, dynamoDeployment)
+	rollingUpdateCtx := r.buildRollingUpdateContext(ctx, dynamoDeployment)
+	if rollingUpdateCtx.InProgress() {
 		logger.Info("Rolling update in progress",
 			"oldWorkerHash", rollingUpdateCtx.OldWorkerHash,
 			"newWorkerHash", rollingUpdateCtx.NewWorkerHash,
@@ -1058,7 +1056,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	// During rolling update, scale old worker DCDs via direct patching.
 	// This is done separately from DCD generation to avoid overwriting the old spec
 	// with the new spec (which would trigger an unwanted rolling update on old workers).
-	if rollingUpdateCtx != nil {
+	if rollingUpdateCtx.InProgress() {
 		if err := r.scaleOldWorkerDCDs(ctx, dynamoDeployment, rollingUpdateCtx); err != nil {
 			logger.Error(err, "failed to scale old worker DCDs")
 			return ReconcileResult{}, fmt.Errorf("failed to scale old worker DCDs: %w", err)
@@ -1070,7 +1068,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	return result, nil
 }
 
-// buildRollingUpdateContext creates a RollingUpdateContext for the current rolling update.
+// buildRollingUpdateContext creates a RollingUpdateContext.
 // It computes namespaces and pre-calculates old and new worker replica counts.
 //
 // The rollingUpdate heuristic is:
@@ -1079,16 +1077,25 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) *dynamo.RollingUpdateContext {
+) dynamo.RollingUpdateContext {
 	logger := log.FromContext(ctx)
 
 	// Compute hashes
 	newWorkerHashFull := dynamo.ComputeWorkerSpecHash(dgd)
-	oldWorkerHashFull := r.getCurrentActiveWorkerHash(dgd)
+	oldWorkerHashFull := r.getCurrentWorkerHash(dgd)
 
 	// Use first 8 chars of hash for DCD naming (short but unique enough)
 	newWorkerHash := newWorkerHashFull[:8]
 	oldWorkerHash := oldWorkerHashFull[:8]
+
+	if oldWorkerHash == newWorkerHash {
+		return dynamo.RollingUpdateContext{
+			OldWorkerHash:     oldWorkerHash,
+			NewWorkerHash:     newWorkerHash,
+			OldWorkerReplicas: make(map[string]int32),
+			NewWorkerReplicas: make(map[string]int32),
+		}
+	}
 
 	// Pre-calculate old and new worker replicas based on new worker readiness
 	oldWorkerReplicas := make(map[string]int32)
@@ -1106,7 +1113,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		}
 
 		// Query new DCD to get ready replicas (using hash-based naming)
-		newDCDName := dynamo.GetDynamoComponentName(dgd, serviceName) + "-" + newWorkerHash
+		newDCDName := dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, newWorkerHash)
 		newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD)
 
@@ -1140,8 +1147,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			"oldNeeded", oldNeeded)
 	}
 
-	return &dynamo.RollingUpdateContext{
-		InProgress:        true,
+	return dynamo.RollingUpdateContext{
 		OldWorkerHash:     oldWorkerHash,
 		NewWorkerHash:     newWorkerHash,
 		OldWorkerReplicas: oldWorkerReplicas,
@@ -1640,25 +1646,6 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the PVC
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
-			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
-		// Traffic proxy resources for rolling updates
-		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
-			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
-		Owns(&corev1.Service{}, builder.WithPredicates(predicate.Funcs{
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
-			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
-		Owns(&corev1.ConfigMap{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },

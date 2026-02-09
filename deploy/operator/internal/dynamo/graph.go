@@ -249,14 +249,12 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 	return config, err
 }
 
+func (r RollingUpdateContext) InProgress() bool {
+	return r.OldWorkerHash != r.NewWorkerHash
+}
+
 // RollingUpdateContext provides information about an in-progress rolling update.
-// When InProgress is true:
-// - GenerateDynamoComponentsDeployments generates DCDs only for the NEW namespace
-// - Old DCDs are NOT regenerated to avoid spec contamination
-// - Old worker replicas are scaled via direct patching in the controller
 type RollingUpdateContext struct {
-	// InProgress indicates whether a rolling update is currently in progress
-	InProgress bool
 	// OldWorkerHash is the short hash (8 chars) for the old worker spec, used for DCD naming
 	OldWorkerHash string
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
@@ -272,88 +270,26 @@ type RollingUpdateContext struct {
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
 // The map key is a unique identifier for each DCD (serviceName).
-//
-// All components use the base namespace (<k8s-ns>-<dgd-name>) for DYN_NAMESPACE.
-// Frontend components do not have a hash suffix in their DCD name, and get DYN_NAMESPACE_PREFIX
-// for prefix-based discovery of workers across multiple pools during rolling updates.
-// Worker components include a hash suffix in their DCD name and get DYN_NAMESPACE_WORKER_SUFFIX
-// so the new runtime composes an effective namespace of "<base>-<suffix>" for discovery isolation.
-//
-// When rollingUpdateContext.InProgress is true, this generates DCDs only for the NEW worker hash.
-// Old worker DCDs are NOT generated to avoid overwriting their original spec with the new spec.
 func GenerateDynamoComponentsDeployments(
 	ctx context.Context,
 	parentDGD *v1alpha1.DynamoGraphDeployment,
 	defaultIngressSpec *v1alpha1.IngressSpec,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
-	rollingUpdateCtx *RollingUpdateContext,
+	rollingUpdateCtx RollingUpdateContext,
 ) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 
 	dynamoNamespace := ComputeDynamoNamespace(parentDGD)
 
-	// Determine the hash suffix for worker DCD naming
-	var hashSuffix string
-	if rollingUpdateCtx != nil && rollingUpdateCtx.InProgress {
-		hashSuffix = rollingUpdateCtx.NewWorkerHash
-	} else {
-		hashSuffix = ComputeWorkerSpecHash(parentDGD)
-	}
-
 	// Generate DCDs for each service
 	for componentName, component := range parentDGD.Spec.Services {
-		isFrontend := component.ComponentType == commonconsts.ComponentTypeFrontend
-
-		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, defaultIngressSpec, restartState, existingRestartAnnotations)
+		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, defaultIngressSpec, restartState, existingRestartAnnotations, rollingUpdateCtx)
 		if err != nil {
 			return nil, err
 		}
-
-		if isFrontend {
-			// Frontend gets DYN_NAMESPACE_PREFIX for prefix-based worker discovery
-			dcd.Spec.Envs = MergeEnvs(dcd.Spec.Envs, []corev1.EnvVar{
-				{
-					Name:  commonconsts.DynamoNamespacePrefixEnvVar,
-					Value: dynamoNamespace,
-				},
-			})
-		} else {
-			// Workers get a hash suffix in their DCD name for stable naming during rolling updates
-			dcd.Name = dcd.Name + "-" + hashSuffix
-
-			// Label worker DCDs with their hash for cleanup during rolling updates
-			dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash] = hashSuffix
-
-			// Workers get DYN_NAMESPACE_WORKER_SUFFIX so new runtimes compose
-			// the effective namespace as "<DYN_NAMESPACE>-<suffix>"
-			dcd.Spec.Envs = MergeEnvs(dcd.Spec.Envs, []corev1.EnvVar{
-				{
-					Name:  commonconsts.DynamoNamespaceWorkerSuffixEnvVar,
-					Value: hashSuffix,
-				},
-			})
-		}
-
-		// During rolling update, override replicas for worker components
-		if rollingUpdateCtx != nil && rollingUpdateCtx.InProgress && IsWorkerComponent(component.ComponentType) {
-			if replicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; ok {
-				dcd.Spec.Replicas = &replicas
-			}
-		}
-
 		deployments[componentName] = dcd
 	}
-
-	// During rolling update, we do NOT generate DCDs for the old namespace.
-	// The old worker DCDs already exist from before the rollout started.
-	// Generating them here would overwrite their original spec with the new spec,
-	// causing unwanted rolling updates on the old deployments.
-	//
-	// Instead:
-	// - Old worker replicas are scaled down via direct patching in the controller
-	// - Frontend uses prefix-based discovery to route to both old and new workers
-	// - Old worker DCDs are deleted after rollout completes via deleteOldDCDs()
 
 	return deployments, nil
 }
@@ -372,10 +308,18 @@ func generateSingleDCD(
 	defaultIngressSpec *v1alpha1.IngressSpec,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
+	rollingUpdateCtx RollingUpdateContext,
 ) (*v1alpha1.DynamoComponentDeployment, error) {
+	// always use NewWorkerHash for the hash suffix as old worker DCDs are not generated
+	workerHashSuffix := rollingUpdateCtx.NewWorkerHash
+
 	deployment := &v1alpha1.DynamoComponentDeployment{}
 	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
-	deployment.Name = GetDynamoComponentName(parentDGD, componentName)
+	if IsWorkerComponent(component.ComponentType) {
+		deployment.Name = GetDynamoComponentNameWithHashSuffix(parentDGD, componentName, workerHashSuffix)
+	} else {
+		deployment.Name = GetDynamoComponentName(parentDGD, componentName)
+	}
 	deployment.Spec.BackendFramework = parentDGD.Spec.BackendFramework
 	deployment.Namespace = parentDGD.Namespace
 	deployment.Spec.ServiceName = componentName
@@ -387,6 +331,11 @@ func generateSingleDCD(
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
+
+	// only label worker DCDs with their hash for cleanup during rolling updates
+	if IsWorkerComponent(component.ComponentType) {
+		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHashSuffix
+	}
 
 	// Propagate metrics annotation from parent deployment if present
 	if parentDGD.Annotations != nil {
@@ -445,6 +394,10 @@ func generateSingleDCD(
 		return nil, err
 	}
 
+	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
+	if rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && rollingUpdateCtx.NewWorkerReplicas[componentName] != 0 {
+		deployment.Spec.Replicas = ptr.To(rollingUpdateCtx.NewWorkerReplicas[componentName])
+	}
 	if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas
 	}
@@ -558,6 +511,10 @@ func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 
 func GetDynamoComponentName(dynamoDeployment *v1alpha1.DynamoGraphDeployment, component string) string {
 	return fmt.Sprintf("%s-%s", dynamoDeployment.Name, strings.ToLower(component))
+}
+
+func GetDynamoComponentNameWithHashSuffix(dynamoDeployment *v1alpha1.DynamoGraphDeployment, component string, hashSuffix string) string {
+	return fmt.Sprintf("%s-%s-%s", dynamoDeployment.Name, strings.ToLower(component), hashSuffix)
 }
 
 type SecretsRetriever interface {
@@ -1239,6 +1196,11 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		dynamoNamespace = *component.DynamoNamespace
 	}
 
+	var workerHashSuffix string
+	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
+		workerHashSuffix = component.Labels[commonconsts.KubeLabelDynamoWorkerHash]
+	}
+
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ComponentType:                  component.ComponentType,
@@ -1247,6 +1209,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		DiscoveryBackend:               discoveryBackend,
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
+		WorkerHashSuffix:               workerHashSuffix,
 	}
 	return componentContext
 }

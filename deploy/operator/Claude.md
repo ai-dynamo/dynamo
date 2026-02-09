@@ -119,7 +119,7 @@ KubeLabelDynamoComponentType       = "nvidia.com/dynamo-component-type"
 KubeLabelDynamoWorkerHash          = "nvidia.com/dynamo-worker-hash"  // Worker DCDs only, for rollout cleanup
 
 // Annotations
-AnnotationActiveWorkerHash = "nvidia.com/active-worker-hash"
+AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
 ```
 
 ## Environment Variables

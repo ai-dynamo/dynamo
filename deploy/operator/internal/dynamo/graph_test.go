@@ -790,7 +790,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec, nil, nil, nil)
+			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec, nil, nil, RollingUpdateContext{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -827,7 +827,7 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespaceIgnored(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil, nil)
+	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil, RollingUpdateContext{})
 	if !assert.NoError(t, err) {
 		return
 	}
