@@ -167,9 +167,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::kv::ZmqKvEventListener>()?;
-    m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
-    m.add_class::<llm::kv::KvRecorder>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -227,7 +225,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -239,7 +237,6 @@ fn register_llm<'p>(
     context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
     router_mode: Option<RouterMode>,
-    migration_limit: u32,
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
@@ -249,17 +246,12 @@ fn register_llm<'p>(
     base_model_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
-    if model_type.inner == llm_rs::model_type::ModelType::Prefill {
-        if !matches!(model_input, ModelInput::Tokens) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "ModelType::Prefill requires model_input to be ModelInput::Tokens",
-            ));
-        }
-        if migration_limit != 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "ModelType::Prefill requires migration_limit to be 0",
-            ));
-        }
+    if model_type.inner == llm_rs::model_type::ModelType::Prefill
+        && !matches!(model_input, ModelInput::Tokens)
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+        ));
     }
 
     let model_input = match model_input {
@@ -269,6 +261,7 @@ fn register_llm<'p>(
     };
 
     let is_tensor_based = model_type.inner.supports_tensor();
+    let is_images = model_type.inner.supports_images();
 
     let model_type_obj = model_type.inner;
 
@@ -317,8 +310,9 @@ fn register_llm<'p>(
         .or_else(|| Some(source_path.clone()));
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        // For TensorBased models, skip HuggingFace downloads and register directly
-        if is_tensor_based {
+        // For TensorBased and Images models, skip HuggingFace downloads and register directly
+        // These model types don't require tokenizers
+        if is_tensor_based || is_images {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
@@ -364,7 +358,6 @@ fn register_llm<'p>(
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(Some(router_config))
-            .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
@@ -372,13 +365,17 @@ fn register_llm<'p>(
             .media_fetcher(media_fetcher.map(|m| m.inner));
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
+
+        // Convert lora_identifier (Option<String>) to Option<LoraInfo>
+        let lora_info = lora_identifier
+            .as_ref()
+            .map(|name| llm_rs::model_card::LoraInfo {
+                name: name.clone(),
+                max_gpu_lora_count: None,
+            });
+
         local_model
-            .attach(
-                &endpoint.inner,
-                model_type_obj,
-                model_input,
-                lora_identifier.as_deref(),
-            )
+            .attach(&endpoint.inner, model_type_obj, model_input, lora_info)
             .await
             .map_err(to_pyerr)?;
 
@@ -518,6 +515,10 @@ impl ModelType {
     #[classattr]
     const Prefill: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Prefill,
+    };
+    #[classattr]
+    const Images: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Images,
     };
 
     fn __or__(&self, other: &Self) -> Self {

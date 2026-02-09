@@ -82,9 +82,17 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         # values prevent incorrect prefix cache matches between different images.
         multi_modal_data = None
         if is_qwen_vl_model(self.config.model):
-            multi_modal_data = construct_qwen_decode_mm_data(
-                request.image_grid_thw, request.embeddings_shape, request.request_id
-            )
+            image_grid_thw = getattr(request, "image_grid_thw", None)
+            embeddings_shape = getattr(request, "embeddings_shape", None)
+            if image_grid_thw is None or embeddings_shape is None:
+                logger.warning(
+                    "Missing Qwen VL decode fields (image_grid_thw/embeddings_shape); "
+                    "skipping multi_modal_data construction."
+                )
+            else:
+                multi_modal_data = construct_qwen_decode_mm_data(
+                    image_grid_thw, embeddings_shape, request.request_id
+                )
 
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
@@ -276,6 +284,24 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 multi_modal_data["image"].append(
                     await self.image_loader.load_image(mi.multimodal_input.image_url)
                 )
+
+        # For Qwen VL (mRoPE), capture the accumulated image grid + embedding shape
+        # from the constructed multimodal data so decode can reconstruct its
+        # multi_modal_data consistently for multiple images.
+        if is_qwen_vl_model(self.config.model) and isinstance(
+            multi_modal_data.get("image"), dict
+        ):
+            image_data = multi_modal_data["image"]
+            image_grid_thw = image_data.get("image_grid_thw")
+            image_embeds = image_data.get("image_embeds")
+            if image_grid_thw is not None:
+                request.image_grid_thw = (
+                    image_grid_thw.tolist()
+                    if isinstance(image_grid_thw, torch.Tensor)
+                    else image_grid_thw
+                )
+            if image_embeds is not None:
+                request.embeddings_shape = list(image_embeds.shape)
 
         # Remove the image features from the request as they are not required
         # Use empty list instead of None to satisfy Pydantic validation on decode worker after vllm upgrade

@@ -15,16 +15,12 @@
 
 use clap::{Parser, ValueEnum};
 use dynamo_kv_router::{
-    OverlapScores, RadixTree, RouterEvent, compute_block_hash_for_seq,
+    RadixTree, RouterEvent,
+    bench_utils::{LatencyStats, SequenceData, generate_sequences},
+    compute_block_hash_for_seq,
     flat_hashmap::FlatHashMap,
-    protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, WorkerId,
-        compute_seq_hash_for_block,
-    },
+    protocols::LocalBlockHash,
 };
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
 /// Unified interface for RadixTree and FlatHashMap benchmarking.
@@ -206,114 +202,6 @@ struct Args {
     flat_hashmap: bool,
 }
 
-/// Pre-generated sequence data for benchmarking
-#[derive(Clone)]
-struct SequenceData {
-    worker_id: WorkerId,
-    local_hashes: Vec<LocalBlockHash>,
-    external_hashes: Vec<ExternalSequenceBlockHash>,
-}
-
-impl SequenceData {
-    /// Create a new SequenceData from local_hashes.
-    /// Automatically computes external_hashes using compute_seq_hash_for_block (cumulative hashes).
-    /// This ensures FlatHashMap can correctly identify block positions.
-    fn from_local_hashes(worker_id: WorkerId, local_hashes: Vec<LocalBlockHash>) -> Self {
-        let seq_hashes = compute_seq_hash_for_block(&local_hashes);
-        let external_hashes = seq_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash)
-            .collect();
-
-        Self {
-            worker_id,
-            local_hashes,
-            external_hashes,
-        }
-    }
-
-    fn to_store_event(&self, event_id: u64) -> RouterEvent {
-        RouterEvent {
-            worker_id: self.worker_id,
-            event: KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: self
-                        .local_hashes
-                        .iter()
-                        .zip(self.external_hashes.iter())
-                        .map(|(local, ext)| KvCacheStoredBlockData {
-                            tokens_hash: *local,
-                            block_hash: *ext,
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        }
-    }
-
-    fn to_remove_event(&self, event_id: u64) -> RouterEvent {
-        RouterEvent {
-            worker_id: self.worker_id,
-            event: KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: self.external_hashes.clone(),
-                }),
-                dp_rank: 0,
-            },
-        }
-    }
-}
-
-/// Generate sequences with shared prefix prompts
-fn generate_sequences(
-    num_sequences: usize,
-    depth: usize,
-    num_workers: usize,
-    prefix_prompt_ratio: f64,
-    num_prefix_prompts: usize,
-    seed: u64,
-) -> Vec<SequenceData> {
-    let mut sequences = Vec::with_capacity(num_sequences);
-    let prefix_length = (depth as f64 * prefix_prompt_ratio).round() as usize;
-    let mut rng: StdRng = StdRng::seed_from_u64(seed);
-
-    for seq_id in 0..num_sequences {
-        let seq_id_u64 = seq_id as u64;
-        let worker_id = (seq_id % num_workers) as WorkerId;
-
-        // Determine prefix group for this sequence
-        let group_id = if num_prefix_prompts > 0 && prefix_length > 0 {
-            Some(rng.random_range(0..num_prefix_prompts) as u64)
-        } else {
-            None
-        };
-
-        // Build local_hashes: shared prefix (if applicable) + unique suffix
-        let local_hashes: Vec<LocalBlockHash> = (0..depth)
-            .map(|block_idx| {
-                let block_idx_u64 = block_idx as u64;
-                if let Some(gid) = group_id {
-                    if block_idx < prefix_length {
-                        // Shared prefix based on group_id
-                        return LocalBlockHash(0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64);
-                    }
-                }
-                // Unique suffix (or no shared prefix)
-                LocalBlockHash((seq_id_u64 << 32) | block_idx_u64)
-            })
-            .collect();
-
-        sequences.push(SequenceData::from_local_hashes(worker_id, local_hashes));
-    }
-
-    sequences
-}
-
 /// Build a pre-populated RadixTree (for sweep/dump benchmarks that specifically need RadixTree)
 fn build_tree(sequences: &[SequenceData]) -> RadixTree {
     let num_blocks: usize = sequences.iter().map(|s| s.local_hashes.len()).sum();
@@ -381,52 +269,6 @@ fn build_index(sequences: &[SequenceData], use_flat_hashmap: bool) -> KvIndex {
     index
 }
 
-/// Statistics for a set of timing measurements
-#[derive(Debug)]
-struct LatencyStats {
-    min: Duration,
-    max: Duration,
-    avg: Duration,
-    p50: Duration,
-    p95: Duration,
-    p99: Duration,
-    throughput_ops_sec: f64,
-}
-
-impl LatencyStats {
-    fn from_durations(mut durations: Vec<Duration>) -> Self {
-        durations.sort();
-        let n = durations.len();
-        let total: Duration = durations.iter().sum();
-        let avg = total / n as u32;
-
-        Self {
-            min: durations[0],
-            max: durations[n - 1],
-            avg,
-            p50: durations[n / 2],
-            p95: durations[n * 95 / 100],
-            p99: durations[n * 99 / 100],
-            throughput_ops_sec: n as f64 / total.as_secs_f64(),
-        }
-    }
-
-    fn print(&self, operation: &str, blocks_per_op: usize) {
-        println!("\n{} Latency Statistics:", operation);
-        println!("  min:  {:>12?}", self.min);
-        println!("  avg:  {:>12?}", self.avg);
-        println!("  p50:  {:>12?}", self.p50);
-        println!("  p95:  {:>12?}", self.p95);
-        println!("  p99:  {:>12?}", self.p99);
-        println!("  max:  {:>12?}", self.max);
-        println!("  throughput: {:.2} ops/sec", self.throughput_ops_sec);
-        println!(
-            "  throughput: {:.2} blocks/sec",
-            self.throughput_ops_sec * blocks_per_op as f64
-        );
-    }
-}
-
 /// Benchmark compute_block_hash_for_seq operation
 fn bench_hash(args: &Args) {
     println!("\n=== Benchmarking COMPUTE_BLOCK_HASH (per-request hot path) ===");
@@ -464,7 +306,7 @@ fn bench_hash(args: &Args) {
         }
     }
 
-    let stats = LatencyStats::from_durations(durations);
+    let stats = LatencyStats::from_durations(durations).unwrap();
     stats.print("COMPUTE_BLOCK_HASH", args.depth);
 }
 
@@ -487,6 +329,7 @@ fn bench_store_remove_cycle(args: &Args, time_store: bool) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
+        true, // use_cumulative_hash
     );
 
     let mut index = build_index(&sequences, args.flat_hashmap);
@@ -524,7 +367,7 @@ fn bench_store_remove_cycle(args: &Args, time_store: bool) {
         }
     }
 
-    let stats = LatencyStats::from_durations(durations);
+    let stats = LatencyStats::from_durations(durations).unwrap();
     stats.print(op_name, args.depth);
 }
 
@@ -548,6 +391,7 @@ fn bench_find_matches(args: &Args) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
+        true, // use_cumulative_hash
     );
 
     let index = build_index(&sequences, args.flat_hashmap);
@@ -575,7 +419,9 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(hit_durations).print("FIND_MATCHES (HIT)", args.depth);
+    LatencyStats::from_durations(hit_durations)
+        .unwrap()
+        .print("FIND_MATCHES (HIT)", args.depth);
 
     // MISS case
     println!("\n  --- MISS case (non-existing sequences) ---");
@@ -589,7 +435,9 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(miss_durations).print("FIND_MATCHES (MISS)", args.depth);
+    LatencyStats::from_durations(miss_durations)
+        .unwrap()
+        .print("FIND_MATCHES (MISS)", args.depth);
 
     // PARTIAL case
     println!("\n  --- PARTIAL case (prefix match only) ---");
@@ -604,7 +452,9 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(partial_durations).print("FIND_MATCHES (PARTIAL)", args.depth);
+    LatencyStats::from_durations(partial_durations)
+        .unwrap()
+        .print("FIND_MATCHES (PARTIAL)", args.depth);
 
     // EARLY_EXIT case
     println!("\n  --- EARLY_EXIT case ---");
@@ -617,6 +467,7 @@ fn bench_find_matches(args: &Args) {
         }
     }
     LatencyStats::from_durations(early_exit_durations)
+        .unwrap()
         .print("FIND_MATCHES (EARLY_EXIT)", args.depth);
 }
 
@@ -845,6 +696,7 @@ fn bench_sweep(args: &Args) {
             args.prefix_prompt_ratio,
             num_prefix_prompts,
             args.seed,
+            true, // use_cumulative_hash
         );
         let tree_sequences = &all_sequences[..num_sequences];
         let extra_sequences = &all_sequences[num_sequences..];
@@ -956,6 +808,7 @@ fn bench_dump(args: &Args) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
+        true, // use_cumulative_hash
     );
 
     let tree = build_tree(&sequences);

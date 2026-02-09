@@ -34,7 +34,6 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
-    pytest.mark.post_merge,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.post_merge,  # post_merge to pinpoint failure commit
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
@@ -63,8 +62,6 @@ class DynamoWorkerProcess(ManagedProcess):
         system_port = allocate_port(9100)
         self.system_port = system_port
         self.frontend_port = frontend_port
-        # Prefill workers require migration_limit=0 (no KV cache migration support)
-        migration_limit = "0" if mode == "prefill" else "3"
 
         command = [
             "python3",
@@ -78,8 +75,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "16384",
             "--max-num-tokens",
             "16384",
-            "--migration-limit",
-            migration_limit,
         ]
         if mode != "prefill_and_decode":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
@@ -134,7 +129,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             log_dir=log_dir,
         )
 
