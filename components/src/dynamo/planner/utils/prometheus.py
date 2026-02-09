@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import typing
 
+import aiohttp
 from prometheus_api_client import PrometheusConnect
+from prometheus_client.parser import text_string_to_metric_families
 from pydantic import BaseModel, ValidationError
 
 from dynamo import prometheus_names
@@ -180,3 +183,143 @@ def parse_frontend_metric_containers(
             logger.error(f"Error parsing frontend metric container: {e}")
             continue
     return metrics_containers
+
+
+# Metric names for per-worker load metrics (gauge-type, queried directly from router)
+_WORKER_METRIC_NAMES = {
+    "active_prefill_tokens": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_ACTIVE_PREFILL_TOKENS}",
+    "active_decode_blocks": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_ACTIVE_DECODE_BLOCKS}",
+    "last_ttft": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS}",
+    "last_isl": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_INPUT_SEQUENCE_TOKENS}",
+    "last_itl": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS}",
+}
+
+class DirectRouterMetricsClient:
+    """Query router's /metrics endpoint directly for real-time per-worker metrics.
+
+    Runs a continuous background sampling loop that collects metrics at
+    evenly-spaced intervals (interval / num_samples). At decision time,
+    the load-based loop reads the averaged buffer via get_averaged_metrics().
+    """
+
+    def __init__(self, router_metrics_url: str, dynamo_namespace: str):
+        self.router_metrics_url = router_metrics_url
+        self.dynamo_namespace = dynamo_namespace
+        self._sample_buffer: list[dict[str, dict[str, float]]] = []
+        self._num_samples: int = 10
+
+    def _parse_prometheus_text(
+        self, text: str, model_name: str
+    ) -> dict[str, dict[str, float]]:
+        """Parse Prometheus text exposition format and extract per-worker metrics.
+
+        Uses prometheus_client.parser to parse the text exposition format.
+
+        Args:
+            text: Raw Prometheus text from /metrics endpoint
+            model_name: Model name for filtering (case-insensitive)
+
+        Returns:
+            {worker_id: {"active_prefill_tokens": float, "active_decode_blocks": float, ...}}
+        """
+        target_metrics = set(_WORKER_METRIC_NAMES.values())
+        reverse_map = {v: k for k, v in _WORKER_METRIC_NAMES.items()}
+        result: dict[str, dict[str, float]] = {}
+
+        for family in text_string_to_metric_families(text):
+            if family.name not in target_metrics:
+                continue
+
+            field_name = reverse_map[family.name]
+
+            for sample in family.samples:
+                labels = sample.labels
+
+                # Filter by dynamo_namespace and model
+                if labels.get("dynamo_namespace") != self.dynamo_namespace:
+                    continue
+                if labels.get("model", "").lower() != model_name.lower():
+                    continue
+
+                worker_id = labels.get("worker_id", "unknown")
+                value = sample.value
+
+                if worker_id not in result:
+                    result[worker_id] = {}
+                result[worker_id][field_name] = value
+
+        return result
+
+    async def _fetch_and_parse(
+        self, model_name: str
+    ) -> dict[str, dict[str, float]]:
+        """Fetch /metrics from router and parse into per-worker metrics."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.router_metrics_url, timeout=aiohttp.ClientTimeout(total=2)
+                ) as response:
+                    text = await response.text()
+            return self._parse_prometheus_text(text, model_name)
+        except Exception as e:
+            logger.warning(f"Failed to fetch router metrics: {e}")
+            return {}
+
+    async def run_sampling_loop(
+        self, model_name: str, num_samples: int, interval: float
+    ) -> None:
+        """Background coroutine: continuously sample at evenly-spaced intervals.
+
+        Runs alongside the load-based loop via asyncio.gather().
+        sample_interval = interval / num_samples (e.g., 5s / 10 = 0.5s)
+        Keeps only the last num_samples in the buffer (rolling window).
+        """
+        self._num_samples = num_samples
+        sample_interval = interval / num_samples
+        while True:
+            metrics = await self._fetch_and_parse(model_name)
+            if metrics:
+                self._sample_buffer.append(metrics)
+                if len(self._sample_buffer) > num_samples:
+                    self._sample_buffer.pop(0)
+            await asyncio.sleep(sample_interval)
+
+    def get_averaged_metrics(self) -> typing.Optional[dict[str, dict[str, float]]]:
+        """Return averaged per-worker metrics from the sample buffer.
+
+        Called by the load-based loop at decision time. Non-blocking.
+
+        Returns:
+            {worker_id: {"active_prefill_tokens": float, ...}} or None if empty.
+        """
+        if not self._sample_buffer:
+            return None
+
+        # Accumulate sums and counts per (worker_id, metric_name)
+        worker_sums: dict[str, dict[str, float]] = {}
+        worker_counts: dict[str, dict[str, int]] = {}
+
+        for sample in self._sample_buffer:
+            for worker_id, metrics in sample.items():
+                if worker_id not in worker_sums:
+                    worker_sums[worker_id] = {}
+                    worker_counts[worker_id] = {}
+                for metric_name, value in metrics.items():
+                    worker_sums[worker_id][metric_name] = (
+                        worker_sums[worker_id].get(metric_name, 0.0) + value
+                    )
+                    worker_counts[worker_id][metric_name] = (
+                        worker_counts[worker_id].get(metric_name, 0) + 1
+                    )
+
+        # Average
+        result: dict[str, dict[str, float]] = {}
+        for worker_id in worker_sums:
+            result[worker_id] = {}
+            for metric_name in worker_sums[worker_id]:
+                count = worker_counts[worker_id][metric_name]
+                result[worker_id][metric_name] = (
+                    worker_sums[worker_id][metric_name] / count
+                )
+
+        return result

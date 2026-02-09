@@ -6,16 +6,22 @@ from typing import Optional
 
 from dynamo.planner.utils.dryrun_plot_utils import create_dryrun_plot
 from dynamo.planner.utils.planner_core import (
-    DecodePlanner,
     PlannerSharedState,
-    PrefillPlanner,
     _apply_component_gpu_budget,
     _apply_global_gpu_budget,
 )
+from dynamo.planner.utils.decode_planner import DecodePlanner
+from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 
 
 def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
+    if getattr(args, "enable_loadbased_scaling", False):
+        raise ValueError(
+            "Load-based scaling is not supported in dryrun mode. "
+            "Disable --enable-loadbased-scaling to use dryrun."
+        )
+
     # Dryrun mode: use defaults if GPU counts not provided (no DGD available)
     if args.prefill_engine_num_gpu is None:
         args.prefill_engine_num_gpu = 1
@@ -90,7 +96,7 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
             compute_safe_p_thpt(args.start_num_p, isl[0], args.ttft)
             * args.adjustment_interval
         ]
-        prefill_planner.dryrun_observe_metrics(rr[0], isl[0], osl[0])
+        prefill_planner.dryrun_observe_traffic_stats(rr[0], isl[0], osl[0])
     else:
         num_p = [0]
         p_thpt = [0]
@@ -103,7 +109,7 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
             compute_safe_d_thpt(args.start_num_d, isl[0], osl[0], args.itl)
             * args.adjustment_interval
         ]
-        decode_planner.dryrun_observe_metrics(rr[0], isl[0], osl[0])
+        decode_planner.dryrun_observe_traffic_stats(rr[0], isl[0], osl[0])
     else:
         num_d = [0]
         d_thpt = [0]
@@ -152,7 +158,7 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
         # update load predictor
         for planner in [prefill_planner, decode_planner]:
             if planner is not None:
-                planner.dryrun_observe_metrics(
+                planner.dryrun_observe_traffic_stats(
                     metric["request_count"], metric["avg_isl"], metric["avg_osl"]
                 )
 

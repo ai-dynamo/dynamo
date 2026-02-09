@@ -13,13 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import asyncio
 import logging
 
 from pydantic import BaseModel
 
-from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
-from dynamo.planner.utils.planner_core import start_sla_planner
+from dynamo.planner.utils.decode_planner import DecodePlanner
+from dynamo.planner.utils.disagg_planner import DisaggPlanner
+from dynamo.planner.utils.planner_argparse import (
+    create_sla_planner_parser,
+    validate_sla_planner_args,
+)
+from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
@@ -31,6 +37,22 @@ INIT_PLANNER_START_DELAY = 30
 
 class RequestType(BaseModel):
     text: str
+
+
+async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
+    validate_sla_planner_args(args)
+
+    mode = getattr(args, "mode", "disagg")
+    if mode == "disagg":
+        planner = DisaggPlanner(runtime, args)
+    elif mode == "prefill":
+        planner = PrefillPlanner(runtime, args)
+    elif mode == "decode":
+        planner = DecodePlanner(runtime, args)
+    else:
+        raise ValueError(f"Invalid planner mode: {mode}")
+    await planner._async_init()
+    await planner.run()
 
 
 @dynamo_worker()

@@ -25,7 +25,7 @@ from dynamo.planner.utils.perf_interpolation import (
     PrefillInterpolator,
 )
 from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
-from dynamo.planner.utils.prometheus import PrometheusAPIClient
+from dynamo.planner.utils.prometheus import DirectRouterMetricsClient, PrometheusAPIClient
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -127,6 +127,11 @@ class PlannerSharedState:
     num_d_workers: int = 0
     cumulative_gpu_hours: float = 0.0
     last_adjustment_time: float = 0.0
+    # Lower bounds from throughput-based scaling (used when both modes enabled)
+    throughput_lower_bound_p: int = 1
+    throughput_lower_bound_d: int = 1
+    # Separate timestamp for load-based adjustment loop
+    last_loadbased_adjustment_time: float = 0.0
 
 
 def _apply_global_gpu_budget(
@@ -405,6 +410,33 @@ class BasePlanner:
         else:
             self.no_correction = args.no_correction
 
+        # Load-based scaling flags.
+        # Argument validation (flag resolution, constraint checks, correction factor
+        # auto-disable) is handled by validate_sla_planner_args() in planner_argparse.
+        self.enable_loadbased = getattr(args, "enable_loadbased_scaling", False)
+        self.enable_throughput = getattr(args, "enable_throughput_scaling", True)
+
+        if self.enable_loadbased:
+            self.router_metrics_client = DirectRouterMetricsClient(
+                args.loadbased_router_metrics_url, args.namespace
+            )
+            self.cached_per_worker_metrics: dict[str, dict[str, float]] = {}
+
+            from dynamo.planner.utils.load_based_regression import (
+                LoadBasedRegressionModel,
+            )
+
+            if self.component_type == SubComponentType.PREFILL:
+                self.ttft_regression = LoadBasedRegressionModel(
+                    window_size=self.args.loadbased_learning_window,
+                    min_observations=self.args.loadbased_min_observations,
+                )
+            elif self.component_type == SubComponentType.DECODE:
+                self.itl_regression = LoadBasedRegressionModel(
+                    window_size=self.args.loadbased_learning_window,
+                    min_observations=self.args.loadbased_min_observations,
+                )
+
     @property
     def last_metrics(self) -> Metrics:
         return self.shared_state.last_metrics
@@ -508,7 +540,7 @@ class BasePlanner:
 
         return num_p_workers, num_d_workers, True  # Always stable for non-K8s
 
-    async def observe_metrics(
+    async def observe_traffic_stats(
         self, require_prefill: bool = True, require_decode: bool = True
     ) -> None:
         """
@@ -623,7 +655,7 @@ class BasePlanner:
             logger.error(f"Failed to predict load: {e}")
             return None, None, None
 
-    def dryrun_observe_metrics(self, num_req: int, isl_avg: float, osl_avg: float):
+    def dryrun_observe_traffic_stats(self, num_req: int, isl_avg: float, osl_avg: float):
         self.num_req_predictor.add_data_point(num_req)
         self.isl_predictor.add_data_point(isl_avg)
         self.osl_predictor.add_data_point(osl_avg)
@@ -700,6 +732,155 @@ class BasePlanner:
         ]
         await self.connector.set_component_replicas(target_replicas, blocking=False)
 
+    async def _apply_scaling_blocking(self, desired_replicas: int) -> None:
+        """Apply scaling with blocking=True (wait for deployment ready)."""
+        if self.args.no_operation:
+            return
+        target_replicas = [
+            TargetReplica(
+                sub_component_type=self.component_type,
+                component_name=self._component_name(),
+                desired_replicas=desired_replicas,
+            )
+        ]
+        await self.connector.set_component_replicas(target_replicas, blocking=True)
+
+    async def observe_engine_load_stats(self) -> None:
+        """Query DirectRouterMetricsClient for per-worker metrics, update regression."""
+        all_metrics = self.router_metrics_client.get_averaged_metrics()
+        if all_metrics is None:
+            logger.warning("No per-worker metrics available yet (buffer empty)")
+            return
+
+        if self.component_type == SubComponentType.PREFILL:
+            self.cached_per_worker_metrics = {
+                wid: m
+                for wid, m in all_metrics.items()
+                if "active_prefill_tokens" in m
+            }
+            for wid, m in self.cached_per_worker_metrics.items():
+                active_prefill = m.get("active_prefill_tokens", 0.0)
+                last_isl = m.get("last_isl", 0.0)
+                last_ttft = m.get("last_ttft", 0.0)
+                if last_ttft > 0 and last_isl > 0:
+                    x = active_prefill + last_isl
+                    # last_ttft is in seconds from Prometheus, convert to ms
+                    y = last_ttft * 1000
+                    self.ttft_regression.add_observation(x, y)
+
+        elif self.component_type == SubComponentType.DECODE:
+            self.cached_per_worker_metrics = {
+                wid: m
+                for wid, m in all_metrics.items()
+                if "active_decode_blocks" in m
+            }
+            for wid, m in self.cached_per_worker_metrics.items():
+                active_decode = m.get("active_decode_blocks", 0.0)
+                last_itl = m.get("last_itl", 0.0)
+                if last_itl > 0 and active_decode > 0:
+                    x = active_decode
+                    # last_itl is in seconds from Prometheus, convert to ms
+                    y = last_itl * 1000
+                    self.itl_regression.add_observation(x, y)
+
+    def loadbased_plan_adjustment(self) -> Optional[int]:
+        """Load-based scaling decision. Override in subclasses."""
+        raise NotImplementedError
+
+    async def _throughput_loop(
+        self, require_prefill: bool, require_decode: bool
+    ) -> None:
+        """Throughput-based scaling loop (existing behavior, extracted from run())."""
+        while True:
+            current_time = time.time()
+
+            if (
+                current_time - self.shared_state.last_adjustment_time
+                >= self.args.adjustment_interval
+            ):
+                self.shared_state.last_adjustment_time = time.time()
+                logger.info("New throughput adjustment interval started!")
+
+                await self.observe_traffic_stats(
+                    require_prefill=require_prefill, require_decode=require_decode
+                )
+                desired_replicas = self.plan_adjustment()
+                if desired_replicas is not None:
+                    if self.enable_loadbased:
+                        # When load-based is also enabled: just set lower bound
+                        if self.component_type == SubComponentType.PREFILL:
+                            self.shared_state.throughput_lower_bound_p = desired_replicas
+                        else:
+                            self.shared_state.throughput_lower_bound_d = desired_replicas
+                        logger.info(
+                            f"Throughput lower bound set to {desired_replicas} for {self.component_type.value}"
+                        )
+                    else:
+                        # Throughput-only: apply scaling directly
+                        desired_replicas = self.apply_component_budget(desired_replicas)
+                        self.update_predicted_replicas_metric(desired_replicas)
+                        await self._apply_scaling(desired_replicas)
+
+            await asyncio.sleep(self.args.adjustment_interval / 10)
+
+    async def _loadbased_loop(
+        self, require_prefill: bool, require_decode: bool
+    ) -> None:
+        """Load-based scaling loop at shorter interval."""
+        while True:
+            current_time = time.time()
+
+            if (
+                current_time - self.shared_state.last_loadbased_adjustment_time
+                >= self.args.loadbased_adjustment_interval
+            ):
+                self.shared_state.last_loadbased_adjustment_time = time.time()
+                logger.info("New load-based adjustment interval started!")
+
+                # Query DGD for fresh worker counts
+                num_p, num_d, _ = await self.get_workers_info(
+                    require_prefill=require_prefill, require_decode=require_decode
+                )
+                self.shared_state.num_p_workers = num_p
+                self.shared_state.num_d_workers = num_d
+
+                # Observe per-worker metrics from router
+                await self.observe_engine_load_stats()
+
+                # Reconcile DGD worker count with router Prometheus count
+                prom_count = len(self.cached_per_worker_metrics)
+                dgd_count = (
+                    num_p
+                    if self.component_type == SubComponentType.PREFILL
+                    else num_d
+                )
+                if prom_count != dgd_count:
+                    logger.warning(
+                        f"Worker count mismatch: DGD reports {dgd_count} workers, "
+                        f"router metrics reports {prom_count} workers. "
+                        "Skipping load-based scaling adjustment."
+                    )
+                    await asyncio.sleep(
+                        self.args.loadbased_adjustment_interval / 10
+                    )
+                    continue
+
+                desired_replicas = self.loadbased_plan_adjustment()
+
+                if desired_replicas is not None:
+                    # Enforce lower bound from throughput-based
+                    if self.enable_throughput:
+                        if self.component_type == SubComponentType.PREFILL:
+                            lower_bound = self.shared_state.throughput_lower_bound_p
+                        else:
+                            lower_bound = self.shared_state.throughput_lower_bound_d
+                        desired_replicas = max(desired_replicas, lower_bound)
+                    desired_replicas = self.apply_component_budget(desired_replicas)
+                    self.update_predicted_replicas_metric(desired_replicas)
+                    await self._apply_scaling_blocking(desired_replicas)
+
+            await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
+
     async def run(self):
         """Main loop for the planner"""
         if not self.args.no_operation:
@@ -737,244 +918,20 @@ class BasePlanner:
             )  # normalize model name to lowercase (MDC)
 
         self.shared_state.last_adjustment_time = time.time()
+        self.shared_state.last_loadbased_adjustment_time = time.time()
 
-        while True:
-            current_time = time.time()
-
-            if (
-                current_time - self.shared_state.last_adjustment_time
-                >= self.args.adjustment_interval
-            ):
-                self.shared_state.last_adjustment_time = time.time()
-                logger.info("New adjustment interval started!")
-
-                await self.observe_metrics(
-                    require_prefill=require_prefill, require_decode=require_decode
+        # Build list of concurrent loops based on enabled scaling modes
+        loops = []
+        if self.enable_throughput:
+            loops.append(self._throughput_loop(require_prefill, require_decode))
+        if self.enable_loadbased:
+            loops.append(self._loadbased_loop(require_prefill, require_decode))
+            loops.append(
+                self.router_metrics_client.run_sampling_loop(
+                    self.model_name,
+                    self.args.loadbased_metric_samples,
+                    self.args.loadbased_adjustment_interval,
                 )
-                desired_replicas = self.plan_adjustment()
-                if desired_replicas is not None:
-                    desired_replicas = self.apply_component_budget(desired_replicas)
-                    self.update_predicted_replicas_metric(desired_replicas)
-                    await self._apply_scaling(desired_replicas)
-
-            # sleep for a while to avoid busy-waiting but not too long to miss the next adjustment
-            await asyncio.sleep(self.args.adjustment_interval / 10)
-
-
-class PrefillPlanner(BasePlanner):
-    component_type = SubComponentType.PREFILL
-
-    def _update_correction_factor(self) -> bool:
-        expect_ttft = self.prefill_interpolator.interpolate_ttft(self.last_metrics.isl)
-        self.p_correction_factor = self.last_metrics.ttft / expect_ttft
-        logger.info(f"Correction factor (prefill TTFT): {self.p_correction_factor:.3f}")
-        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
-            self.prometheus_metrics.p_correction_factor.set(self.p_correction_factor)
-        return True
-
-    def _compute_replica_requirements(
-        self, next_num_req: float, next_isl: float, next_osl: float
-    ) -> int:
-        pred_prefill_throughput = (
-            next_num_req
-            * next_isl
-            / self.args.adjustment_interval
-            * min(1, self.p_correction_factor)
-        )
-        p_thpt_per_gpu = self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
-        next_num_p = math.ceil(
-            pred_prefill_throughput / p_thpt_per_gpu / self.args.prefill_engine_num_gpu
-        )
-        next_num_p = max(next_num_p, self.args.min_endpoint)
-        logger.info(
-            f"Prefill calculation: {pred_prefill_throughput:.2f}(p_thpt) / "
-            f"{p_thpt_per_gpu * self.args.prefill_engine_num_gpu:.2f}(p_engine_cap) = "
-            f"{next_num_p}(num_p)"
-        )
-        return next_num_p
-
-    def update_predicted_replicas_metric(self, desired_replicas: int) -> None:
-        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
-            self.prometheus_metrics.predicted_num_p.set(desired_replicas)
-
-
-class DecodePlanner(BasePlanner):
-    component_type = SubComponentType.DECODE
-
-    def _update_correction_factor(self) -> bool:
-        if self.shared_state.num_d_workers == 0:
-            logger.warning(
-                "No decode workers found for correction factor, skipping correction update"
-            )
-            return True
-        expect_itl = self.decode_interpolator.interpolate_itl(
-            concurrency=self.last_metrics.num_req  # type: ignore
-            / self.shared_state.num_d_workers
-            * self.last_metrics.request_duration  # type: ignore
-            / self.args.adjustment_interval,
-            context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
-        )
-        self.d_correction_factor = self.last_metrics.itl / expect_itl
-        logger.info(f"Correction factor (decode ITL): {self.d_correction_factor:.3f}")
-        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
-            self.prometheus_metrics.d_correction_factor.set(self.d_correction_factor)
-        return True
-
-    def _compute_replica_requirements(
-        self, next_num_req: float, next_isl: float, next_osl: float
-    ) -> int:
-        if self.d_correction_factor <= 0:
-            logger.warning(
-                f"d_correction_factor is {self.d_correction_factor}, using default value of 1.0"
-            )
-            corrected_itl = self.args.itl
-        else:
-            corrected_itl = self.args.itl / self.d_correction_factor
-        (
-            pred_decode_thpt_per_gpu,
-            _,
-            _,
-        ) = self.decode_interpolator.find_best_throughput_per_gpu(
-            itl=corrected_itl, context_length=next_isl + next_osl / 2
-        )
-        pred_decode_throughput = next_num_req * next_osl / self.args.adjustment_interval
-        next_num_d = math.ceil(
-            pred_decode_throughput
-            / pred_decode_thpt_per_gpu
-            / self.args.decode_engine_num_gpu
-        )
-        next_num_d = max(next_num_d, self.args.min_endpoint)
-        logger.info(
-            f"Decode calculation: {pred_decode_throughput:.2f}(d_thpt) / "
-            f"{pred_decode_thpt_per_gpu * self.args.decode_engine_num_gpu:.2f}(d_engine_cap) = "
-            f"{next_num_d}(num_d)"
-        )
-        return next_num_d
-
-    def update_predicted_replicas_metric(self, desired_replicas: int) -> None:
-        if self.prometheus_port != 0 and self.prometheus_metrics is not None:
-            self.prometheus_metrics.predicted_num_d.set(desired_replicas)
-
-
-class DisaggPlanner:
-    def __init__(
-        self, runtime: Optional[DistributedRuntime], args: argparse.Namespace
-    ) -> None:
-        self.args = args
-        self.shared_state = PlannerSharedState()
-        prometheus_metrics = PlannerPrometheusMetrics()
-
-        self.prefill_planner = PrefillPlanner(
-            runtime,
-            args,
-            shared_state=self.shared_state,
-            prometheus_metrics=prometheus_metrics,
-            start_prometheus_server=True,
-        )
-        self.decode_planner = DecodePlanner(
-            runtime,
-            args,
-            shared_state=self.shared_state,
-            prometheus_metrics=prometheus_metrics,
-            prometheus_api_client=getattr(
-                self.prefill_planner, "prometheus_api_client", None
-            ),
-            connector=getattr(self.prefill_planner, "connector", None),
-            start_prometheus_server=False,
-        )
-
-    async def _async_init(self):
-        # Prefill/Decode share the same connector instance in disagg mode.
-        await self.prefill_planner._async_init()
-
-    async def run(self):
-        if not self.args.no_operation:
-            logger.info("Validating deployment...")
-            await self.prefill_planner.connector.validate_deployment(
-                prefill_component_name=self.prefill_planner.prefill_component_name,
-                decode_component_name=self.prefill_planner.decode_component_name,
-                require_prefill=True,
-                require_decode=True,
-            )
-            logger.info("Successfully validated the deployment")
-
-            # Initialize GPU counts
-            _initialize_gpu_counts(
-                self.args,
-                self.prefill_planner.connector,
-                require_prefill=True,
-                require_decode=True,
             )
 
-            await self.prefill_planner.connector.wait_for_deployment_ready()
-
-            model_name = await self.prefill_planner._get_model_name(
-                require_prefill=True, require_decode=True
-            )
-            logger.info(f"Detected model name from deployment: {model_name}")
-            model_name = model_name.lower()
-            self.prefill_planner.model_name = model_name
-            self.decode_planner.model_name = model_name
-
-        self.shared_state.last_adjustment_time = time.time()
-
-        while True:
-            current_time = time.time()
-
-            if (
-                current_time - self.shared_state.last_adjustment_time
-                >= self.args.adjustment_interval
-            ):
-                self.shared_state.last_adjustment_time = time.time()
-                logger.info("New adjustment interval started!")
-
-                await self.prefill_planner.observe_metrics(
-                    require_prefill=True, require_decode=True
-                )
-                self.decode_planner.update_predictors_from_metrics(
-                    self.shared_state.last_metrics
-                )
-                next_num_p = self.prefill_planner.plan_adjustment()
-                next_num_d = self.decode_planner.plan_adjustment()
-                if next_num_p is None or next_num_d is None:
-                    continue
-
-                next_num_p, next_num_d = _apply_global_gpu_budget(
-                    next_num_p, next_num_d, self.args
-                )
-                self.prefill_planner.update_predicted_replicas_metric(next_num_p)
-                self.decode_planner.update_predicted_replicas_metric(next_num_d)
-
-                if not self.args.no_operation:
-                    target_replicas = [
-                        TargetReplica(
-                            sub_component_type=SubComponentType.PREFILL,
-                            component_name=self.prefill_planner.prefill_component_name,
-                            desired_replicas=next_num_p,
-                        ),
-                        TargetReplica(
-                            sub_component_type=SubComponentType.DECODE,
-                            component_name=self.prefill_planner.decode_component_name,
-                            desired_replicas=next_num_d,
-                        ),
-                    ]
-                    await self.prefill_planner.connector.set_component_replicas(
-                        target_replicas, blocking=False
-                    )
-
-            # sleep for a while to avoid busy-waiting but not too long to miss the next adjustment
-            await asyncio.sleep(self.args.adjustment_interval / 10)
-
-
-async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
-    mode = getattr(args, "mode", "disagg")
-    if mode == "disagg":
-        planner = DisaggPlanner(runtime, args)
-    elif mode == "prefill":
-        planner = PrefillPlanner(runtime, args)
-    elif mode == "decode":
-        planner = DecodePlanner(runtime, args)
-    else:
-        raise ValueError(f"Invalid planner mode: {mode}")
-    await planner._async_init()
-    await planner.run()
+        await asyncio.gather(*loops)
