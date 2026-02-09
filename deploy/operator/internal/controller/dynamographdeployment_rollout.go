@@ -103,36 +103,36 @@ func (r *DynamoGraphDeploymentReconciler) setActiveWorkerHash(
 	dgd.Annotations[consts.AnnotationActiveWorkerHash] = hash
 }
 
-// getOrCreateRolloutStatus returns the existing rollout status or creates a new one.
-func (r *DynamoGraphDeploymentReconciler) getOrCreateRolloutStatus(
+// getOrCreateRollingUpdateStatus returns the existing rolling update status or creates a new one.
+func (r *DynamoGraphDeploymentReconciler) getOrCreateRollingUpdateStatus(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) *nvidiacomv1alpha1.RolloutStatus {
-	if dgd.Status.Rollout == nil {
-		dgd.Status.Rollout = &nvidiacomv1alpha1.RolloutStatus{
-			Phase: nvidiacomv1alpha1.RolloutPhaseNone,
+) *nvidiacomv1alpha1.RollingUpdateStatus {
+	if dgd.Status.RollingUpdate == nil {
+		dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+			Phase: nvidiacomv1alpha1.RollingUpdatePhaseNone,
 		}
 	}
-	return dgd.Status.Rollout
+	return dgd.Status.RollingUpdate
 }
 
 // isRollingUpdateInProgress returns true if a rolling update is currently active.
 func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) bool {
-	if dgd.Status.Rollout == nil {
+	if dgd.Status.RollingUpdate == nil {
 		return false
 	}
-	phase := dgd.Status.Rollout.Phase
-	return phase == nvidiacomv1alpha1.RolloutPhasePending ||
-		phase == nvidiacomv1alpha1.RolloutPhaseInProgress
+	phase := dgd.Status.RollingUpdate.Phase
+	return phase == nvidiacomv1alpha1.RollingUpdatePhasePending ||
+		phase == nvidiacomv1alpha1.RollingUpdatePhaseInProgress
 }
 
-// clearRolloutStatus resets the rollout status after completion or failure cleanup.
-func (r *DynamoGraphDeploymentReconciler) clearRolloutStatus(
+// clearRollingUpdateStatus resets the rolling update status after completion or failure cleanup.
+func (r *DynamoGraphDeploymentReconciler) clearRollingUpdateStatus(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) {
-	dgd.Status.Rollout = &nvidiacomv1alpha1.RolloutStatus{
-		Phase: nvidiacomv1alpha1.RolloutPhaseNone,
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseNone,
 	}
 }
 
@@ -151,7 +151,7 @@ func (r *DynamoGraphDeploymentReconciler) getWorkerServices(
 }
 
 // reconcileRollingUpdate orchestrates the rolling update state machine and proxy weights.
-// It updates the rollout status and proxy configuration but does NOT return early.
+// It updates the rolling update status and proxy configuration but does NOT return early.
 // The caller (main Reconcile) should always proceed to reconcileResources afterward.
 //
 // This function is responsible for:
@@ -168,58 +168,58 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 ) error {
 	logger := log.FromContext(ctx)
 
-	// Get or create rollout status
-	rolloutStatus := r.getOrCreateRolloutStatus(dgd)
+	// Get or create rollingUpdate status
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 
 	// Compute hash information
 	newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)
 	oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)
 
 	logger.Info("Reconciling rolling update",
-		"phase", rolloutStatus.Phase,
+		"phase", rollingUpdateStatus.Phase,
 		"oldWorkerHash", oldWorkerHash,
 		"newWorkerHash", newWorkerHash)
 
-	if rolloutStatus.Phase == nvidiacomv1alpha1.RolloutPhaseCompleted {
+	if rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseCompleted {
 		if oldWorkerHash != newWorkerHash {
-			logger.Info("Rollout completed but annotation stale, updating annotation",
+			logger.Info("Rolling update completed but annotation stale, updating annotation",
 				"oldHash", oldWorkerHash, "newHash", newWorkerHash)
 			r.setActiveWorkerHash(dgd, newWorkerHash)
 			return r.Update(ctx, dgd)
 		}
 		// Annotation matches, we're done
-		logger.V(1).Info("Rollout completed and annotation matches")
+		logger.V(1).Info("Rolling update completed and annotation matches")
 		return nil
 	}
 
 	if oldWorkerHash == newWorkerHash &&
-		rolloutStatus.Phase == nvidiacomv1alpha1.RolloutPhaseInProgress {
-		logger.Info("Detected stuck rollout: hashes match but phase is InProgress",
+		rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseInProgress {
+		logger.Info("Detected stuck rolling update: hashes match but phase is InProgress",
 			"hash", newWorkerHash,
-			"phase", rolloutStatus.Phase)
-		return r.completeRollout(ctx, dgd, rolloutStatus, oldWorkerHash, newWorkerHash)
+			"phase", rollingUpdateStatus.Phase)
+		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
 	}
 
-	switch rolloutStatus.Phase {
-	case nvidiacomv1alpha1.RolloutPhaseNone:
-		return r.startRollingUpdate(ctx, dgd, rolloutStatus, oldWorkerHash, newWorkerHash)
+	switch rollingUpdateStatus.Phase {
+	case nvidiacomv1alpha1.RollingUpdatePhaseNone:
+		return r.startRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
 
-	case nvidiacomv1alpha1.RolloutPhasePending:
-		rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseInProgress
+	case nvidiacomv1alpha1.RollingUpdatePhasePending:
+		rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseInProgress
 		if err := r.Status().Update(ctx, dgd); err != nil {
-			return fmt.Errorf("failed to update rollout status to InProgress: %w", err)
+			return fmt.Errorf("failed to update rolling update status to InProgress: %w", err)
 		}
 		return nil
 
-	case nvidiacomv1alpha1.RolloutPhaseInProgress:
-		return r.continueRollingUpdate(ctx, dgd, rolloutStatus, oldWorkerHash, newWorkerHash)
+	case nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
+		return r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
 
-	case nvidiacomv1alpha1.RolloutPhaseCompleted:
-		// Cleanup is now done atomically in completeRollout, nothing to do here
+	case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
+		// Cleanup is now done atomically in completeRollingUpdate, nothing to do here
 		logger.Info("Rolling update already completed")
 		return nil
 
-	case nvidiacomv1alpha1.RolloutPhaseFailed:
+	case nvidiacomv1alpha1.RollingUpdatePhaseFailed:
 		logger.Info("Rolling update in failed state, manual intervention may be required")
 		return nil
 	}
@@ -231,7 +231,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rolloutStatus *nvidiacomv1alpha1.RolloutStatus,
+	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	oldWorkerHash, newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -240,18 +240,18 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 		"oldHash", oldWorkerHash,
 		"newHash", newWorkerHash)
 
-	// Initialize rollout status
+	// Initialize rolling update status
 	// Note: Worker hashes are computed dynamically from worker hash annotation,
 	// not stored in status, to avoid staleness issues
 	now := metav1.Now()
-	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhasePending
-	rolloutStatus.StartTime = &now
+	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhasePending
+	rollingUpdateStatus.StartTime = &now
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
 		"Starting rolling update from worker hash %s to %s", oldWorkerHash, newWorkerHash)
 
 	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to initialize rollout status: %w", err)
+		return fmt.Errorf("failed to initialize rolling update status: %w", err)
 	}
 
 	return nil
@@ -263,15 +263,15 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rolloutStatus *nvidiacomv1alpha1.RolloutStatus,
+	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	oldWorkerHash, newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
 
 	workerServices := r.getWorkerServices(dgd)
 	if len(workerServices) == 0 {
-		logger.Info("No worker services found, completing rollout")
-		return r.completeRollout(ctx, dgd, rolloutStatus, oldWorkerHash, newWorkerHash)
+		logger.Info("No worker services found, completing rolling update")
+		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
 	}
 
 	oldInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, oldWorkerHash)
@@ -296,25 +296,25 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		"oldWorkerHash", oldWorkerHash,
 		"newWorkerHash", newWorkerHash)
 
-	// Check if rollout is complete: all new workers ready and all old workers scaled down
+	// Check if rolling update is complete: all new workers ready and all old workers scaled down
 	if newInfo.TotalReadyWorkers() >= desiredReplicas && oldInfo.TotalReadyWorkers() == 0 {
-		return r.completeRollout(ctx, dgd, rolloutStatus, oldWorkerHash, newWorkerHash)
+		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
 	}
 
 	// Update status
 	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update rollout status: %w", err)
+		return fmt.Errorf("failed to update rolling update status: %w", err)
 	}
 
 	return nil
 }
 
-// completeRollout marks the rollout as completed, cleans up old resources, and updates status.
+// completeRollingUpdate marks the rolling update as completed, cleans up old resources, and updates status.
 // This performs all cleanup atomically to avoid race conditions with subsequent reconciles.
-func (r *DynamoGraphDeploymentReconciler) completeRollout(
+func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rolloutStatus *nvidiacomv1alpha1.RolloutStatus,
+	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	oldWorkerHash, newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -325,22 +325,22 @@ func (r *DynamoGraphDeploymentReconciler) completeRollout(
 			logger.Error(err, "Failed to delete old DCDs", "oldWorkerHash", oldWorkerHash)
 			r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "CleanupPartialFailure",
 				"Failed to delete some old worker DCDs with hash %s: %v", oldWorkerHash, err)
-			// Continue anyway - we don't want cleanup failures to block the rollout completion
+			// Continue anyway - we don't want cleanup failures to block the rolling update completion
 		} else {
 			logger.Info("Old resources cleaned up", "oldWorkerHash", oldWorkerHash)
 		}
 	}
 
-	// Update rollout status to Completed
-	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseCompleted
+	// Update rolling update status to Completed
+	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseCompleted
 	now := metav1.Now()
-	rolloutStatus.EndTime = &now
+	rollingUpdateStatus.EndTime = &now
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
 		"Rolling update completed, worker hash %s", newWorkerHash)
 
 	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update rollout status: %w", err)
+		return fmt.Errorf("failed to update rolling update status: %w", err)
 	}
 
 	// Update the active worker hash to the new hash
@@ -446,17 +446,17 @@ func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
 func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rolloutCtx *dynamo.RolloutContext,
+	rollingUpdateCtx *dynamo.RollingUpdateContext,
 ) error {
 	logger := log.FromContext(ctx)
 
-	if rolloutCtx == nil || !rolloutCtx.InProgress {
+	if rollingUpdateCtx == nil || !rollingUpdateCtx.InProgress {
 		return nil
 	}
 
-	for serviceName, desiredReplicas := range rolloutCtx.OldWorkerReplicas {
+	for serviceName, desiredReplicas := range rollingUpdateCtx.OldWorkerReplicas {
 		// Construct the old DCD name using the hash-based naming convention
-		oldDCDName := dynamo.GetDynamoComponentName(dgd, serviceName) + "-" + rolloutCtx.OldWorkerHash
+		oldDCDName := dynamo.GetDynamoComponentName(dgd, serviceName) + "-" + rollingUpdateCtx.OldWorkerHash
 
 		// Get the existing DCD
 		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}

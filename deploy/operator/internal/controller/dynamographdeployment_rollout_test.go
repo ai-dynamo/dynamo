@@ -295,23 +295,23 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 	assert.NotEqual(t, hash1, hash3, "Hash should change when decode specs change")
 }
 
-func TestGetOrCreateRolloutStatus(t *testing.T) {
+func TestGetOrCreateRollingUpdateStatus(t *testing.T) {
 	tests := []struct {
 		name           string
-		existingStatus *nvidiacomv1alpha1.RolloutStatus
-		expectedPhase  nvidiacomv1alpha1.RolloutPhase
+		existingStatus *nvidiacomv1alpha1.RollingUpdateStatus
+		expectedPhase  nvidiacomv1alpha1.RollingUpdatePhase
 	}{
 		{
 			name:           "creates new status when nil",
 			existingStatus: nil,
-			expectedPhase:  nvidiacomv1alpha1.RolloutPhaseNone,
+			expectedPhase:  nvidiacomv1alpha1.RollingUpdatePhaseNone,
 		},
 		{
 			name: "returns existing status",
-			existingStatus: &nvidiacomv1alpha1.RolloutStatus{
-				Phase: nvidiacomv1alpha1.RolloutPhaseInProgress,
+			existingStatus: &nvidiacomv1alpha1.RollingUpdateStatus{
+				Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
 			},
-			expectedPhase: nvidiacomv1alpha1.RolloutPhaseInProgress,
+			expectedPhase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
 		},
 	}
 
@@ -320,10 +320,10 @@ func TestGetOrCreateRolloutStatus(t *testing.T) {
 			dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
-			dgd.Status.Rollout = tt.existingStatus
+			dgd.Status.RollingUpdate = tt.existingStatus
 
 			r := createTestReconciler(dgd)
-			status := r.getOrCreateRolloutStatus(dgd)
+			status := r.getOrCreateRollingUpdateStatus(dgd)
 
 			assert.NotNil(t, status)
 			assert.Equal(t, tt.expectedPhase, status.Phase)
@@ -334,7 +334,7 @@ func TestGetOrCreateRolloutStatus(t *testing.T) {
 func TestIsRollingUpdateInProgress(t *testing.T) {
 	tests := []struct {
 		name     string
-		status   *nvidiacomv1alpha1.RolloutStatus
+		status   *nvidiacomv1alpha1.RollingUpdateStatus
 		expected bool
 	}{
 		{
@@ -344,27 +344,27 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 		},
 		{
 			name:     "phase none - not in progress",
-			status:   &nvidiacomv1alpha1.RolloutStatus{Phase: nvidiacomv1alpha1.RolloutPhaseNone},
+			status:   &nvidiacomv1alpha1.RollingUpdateStatus{Phase: nvidiacomv1alpha1.RollingUpdatePhaseNone},
 			expected: false,
 		},
 		{
 			name:     "phase pending - in progress",
-			status:   &nvidiacomv1alpha1.RolloutStatus{Phase: nvidiacomv1alpha1.RolloutPhasePending},
+			status:   &nvidiacomv1alpha1.RollingUpdateStatus{Phase: nvidiacomv1alpha1.RollingUpdatePhasePending},
 			expected: true,
 		},
 		{
 			name:     "phase in progress - in progress",
-			status:   &nvidiacomv1alpha1.RolloutStatus{Phase: nvidiacomv1alpha1.RolloutPhaseInProgress},
+			status:   &nvidiacomv1alpha1.RollingUpdateStatus{Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress},
 			expected: true,
 		},
 		{
 			name:     "phase completed - not in progress",
-			status:   &nvidiacomv1alpha1.RolloutStatus{Phase: nvidiacomv1alpha1.RolloutPhaseCompleted},
+			status:   &nvidiacomv1alpha1.RollingUpdateStatus{Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted},
 			expected: false,
 		},
 		{
 			name:     "phase failed - not in progress",
-			status:   &nvidiacomv1alpha1.RolloutStatus{Phase: nvidiacomv1alpha1.RolloutPhaseFailed},
+			status:   &nvidiacomv1alpha1.RollingUpdateStatus{Phase: nvidiacomv1alpha1.RollingUpdatePhaseFailed},
 			expected: false,
 		},
 	}
@@ -374,7 +374,7 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 			dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
-			dgd.Status.Rollout = tt.status
+			dgd.Status.RollingUpdate = tt.status
 
 			r := createTestReconciler(dgd)
 			result := r.isRollingUpdateInProgress(dgd)
@@ -384,19 +384,19 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 	}
 }
 
-func TestClearRolloutStatus(t *testing.T) {
+func TestClearRollingUpdateStatus(t *testing.T) {
 	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
-	dgd.Status.Rollout = &nvidiacomv1alpha1.RolloutStatus{
-		Phase: nvidiacomv1alpha1.RolloutPhaseCompleted,
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
 	}
 
 	r := createTestReconciler(dgd)
-	r.clearRolloutStatus(dgd)
+	r.clearRollingUpdateStatus(dgd)
 
-	assert.NotNil(t, dgd.Status.Rollout)
-	assert.Equal(t, nvidiacomv1alpha1.RolloutPhaseNone, dgd.Status.Rollout.Phase)
+	assert.NotNil(t, dgd.Status.RollingUpdate)
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseNone, dgd.Status.RollingUpdate.Phase)
 }
 
 func TestGetDesiredWorkerReplicas(t *testing.T) {

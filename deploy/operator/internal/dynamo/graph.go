@@ -249,12 +249,12 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 	return config, err
 }
 
-// RolloutContext provides information about an in-progress rolling update.
+// RollingUpdateContext provides information about an in-progress rolling update.
 // When InProgress is true:
 // - GenerateDynamoComponentsDeployments generates DCDs only for the NEW namespace
 // - Old DCDs are NOT regenerated to avoid spec contamination
 // - Old worker replicas are scaled via direct patching in the controller
-type RolloutContext struct {
+type RollingUpdateContext struct {
 	// InProgress indicates whether a rolling update is currently in progress
 	InProgress bool
 	// OldWorkerHash is the short hash (8 chars) for the old worker spec, used for DCD naming
@@ -279,7 +279,7 @@ type RolloutContext struct {
 // Worker components include a hash suffix in their DCD name and get DYN_NAMESPACE_WORKER_SUFFIX
 // so the new runtime composes an effective namespace of "<base>-<suffix>" for discovery isolation.
 //
-// When rolloutCtx.InProgress is true, this generates DCDs only for the NEW worker hash.
+// When rollingUpdateContext.InProgress is true, this generates DCDs only for the NEW worker hash.
 // Old worker DCDs are NOT generated to avoid overwriting their original spec with the new spec.
 func GenerateDynamoComponentsDeployments(
 	ctx context.Context,
@@ -287,7 +287,7 @@ func GenerateDynamoComponentsDeployments(
 	defaultIngressSpec *v1alpha1.IngressSpec,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
-	rolloutCtx *RolloutContext,
+	rollingUpdateCtx *RollingUpdateContext,
 ) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 
@@ -295,8 +295,8 @@ func GenerateDynamoComponentsDeployments(
 
 	// Determine the hash suffix for worker DCD naming
 	var hashSuffix string
-	if rolloutCtx != nil && rolloutCtx.InProgress {
-		hashSuffix = rolloutCtx.NewWorkerHash
+	if rollingUpdateCtx != nil && rollingUpdateCtx.InProgress {
+		hashSuffix = rollingUpdateCtx.NewWorkerHash
 	} else {
 		hashSuffix = ComputeWorkerSpecHash(parentDGD)
 	}
@@ -336,8 +336,8 @@ func GenerateDynamoComponentsDeployments(
 		}
 
 		// During rolling update, override replicas for worker components
-		if rolloutCtx != nil && rolloutCtx.InProgress && IsWorkerComponent(component.ComponentType) {
-			if replicas, ok := rolloutCtx.NewWorkerReplicas[componentName]; ok {
+		if rollingUpdateCtx != nil && rollingUpdateCtx.InProgress && IsWorkerComponent(component.ComponentType) {
+			if replicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; ok {
 				dcd.Spec.Replicas = &replicas
 			}
 		}

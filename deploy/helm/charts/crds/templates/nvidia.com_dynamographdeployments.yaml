@@ -11388,15 +11388,15 @@ spec:
                       description: Phase is the phase of the restart.
                       type: string
                   type: object
-                rollout:
-                  description: Rollout tracks the progress of a rolling update.
+                rollingUpdate:
+                  description: RollingUpdate tracks the progress of a rolling update.
                   properties:
                     endTime:
-                      description: EndTime is when the rollout completed (successfully or failed).
+                      description: EndTime is when the rolling update completed (successfully or failed).
                       format: date-time
                       type: string
                     phase:
-                      description: Phase indicates the current phase of the rollout.
+                      description: Phase indicates the current phase of the rolling update.
                       enum:
                         - Pending
                         - InProgress
@@ -11405,7 +11405,7 @@ spec:
                         - ""
                       type: string
                     startTime:
-                      description: StartTime is when the rollout began.
+                      description: StartTime is when the rolling update began.
                       format: date-time
                       type: string
                   type: object

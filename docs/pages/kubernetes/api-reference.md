@@ -606,7 +606,7 @@ _Appears in:_
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
-| `rollout` _[RolloutStatus](#rolloutstatus)_ | Rollout tracks the progress of a rolling update. |  | Optional: \{\} <br /> |
+| `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | Rollout tracks the progress of a rolling update. |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -1005,17 +1005,17 @@ _Appears in:_
 | `Parallel` |  |
 
 
-#### RolloutPhase
+#### RollingUpdatePhase
 
 _Underlying type:_ _string_
 
-RolloutPhase represents the current phase of a rolling update.
+RollingUpdatePhase represents the current phase of a rolling update.
 
 _Validation:_
 - Enum: [Pending InProgress Completed Failed ]
 
 _Appears in:_
-- [RolloutStatus](#rolloutstatus)
+- [RollingUpdateStatus](#rollingupdatestatus)
 
 | Field | Description |
 | --- | --- |
@@ -1026,11 +1026,11 @@ _Appears in:_
 | `` |  |
 
 
-#### RolloutStatus
+#### RollingUpdateStatus
 
 
 
-RolloutStatus tracks the progress of a rolling update.
+RollingUpdateStatus tracks the progress of a rolling update.
 
 
 
@@ -1039,9 +1039,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `phase` _[RolloutPhase](#rolloutphase)_ | Phase indicates the current phase of the rollout. |  | Enum: [Pending InProgress Completed Failed ] <br />Optional: \{\} <br /> |
-| `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rollout began. |  | Optional: \{\} <br /> |
-| `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rollout completed (successfully or failed). |  | Optional: \{\} <br /> |
+| `phase` _[RollingUpdatePhase](#rollingupdatephase)_ | Phase indicates the current phase of the rolling update. |  | Enum: [Pending InProgress Completed Failed ] <br />Optional: \{\} <br /> |
+| `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rolling update began. |  | Optional: \{\} <br /> |
+| `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rolling update completed (successfully or failed). |  | Optional: \{\} <br /> |
 
 
 #### ScalingAdapter
