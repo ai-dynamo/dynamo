@@ -945,14 +945,23 @@ impl OpenAIPreprocessor {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.choices.iter_mut() {
-                            if let Some(text) = choice.delta.content.as_ref() {
+                            // Reasoning parsing only applies to text content
+                            if let Some(
+                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                                    text,
+                                ),
+                            ) = choice.delta.content.as_ref()
+                            {
                                 let parser_result =
                                     parser.parse_reasoning_streaming_incremental(text, &[]);
 
                                 // Update this specific choice with parsed content
-                                choice.delta.content = parser_result.get_some_normal_text();
+                                choice.delta.content = parser_result.get_some_normal_text().map(
+                                    dynamo_async_openai::types::ChatCompletionMessageContent::Text,
+                                );
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
+                            // For multimodal content, pass through unchanged
                         }
                         Ok(data)
                     })
