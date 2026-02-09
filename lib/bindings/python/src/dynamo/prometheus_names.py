@@ -34,7 +34,6 @@ class distributed_runtime:
     # Total uptime of the DistributedRuntime in seconds
     UPTIME_SECONDS = "uptime_seconds"
 
-
 class frontend_service:
     """Frontend service metrics (LLM HTTP service)"""
 
@@ -57,6 +56,8 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
+    # Tokenizer latency in milliseconds
+    TOKENIZER_LATENCY_MS = "tokenizer_latency_ms"
     # Total number of output tokens generated (counter that updates in real-time)
     OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
@@ -98,7 +99,8 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
-
+    # Label name for tokenizer operation
+    OPERATION_LABEL = "operation"
 
 class kvbm:
     """KVBM"""
@@ -134,18 +136,16 @@ class kvbm:
     # Number of failed object storage write operations (blocks)
     OBJECT_WRITE_FAILURES = "object_write_failures"
 
-
 class kvrouter:
+
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
-
 
 class kvstats:
     # Total number of KV cache blocks available on the worker
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
     GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
-
 
 class labels:
     """Automatically inserted Prometheus label names used across the metrics system"""
@@ -165,11 +165,9 @@ class labels:
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     WORKER_TYPE = "worker_type"
 
-
 class model_info:
     # Model load time in seconds
     LOAD_TIME_SECONDS = "model_load_time_seconds"
-
 
 class name_prefix:
     """Metric name prefixes used across the metrics system"""
@@ -178,7 +176,6 @@ class name_prefix:
     COMPONENT = "dynamo_component"
     # Prefix for frontend service metrics
     FRONTEND = "dynamo_frontend"
-
 
 class task_tracker:
     """Task tracker Prometheus metric name suffixes"""
@@ -195,7 +192,6 @@ class task_tracker:
     TASKS_FAILED_TOTAL = "tasks_failed_total"
     # Total number of rejected tasks
     TASKS_REJECTED_TOTAL = "tasks_rejected_total"
-
 
 class work_handler:
     """Work handler Prometheus metric names"""
