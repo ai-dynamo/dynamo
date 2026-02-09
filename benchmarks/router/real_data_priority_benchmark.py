@@ -229,8 +229,8 @@ def main():
     parser.add_argument(
         "--priority-values",
         type=str,
-        default="0.0,0.4,0.8",
-        help="Comma-separated latency_sensitivity values for low/medium/high tiers (default: 0.0,0.4,0.8)",
+        default="0,1,2",
+        help="Comma-separated latency_sensitivity values for low/medium/high tiers (default: 0,1,2)",
     )
 
     args = parser.parse_args()
