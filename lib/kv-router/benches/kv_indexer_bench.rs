@@ -15,8 +15,11 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dynamo_kv_router::{
+    ConcurrentRadixTree,
     bench_utils::{LatencyStats, SequenceData, generate_sequences},
-    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded},
+    indexer::{
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer,
+    },
     nested_map::PositionalIndexer,
     protocols::{LocalBlockHash, RouterEvent},
 };
@@ -60,6 +63,8 @@ enum IndexerType {
     Sharded,
     /// Nested PositionalIndexer (position-based HashMap with jump search)
     Nested,
+    /// Concurrent radix tree (lock-per-node with DashMap lookup)
+    Concurrent,
     /// Run all indexer types and compare
     All,
 }
@@ -218,7 +223,7 @@ impl BenchableIndexer for KvIndexerSharded {
 }
 
 #[async_trait::async_trait]
-impl BenchableIndexer for PositionalIndexer {
+impl BenchableIndexer for ThreadPoolIndexer<PositionalIndexer> {
     async fn apply_event(&mut self, event: RouterEvent) {
         KvIndexerInterface::apply_event(self, event).await;
     }
@@ -233,6 +238,25 @@ impl BenchableIndexer for PositionalIndexer {
 
     fn name(&self) -> &str {
         "PositionalIndexer (nested)"
+    }
+}
+
+#[async_trait::async_trait]
+impl BenchableIndexer for ThreadPoolIndexer<ConcurrentRadixTree> {
+    async fn apply_event(&mut self, event: RouterEvent) {
+        KvIndexerInterface::apply_event(self, event).await;
+    }
+
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
+        KvIndexerInterface::find_matches(self, sequence).await?;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "ConcurrentRadixTree"
     }
 }
 
@@ -740,8 +764,27 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
 
     // Benchmark nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
-        let mut indexer =
-            PositionalIndexer::new(args.num_shards, args.common.block_size, args.jump_size);
+        let mut indexer = ThreadPoolIndexer::new(
+            PositionalIndexer::new(args.jump_size),
+            args.num_shards,
+            args.common.block_size,
+        );
+        let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
+        results.push(result);
+        indexer.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Benchmark concurrent radix tree indexer
+    if matches!(
+        args.indexer_type,
+        IndexerType::Concurrent | IndexerType::All
+    ) {
+        let mut indexer = ThreadPoolIndexer::new(
+            ConcurrentRadixTree::new(),
+            args.num_shards,
+            args.common.block_size,
+        );
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
         results.push(result);
         indexer.shutdown();
@@ -1324,11 +1367,66 @@ async fn run_stress_mode(args: StressArgs) {
 
     // Test nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
-        let indexer =
-            PositionalIndexer::new(args.num_shards, args.common.block_size, args.jump_size);
+        let indexer = ThreadPoolIndexer::new(
+            PositionalIndexer::new(args.jump_size),
+            args.num_shards,
+            args.common.block_size,
+        );
 
         println!(
             "\n  Applying {} store events to PositionalIndexer...",
+            sequences.len()
+        );
+        let construction_start = Instant::now();
+
+        for (event_id, seq) in sequences.iter().enumerate() {
+            let event = seq.to_store_event(event_id as u64);
+            indexer.apply_event(event).await;
+
+            if args.common.verbose && (event_id + 1) % 100 == 0 {
+                println!("    Applied {}/{} events...", event_id + 1, sequences.len());
+            }
+        }
+
+        indexer.flush().await;
+
+        let construction_time = construction_start.elapsed();
+        let construction_events = sequences.len() as u64;
+
+        println!("  Tree construction completed in {:?}", construction_time);
+        println!(
+            "  Throughput: {:.0} events/sec",
+            construction_events as f64 / construction_time.as_secs_f64()
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let indexer = Arc::new(indexer);
+
+        let mut results = run_stress_test(indexer.clone(), &sequences, &args).await;
+        results.construction_time = construction_time;
+        results.construction_events = construction_events;
+
+        print_stress_results(&args, &results);
+        all_results.push(results);
+
+        indexer.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Test concurrent radix tree indexer
+    if matches!(
+        args.indexer_type,
+        IndexerType::Concurrent | IndexerType::All
+    ) {
+        let indexer = ThreadPoolIndexer::new(
+            ConcurrentRadixTree::new(),
+            args.num_shards,
+            args.common.block_size,
+        );
+
+        println!(
+            "\n  Applying {} store events to ConcurrentRadixTree...",
             sequences.len()
         );
         let construction_start = Instant::now();

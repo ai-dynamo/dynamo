@@ -1,9 +1,13 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
-    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, PositionalIndexer,
+    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
 };
 use dynamo_kv_router::protocols::RouterEvent;
+use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
 use rand::prelude::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -44,6 +48,13 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Lock-based concurrent radix tree indexer.
+    ConcurrentRadixTree {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -64,11 +75,18 @@ impl IndexerArgs {
             IndexerArgs::NestedMap {
                 jump_size,
                 num_event_workers,
-            } => Arc::new(PositionalIndexer::new(
+            } => Arc::new(ThreadPoolIndexer::new(
+                PositionalIndexer::new(jump_size),
                 num_event_workers,
                 args.block_size,
-                jump_size,
             )),
+            IndexerArgs::ConcurrentRadixTree { num_event_workers } => {
+                Arc::new(ThreadPoolIndexer::new(
+                    ConcurrentRadixTree::new(),
+                    num_event_workers,
+                    args.block_size,
+                ))
+            }
         }
     }
 }

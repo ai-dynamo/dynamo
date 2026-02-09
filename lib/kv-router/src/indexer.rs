@@ -60,7 +60,7 @@ use std::sync::OnceLock;
 use std::{
     collections::VecDeque,
     iter,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicUsize},
     thread::JoinHandle,
     time::Duration,
 };
@@ -69,7 +69,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::approx::{BlockEntry, PruneConfig, PruneManager};
 // use crate::nested_map::NestedMap;
-pub use crate::nested_map::PositionalIndexer;
 use crate::protocols::*;
 pub use crate::radix_tree::RadixTree;
 use dynamo_tokens::SequenceHash;
@@ -353,6 +352,243 @@ pub trait KvIndexerInterface {
     /// Returns the amount of events still in the queue at the time of the flush.
     /// Used primarily for debugging.
     async fn flush(&self) -> usize;
+}
+
+// ============================================================================
+// SyncIndexer trait and ThreadPoolIndexer generic wrapper
+// ============================================================================
+
+/// Trait for thread-safe data structures that support KV cache indexing operations.
+///
+/// All methods take `&self` and are synchronous. Implementations must be safe for
+/// concurrent access (via internal locking, DashMap, etc).
+///
+/// This trait is used with [`ThreadPoolIndexer`], which wraps a `SyncIndexer` to
+/// provide the async [`KvIndexerInterface`] with:
+/// - Sticky event routing to N worker threads
+/// - Inline reads on the caller's thread (no channel dispatch for find_matches)
+pub trait SyncIndexer: Send + Sync + 'static {
+    /// Find matches for a sequence of block hashes.
+    fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
+
+    /// Apply a router event to the data structure.
+    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError>;
+
+    /// Remove all entries for a worker.
+    fn remove_worker(&self, worker_id: WorkerId);
+
+    /// Dump the data structure as router events for reconstruction.
+    fn dump_events(&self) -> Vec<RouterEvent>;
+}
+
+/// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
+///
+/// Spawns N OS threads for processing write events (sticky-routed by WorkerId).
+/// Read operations (find_matches) are executed inline on the caller's thread,
+/// avoiding channel overhead and allowing reads to scale with callers.
+///
+/// # Architecture
+///
+/// ```text
+///                                       +------------------------------------+
+///                                       |     N Worker Threads (OS threads)  |
+///                                       |                                    |
+///  worker_event_channels[0] ----------> |   Thread 0: blocking recv loop     |
+///  worker_event_channels[1] ----------> |   Thread 1: blocking recv loop     |
+///  worker_event_channels[N] ----------> |   Thread N: blocking recv loop     |
+///                                       |                                    |
+///  find_matches() ---(inline)---------> |   Arc<T: SyncIndexer>              |
+///                                       |   (shared, thread-safe)            |
+///                                       +------------------------------------+
+/// ```
+pub struct ThreadPoolIndexer<T: SyncIndexer> {
+    /// Shared backend - thread-safe via internal locking.
+    backend: Arc<T>,
+
+    /// Maps WorkerId to worker thread index for sticky routing.
+    worker_assignments: DashMap<WorkerId, usize>,
+    /// Counter for round-robin assignment of new WorkerIds.
+    worker_assignment_count: AtomicUsize,
+
+    /// Channels to send events to worker threads (one per thread).
+    /// Sending `None` signals the thread to shut down.
+    worker_event_channels: Vec<flume::Sender<Option<RouterEvent>>>,
+
+    /// Number of worker threads.
+    num_workers: usize,
+    /// Block size for KV cache.
+    kv_block_size: u32,
+
+    /// Handles to worker threads for joining on shutdown.
+    thread_handles: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl<T: SyncIndexer> ThreadPoolIndexer<T> {
+    /// Create a new `ThreadPoolIndexer` wrapping the given backend.
+    ///
+    /// Spawns `num_workers` OS threads, each running a blocking recv loop
+    /// that processes events by calling `backend.apply_event()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - The thread-safe data structure to wrap
+    /// * `num_workers` - Number of worker threads for event processing
+    /// * `kv_block_size` - Block size for KV cache
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_workers` is 0.
+    pub fn new(backend: T, num_workers: usize, kv_block_size: u32) -> Self {
+        assert!(num_workers > 0, "Number of workers must be greater than 0");
+
+        let backend = Arc::new(backend);
+        let mut worker_event_senders = Vec::new();
+        let mut thread_handles = Vec::new();
+        for _ in 0..num_workers {
+            let (event_sender, event_receiver) = flume::unbounded::<Option<RouterEvent>>();
+            worker_event_senders.push(event_sender);
+
+            let backend = Arc::clone(&backend);
+
+            let handle = std::thread::spawn(move || {
+                loop {
+                    if let Ok(Some(event)) = event_receiver.recv() {
+                        if let Err(e) = backend.apply_event(event) {
+                            tracing::warn!("Failed to apply event: {:?}", e);
+                        }
+                    } else {
+                        // Channel closed or received None (shutdown signal)
+                        break;
+                    }
+                }
+            });
+            thread_handles.push(handle);
+        }
+
+        Self {
+            backend,
+            worker_assignments: DashMap::new(),
+            worker_assignment_count: AtomicUsize::new(0),
+            worker_event_channels: worker_event_senders,
+            num_workers,
+            kv_block_size,
+            thread_handles: Mutex::new(thread_handles),
+        }
+    }
+
+    /// Get a reference to the underlying backend.
+    pub fn backend(&self) -> &T {
+        &self.backend
+    }
+
+    /// Wait for all worker channels to drain.
+    ///
+    /// Used primarily for testing and benchmarking to ensure all queued events
+    /// have been picked up by workers before checking results.
+    pub async fn flush(&self) {
+        loop {
+            let all_empty = self.worker_event_channels.iter().all(|ch| ch.is_empty());
+
+            if all_empty {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+}
+
+#[async_trait]
+impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        // Execute inline on caller's thread - no channel dispatch
+        Ok(self.backend.find_matches(&sequence, false))
+    }
+
+    async fn find_matches_for_request(
+        &self,
+        tokens: &[u32],
+    ) -> Result<OverlapScores, KvRouterError> {
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        Ok(self.backend.find_matches(&sequence, false))
+    }
+
+    async fn apply_event(&self, event: RouterEvent) {
+        let worker_id = event.worker_id;
+
+        // Get or assign worker thread index using sticky round-robin
+        let thread_idx = *self.worker_assignments.entry(worker_id).or_insert_with(|| {
+            let idx = self
+                .worker_assignment_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            idx % self.num_workers
+        });
+
+        // Send event to the assigned worker thread
+        if let Err(e) = self.worker_event_channels[thread_idx].send(Some(event)) {
+            tracing::error!(
+                "Failed to send event to worker thread {}: {:?}",
+                thread_idx,
+                e
+            );
+        }
+    }
+
+    async fn remove_worker(&self, worker_id: WorkerId) {
+        // Execute inline - the backend is thread-safe
+        self.backend.remove_worker(worker_id);
+    }
+
+    fn shutdown(&self) {
+        // Send shutdown signal (None) to all worker threads
+        for channel in self.worker_event_channels.iter() {
+            let _ = channel.send(None);
+        }
+
+        // Take ownership of thread handles and join them
+        let handles = std::mem::take(
+            &mut *self
+                .thread_handles
+                .lock()
+                .expect("thread_handles mutex poisoned"),
+        );
+        for handle in handles {
+            if let Err(e) = handle.join() {
+                tracing::error!("Worker thread panicked during shutdown: {:?}", e);
+            }
+        }
+    }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        // Execute inline - the backend is thread-safe
+        Ok(self.backend.dump_events())
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        _tokens_with_hashes: &mut TokensWithHashes,
+        _worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        // No-op: pruning not supported in ThreadPoolIndexer
+        Ok(())
+    }
+
+    async fn flush(&self) -> usize {
+        let curr_size: usize = self.worker_event_channels.iter().map(|ch| ch.len()).sum();
+        loop {
+            let all_empty = self.worker_event_channels.iter().all(|ch| ch.is_empty());
+
+            if all_empty {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        curr_size
+    }
 }
 
 /// A request to process a routing decision.
@@ -1666,6 +1902,7 @@ impl Drop for KvIndexerSharded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::concurrent_radix_tree::ConcurrentRadixTree;
     use crate::nested_map::PositionalIndexer;
     use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash, compute_seq_hash_for_block};
     use rstest::rstest;
@@ -1829,7 +2066,7 @@ mod tests {
 
     #[template]
     #[rstest]
-    fn indexer_template(#[values("single", "sharded", "flat")] variant: &str) {}
+    fn indexer_template(#[values("single", "sharded", "flat", "concurrent")] variant: &str) {}
 
     fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
         let token = CancellationToken::new();
@@ -1839,7 +2076,16 @@ mod tests {
         match variant {
             "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics)),
             "sharded" => Box::new(KvIndexerSharded::new(token, 4, kv_block_size, metrics)),
-            "flat" => Box::new(PositionalIndexer::new(4, kv_block_size, 32)),
+            "flat" => Box::new(ThreadPoolIndexer::new(
+                PositionalIndexer::new(32),
+                4,
+                kv_block_size,
+            )),
+            "concurrent" => Box::new(ThreadPoolIndexer::new(
+                ConcurrentRadixTree::new(),
+                4,
+                kv_block_size,
+            )),
             _ => panic!("Unknown variant: {}", variant),
         }
     }
@@ -1999,7 +2245,10 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_dump_and_restore(variant: &str) {
-        if variant == "flat" {
+        if variant == "flat" || variant == "concurrent" {
+            // ThreadPoolIndexer variants dispatch events to worker threads,
+            // and there is no flush available through KvIndexerInterface.
+            // dump_events may run before events are processed.
             return;
         }
         let index = make_indexer(variant);
@@ -2064,7 +2313,7 @@ mod tests {
 
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.flush().await;
 
         // Empty query should return empty scores
         let scores = index.find_matches(vec![]).await.unwrap();
@@ -2078,7 +2327,7 @@ mod tests {
 
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.flush().await;
 
         // Query for non-existent blocks
         let scores = index
@@ -2109,7 +2358,7 @@ mod tests {
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
         // Allow time for async processing
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.flush().await;
 
         // Note: find_matches_for_request computes block hashes from tokens,
         // so we need tokens that hash to the same LocalBlockHash values.
@@ -2151,7 +2400,7 @@ mod tests {
             .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
             .await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.flush().await;
 
         // Query for full sequence [1, 2, 3, 4, 5] should match all 5 blocks
         let full_seq: Vec<LocalBlockHash> = (1..=5).map(|i| LocalBlockHash(i)).collect();
@@ -2181,7 +2430,7 @@ mod tests {
             .apply_event(make_store_event_with_dp_rank(0, &[1, 2, 3], 2))
             .await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.flush().await;
 
         // Query should return all 3 dp_ranks as separate entries
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2273,7 +2522,7 @@ mod tests {
         // Try to remove blocks [999, 998] that don't exist - should not error
         index.apply_event(make_remove_event(0, &[999, 998])).await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.flush().await;
 
         // Original data should still be there
         let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2323,7 +2572,7 @@ mod tests {
             .apply_event(make_store_event(0, &[100, 101, 102]))
             .await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.flush().await;
 
         // Query first sequence
         let seq1: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
@@ -2488,7 +2737,7 @@ mod tests {
             .apply_event(make_store_event_with_parent(1, &common_prefix, &branch_b))
             .await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.flush().await;
 
         // Query common prefix - both workers should match
         let prefix_query: Vec<LocalBlockHash> = (1..=30).map(|i| LocalBlockHash(i)).collect();

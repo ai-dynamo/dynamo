@@ -1613,6 +1613,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "dashmap 6.1.0",
  "dynamo-runtime",
  "dynamo-tokens",
  "prometheus",
