@@ -247,6 +247,13 @@ impl PositionalIndexer {
             None => 0, // Start from position 0
         };
 
+        if !worker_blocks.contains_key(&worker) {
+            worker_blocks.insert(worker, RwLock::new(HashMap::new()));
+        }
+
+        let worker_blocks_entry = worker_blocks.get(&worker).unwrap();
+        let mut worker_map = worker_blocks_entry.write().unwrap();
+
         for (i, block_data) in store_data.blocks.into_iter().enumerate() {
             let position = start_pos + i;
             let local_hash = block_data.tokens_hash;
@@ -262,10 +269,7 @@ impl PositionalIndexer {
             }
 
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
-            let worker_map = worker_blocks.entry(worker).or_default();
             worker_map
-                .write()
-                .unwrap()
                 .insert(seq_hash, (position, local_hash));
         }
 
@@ -290,8 +294,10 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
+        let mut worker_map = worker_map.write().unwrap();
+
         for seq_hash in seq_hashes {
-            let Some((position, local_hash)) = worker_map.write().unwrap().remove(seq_hash) else {
+            let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
                 tracing::warn!(
                     worker_id = worker.worker_id.to_string(),
                     dp_rank = worker.dp_rank,
@@ -438,6 +444,24 @@ impl PositionalIndexer {
         entry.get(seq_hash).cloned()
     }
 
+    fn count_workers_at(
+        &self,
+        position: usize,
+        local_hash: LocalBlockHash,
+        seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
+        sequence: &[LocalBlockHash],
+    ) -> Option<usize> {
+        let pos_map = self.index.get(&position)?;
+        let entry = pos_map.get(&local_hash)?;
+
+        // Always compute and verify seq_hash to handle divergent queries correctly.
+        // Even if there's only one seq_hash entry, the query's seq_hash might differ
+        // if the query diverged from the stored sequence at an earlier position.
+        Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
+        let seq_hash = seq_hashes[position];
+        Some(entry.get(seq_hash).map(|workers| workers.len()).unwrap_or(0))
+    }
+
     /// Scan positions sequentially, updating active set and recording drain scores.
     ///
     /// Returns the highest position where workers remain active (or lo-1 if none match at lo).
@@ -461,12 +485,16 @@ impl PositionalIndexer {
 
             match workers_at_pos {
                 Some(workers) => {
-                    for worker in active.difference(&workers) {
-                        // Score is the position where they stopped matching (i.e., pos)
-                        // which represents they matched positions 0..pos
-                        scores.scores.insert(*worker, pos as u32);
-                    }
-                    *active = workers;
+                    active.retain(|w| {
+                        if workers.contains(w) {
+                            true
+                        } else {
+                            // Score is the position where they stopped matching (i.e., pos)
+                            // which represents they matched positions 0..pos
+                            scores.scores.insert(*w, pos as u32);
+                            false
+                        }
+                    });
                     if early_exit && !active.is_empty() {
                         // Found at least one match, can exit early
                         break;
@@ -552,36 +580,13 @@ impl PositionalIndexer {
             let next_pos = (current_pos + self.jump_size).min(len - 1);
 
             // Check workers at jump destination
-            let workers_at_next = self.get_workers_lazy(
-                next_pos,
-                local_hashes[next_pos],
-                &mut seq_hashes,
-                local_hashes,
-            );
-
-            let num_workers_at_next = workers_at_next
-                .as_ref()
-                .map(|workers| workers.len())
-                .unwrap_or(0);
+            let num_workers_at_next = self.count_workers_at(next_pos, local_hashes[next_pos], &mut seq_hashes, local_hashes).unwrap_or(0);
 
             if num_workers_at_next == active.len() {
                 current_pos = next_pos;
-            } else if num_workers_at_next == 0 {
+            } else {
                 // No active workers match at jump destination
                 // Scan the range to find where each worker drained
-                self.linear_scan_drain(
-                    local_hashes,
-                    &mut seq_hashes,
-                    &mut active,
-                    &mut scores,
-                    current_pos + 1,
-                    next_pos + 1,
-                    false,
-                );
-                current_pos = next_pos;
-            } else {
-                // Partial match - some workers drained in between
-                // Scan the range to find exact drain points
                 self.linear_scan_drain(
                     local_hashes,
                     &mut seq_hashes,
