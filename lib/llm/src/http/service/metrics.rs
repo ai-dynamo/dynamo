@@ -541,7 +541,7 @@ impl Metrics {
                 "Tokenizer latency in milliseconds",
             )
             .buckets(vec![
-                0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 512.0,
+                0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0,
             ]),
             &[frontend_service::OPERATION_LABEL],
         )
@@ -1651,7 +1651,6 @@ mod tests {
 
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
-        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
         let mut collector = metrics.clone().create_response_collector(model);
 
         // Create histogram handle first
@@ -1711,6 +1710,7 @@ mod tests {
 
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
         let mut collector = metrics.clone().create_response_collector(model);
 
         // Create a metrics annotation event (event without SSE data payload)

@@ -400,7 +400,7 @@ impl RequestTracker {
     }
 
     pub fn tokenizer_latency(&self) -> Option<Duration> {
-        self.tokenizer_latency.get().cloned()
+        self.tokenizer_latency.get().copied()
     }
 
     /// Get worker ID information if any worker IDs have been recorded.

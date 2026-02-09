@@ -34,6 +34,7 @@ class distributed_runtime:
     # Total uptime of the DistributedRuntime in seconds
     UPTIME_SECONDS = "uptime_seconds"
 
+
 class frontend_service:
     """Frontend service metrics (LLM HTTP service)"""
 
@@ -102,6 +103,7 @@ class frontend_service:
     # Label name for tokenizer operation
     OPERATION_LABEL = "operation"
 
+
 class kvbm:
     """KVBM"""
 
@@ -136,16 +138,18 @@ class kvbm:
     # Number of failed object storage write operations (blocks)
     OBJECT_WRITE_FAILURES = "object_write_failures"
 
-class kvrouter:
 
+class kvrouter:
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
+
 
 class kvstats:
     # Total number of KV cache blocks available on the worker
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
     GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
+
 
 class labels:
     """Automatically inserted Prometheus label names used across the metrics system"""
@@ -169,6 +173,7 @@ class model_info:
     # Model load time in seconds
     LOAD_TIME_SECONDS = "model_load_time_seconds"
 
+
 class name_prefix:
     """Metric name prefixes used across the metrics system"""
 
@@ -176,6 +181,7 @@ class name_prefix:
     COMPONENT = "dynamo_component"
     # Prefix for frontend service metrics
     FRONTEND = "dynamo_frontend"
+
 
 class task_tracker:
     """Task tracker Prometheus metric name suffixes"""
@@ -192,6 +198,7 @@ class task_tracker:
     TASKS_FAILED_TOTAL = "tasks_failed_total"
     # Total number of rejected tasks
     TASKS_REJECTED_TOTAL = "tasks_rejected_total"
+
 
 class work_handler:
     """Work handler Prometheus metric names"""
