@@ -76,7 +76,7 @@ def write_trace_file(requests, path):
 
 
 def run_concurrent_streams(
-    args, tier_requests, priority_values, run_dir, tag_priority, logger
+    args, tier_requests, priority_values, run_dir, tag_priority, logger, seed=None
 ):
     """Launch concurrent aiperf subprocesses for each tier.
 
@@ -100,7 +100,7 @@ def run_concurrent_streams(
             args.tokenizer,
             trace_path,
             artifact_dir,
-            args.seed,
+            seed if seed is not None else args.seed,
             args.block_size,
             args.url,
         )
@@ -262,6 +262,11 @@ def main():
     for tier in TIERS:
         logger.info(f"  {tier} priority: {len(tier_requests[tier])} requests")
 
+    # Use different aiperf random seeds per run so that the generated prompts
+    # differ, preventing mocker KV cache hits between runs.
+    baseline_seed = args.seed
+    priority_seed = args.seed + 1
+
     # Run 1: Baseline (same split, no priority tagging)
     baseline_dir = os.path.join(args.output_dir, "baseline")
     logger.info("=== Running baseline (no priority tagging) ===")
@@ -272,22 +277,20 @@ def main():
         baseline_dir,
         tag_priority=False,
         logger=logger,
+        seed=baseline_seed,
     )
 
     # Run 2: With priority tagging
-    # Offset hash_ids so the second run doesn't benefit from KV cache warmth
-    tier_requests_shifted = offset_hash_ids(tier_requests)
     priority_dir = os.path.join(args.output_dir, "priority")
-    logger.info(
-        "=== Running with priority tagging (hash_ids offset to avoid cache warmth) ==="
-    )
+    logger.info("=== Running with priority tagging ===")
     run_concurrent_streams(
         args,
-        tier_requests_shifted,
+        tier_requests,
         priority_values,
         priority_dir,
         tag_priority=True,
         logger=logger,
+        seed=priority_seed,
     )
 
     # Plot comparison
