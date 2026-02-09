@@ -80,6 +80,7 @@ def run_concurrent_streams(
             args.block_size,
             args.url,
         )
+        cmd.extend(["--log-level", "WARNING", "--ui-type", "none"])
         if tag_priority:
             cmd.extend(
                 [
