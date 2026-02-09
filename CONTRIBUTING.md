@@ -205,7 +205,7 @@ For larger contributions, follow these steps:
 
 6. **Address Code Rabbit Review** – Respond to automated Code Rabbit suggestions, including nitpicks.
 
-7. **Trigger CI Tests** – A maintainer must comment `/ok to test <commit-id>` to run the full CI suite, where `<commit-id>` is the short SHA of your latest commit. **Important**: This must be re-issued after every new push — the approval is per-commit, not per-PR. Org members with [GPG-signed commits](https://docs.github.com/en/authentication/managing-commit-signature-verification) trigger CI automatically and can skip this step. Fix any failing tests before requesting human review. If you're unsure what's failing, comment `/lgtm-bot diagnose` on your PR for a detailed analysis.
+7. **Trigger CI Tests** – A Dynamo maintainer must comment `/ok to test <commit-id>` to run the full CI suite, where `<commit-id>` is the short SHA of your latest commit. **Important**: This must be re-issued after every new push — the approval is per-commit, not per-PR. Fix any failing tests before requesting human review. If you're unsure what's failing, comment `/lgtm-bot diagnose` on your PR for a detailed analysis.
 
 8. **Request Review** – CODEOWNERS team reviews are automatically requested when your PR is opened. The bot also posts a comment listing which teams are required and why. You can add additional reviewers manually — check [CODEOWNERS](CODEOWNERS) for the full list of required approvers based on files modified.
 
@@ -236,16 +236,13 @@ Comment `/lgtm-bot diagnose` on any PR to get a detailed analysis of what's bloc
 - **DCO / PR title** – Checks for DCO sign-off and conventional commit format
 - **CI trigger status** – Shows whether full CI has been triggered and provides the exact `/ok to test <sha>` command for maintainers
 
-### CI Triggering
-
-CI requires `/ok to test <commit-id>` from a maintainer for each new push. **Exception**: org members with [GPG-signed commits](https://docs.github.com/en/authentication/managing-commit-signature-verification) trigger CI automatically. To set up GPG signing, see the [GitHub docs on signing commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits).
-
 ### For External Contributors
 
-External contributors (from forks) should also be aware of:
+External contributors (from forks) should be aware of:
 
-1. **CODEOWNERS visibility** – The bot posts a comment listing which teams need to review your PR, since you may not be able to see team membership directly.
-2. **Merging** – Only organization members can merge PRs. Once your PR has the `lgtm` label, a maintainer will merge it.
+1. **CI triggering** – A Dynamo maintainer must comment `/ok to test <commit-id>` to run the full CI suite. This must be re-issued after every new push.
+2. **CODEOWNERS visibility** – The bot posts a comment listing which teams need to review your PR, since you may not be able to see team membership directly.
+3. **Merging** – Only organization members can merge PRs. Once your PR has the `lgtm` label, a maintainer will merge it.
 
 ---
 
