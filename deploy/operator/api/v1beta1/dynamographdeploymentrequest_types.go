@@ -147,6 +147,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// Backend specifies the inference backend to use for profiling and deployment.
 	// +optional
+	// +kubebuilder:default=auto
 	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
 	Backend BackendType `json:"backend,omitempty"`
 
@@ -178,6 +179,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// SearchStrategy controls the profiling search depth.
 	// "rapid" performs a fast sweep; "thorough" explores more configurations.
 	// +optional
+	// +kubebuilder:default=rapid
 	// +kubebuilder:validation:Enum=rapid;thorough
 	SearchStrategy SearchStrategy `json:"searchStrategy,omitempty"`
 
@@ -185,7 +187,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// after profiling completes. If false, the generated spec is stored in status
 	// for manual review and application.
 	// +optional
-	// +kubebuilder:default=false
+	// +kubebuilder:default=true
 	AutoApply bool `json:"autoApply,omitempty"`
 }
 
