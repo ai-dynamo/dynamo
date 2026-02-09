@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:decomp-1
+          image: docker.io/lambda108/epp-inference-extension-dynamo:fix-context-id
       eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:

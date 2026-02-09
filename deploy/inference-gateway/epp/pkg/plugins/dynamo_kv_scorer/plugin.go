@@ -458,7 +458,12 @@ func (k *KVAwareScorer) callDynamoRouter(
 	}
 
 	// Build OpenAI-compatible JSON request from the GAIE LLMRequest structure
-	requestBody := buildOpenAIRequest(req)
+	requestBody, err := buildOpenAIRequest(req)
+	if err != nil {
+		logger.V(logutil.DEFAULT).Info("Invalid/empty request body for router; refusing to route",
+			"err", err.Error())
+		return "", "", nil, err
+	}
 	requestJSON, jsonErr := json.Marshal(requestBody)
 	if jsonErr != nil {
 		logger.V(logutil.DEFAULT).Error(jsonErr, "Failed to marshal OpenAI request")
@@ -488,47 +493,62 @@ func (k *KVAwareScorer) callDynamoRouter(
 	// 	}
 	// }
 
+	// Copy scalar result fields before freeing the struct. The Rust destructor is
+	// allowed to mutate the struct, and relying on fields remaining valid after
+	// passing a mutable pointer is fragile.
+	isDisaggregated := result.is_disaggregated
+	decodeWorkerID := uint64(result.decode_worker_id)
+	prefillWorkerIDVal := uint64(result.prefill_worker_id)
+
 	// Free the routing result
 	C.free_routing_result(&result)
 
-	workerIDStr := fmt.Sprintf("%d", uint64(result.decode_worker_id))
+	workerIDStr := fmt.Sprintf("%d", decodeWorkerID)
 	prefillWorkerIDStr := ""
-	if result.is_disaggregated {
-		prefillWorkerIDStr = fmt.Sprintf("%d", uint64(result.prefill_worker_id))
+	if isDisaggregated {
+		prefillWorkerIDStr = fmt.Sprintf("%d", prefillWorkerIDVal)
 	}
 	logger.V(logutil.DEFAULT).Info("Worker selection completed",
 		"workerID", workerIDStr, "prefillWorkerID", prefillWorkerIDStr,
-		"isDisaggregated", result.is_disaggregated, "tokenCount", count)
+		"isDisaggregated", isDisaggregated, "tokenCount", count)
 
 	return workerIDStr, prefillWorkerIDStr, tokens64, nil
 }
 
 // buildOpenAIRequest constructs an OpenAI-compatible request from the GAIE LLMRequest structure.
 // Preserves message roles for correct chat template application and tokenization.
-func buildOpenAIRequest(req *schedtypes.LLMRequest) map[string]any {
+func buildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 	requestBody := make(map[string]any)
 
 	// Preserve the original message structure for correct chat template application
-	if req != nil && req.Body != nil {
-		if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
-			messages := make([]map[string]any, 0, len(req.Body.ChatCompletions.Messages))
-			for _, msg := range req.Body.ChatCompletions.Messages {
-				messages = append(messages, map[string]any{
-					"role":    msg.Role,
-					"content": msg.Content.PlainText(),
-				})
+	if req == nil || req.Body == nil {
+		return nil, fmt.Errorf("missing request body")
+	}
+
+	if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
+		messages := make([]map[string]any, 0, len(req.Body.ChatCompletions.Messages))
+		anyNonEmpty := false
+		for _, msg := range req.Body.ChatCompletions.Messages {
+			content := msg.Content.PlainText()
+			if strings.TrimSpace(content) != "" {
+				anyNonEmpty = true
 			}
-			requestBody["messages"] = messages
-		} else if req.Body.Completions != nil && req.Body.Completions.Prompt != "" {
-			// Legacy completions format - wrap as single user message
-			requestBody["messages"] = []map[string]any{
-				{"role": "user", "content": req.Body.Completions.Prompt},
-			}
-		} else {
-			requestBody["messages"] = []map[string]any{{"role": "user", "content": "default prompt"}}
+			messages = append(messages, map[string]any{
+				"role":    msg.Role,
+				"content": content,
+			})
+		}
+		if !anyNonEmpty {
+			return nil, fmt.Errorf("empty chat messages")
+		}
+		requestBody["messages"] = messages
+	} else if req.Body.Completions != nil && strings.TrimSpace(req.Body.Completions.Prompt) != "" {
+		// Legacy completions format - wrap as single user message
+		requestBody["messages"] = []map[string]any{
+			{"role": "user", "content": req.Body.Completions.Prompt},
 		}
 	} else {
-		requestBody["messages"] = []map[string]any{{"role": "user", "content": "default prompt"}}
+		return nil, fmt.Errorf("no messages or prompt provided")
 	}
 
 	// Model field is required by OpenAI spec but not used by the router's tokenizer
@@ -538,7 +558,7 @@ func buildOpenAIRequest(req *schedtypes.LLMRequest) map[string]any {
 	} else {
 		requestBody["model"] = "default"
 	}
-	return requestBody
+	return requestBody, nil
 }
 
 // --------------------------- router bookkeeping ---------------------------

@@ -436,11 +436,16 @@ impl RouterHandles {
     /// Query optimal decode worker for a request.
     /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_weight=0
     /// (since KV cache is being transferred from prefill, not reused).
+    ///
+    /// Note: The C bindings are query-only and must not mutate router state during worker
+    /// selection. State updates require a `context_id` (request id) and are managed via the
+    /// explicit bookkeeping APIs (`add_request`, `mark_prefill_complete`, `free_request`).
+    /// This function always queries with `update_states=false` to avoid panicking across the
+    /// FFI boundary (KvRouter::find_best_match requires context_id when update_states=true).
     /// Returns (worker, overlap_blocks) on success.
     async fn query_decode_worker(
         &self,
         tokens: &[u32],
-        update_states: bool,
         is_disaggregated: bool,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
         // For decode phase in disaggregated mode, use overlap_score_weight=0
@@ -455,7 +460,7 @@ impl RouterHandles {
         };
 
         self.decode_router
-            .find_best_match(None, tokens, config_override.as_ref(), update_states, None)
+            .find_best_match(None, tokens, config_override.as_ref(), false, None)
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
@@ -671,8 +676,7 @@ pub unsafe extern "C" fn create_routers(
 
 /// Add a request to the router's bookkeeping after worker selection.
 ///
-/// Do NOT call this function if you use update_states=true in query_decode!
-/// This registers the request with the KvRouter's scheduler for tracking active blocks
+/// Register the request with the KvRouter's scheduler for tracking active blocks
 /// and managing prefill/decode lifecycle. Call this after `query_decode` returns
 /// worker IDs and before sending the request to the worker.
 ///
@@ -985,7 +989,7 @@ pub unsafe extern "C" fn route_request(
         // Query decode worker
         // Note: update_states=false because add_request() is called separately for bookkeeping
         let (decode_worker, overlap_blocks) = handles
-            .query_decode_worker(tokens, false, is_disaggregated)
+            .query_decode_worker(tokens, is_disaggregated)
             .await?;
 
         tracing::info!(

@@ -133,8 +133,8 @@ kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 ```
 
--When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
--You must enable the `--direct-route` flag in the FrontEnd cli.
+- When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
+- You must enable the `--direct-route` flag in the FrontEnd cli.
 ```bash
     command:
       - python3
@@ -144,8 +144,8 @@ kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPAC
       - --router-mode
       - direct
 ```
--The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
--The flag assures the routing respects this selection.
+- The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
+- The flag assures the routing respects this selection.
 
 **Startup Probe Timeout:** The EPP has a default startup probe timeout of 30 minutes (10s × 180 failures).
 If your model takes longer to load, increase the `failureThreshold` in the EPP's `startupProbe`. For example,
@@ -178,7 +178,7 @@ Before deploying you must enable the `--direct-route` flag in the FrontEnd cli i
       - --router-mode
       - direct
 ```
-```
+
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
 Sample commands to deploy model:

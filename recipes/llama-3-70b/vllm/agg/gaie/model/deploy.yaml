@@ -19,7 +19,7 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
-          # This ensures that the requst is routed  directly to the chosen worker
+          # This ensures that the request is routed  directly to the chosen worker
           args:
             - "-m"
             - "dynamo.frontend"
