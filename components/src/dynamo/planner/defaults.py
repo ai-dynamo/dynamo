@@ -48,14 +48,6 @@ class BasePlannerDefaults:
     metric_reporting_prometheus_port = int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
 
 
-class LoadPlannerDefaults(BasePlannerDefaults):
-    metric_pulling_interval = 10  # in seconds
-    decode_kv_scale_up_threshold = 0.9
-    decode_kv_scale_down_threshold = 0.5
-    prefill_queue_scale_up_threshold = 5.0
-    prefill_queue_scale_down_threshold = 0.2
-
-
 class SLAPlannerDefaults(BasePlannerDefaults):
     # Prometheus endpoint URL for pulling/querying metrics
     metric_pulling_prometheus_endpoint = os.environ.get(

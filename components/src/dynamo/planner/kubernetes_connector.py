@@ -278,6 +278,30 @@ class KubernetesConnector(PlannerConnector):
 
         return prefill_gpu_count, decode_gpu_count
 
+    def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
+        """Auto-discover the Frontend service's metrics URL from the DGD.
+
+        Iterates spec.services to find the service with componentType "frontend",
+        then constructs the in-cluster URL using the operator's naming convention:
+        http://{dgd_name}-{service_key_lowercase}:{port}/metrics
+
+        Returns:
+            The metrics URL string, or None if no frontend service is found.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        services = deployment.get("spec", {}).get("services", {})
+
+        for service_key, service_spec in services.items():
+            if service_spec.get("componentType", "") == "frontend":
+                service_name = f"{self.graph_deployment_name}-{service_key.lower()}"
+                url = f"http://{service_name}:{port}/metrics"
+                logger.info(
+                    f"Auto-discovered frontend metrics URL: {url}"
+                )
+                return url
+
+        return None
+
     async def wait_for_deployment_ready(self):
         """Wait for the deployment to be ready"""
         await self.kube_api.wait_for_graph_deployment_ready(

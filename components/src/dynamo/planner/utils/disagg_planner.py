@@ -31,7 +31,7 @@ class DisaggPlanner:
         self.shared_state = PlannerSharedState()
         prometheus_metrics = PlannerPrometheusMetrics()
 
-        self.enable_throughput = not getattr(args, "disable_throughput_scaling", False)
+        self.enable_throughput = getattr(args, "enable_throughput_scaling", True)
         self.enable_loadbased = getattr(args, "enable_loadbased_scaling", False)
 
         self.prefill_planner = PrefillPlanner(

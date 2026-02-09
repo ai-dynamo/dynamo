@@ -417,6 +417,20 @@ class BasePlanner:
         self.enable_throughput = getattr(args, "enable_throughput_scaling", True)
 
         if self.enable_loadbased:
+            # Auto-discover frontend metrics URL in Kubernetes mode
+            if not args.loadbased_router_metrics_url and isinstance(
+                getattr(self, "connector", None), KubernetesConnector
+            ):
+                args.loadbased_router_metrics_url = (
+                    self.connector.get_frontend_metrics_url()
+                )
+                if not args.loadbased_router_metrics_url:
+                    raise ValueError(
+                        "Could not auto-discover frontend metrics URL from DGD. "
+                        "No service with componentType 'frontend' found. "
+                        "Please provide --loadbased-router-metrics-url explicitly."
+                    )
+
             self.router_metrics_client = DirectRouterMetricsClient(
                 args.loadbased_router_metrics_url, args.namespace
             )
