@@ -128,14 +128,14 @@ const (
 	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"   // DynamoCheckpoint CR name reference
 
 	// Environment variables injected into pods
-	EnvCheckpointStorageType    = "DYN_CHECKPOINT_STORAGE_TYPE"     // Storage backend (pvc, s3, oci) — checkpoint job pods only
-	EnvCheckpointLocation       = "DYN_CHECKPOINT_LOCATION"         // Full checkpoint URI — future S3/OCI; for PVC, use PATH+HASH instead
-	EnvCheckpointPath           = "DYN_CHECKPOINT_PATH"             // Base checkpoint directory (e.g., /checkpoints) — PVC restored pods
-	EnvCheckpointHash           = "DYN_CHECKPOINT_HASH"             // Identity hash — all checkpoint-related pods
-	EnvCheckpointSignalFile     = "DYN_CHECKPOINT_SIGNAL_FILE"      // Signal file path — checkpoint job pods
-	EnvReadyForCheckpointFile   = "DYN_READY_FOR_CHECKPOINT_FILE"   // Ready-for-checkpoint file path — checkpoint job pods
-	EnvRestoreMarkerFile        = "DYN_RESTORE_MARKER_FILE"         // Restore marker path — injected into restore and checkpoint job pods
-	EnvSkipWaitForCheckpoint    = "SKIP_WAIT_FOR_CHECKPOINT"        // Skip polling, check once — restored/DGD pods
+	EnvCheckpointStorageType  = "DYN_CHECKPOINT_STORAGE_TYPE"   // Storage backend (pvc, s3, oci) — checkpoint job pods only
+	EnvCheckpointLocation     = "DYN_CHECKPOINT_LOCATION"       // Full checkpoint URI — future S3/OCI; for PVC, use PATH+HASH instead
+	EnvCheckpointPath         = "DYN_CHECKPOINT_PATH"           // Base checkpoint directory (e.g., /checkpoints) — PVC restored pods
+	EnvCheckpointHash         = "DYN_CHECKPOINT_HASH"           // Identity hash — all checkpoint-related pods
+	EnvCheckpointSignalFile   = "DYN_CHECKPOINT_SIGNAL_FILE"    // Signal file path — checkpoint job pods
+	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
+	EnvRestoreMarkerFile      = "DYN_RESTORE_MARKER_FILE"       // Restore marker path — injected into restore and checkpoint job pods
+	EnvSkipWaitForCheckpoint  = "SKIP_WAIT_FOR_CHECKPOINT"      // Skip polling, check once — restored/DGD pods
 	// Checkpoint pod-internal constants
 	CheckpointVolumeName               = "checkpoint-storage"  // Pod-internal volume name for checkpoint PVC
 	CheckpointSignalVolumeName         = "checkpoint-signal"   // Pod-internal volume name for signal hostPath

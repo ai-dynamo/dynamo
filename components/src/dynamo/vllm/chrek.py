@@ -61,7 +61,9 @@ class CheckpointConfig:
         For PVC storage, checks for checkpoint.done marker at the location.
         Returns True if the job should exit without loading the model.
         """
-        assert self.storage_type == "pvc", "Checkpoint existence check is only implemented for PVC storage"
+        assert (
+            self.storage_type == "pvc"
+        ), "Checkpoint existence check is only implemented for PVC storage"
         if self.storage_type == "pvc" and self.location:
             done_marker = f"{self.location}/checkpoint.done"
             if os.path.exists(done_marker):
@@ -74,7 +76,9 @@ class CheckpointConfig:
                     return False
 
                 if status["success"]:
-                    logger.info(f"Existing successful checkpoint found at {self.location}, skipping")
+                    logger.info(
+                        f"Existing successful checkpoint found at {self.location}, skipping"
+                    )
                     return True
 
                 logger.warning(
