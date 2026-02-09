@@ -185,6 +185,12 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_output_tokens: Option<u32>,
+
+    /// Priority jump in seconds for queue ordering.
+    /// Higher values cause the request to be scheduled sooner when the router queue is enabled.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_jump: Option<f64>,
 }
 
 impl Default for NvExt {
