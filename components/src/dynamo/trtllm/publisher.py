@@ -9,13 +9,13 @@ and publishes them either to ZMQ (for consolidator) or NATS (direct to router).
 
 Key Components:
 - ZmqKvEventPublisher: Pure Python ZMQ PUBLISHER that publishes TensorRT-LLM KV events
-  to ZMQ (so the consolidator can subscribe). This is different from the ZmqKvEventPublisher
-  in dynamo.llm, which is a Rust-based ZMQ SUBSCRIBER that subscribes from consolidator
-  and publishes to NATS.
+  to ZMQ (so the consolidator can subscribe). This is different from KvEventPublisher
+  in dynamo.llm, which is a Rust-based class that can optionally subscribe from a ZMQ
+  source and publishes to NATS.
 - Publisher: Main class that coordinates event publishing (ZMQ or NATS) and metrics publishing.
 
 Event Flow:
-- With Consolidator: Engine → ZmqKvEventPublisher (ZMQ PUB) → Consolidator → ZmqKvEventPublisher (dynamo.llm, ZMQ SUB) → NATS → Router
+- With Consolidator: Engine → ZmqKvEventPublisher (ZMQ PUB) → Consolidator → KvEventPublisher (dynamo.llm, ZMQ SUB) → NATS → Router
 - Without Consolidator: Engine → KvEventPublisher (NATS PUB) → Router
 """
 
@@ -65,9 +65,9 @@ class ZmqKvEventPublisher:
     Pure Python ZMQ PUBLISHER for TensorRT-LLM KV events.
 
     This class publishes TensorRT-LLM's KV cache events to ZMQ so that the consolidator
-    can subscribe to them. This is different from the ZmqKvEventPublisher in dynamo.llm,
-    which is a Rust-based ZMQ SUBSCRIBER that subscribes from the consolidator's ZMQ
-    output and publishes to NATS.
+    can subscribe to them. This is different from KvEventPublisher in dynamo.llm,
+    which is a Rust-based class that can optionally subscribe from a ZMQ source
+    and publishes to NATS.
 
     Event Format: [timestamp, [events], data_parallel_rank]
     Message Format: multipart ZMQ message [topic, sequence, payload] where payload is
@@ -278,7 +278,7 @@ class Publisher:
     - If zmq_endpoint None: Uses KvEventPublisher (NATS PUB) → Router directly
 
     Note: The ZmqKvEventPublisher used here is the pure Python ZMQ publisher defined
-    in this module, not the Rust-based ZmqKvEventPublisher from dynamo.llm (which is
+    in this module, not the Rust-based KvEventPublisher from dynamo.llm (which is
     used in main.py as the worker-side subscriber from consolidator to NATS).
     """
 
@@ -357,7 +357,7 @@ class Publisher:
         # Publisher selection based on consolidator configuration:
         # - With consolidator: Use ZmqKvEventPublisher (this module) → ZMQ → Consolidator → NATS → Router
         # - Without consolidator: Use KvEventPublisher → NATS → Router (direct)
-        # Note: The worker-side ZmqKvEventPublisher (from dynamo.llm) that subscribes from
+        # Note: The worker-side KvEventPublisher (from dynamo.llm) that subscribes from
         # consolidator and publishes to NATS is created separately in main.py, not here.
         if self.zmq_kv_event_publisher:
             logging.info(

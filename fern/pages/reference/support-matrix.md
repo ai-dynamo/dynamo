@@ -13,24 +13,43 @@ This document provides the support matrix for Dynamo, including hardware, softwa
 
 The following table shows the backend framework versions included with each Dynamo release:
 
-| **Dependency** | **main (ToT)** | **v0.8.1.post1** | **v0.8.1 (latest)** | **v0.8.0** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
-| :------------- | :------------- | :--------------- | :------------------ | :--------- | :--------- | :--------------- | :--------- |
-| vLLM           | `0.14.0`       | `0.12.0`         | `0.12.0`            | `0.12.0`   | `0.11.0`   | `0.11.0`         | `0.11.0`   |
-| SGLang         | `0.5.8`        | `0.5.6.post2`    | `0.5.6.post2`       | `0.5.6.post2` | `0.5.3.post4` | `0.5.3.post4` | `0.5.3.post4` |
-| TensorRT-LLM   | `1.2.0rc6.post2` | `1.2.0rc6.post2` | `1.2.0rc6.post1`  | `1.2.0rc6.post1` | `1.2.0rc3` | `1.2.0rc3`     | `1.2.0rc2` |
-| NIXL           | `0.9.0`        | `0.8.0`          | `0.8.0`             | `0.8.0`    | `0.8.0`    | `0.8.0`          | `0.8.0`    |
+| **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **NIXL** |
+| :--- | :--- | :--- | :--- | :--- |
+| **main (ToT)** | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
+| **v1.0.0** *(planned)* | `0.15.0` | *Latest as of 2/17* | *Latest as of 2/17* | `0.10.0` |
+| **v0.9.0** *(in progress)* | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
+| **v0.8.1.post3** *(in progress)* | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post3` | `0.8.0` |
+| **v0.8.1.post2** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post2` | `0.8.0` |
+| **v0.8.1.post1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
+| **v0.8.1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
+| **v0.8.0** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
+| **v0.7.1** | `0.11.0` | `0.5.4.post3` | `1.2.0rc3` | `0.8.0` |
+| **v0.7.0.post1** | `0.11.0` | `0.5.4.post3` | `1.2.0rc3` | `0.8.0` |
+| **v0.7.0** | `0.11.0` | `0.5.4.post3` | `1.2.0rc2` | `0.8.0` |
+| **v0.6.1.post1** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
+| **v0.6.1** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
+| **v0.6.0** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
 
-**main (ToT)** reflects the current development branch. **v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only (no GitHub release).
+### Version Labels
 
-> [!WARNING]
-> Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] Python wheel will fail.
+- **main (ToT)** reflects the current development branch.
+- Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
-| **Dynamo Version** | **SGLang**                | **TensorRT-LLM** | **vLLM**                 |
-| :----------------- | :------------------------ | :--------------- | :----------------------- |
-| **Dynamo 0.8.1**   | CUDA 12.9, CUDA 13.0 (Experimental) | CUDA 13.0        | CUDA 12.9, CUDA 13.0 (Experimental) |
-| **Dynamo 0.8.0**   | CUDA 12.9, CUDA 13.0 (Experimental) | CUDA 13.0        | CUDA 12.9, CUDA 13.0 (Experimental) |
-| **Dynamo 0.7.1**   | CUDA 12.8                 | CUDA 13.0        | CUDA 12.9                |
-| **Dynamo 0.7.0**   | CUDA 12.9                 | CUDA 13.0        | CUDA 12.8                |
+### Version Compatibility
+
+- Backend versions listed are the only versions tested and supported for each release.
+- TensorRT-LLM does not support Python 3.11; installation of the `ai-dynamo[trtllm]` wheel will fail on Python 3.11.
+
+### CUDA Versions by Backend
+
+| **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **Notes** |
+| :--- | :--- | :--- | :--- | :--- |
+| **v0.8.1** | `12.9`, `13.0` | `12.9`, `13.0` | `13.0` | Experimental vLLM/SGLang CUDA 13 support |
+| **v0.8.0** | `12.9`, `13.0` | `12.9`, `13.0` | `13.0` | Experimental vLLM/SGLang CUDA 13 support |
+| **v0.7.1** | `12.9` | `12.8` | `13.0` | |
+| **v0.7.0** | `12.8` | `12.9` | `13.0` | TensorRT-LLM CUDA 13 support - CUDA 12.9 deprecated |
+| **v0.6.1** | `12.8` | `12.9` | `12.9` | |
+| **v0.6.0** | `12.8` | `12.8` | `12.9` | |
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
 
@@ -69,7 +88,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 Wheels are built using a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but not officially verified.
 
-> [!CAUTION]
+> [!Caution]
 > KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
 
 ## Software Compatibility
@@ -119,7 +138,7 @@ For extended driver compatibility beyond the minimum versions listed above, cons
 | :------------------------ | :---------- | :--------------- | :--------- |
 | **Amazon Linux**          | 2023        | x86_64           | Supported  |
 
-> [!CAUTION]
+> [!Caution]
 > **AL2023 TensorRT-LLM Limitation:** There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
 
 ## Build Support

@@ -7,7 +7,7 @@
 
 This document provides a comprehensive inventory of all Dynamo release artifacts including container images, Python wheels, Helm charts, and Rust crates.
 
-**See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support
+> **See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support
 
 Release history in this document begins at v0.6.0.
 
@@ -74,7 +74,7 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 
 ### Container Images (NGC)
 
-For detailed run instructions, see the [Container README](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md) or backend-specific guides: [vLLM](../backends/vllm/README.md) | [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md)
+> For detailed run instructions, see the [Container README](https://github.com/ai-dynamo/dynamo/tree/main/container/README.md) or backend-specific guides: [vLLM](../backends/vllm/README.md) | [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md)
 
 ```bash
 # Runtime containers
@@ -94,7 +94,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator:0.8.1
 
 ### Python Wheels (PyPI)
 
-For detailed installation instructions, see the [Local Quick Start](https://github.com/ai-dynamo/dynamo#local-quick-start) in the README.
+> For detailed installation instructions, see the [Local Quick Start](https://github.com/ai-dynamo/dynamo#local-quick-start) in the README.
 
 ```bash
 # Install Dynamo with a specific backend (Recommended)
@@ -112,7 +112,7 @@ uv pip install kvbm==0.8.1
 
 ### Helm Charts (NGC)
 
-For Kubernetes deployment instructions, see the [Kubernetes Installation Guide](../kubernetes/installation-guide.md).
+> For Kubernetes deployment instructions, see the [Kubernetes Installation Guide](../kubernetes/installation-guide.md).
 
 ```bash
 helm install dynamo-crds oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds --version 0.8.1
@@ -122,7 +122,7 @@ helm install dynamo-graph oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dyna
 
 ### Rust Crates (crates.io)
 
-For API documentation, see each crate on [docs.rs](https://docs.rs/). To build Dynamo from source, see [Building from Source](https://github.com/ai-dynamo/dynamo#building-from-source).
+> For API documentation, see each crate on [docs.rs](https://docs.rs/). To build Dynamo from source, see [Building from Source](https://github.com/ai-dynamo/dynamo#building-from-source).
 
 ```bash
 cargo add dynamo-runtime@0.8.1
@@ -166,17 +166,17 @@ For a complete list of known issues, refer to the release notes for each patch:
 |---------|--------------|--------|------|
 | `v0.8.1` | Jan 23, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.8.1/index.html) |
 | `v0.8.0` | Jan 15, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.8.0/index.html) |
-| `v0.7.1` | Dec 15, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) | — |
+| `v0.7.1` | Dec 15, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.7.1/index.html) |
 | `v0.7.0` | Nov 26, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.7.0/index.html) |
 | `v0.6.1` | Nov 6, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.6.1/index.html) |
 | `v0.6.0` | Oct 28, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.6.0/index.html) |
 
 ### Container Images
 
-**NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
-
-To access a specific version, append `?version=TAG` to the container URL:
-`https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/{container}?version={tag}`
+> **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
+>
+> To access a specific version, append `?version=TAG` to the container URL:
+> `https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/{container}?version={tag}`
 
 #### vllm-runtime
 
@@ -245,9 +245,9 @@ To access a specific version, append `?version=TAG` to the container URL:
 
 ### Python Wheels
 
-**PyPI:** [ai-dynamo](https://pypi.org/project/ai-dynamo/) | [ai-dynamo-runtime](https://pypi.org/project/ai-dynamo-runtime/) | [kvbm](https://pypi.org/project/kvbm/)
-
-To access a specific version: `https://pypi.org/project/{package}/{version}/`
+> **PyPI:** [ai-dynamo](https://pypi.org/project/ai-dynamo/) | [ai-dynamo-runtime](https://pypi.org/project/ai-dynamo-runtime/) | [kvbm](https://pypi.org/project/kvbm/)
+>
+> To access a specific version: `https://pypi.org/project/{package}/{version}/`
 
 #### ai-dynamo (wheel)
 
@@ -284,9 +284,9 @@ To access a specific version: `https://pypi.org/project/{package}/{version}/`
 
 ### Helm Charts
 
-**NGC Helm Registry:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
-
-Direct download: `https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/{chart}-{version}.tgz`
+> **NGC Helm Registry:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
+>
+> Direct download: `https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/{chart}-{version}.tgz`
 
 #### dynamo-crds (Helm chart)
 
@@ -323,9 +323,9 @@ Direct download: `https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/{chart}-{v
 
 ### Rust Crates
 
-**crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config)
-
-To access a specific version: `https://crates.io/crates/{crate}/{version}`
+> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config)
+>
+> To access a specific version: `https://crates.io/crates/{crate}/{version}`
 
 #### dynamo-runtime (crate)
 

@@ -134,3 +134,10 @@ The planner queries the frontend's `/metrics` endpoint via Prometheus. Required 
 - Request count and duration
 - TTFT and ITL distributions
 - Input/output sequence lengths
+
+```{toctree}
+:hidden:
+
+planner_guide
+planner_examples
+```

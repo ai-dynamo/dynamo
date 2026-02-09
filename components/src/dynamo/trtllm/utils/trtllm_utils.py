@@ -9,6 +9,7 @@ from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
+from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.trtllm import __version__
 from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 
@@ -40,7 +41,6 @@ class Config:
         self.expert_parallel_size: Optional[int] = None
         self.enable_attention_dp: bool = False
         self.kv_block_size: int = 32
-        self.migration_limit: int = 0
         self.gpus_per_node: Optional[int] = None
         self.max_batch_size: int = BuildConfig.model_fields["max_batch_size"].default
         self.max_num_tokens: int = BuildConfig.model_fields["max_num_tokens"].default
@@ -64,7 +64,7 @@ class Config:
         self.store_kv: str = ""
         self.request_plane: str = ""
         self.event_plane: str = ""
-        self.enable_local_indexer: bool = False
+        self.enable_local_indexer: bool = True
         # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
         self.use_kv_events: bool = False
 
@@ -88,7 +88,6 @@ class Config:
             f"free_gpu_memory_fraction={self.free_gpu_memory_fraction}, "
             f"extra_engine_args={self.extra_engine_args}, "
             f"override_engine_args={self.override_engine_args}, "
-            f"migration_limit={self.migration_limit}, "
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
             f"encode_endpoint={self.encode_endpoint}, "
@@ -114,30 +113,6 @@ def _preprocess_for_encode_config(
 ) -> dict:  # pyright: ignore[reportUnusedFunction]
     """Convert Config object to dictionary for encoding."""
     return obj.__dict__
-
-
-def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
-    """Parse a Dynamo endpoint string into its components.
-
-    Args:
-        endpoint: Endpoint string in format 'namespace.component.endpoint'
-            or 'dyn://namespace.component.endpoint'.
-
-    Returns:
-        Tuple of (namespace, component, endpoint_name).
-
-    Raises:
-        ValueError: If endpoint format is invalid.
-    """
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        raise ValueError(
-            f"Invalid endpoint format: '{endpoint}'. "
-            "Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-    namespace, component, endpoint_name = endpoint_parts
-    return namespace, component, endpoint_name
 
 
 def cmd_line_args():
@@ -195,12 +170,6 @@ def cmd_line_args():
     # query the block size from the TRTLLM engine.
     parser.add_argument(
         "--kv-block-size", type=int, default=32, help="Size of a KV cache block."
-    )
-    parser.add_argument(
-        "--migration-limit",
-        type=int,
-        default=0,
-        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
     parser.add_argument(
         "--gpus-per-node",
@@ -358,11 +327,10 @@ def cmd_line_args():
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--enable-local-indexer",
-        type=str,
-        choices=["true", "false"],
-        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+        "--durable-kv-events",
+        action="store_true",
+        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     )
 
     args = parser.parse_args()
@@ -416,7 +384,6 @@ def cmd_line_args():
     config.max_seq_len = args.max_seq_len
     config.max_beam_width = args.max_beam_width
     config.kv_block_size = args.kv_block_size
-    config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
     config.override_engine_args = args.override_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
@@ -429,7 +396,7 @@ def cmd_line_args():
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
-    config.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
+    config.enable_local_indexer = not args.durable_kv_events
     # Derive use_kv_events from publish_events_and_metrics
     config.use_kv_events = config.publish_events_and_metrics
     config.connector = args.connector

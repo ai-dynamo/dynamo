@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Dynamo Metrics Collection on Kubernetes
-
 ## Overview
 
 This guide provides a walkthrough for collecting and visualizing metrics from Dynamo components using the kube-prometheus-stack. The kube-prometheus-stack provides a powerful and flexible way to configure monitoring for Kubernetes applications through custom resources like PodMonitors, making it easy to automatically discover and scrape metrics from Dynamo components.
@@ -25,11 +23,11 @@ helm repo update
 # Values allow PodMonitors to be picked up that are outside of the kube-prometheus-stack helm release
 helm install prometheus -n monitoring --create-namespace prometheus-community/kube-prometheus-stack \
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
-  --set prometheus.prometheusSpec.podMonitorNamespaceSelector="{}" \
-  --set prometheus.prometheusSpec.probeNamespaceSelector="{}"
+  --set prometheus.prometheusSpec.podMonitorNamespaceSelector.matchLabels=null \
+  --set prometheus.prometheusSpec.probeNamespaceSelector.matchLabels=null
 ```
 
-> [!NOTE]
+> [!Note]
 > The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
 
 ### Install Dynamo Operator
@@ -46,7 +44,7 @@ helm install dynamo-platform ...
 
 The Dynamo Grafana dashboard includes panels for node-level CPU utilization, system load, and container resource usage. These metrics are collected and exported to Prometheus via [node-exporter](https://github.com/prometheus/node_exporter), which exposes hardware and OS metrics from Linux systems.
 
-> [!NOTE]
+> [!Note]
 > The kube-prometheus-stack installation described above includes node-exporter by default. If you're using a custom Prometheus setup, you'll need to ensure node-exporter is deployed as a DaemonSet on your cluster nodes.
 
 To verify node-exporter is running:
@@ -117,7 +115,9 @@ The Prometheus Operator uses PodMonitor resources to automatically discover and 
 - `nvidia.com/metrics-enabled: "true"` - Enables metrics collection
 - `nvidia.com/dynamo-component-type: "frontend|worker"` - Identifies the component type
 
-> **Note**: You can opt-out specific deployments from metrics collection by adding this annotation to your DynamoGraphDeployment:
+<Note>
+You can opt-out specific deployments from metrics collection by adding this annotation to your DynamoGraphDeployment:
+</Note>
 ```yaml
 apiVersion: nvidia.com/v1
 kind: DynamoGraphDeployment
@@ -158,7 +158,7 @@ Visit http://localhost:9090 and try these example queries:
 - `dynamo_frontend_requests_total`
 - `dynamo_frontend_time_to_first_token_seconds_bucket`
 
-![Prometheus UI showing Dynamo metrics](../../../assets/img/prometheus-k8s.png)
+![Prometheus UI showing Dynamo metrics](/assets/img/prometheus-k8s.png)
 
 ### In Grafana
 ```bash
@@ -176,4 +176,10 @@ Visit http://localhost:3000 and log in with the credentials captured above.
 
 Once logged in, find the Dynamo dashboard under General.
 
-![Grafana dashboard showing Dynamo metrics](../../../assets/img/grafana-k8s.png)
+![Grafana dashboard showing Dynamo metrics](/assets/img/grafana-k8s.png)
+
+## Operator Metrics
+
+> **Note:** The metrics described above are for Dynamo **applications** (frontends, workers). The Dynamo **Operator** itself also exposes metrics for monitoring controller reconciliation, webhook validation, and resource inventory.
+>
+> See the **[Operator Metrics Guide](operator-metrics.md)** for details on operator-specific metrics and the operator dashboard.
