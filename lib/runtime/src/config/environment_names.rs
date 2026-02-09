@@ -20,6 +20,7 @@
 //! - **Model**: Model loading and caching
 //! - **Worker**: Worker lifecycle and shutdown
 //! - **Testing**: Test-specific configuration
+//! - **Mocker**: Mocker (mock scheduler/KV manager) configuration
 
 /// Logging and tracing environment variables
 pub mod logging {
@@ -301,6 +302,10 @@ pub mod model {
 
         /// Hugging Face home directory
         pub const HF_HOME: &str = "HF_HOME";
+
+        /// Offline mode - skip API calls when model is cached
+        /// Set to "1" or "true" to enable
+        pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
 }
 
@@ -311,6 +316,26 @@ pub mod event_plane {
 
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+}
+
+/// ZMQ Broker environment variables
+pub mod zmq_broker {
+    /// Explicit ZMQ broker URL (takes precedence over discovery)
+    /// Format: "xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"
+    /// Example: "xsub=tcp://broker:5555 , xpub=tcp://broker:5556"
+    pub const DYN_ZMQ_BROKER_URL: &str = "DYN_ZMQ_BROKER_URL";
+
+    /// Enable ZMQ broker discovery mode
+    pub const DYN_ZMQ_BROKER_ENABLED: &str = "DYN_ZMQ_BROKER_ENABLED";
+
+    /// XSUB bind address (broker binary only)
+    pub const ZMQ_BROKER_XSUB_BIND: &str = "ZMQ_BROKER_XSUB_BIND";
+
+    /// XPUB bind address (broker binary only)
+    pub const ZMQ_BROKER_XPUB_BIND: &str = "ZMQ_BROKER_XPUB_BIND";
+
+    /// Namespace for broker discovery registration
+    pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
 }
 
 /// CUDA and GPU environment variables
@@ -330,6 +355,12 @@ pub mod build {
     /// which requires a string literal at compile time.
     /// Build scripts (build.rs) also cannot import this constant.
     pub const OUT_DIR: &str = "OUT_DIR";
+}
+
+/// Mocker (mock scheduler/KV manager) environment variables
+pub mod mocker {
+    /// Enable structured KV cache allocation/eviction trace logs (set to "1" or "true" to enable)
+    pub const DYN_MOCKER_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
 }
 
 /// Testing environment variables
@@ -416,13 +447,22 @@ mod tests {
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            model::huggingface::HF_HUB_OFFLINE,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            // ZMQ Broker
+            zmq_broker::DYN_ZMQ_BROKER_URL,
+            zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+            zmq_broker::ZMQ_BROKER_XSUB_BIND,
+            zmq_broker::ZMQ_BROKER_XPUB_BIND,
+            zmq_broker::ZMQ_BROKER_NAMESPACE,
             // CUDA
             cuda::DYNAMO_FATBIN_PATH,
             // Build
             build::OUT_DIR,
+            // Mocker
+            mocker::DYN_MOCKER_KV_CACHE_TRACE,
             // Testing
             testing::DYN_QUEUED_UP_PROCESSING,
             testing::DYN_SOAK_RUN_DURATION,

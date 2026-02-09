@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 0.7.1](https://img.shields.io/badge/Version-0.7.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 0.9.0](https://img.shields.io/badge/Version-0.9.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -86,10 +86,10 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 0.6.1 |
+| file://components/operator | dynamo-operator | 0.7.1 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/nvidia/grove | grove(grove-charts) | v0.1.0-alpha.3 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.6 |
 | oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.9.4 |
 
 ## Values
@@ -99,6 +99,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port" |
+| dynamo-operator.nats.enabled | bool | `true` | Whether the NATS is enabled |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
 | dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | Namespace access controls for the operator |
 | dynamo-operator.namespaceRestriction.enabled | bool | `false` | Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace). |
@@ -148,8 +149,22 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.renewBefore | string | `"360h"` | Time before certificate expiration to trigger renewal (e.g., "360h" for 15 days). cert-manager will attempt to renew the certificate when this threshold is reached. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
+| dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
+| dynamo-operator.checkpoint.storage.type | string | `"pvc"` | Storage backend type: pvc, s3, or oci |
+| dynamo-operator.checkpoint.storage.signalHostPath | string | `"/var/lib/chrek/signals"` | Host path for signal files (communication between checkpoint pod and DaemonSet) |
+| dynamo-operator.checkpoint.storage.pvc.pvcName | string | `"chrek-pvc"` | Name of the PVC created by the chrek chart |
+| dynamo-operator.checkpoint.storage.pvc.basePath | string | `"/checkpoints"` | Base path within the PVC for storing checkpoints |
+| dynamo-operator.checkpoint.storage.s3.uri | string | `""` | S3 URI in format: s3://[endpoint/]bucket/prefix |
+| dynamo-operator.checkpoint.storage.s3.credentialsSecretRef | string | `""` | Reference to a secret containing AWS credentials |
+| dynamo-operator.checkpoint.storage.oci.uri | string | `""` | OCI URI in format: oci://registry/repository |
+| dynamo-operator.checkpoint.storage.oci.credentialsSecretRef | string | `""` | Reference to a docker config secret for registry authentication |
+| dynamo-operator.checkpoint.criu.timeout | string | `"21600"` | CRIU operation timeout in seconds. Default: 21600 (6 hours) |
 | grove.enabled | bool | `false` | Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide |
+| grove.tolerations | list | `[]` | Node tolerations for Grove pods |
+| grove.affinity | object | `{}` | Affinity for Grove pods |
 | kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide |
+| kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
+| kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd." |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 | nats.enabled | bool | `true` | Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats." |
@@ -166,7 +181,7 @@ For detailed etcd configuration options beyond `etcd.enabled`, please refer to t
 
 ## 📚 Additional Resources
 
-- [Dynamo Kubernetes Platform Deployment Installation Guide](../../../../docs/kubernetes/installation_guide.md)
+- [Dynamo Cloud Deployment Installation Guide](../../../../docs/kubernetes/installation_guide.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)

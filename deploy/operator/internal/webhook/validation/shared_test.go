@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"context"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -219,7 +220,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
-			_, err := validator.Validate()
+			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SharedSpecValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
@@ -284,7 +285,7 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
-			warnings, err := validator.Validate()
+			warnings, err := validator.Validate(context.Background())
 
 			if err != nil {
 				t.Errorf("SharedSpecValidator.Validate() unexpected error = %v", err)

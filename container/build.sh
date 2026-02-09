@@ -22,6 +22,7 @@ fi
 set -e
 
 TAG=
+PRIMARY_TAG=
 RUN_PREFIX=
 PLATFORM=linux/amd64
 
@@ -74,7 +75,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.10-py3
+TRTLLM_BASE_IMAGE_TAG=25.12-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -104,7 +105,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="50379d028c2689ffb5cefe7797c5afb199e9df93" # 1.2.0rc6.post2
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="45d7022cc33903509fd8045bbc577d77dd1d3e2f" # 1.3.0rc1
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -113,8 +114,13 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc6.post2"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.3.0rc1"
+# TensorRT-LLM wheels on PyPI might not be compatible with the NGC PyTorch.
+# For incompatible versions, we install the wheel from the NGC image during the Docker build.
+# The following versions are not ABI compatible with the NGC PyTorch.
+TRTLLM_ABI_INCOMPATIBLE_VERSIONS=("1.3.0rc1")
 TENSORRTLLM_PIP_WHEEL=""
+TRTLLM_WHEEL_IMAGE=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
@@ -136,12 +142,12 @@ SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
 SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
 SGLANG_CUDA_VERSION_CU13="13.0.1"
-SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.7-cu130-runtime"
+SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.8-cu130-runtime"
 
 PYTHON_VERSION="3.12"
 
 NIXL_REF=0.9.0
-NIXL_UCX_REF=1.20.0
+NIXL_UCX_REF=v1.20.0
 NIXL_GDRCOPY_REF=v2.5.1
 NIXL_LIBFABRIC_REF=v2.3.0
 
@@ -296,7 +302,12 @@ get_options() {
             ;;
         --tag)
             if [ "$2" ]; then
-                TAG="--tag $2"
+                if [ -z "$TAG" ]; then
+                    TAG="--tag $2"
+                    PRIMARY_TAG="$2"
+                else
+                    TAG+=" --tag $2"
+                fi
                 shift
             else
                 missing_requirement "$1"
@@ -470,8 +481,10 @@ get_options() {
 
     if [ -z "$TAG" ]; then
         TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
+        PRIMARY_TAG="dynamo:${VERSION}-${FRAMEWORK,,}"
         if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
             TAG="${TAG}-${TARGET}"
+            PRIMARY_TAG="${PRIMARY_TAG}-${TARGET}"
         fi
     fi
 
@@ -535,7 +548,7 @@ show_help() {
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
-    echo "  [--tag tag for image]"
+    echo "  [--tag tag for image (can be specified multiple times)]"
     echo "  [--uid user ID for local-dev images (only with --target local-dev)]"
     echo "  [--gid group ID for local-dev images (only with --target local-dev)]"
     echo "  [--no-cache disable docker build cache]"
@@ -677,6 +690,50 @@ check_wheel_file() {
     return 0
 }
 
+get_trtllm_version_from_pip_wheel() {
+    local wheel_spec="$1"
+    if [[ "$wheel_spec" =~ == ]]; then
+        local version
+        version=$(echo "$wheel_spec" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+        if _is_semver_ref "$version"; then
+            echo "${version#v}"
+            return 0
+        fi
+    fi
+    echo ""
+    return 0
+}
+
+trtllm_version_incompatible() {
+    local version="$1"
+    for incompatible_version in "${TRTLLM_ABI_INCOMPATIBLE_VERSIONS[@]}"; do
+        if [[ "$version" == "$incompatible_version" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_is_semver_ref() {
+    local ref="$1"
+    local semver_regex='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+|[A-Za-z][0-9A-Za-z.-]+)?$'
+    [[ "$ref" =~ $semver_regex ]]
+}
+
+get_github_trtllm_ref() {
+    local commit="$1"
+    if _is_semver_ref "$commit"; then
+        if [[ "$commit" =~ ^v ]]; then
+            echo "$commit"
+        else
+            echo "v${commit}"
+        fi
+        return 0
+    fi
+    echo "$commit"
+    return 0
+}
+
 function determine_user_intention_trtllm() {
     # The tensorrt llm installation flags are not quite mutually exclusive
     # since the user should be able to point at a directory of their choosing
@@ -764,15 +821,22 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [[ "$TRTLLM_INTENTION" == "download" ]]; then
         TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL:-$DEFAULT_TENSORRTLLM_INDEX_URL}
         TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
-        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
-        BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
-        BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
-
+        TRTLLM_WHEEL_VERSION=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
+        if trtllm_version_incompatible "${TRTLLM_WHEEL_VERSION}"; then
+            TRTLLM_WHEEL_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:${TRTLLM_WHEEL_VERSION}"
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
+            BUILD_ARGS+=" --build-arg TRTLLM_WHEEL_IMAGE=${TRTLLM_WHEEL_IMAGE}"
+            PRINT_TRTLLM_WHEEL_FILE=${TRTLLM_WHEEL_IMAGE}
+        else
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
+            BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
+            BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
+            PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
+        fi
         # Create a dummy directory to satisfy the build context requirement
         # There is no way to conditionally copy the build context in dockerfile.
-        mkdir -p /tmp/dummy_dir
-        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
-        PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
+        mkdir -p /tmp/trtllm_wheel_context
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/trtllm_wheel_context"
     elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}"; then
@@ -811,7 +875,11 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [[ -z "$TRTLLM_COMMIT" ]]; then
         # Attempt to default since the commit will work with a hash or a tag/branch
         if [[ ! -z "$TENSORRTLLM_PIP_WHEEL" ]]; then
-            TRTLLM_COMMIT=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+            TRTLLM_COMMIT=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
+            if [[ -z "$TRTLLM_COMMIT" ]]; then
+                echo -e "[ERROR] Could not parse a semver version from TENSORRTLLM_PIP_WHEEL: ${TENSORRTLLM_PIP_WHEEL}"
+                exit 1
+            fi
             echo "Attempting to default TRTLLM_COMMIT to \"$TRTLLM_COMMIT\" for installation of TensorRT."
         else
             echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set."
@@ -820,7 +888,8 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
             exit 1
         fi
     fi
-    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
+    GITHUB_TRTLLM_REF=$(get_github_trtllm_ref "${TRTLLM_COMMIT}")
+    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${GITHUB_TRTLLM_REF}"
 
 
 fi
@@ -949,7 +1018,7 @@ if [[ -z "${TARGET:-}" || "${TARGET:-}" == "dev" || "${TARGET:-}" == "local-dev"
     BUILD_ARGS+=" --build-arg FRAMEWORK=${FRAMEWORK,,} "
 
     # Preserve historical tagging behavior for dev/local-dev (build.sh used to delegate out).
-    base="${TAG#--tag }"
+    base="${PRIMARY_TAG}"
     base="${base%-runtime}"
     base="${base%-local-dev}"
     base="${base%-dev}"
@@ -1035,7 +1104,7 @@ fi
 
 # Use BuildKit for enhanced metadata
 if docker buildx version &>/dev/null; then
-    $RUN_PREFIX docker buildx build --progress=plain${LOAD_FLAG}${PUSH} -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    $RUN_PREFIX docker buildx build --progress=plain ${LOAD_FLAG} ${PUSH} -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 else
     $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
@@ -1049,8 +1118,8 @@ fi
 # Handle --make-efa flag: add AWS EFA layer on top of the built image
 # This runs BEFORE local-dev so the flow is: dev -> dev-aws -> local-dev-aws
 if [[ "${MAKE_EFA:-}" == "true" ]]; then
-    # Get the base image that was just built (dev or runtime)
-    BASE_IMAGE_FOR_EFA=$(echo "$TAG" | sed 's/--tag //')
+    # Get the base image that was just built (use PRIMARY_TAG to avoid parsing issues)
+    BASE_IMAGE_FOR_EFA="${PRIMARY_TAG}"
 
     # Determine the EFA stage based on the target
     # runtime target -> runtime-aws stage
