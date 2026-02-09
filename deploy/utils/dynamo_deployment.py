@@ -548,7 +548,7 @@ async def main():
         "--log-dir",
         "-l",
         default=os.path.join(tempfile.gettempdir(), "dynamo_logs"),
-        help="Base directory for logs (default: <tempdir>/dynamo_logs)",
+        help=f"Base directory for logs (default: {tempfile.gettempdir()}/dynamo_logs)",
     )
     parser.add_argument(
         "--service-name",
