@@ -758,10 +758,10 @@ impl ModelManager {
         model_entry.load_threshold_config(config)
     }
 
-    /// Gets an existing worker monitor for a model, if one exists.
-    pub fn get_worker_monitor(&self, model: &str) -> Option<KvWorkerMonitor> {
+    /// Gets an existing worker monitor for a specific namespace of a model.
+    pub fn get_worker_monitor_for_namespace(&self, model: &str, namespace: &str) -> Option<KvWorkerMonitor> {
         let model_entry = self.models.get(model)?;
-        model_entry.get_worker_monitor()
+        model_entry.get_worker_monitor_for_namespace(namespace)
     }
 
     /// Lists all models with worker monitors configured.
