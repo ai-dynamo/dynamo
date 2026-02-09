@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Grove Deployment Guide
-
 Grove is a Kubernetes API specifically designed to address the orchestration challenges of modern AI workloads, particularly disaggregated inference systems. Grove provides seamless integration with NVIDIA Dynamo for comprehensive AI infrastructure management.
 
 ## Overview
@@ -98,8 +96,8 @@ For KAI Scheduler, see the [KAI Scheduler Deployment Guide](https://github.com/N
 
 For installation instructions, see the [Grove Installation Guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md).
 
-For practical examples of Grove-based multinode deployments in action, see the [Multinode Deployment Guide](deployment/multinode-deployment.md), which demonstrates multi-node disaggregated serving scenarios.
+For practical examples of Grove-based multinode deployments in action, see the [Multinode Deployment Guide](./deployment/multinode-deployment.md), which demonstrates multi-node disaggregated serving scenarios.
 
 For the latest updates on Grove, refer to the [official project on GitHub](https://github.com/NVIDIA/grove).
 
-Dynamo Kubernetes Platform also allows you to install Grove and KAI Scheduler as part of the platform installation. See the [Dynamo Kubernetes Platform Deployment Installation Guide](installation-guide.md) for more details.
+Dynamo Kubernetes Platform also allows you to install Grove and KAI Scheduler as part of the platform installation. See the [Dynamo Kubernetes Platform Deployment Installation Guide](./installation-guide.md) for more details.

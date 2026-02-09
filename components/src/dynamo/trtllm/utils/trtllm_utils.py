@@ -9,6 +9,7 @@ from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
+from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.trtllm import __version__
 from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 
@@ -63,7 +64,7 @@ class Config:
         self.store_kv: str = ""
         self.request_plane: str = ""
         self.event_plane: str = ""
-        self.enable_local_indexer: bool = False
+        self.enable_local_indexer: bool = True
         # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
         self.use_kv_events: bool = False
 
@@ -112,30 +113,6 @@ def _preprocess_for_encode_config(
 ) -> dict:  # pyright: ignore[reportUnusedFunction]
     """Convert Config object to dictionary for encoding."""
     return obj.__dict__
-
-
-def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
-    """Parse a Dynamo endpoint string into its components.
-
-    Args:
-        endpoint: Endpoint string in format 'namespace.component.endpoint'
-            or 'dyn://namespace.component.endpoint'.
-
-    Returns:
-        Tuple of (namespace, component, endpoint_name).
-
-    Raises:
-        ValueError: If endpoint format is invalid.
-    """
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        raise ValueError(
-            f"Invalid endpoint format: '{endpoint}'. "
-            "Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-    namespace, component, endpoint_name = endpoint_parts
-    return namespace, component, endpoint_name
 
 
 def cmd_line_args():
@@ -350,11 +327,10 @@ def cmd_line_args():
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--enable-local-indexer",
-        type=str,
-        choices=["true", "false"],
-        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+        "--durable-kv-events",
+        action="store_true",
+        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     )
 
     args = parser.parse_args()
@@ -420,7 +396,7 @@ def cmd_line_args():
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
-    config.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
+    config.enable_local_indexer = not args.durable_kv_events
     # Derive use_kv_events from publish_events_and_metrics
     config.use_kv_events = config.publish_events_and_metrics
     config.connector = args.connector

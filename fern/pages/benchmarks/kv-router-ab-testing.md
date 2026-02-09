@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Dynamo KV Smart Router A/B Benchmarking Guide
-
 This guide walks you through setting up and running A/B benchmarks to compare Dynamo's KV Smart Router against standard round-robin routing on a Kubernetes cluster.
 
 ## Overview
@@ -99,7 +97,7 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform (Per-Namespace)
 
-If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation_guide.md) to install the platform in both namespaces:
+If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in both namespaces:
 
 - `router-off-test`
 - `router-on-test`

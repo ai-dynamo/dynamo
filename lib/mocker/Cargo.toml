@@ -12,6 +12,7 @@ repository.workspace = true
 
 [dependencies]
 # repo
+dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-kv-router = { workspace = true }
 
