@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::discovery::RuntimeConfigs;
+use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
@@ -84,7 +84,7 @@ pub struct SchedulerQueue {
     pending: Mutex<BinaryHeap<QueueEntry>>,
     ready: Mutex<VecDeque<SchedulingRequest>>,
     slots: Arc<ActiveSequencesMultiWorker>,
-    workers_with_configs: Arc<RuntimeConfigs>,
+    workers_with_configs: RuntimeConfigWatch,
     ready_notify: Arc<Notify>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
@@ -95,7 +95,7 @@ pub struct SchedulerQueue {
 impl SchedulerQueue {
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker>,
-        workers_with_configs: Arc<RuntimeConfigs>,
+        workers_with_configs: RuntimeConfigWatch,
         ready_notify: Arc<Notify>,
     ) -> Self {
         let threshold_frac = queue_threshold_frac();
@@ -180,14 +180,12 @@ impl SchedulerQueue {
     /// Returns true only if ALL workers exceed the threshold (no worker has capacity).
     async fn all_workers_busy(&self, threshold: f64) -> bool {
         let active_tokens = self.slots.active_tokens().await;
+        let configs = self.workers_with_configs.borrow();
 
-        for entry in self.workers_with_configs.configs.iter() {
-            let worker_id = *entry.key();
-            let config = entry.value();
-            let dp_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1);
+        for (&worker_id, config) in configs.iter() {
+            let dp_size = config.data_parallel_size;
             let max_batched = config
-                .as_ref()
-                .and_then(|c| c.max_num_batched_tokens)
+                .max_num_batched_tokens
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
 
             for dp_rank in 0..dp_size {
@@ -280,7 +278,7 @@ impl KvScheduler {
     pub async fn start(
         component: Component,
         block_size: u32,
-        workers_with_configs: Arc<RuntimeConfigs>,
+        workers_with_configs: RuntimeConfigWatch,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_id: u64,
@@ -288,13 +286,10 @@ impl KvScheduler {
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
-        // Get initial workers from DashMap for slot initialization.
-        // Caller must ensure at least one worker is present (via wait_for_some).
-        let initial_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_with_configs
-            .configs
-            .iter()
-            .map(|r| (*r.key(), r.value().clone()))
-            .collect();
+        // Get initial workers from watch receiver.
+        // Caller must ensure at least one worker is present (via wait_for).
+        let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
+            workers_with_configs.borrow().clone();
 
         let slots = Arc::new(
             ActiveSequencesMultiWorker::new(
@@ -309,25 +304,21 @@ impl KvScheduler {
             .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
         );
 
-        // Spawn background task to sync slots with DashMap when notified of changes.
-        // ModelManager's watcher updates the DashMap and notifies; we wait on watch receiver here.
+        // Spawn background task to sync slots when the watch value changes.
         let slots_monitor = slots.clone();
-        let subscriber = workers_with_configs.subscribe();
-        let configs_monitor = subscriber.configs;
-        let mut change_rx = subscriber.change_rx;
+        let mut monitor_rx = workers_with_configs.clone();
         let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("KvScheduler workers monitoring task started");
-            let mut last_workers: HashSet<WorkerId> = HashSet::new();
+            let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
 
             loop {
-                // Wait for notification or cancellation
                 tokio::select! {
                     _ = monitor_cancel_token.cancelled() => {
                         tracing::trace!("KvScheduler workers monitoring task shutting down");
                         break;
                     }
-                    result = change_rx.changed() => {
+                    result = monitor_rx.changed() => {
                         if result.is_err() {
                             tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
                             break;
@@ -335,25 +326,17 @@ impl KvScheduler {
                     }
                 }
 
-                // Get current workers from DashMap
-                let current_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> =
-                    configs_monitor
-                        .iter()
-                        .map(|r| (*r.key(), r.value().clone()))
-                        .collect();
-                let current_worker_ids: HashSet<WorkerId> =
-                    current_workers.keys().copied().collect();
+                let current_workers = monitor_rx.borrow_and_update().clone();
 
-                // Only update slots if workers have changed
-                if current_worker_ids != last_workers {
-                    slots_monitor.update_workers(current_workers);
-                    last_workers = current_worker_ids;
+                if current_workers != last_workers {
+                    slots_monitor.update_workers(current_workers.clone());
+                    last_workers = current_workers;
                 }
             }
         });
 
         let slots_clone = slots.clone();
-        let workers_scheduler = workers_with_configs.clone();
+        let scheduler_rx = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
         let hit_rate_publisher =
@@ -412,12 +395,8 @@ impl KvScheduler {
                     request.decode_blocks = decode_blocks;
                     request.prefill_tokens = prefill_tokens;
 
-                    // Read the current workers configuration from DashMap
-                    let workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_scheduler
-                        .configs
-                        .iter()
-                        .map(|r| (*r.key(), r.value().clone()))
-                        .collect();
+                    // Read the current workers configuration from watch receiver
+                    let workers: HashMap<WorkerId, ModelRuntimeConfig> = scheduler_rx.borrow().clone();
 
                     match selector.select_worker(&workers, &request, block_size) {
                         Ok(selection) => {
@@ -702,7 +681,7 @@ impl DefaultWorkerSelector {
 impl WorkerSelector for DefaultWorkerSelector {
     fn select_worker(
         &self,
-        workers: &HashMap<WorkerId, Option<ModelRuntimeConfig>>,
+        workers: &HashMap<WorkerId, ModelRuntimeConfig>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
@@ -732,11 +711,8 @@ impl WorkerSelector for DefaultWorkerSelector {
         // Outer loop: iterate over all workers from runtime config
         // Inner loop: iterate over all dp_ranks for each worker
         for (worker_id, config) in workers.iter() {
-            // Get data_parallel_size from runtime config
-            // data_parallel_size defaults to 1 in ModelRuntimeConfig
-            let data_parallel_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1); // Fallback if config is None
+            let data_parallel_size = config.data_parallel_size;
 
-            // Iterate over all dp_ranks for this worker
             for dp_rank in 0..data_parallel_size {
                 let worker = WorkerWithDpRank::new(*worker_id, dp_rank);
 
@@ -803,7 +779,6 @@ impl WorkerSelector for DefaultWorkerSelector {
         // this is a runtime config set on a per worker basis, not per dp-rank
         let total_blocks_info = workers
             .get(&best_worker.worker_id)
-            .and_then(|cfg| cfg.as_ref())
             .and_then(|cfg| cfg.total_kv_blocks)
             .map(|blocks| format!(", total blocks: {}", blocks))
             .unwrap_or_default();

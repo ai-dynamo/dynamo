@@ -9,7 +9,7 @@ Dynamo supports running Deepseek R1 with data parallel attention and wide expert
 
 ## Instructions
 
-The following script can be adapted to run Deepseek R1 with a variety of different configuration. The current configuration uses 2 nodes, 16 GPUs, and a dp of 16. Follow the [vLLM Backend](README.md) Getting Started section on each node, and then run these two commands.
+The following script can be adapted to run Deepseek R1 with a variety of different configuration. The current configuration uses 2 nodes, 16 GPUs, and a dp of 16. Follow the [ReadMe](README.md) Getting Started section on each node, and then run these two commands.
 
 node 0
 ```bash

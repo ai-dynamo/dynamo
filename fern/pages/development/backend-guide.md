@@ -72,7 +72,6 @@ The `model_type` can be:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name or the folder name.
 - `context_length`: Max model length in tokens. Defaults to the model's set max. Only set this if you need to reduce KV cache allocation to fit into VRAM.
 - `kv_cache_block_size`: Size of a KV block for the engine, in tokens. Defaults to 16.
-- `migration_limit`: Maximum number of times a request may be [migrated to another Instance](../fault-tolerance/request-migration.md). Defaults to 0.
 - `user_data`: Optional dictionary containing custom metadata for worker behavior (e.g., LoRA configuration). Defaults to None.
 
 See `examples/backends` for full code examples.

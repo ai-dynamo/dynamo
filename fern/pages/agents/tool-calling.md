@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Tool Calling with Dynamo
-
 You can connect Dynamo to external tools and services using function calling (also known as tool calling). By providing a list of available functions, Dynamo can choose
 to output function arguments for the relevant function(s) which you can execute to augment the prompt with relevant external information.
 

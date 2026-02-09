@@ -1,4 +1,7 @@
-# ChReK: Checkpoint/Restore in Kubernetes
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
 
 > ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. It requires privileged mode for restore operations, which may not be suitable for all production environments. See [Limitations](#limitations) for details.
 
@@ -115,7 +118,7 @@ ChReK is best suited for:
 ### Getting Started
 - [Dynamo Integration Guide](dynamo.md) - Using ChReK with Dynamo Platform
 - [Standalone Usage Guide](standalone.md) - Using ChReK independently
-- ChReK Helm Chart README - See `deploy/helm/charts/chrek/README.md` in the repository for Helm chart configuration
+- [ChReK Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/README.md) - Helm chart configuration
 
 ### Related Documentation
 - [CRIU Documentation](https://criu.org/Main_Page) - Upstream CRIU docs

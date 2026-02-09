@@ -234,6 +234,7 @@ class DynamoSglangPublisher:
                     kv_block_size=self.server_args.page_size,
                     zmq_endpoint=zmq_ep,
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
+                    dp_rank=dp_rank,
                 )
                 logging.info(
                     f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} "

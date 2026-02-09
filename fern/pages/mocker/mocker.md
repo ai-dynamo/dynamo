@@ -1,6 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 ---
 
@@ -90,7 +89,7 @@ python -m dynamo.mocker \
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--is-prefill-worker` | False | Prefill-only mode |
 | `--is-decode-worker` | False | Decode-only mode |
-| `--enable-local-indexer` | False | Enable local KV indexer |
+| `--durable-kv-events` | False | Enable durable KV events via JetStream (disables local indexer) |
 | `--bootstrap-ports` | None | Ports for P/D rendezvous |
 
 ## Architecture

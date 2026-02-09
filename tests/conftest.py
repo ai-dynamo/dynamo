@@ -60,11 +60,43 @@ def pytest_configure(config):
         "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
         "k8s: marks tests as requiring Kubernetes",
         "fault_tolerance: marks tests as fault tolerance tests",
+        "deploy: marks tests as deployment tests",
         # Third-party plugin markers
         "timeout: test timeout in seconds (pytest-timeout plugin)",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add shared command-line options for all tests.
+
+    Shared options that apply across multiple test suites are defined here.
+    Suite-specific options (e.g., deploy, fault-tolerance) are defined in
+    their respective subdirectory conftest.py files.
+    """
+    # -------------------------------------------------------------------------
+    # Shared Deployment Options (used by multiple test suites)
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--image",
+        type=str,
+        default=None,
+        help="Container image to use for deployment (overrides YAML default)",
+    )
+    parser.addoption(
+        "--namespace",
+        type=str,
+        default=None,  # No default here - subdirectories provide their own
+        help="Kubernetes namespace for deployment",
+    )
+    parser.addoption(
+        "--skip-service-restart",
+        action="store_true",
+        default=None,  # None = use fixture's default behavior
+        help="Skip restarting NATS and etcd services before deployment. "
+        "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -170,7 +202,10 @@ def predownload_models(pytestconfig):
     else:
         # Fallback to original behavior if extraction failed
         download_models()
+
+    os.environ["HF_HUB_OFFLINE"] = "1"
     yield
+    os.environ.pop("HF_HUB_OFFLINE", None)
 
 
 @pytest.fixture(scope="session")
@@ -186,7 +221,13 @@ def predownload_tokenizers(pytestconfig):
     else:
         # Fallback to original behavior if extraction failed
         download_models(ignore_weights=True)
+
+    # Skip redundant HuggingFace API calls in worker subprocesses since
+    # tokenizers are already cached. This avoids flaky timeouts from slow
+    # HF API responses (the RepoInfo fetch still happens even for cached models).
+    os.environ["HF_HUB_OFFLINE"] = "1"
     yield
+    os.environ.pop("HF_HUB_OFFLINE", None)
 
 
 @pytest.fixture(autouse=True)
@@ -578,20 +619,20 @@ def request_plane(request):
 
 
 @pytest.fixture
-def use_nats_core(request):
+def durable_kv_events(request):
     """
-    Whether to use NATS Core mode (local indexer) instead of JetStream. Defaults to False.
-
-    When True:
-    - NATS server starts without JetStream (-js flag omitted) for faster startup
-    - Tests should use enable_local_indexer=True in mocker_args
+    Whether to use durable KV events via JetStream. Defaults to False (NATS Core mode).
 
     When False (default):
-    - NATS server starts with JetStream for KV event distribution
-    - Tests use JetStream-based indexer synchronization
+    - NATS server starts without JetStream (-js flag omitted) for faster startup
+    - Workers use local indexer mode (NATS Core / fire-and-forget events)
 
-    To use NATS Core mode:
-        @pytest.mark.parametrize("use_nats_core", [True], indirect=True)
+    When True:
+    - NATS server starts with JetStream for durable KV event distribution
+    - Workers use --durable-kv-events flag to publish to JetStream
+
+    To use JetStream mode:
+        @pytest.mark.parametrize("durable_kv_events", [True], indirect=True)
         def test_example(runtime_services_dynamic_ports):
             ...
     """
@@ -624,7 +665,7 @@ def runtime_services(request, store_kv, request_plane):
 
 
 @pytest.fixture()
-def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_core):
+def runtime_services_dynamic_ports(request, store_kv, request_plane, durable_kv_events):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
     This fixture actually allocates dynamic ports by passing port=0 to the servers.
@@ -639,7 +680,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
     - If store_kv != "etcd", etcd is not started (returns None)
     - NATS is always started when etcd is used, because KV events require NATS
       regardless of the request_plane (tcp/nats only affects request transport)
-    - JetStream is enabled by default; disabled when use_nats_core=True for faster startup
+    - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -647,10 +688,10 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
-    # When use_nats_core=True, disable JetStream for faster startup
+    # When durable_kv_events=False (default), disable JetStream for faster startup
     if store_kv == "etcd":
         with NatsServer(
-            request, port=0, disable_jetstream=use_nats_core
+            request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Save original env vars (may be set by session-scoped fixture)
@@ -674,7 +715,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_co
                     os.environ.pop("ETCD_ENDPOINTS", None)
     elif request_plane == "nats":
         with NatsServer(
-            request, port=0, disable_jetstream=use_nats_core
+            request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             orig_nats = os.environ.get("NATS_SERVER")
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"

@@ -239,7 +239,11 @@ impl LocalModelBuilder {
             self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
             self.runtime_config.max_num_batched_tokens =
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer;
+            // Decode workers don't create the WorkerKvQuery endpoint (scheduler_component is None),
+            // so they must not advertise enable_local_indexer=true or the router will hang
+            // trying to query them during initial recovery.
+            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer
+                && mocker_engine_args.worker_type != WorkerType::Decode;
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
             self.media_decoder = Some(MediaDecoder {
                 image: Some(ImageDecoder::default()),
@@ -290,6 +294,7 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
+                migration_limit: self.migration_limit,
             });
         }
 
@@ -341,6 +346,7 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
+            migration_limit: self.migration_limit,
         })
     }
 }
@@ -359,6 +365,7 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
+    migration_limit: u32,
 }
 
 impl LocalModel {
@@ -420,6 +427,10 @@ impl LocalModel {
 
     pub fn runtime_config(&self) -> &ModelRuntimeConfig {
         &self.runtime_config
+    }
+
+    pub fn migration_limit(&self) -> u32 {
+        self.migration_limit
     }
 
     pub fn namespace(&self) -> Option<&str> {
