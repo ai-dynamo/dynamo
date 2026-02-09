@@ -27,7 +27,7 @@ use crate::{
 
 /// A set of workers from the same namespace/configuration with their own pipeline.
 pub struct WorkerSet {
-    /// Full namespace (e.g., "default-myapp-abc12345")
+    /// Full namespace (e.g., "ns-abc12345")
     namespace: String,
 
     /// MDC checksum for this set's configuration

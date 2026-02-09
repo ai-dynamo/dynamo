@@ -231,7 +231,7 @@ impl Model {
     /// Select a WorkerSet and extract a value from it.
     ///
     /// When there's only one set (steady state), returns from that set directly.
-    /// With multiple sets (rollout), uses weighted random selection proportional
+    /// With multiple sets, uses weighted random selection proportional
     /// to worker count, filtering to sets that have the requested engine.
     ///
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
