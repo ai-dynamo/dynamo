@@ -255,9 +255,11 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         from sglang.srt.managers.io_struct import UpdateWeightFromDiskReqInput
 
         req = UpdateWeightFromDiskReqInput(**body)
-        success, message, num_paused_requests = (
-            await self.engine.tokenizer_manager.update_weights_from_disk(req, None)
-        )
+        (
+            success,
+            message,
+            num_paused_requests,
+        ) = await self.engine.tokenizer_manager.update_weights_from_disk(req, None)
         return {
             "success": success,
             "message": message,
@@ -269,9 +271,10 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
 
         req = UpdateWeightsFromTensorReqInput(**body)
-        success, message = await self.engine.tokenizer_manager.update_weights_from_tensor(
-            req, None
-        )
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_tensor(req, None)
         return {"success": success, "message": message}
 
     async def update_weights_from_distributed(self, body: dict) -> dict:
@@ -279,8 +282,11 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         from sglang.srt.managers.io_struct import UpdateWeightsFromDistributedReqInput
 
         req = UpdateWeightsFromDistributedReqInput(**body)
-        success, message = (
-            await self.engine.tokenizer_manager.update_weights_from_distributed(req, None)
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_distributed(
+            req, None
         )
         return {"success": success, "message": message}
 
