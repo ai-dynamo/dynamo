@@ -57,13 +57,13 @@ class LoadPlannerDefaults(BasePlannerDefaults):
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):
-    # Protocol for internal service communication (configurable for TLS support)
-    _service_protocol = os.environ.get("SERVICE_PROTOCOL", "http")
+    # URL scheme for internal service communication (configurable for TLS support)
+    _url_scheme = os.environ.get("DYN_URL_SCHEME", "http")
 
     # Prometheus endpoint URL for pulling/querying metrics
     metric_pulling_prometheus_endpoint = os.environ.get(
         "PROMETHEUS_ENDPOINT",
-        f"{_service_protocol}://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
+        f"{_url_scheme}://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
     )
     profile_results_dir = "profiling_results"
 
