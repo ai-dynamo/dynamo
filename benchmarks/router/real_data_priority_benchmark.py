@@ -3,14 +3,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Priority queue benchmark: splits a trace into priority tiers and runs
-concurrent aiperf streams with different nvext.priority_jump values."""
+"""Priority queue benchmark: splits a trace into priority tiers, runs a baseline
+(no priority tagging) and a priority-tagged run with the same split, then
+produces a bar chart comparing TTFT across tiers."""
 
 import argparse
 import json
 import os
 import subprocess
 
+import matplotlib.pyplot as plt
 import numpy as np
 from common import (
     add_common_args,
@@ -49,9 +51,140 @@ def write_trace_file(requests, path):
             f.write(json.dumps(request) + "\n")
 
 
+def run_concurrent_streams(
+    args, tier_requests, priority_values, run_dir, tag_priority, logger
+):
+    """Launch concurrent aiperf subprocesses for each tier.
+
+    Args:
+        tag_priority: If True, inject nvext.priority_jump per tier.
+    """
+    processes = []
+    log_files = []
+    for tier, pj in zip(TIERS, priority_values):
+        tier_dir = os.path.join(run_dir, f"{tier}_priority")
+        os.makedirs(tier_dir, exist_ok=True)
+
+        trace_path = os.path.join(tier_dir, "trace.jsonl")
+        write_trace_file(tier_requests[tier], trace_path)
+
+        artifact_dir = os.path.join(tier_dir, "aiperf_artifacts")
+        os.makedirs(artifact_dir, exist_ok=True)
+
+        cmd = get_aiperf_cmd_for_trace(
+            args.model,
+            args.tokenizer,
+            trace_path,
+            artifact_dir,
+            args.seed,
+            args.block_size,
+            args.url,
+        )
+        if tag_priority:
+            cmd.extend(["--extra-inputs", json.dumps({"nvext": {"priority_jump": pj}})])
+
+        log_path = os.path.join(tier_dir, "aiperf.log")
+        log_file = open(log_path, "w")
+        log_files.append(log_file)
+
+        label = "priority" if tag_priority else "baseline"
+        logger.info(f"Launching {tier} tier ({label}, priority_jump={pj})")
+        logger.info(f"  Command: {' '.join(cmd)}")
+
+        proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
+        processes.append((tier, proc))
+
+    failed = []
+    for tier, proc in processes:
+        proc.wait()
+        if proc.returncode == 0:
+            logger.info(f"  {tier} tier completed successfully")
+        else:
+            logger.error(f"  {tier} tier failed with exit code {proc.returncode}")
+            failed.append(tier)
+
+    for log_file in log_files:
+        log_file.close()
+
+    if failed:
+        label = "priority" if tag_priority else "baseline"
+        logger.error(f"Failed tiers in {label} run: {', '.join(failed)}")
+        logger.error("Check the aiperf.log files in each tier directory for details")
+        raise SystemExit(1)
+
+
+def load_ttft(run_dir, tier):
+    """Load TTFT stats from an aiperf result JSON."""
+    result_path = os.path.join(
+        run_dir, f"{tier}_priority", "aiperf_artifacts", "profile_export_aiperf.json"
+    )
+    with open(result_path, "r") as f:
+        data = json.load(f)
+    ttft = data["time_to_first_token"]
+    return ttft["p50"], ttft["p25"], ttft["p75"]
+
+
+def plot_ttft_comparison(baseline_dir, priority_dir, output_path, priority_values):
+    """Create a grouped bar chart comparing TTFT between baseline and priority runs."""
+    x = np.arange(len(TIERS))
+    width = 0.35
+
+    baseline_medians = []
+    baseline_lo = []
+    baseline_hi = []
+    priority_medians = []
+    priority_lo = []
+    priority_hi = []
+
+    for tier in TIERS:
+        p50, p25, p75 = load_ttft(baseline_dir, tier)
+        baseline_medians.append(p50)
+        baseline_lo.append(p50 - p25)
+        baseline_hi.append(p75 - p50)
+
+        p50, p25, p75 = load_ttft(priority_dir, tier)
+        priority_medians.append(p50)
+        priority_lo.append(p50 - p25)
+        priority_hi.append(p75 - p50)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    ax.bar(
+        x - width / 2,
+        baseline_medians,
+        width,
+        yerr=[baseline_lo, baseline_hi],
+        label="Baseline (no priority)",
+        capsize=4,
+    )
+    ax.bar(
+        x + width / 2,
+        priority_medians,
+        width,
+        yerr=[priority_lo, priority_hi],
+        label="With priority_jump",
+        capsize=4,
+    )
+
+    tier_labels = [
+        f"{tier.capitalize()}\n(pj={pj})" for tier, pj in zip(TIERS, priority_values)
+    ]
+    ax.set_xticks(x)
+    ax.set_xticklabels(tier_labels)
+    ax.set_ylabel("TTFT (ms)")
+    ax.set_title("Time to First Token by Priority Tier")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    logger.info(f"Plot saved to: {output_path}")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Priority benchmark: split trace into tiers and run concurrent aiperf streams"
+        description="Priority benchmark: compare TTFT with and without priority tagging"
     )
 
     add_common_args(parser)
@@ -99,63 +232,35 @@ def main():
     for tier in TIERS:
         logger.info(f"  {tier} priority: {len(tier_requests[tier])} requests")
 
-    # Launch concurrent aiperf subprocesses
-    processes = []
-    log_files = []
-    for tier, pj in zip(TIERS, priority_values):
-        tier_dir = os.path.join(args.output_dir, f"{tier}_priority")
-        os.makedirs(tier_dir, exist_ok=True)
+    # Run 1: Baseline (same split, no priority tagging)
+    baseline_dir = os.path.join(args.output_dir, "baseline")
+    logger.info("=== Running baseline (no priority tagging) ===")
+    run_concurrent_streams(
+        args,
+        tier_requests,
+        priority_values,
+        baseline_dir,
+        tag_priority=False,
+        logger=logger,
+    )
 
-        trace_path = os.path.join(tier_dir, "trace.jsonl")
-        write_trace_file(tier_requests[tier], trace_path)
+    # Run 2: With priority tagging
+    priority_dir = os.path.join(args.output_dir, "priority")
+    logger.info("=== Running with priority tagging ===")
+    run_concurrent_streams(
+        args,
+        tier_requests,
+        priority_values,
+        priority_dir,
+        tag_priority=True,
+        logger=logger,
+    )
 
-        artifact_dir = os.path.join(tier_dir, "aiperf_artifacts")
-        os.makedirs(artifact_dir, exist_ok=True)
+    # Plot comparison
+    plot_path = os.path.join(args.output_dir, "ttft_comparison.png")
+    plot_ttft_comparison(baseline_dir, priority_dir, plot_path, priority_values)
 
-        cmd = get_aiperf_cmd_for_trace(
-            args.model,
-            args.tokenizer,
-            trace_path,
-            artifact_dir,
-            args.seed,
-            args.block_size,
-            args.url,
-        )
-        cmd.extend(["--extra-inputs", json.dumps({"nvext": {"priority_jump": pj}})])
-
-        log_path = os.path.join(tier_dir, "aiperf.log")
-        log_file = open(log_path, "w")
-        log_files.append(log_file)
-
-        logger.info(f"Launching {tier} priority stream (priority_jump={pj})")
-        logger.info(f"  Trace: {trace_path}")
-        logger.info(f"  Log: {log_path}")
-        logger.info(f"  Command: {' '.join(cmd)}")
-
-        proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
-        processes.append((tier, proc))
-
-    # Wait for all subprocesses to complete
-    failed = []
-    for tier, proc in processes:
-        proc.wait()
-        if proc.returncode == 0:
-            logger.info(f"{tier} priority stream completed successfully")
-        else:
-            logger.error(
-                f"{tier} priority stream failed with exit code {proc.returncode}"
-            )
-            failed.append(tier)
-
-    for log_file in log_files:
-        log_file.close()
-
-    if failed:
-        logger.error(f"Failed tiers: {', '.join(failed)}")
-        logger.error("Check the aiperf.log files in each tier directory for details")
-        raise SystemExit(1)
-
-    logger.info(f"All priority streams completed. Results saved to: {args.output_dir}")
+    logger.info(f"All runs completed. Results saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":
