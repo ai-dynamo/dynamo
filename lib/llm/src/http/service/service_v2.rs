@@ -19,6 +19,7 @@ use super::metrics::register_worker_timing_metrics;
 use crate::discovery::{ModelManager, register_worker_load_metrics};
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
+use crate::storage::{InMemoryResponseStorage, ResponseStorage};
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
@@ -39,6 +40,10 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    /// Response storage for stateful Responses API
+    response_storage: Arc<dyn ResponseStorage>,
+    /// Whether stateful responses features are enabled
+    stateful_responses_enabled: bool,
 }
 
 #[derive(Default, Debug)]
@@ -88,6 +93,33 @@ impl State {
         store: kv::Manager,
         cancel_token: CancellationToken,
     ) -> Self {
+        Self::with_options(
+            manager,
+            store,
+            cancel_token,
+            Arc::new(InMemoryResponseStorage::new()),
+            false,
+        )
+    }
+
+    /// Create state with a custom response storage backend
+    pub fn with_response_storage(
+        manager: Arc<ModelManager>,
+        store: kv::Manager,
+        cancel_token: CancellationToken,
+        response_storage: Arc<dyn ResponseStorage>,
+    ) -> Self {
+        Self::with_options(manager, store, cancel_token, response_storage, false)
+    }
+
+    /// Create state with full configuration
+    fn with_options(
+        manager: Arc<ModelManager>,
+        store: kv::Manager,
+        cancel_token: CancellationToken,
+        response_storage: Arc<dyn ResponseStorage>,
+        stateful_responses_enabled: bool,
+    ) -> Self {
         // Initialize discovery backed by KV store
         // Create a cancellation token for the discovery's watch streams
         let discovery_client = {
@@ -109,7 +141,14 @@ impl State {
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            response_storage,
+            stateful_responses_enabled,
         }
+    }
+
+    /// Check if stateful responses features are enabled
+    pub fn stateful_responses_enabled(&self) -> bool {
+        self.stateful_responses_enabled
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -141,6 +180,11 @@ impl State {
     /// Get the cancellation token
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
+    }
+
+    /// Get the response storage for stateful Responses API
+    pub fn response_storage(&self) -> &Arc<dyn ResponseStorage> {
+        &self.response_storage
     }
 
     // TODO
@@ -194,6 +238,12 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
+
+    /// Enable stateful responses features (session middleware, GET/DELETE routes, storage).
+    /// When false, POST /v1/responses works stateless; store:true and previous_response_id
+    /// return 400. Controlled by CLI flag or DYNAMO_ENABLE_STATEFUL_RESPONSES env var.
+    #[builder(default = "false")]
+    enable_stateful_responses: bool,
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
@@ -361,7 +411,20 @@ impl HttpServiceConfigBuilder {
         let model_manager = Arc::new(ModelManager::new());
         // Create a temporary cancel token for building - will be replaced in spawn/run
         let temp_cancel_token = CancellationToken::new();
-        let state = Arc::new(State::new(model_manager, config.store, temp_cancel_token));
+
+        // Determine if stateful responses are enabled (CLI flag or env var)
+        let stateful_responses = config.enable_stateful_responses
+            || std::env::var("DYNAMO_ENABLE_STATEFUL_RESPONSES")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false);
+
+        let state = Arc::new(State::with_options(
+            model_manager,
+            config.store,
+            temp_cancel_token,
+            Arc::new(InMemoryResponseStorage::new()),
+            stateful_responses,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -488,6 +551,7 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
+            state.stateful_responses_enabled(),
         );
 
         let mut endpoint_routes = HashMap::new();
