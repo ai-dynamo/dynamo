@@ -32,7 +32,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 )
 
-// shouldTriggerRollingUpdate determines if WORKER spec changes require a rolling update.
+// shouldTriggerRollingUpdate determines if worker spec changes require a rolling update.
 func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) bool {
@@ -73,9 +73,10 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	return nil
 }
 
-// isSupportedRollingUpdatePathway checks if DGD uses supported pathways for custom rolling updates.
-// Grove and LWS deployments use different orchestration and don't support the custom rolling update strategy as of now.
-func (r *DynamoGraphDeploymentReconciler) isSupportedRollingUpdatePathway(
+// supportsManagedRollingUpdate checks if DGD pathway supports operator managed rolling updates.
+// Grove and LWS deployments currently do not support operator managed rolling updates.
+// They fall back to the default rolling update mechanism.
+func (r *DynamoGraphDeploymentReconciler) supportsManagedRollingUpdate(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) bool {
 	return !r.isGrovePathway(dgd) && !dgd.HasAnyMultinodeService()

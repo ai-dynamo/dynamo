@@ -188,8 +188,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Rolling update handling for DCD pathway (non-Grove, non-multinode)
-	if r.isSupportedRollingUpdatePathway(dynamoDeployment) {
+	if r.supportsManagedRollingUpdate(dynamoDeployment) {
 		if err = r.initializeWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
 			logger.Error(err, "Failed to initialize worker hash")
 			reason = "failed_to_initialize_worker_hash"

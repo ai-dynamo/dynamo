@@ -227,7 +227,7 @@ func TestIsUnsupportedRollingUpdatePathway(t *testing.T) {
 			dgd := createTestDGD("test-dgd", "default", tt.services)
 			r := createTestReconciler(dgd)
 
-			result := r.isSupportedRollingUpdatePathway(dgd)
+			result := r.supportsManagedRollingUpdate(dgd)
 			if result != tt.expected {
 				t.Errorf("isUnsupportedRollingUpdatePathway() = %v, expected %v", result, tt.expected)
 			}
