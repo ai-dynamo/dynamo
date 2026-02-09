@@ -126,7 +126,7 @@ impl ZmqKvEventPublisherConfig {
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
         zmq_topic = "".to_string(),
-        enable_local_indexer = false,
+        enable_local_indexer = true,
         dp_rank = 0
     ))]
     pub fn new(

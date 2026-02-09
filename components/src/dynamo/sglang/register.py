@@ -160,7 +160,11 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.tool_call_parser
-    runtime_config.enable_local_indexer = dynamo_args.enable_local_indexer
+    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+    is_decode_worker = server_args.disaggregation_mode == "decode"
+    runtime_config.enable_local_indexer = (
+        dynamo_args.enable_local_indexer and not is_decode_worker
+    )
 
     # Set data_parallel_size for DP attention mode
     # This enables the router to correctly track per-(worker_id, dp_rank) pairs
