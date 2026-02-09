@@ -274,7 +274,7 @@ impl KvbmWorker {
 /// 3. Other ranks: Call `NcclBootstrap.deserialize(bytes)` to reconstruct
 /// 4. All ranks: Call `init_communicator(rank)` collectively to create the comm
 #[cfg(feature = "nccl")]
-#[pyclass]
+#[pyclass(name = "NcclBootstrap")]
 pub struct PyNcclBootstrap {
     inner: NcclBootstrap,
 }

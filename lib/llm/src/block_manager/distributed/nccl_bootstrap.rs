@@ -17,11 +17,25 @@ use cudarc::nccl::sys::{
 };
 
 /// Check NCCL result and convert to anyhow::Result
-fn check_nccl_result(result: ncclResult_t) -> Result<()> {
+fn check_nccl_result(result: ncclResult_t, operation: &str) -> Result<()> {
     if result == ncclResult_t::ncclSuccess {
         Ok(())
     } else {
-        anyhow::bail!("NCCL error: {:?}", result)
+        // Provide detailed error information for debugging
+        let error_name = match result {
+            ncclResult_t::ncclUnhandledCudaError => "ncclUnhandledCudaError",
+            ncclResult_t::ncclSystemError => "ncclSystemError",
+            ncclResult_t::ncclInternalError => "ncclInternalError",
+            ncclResult_t::ncclInvalidArgument => "ncclInvalidArgument",
+            ncclResult_t::ncclInvalidUsage => "ncclInvalidUsage",
+            ncclResult_t::ncclRemoteError => "ncclRemoteError",
+            ncclResult_t::ncclInProgress => "ncclInProgress",
+            _ => "Unknown",
+        };
+        anyhow::bail!(
+            "{} failed with error: {} ({:?}). Check NCCL_DEBUG=INFO for more details.",
+            operation, error_name, result
+        )
     }
 }
 
@@ -66,7 +80,7 @@ impl NcclBootstrap {
     pub fn generate(world_size: i32) -> Result<Self> {
         let mut unique_id = ncclUniqueId { internal: [0; 128] };
         let result = unsafe { ncclGetUniqueId(&mut unique_id) };
-        check_nccl_result(result).context("ncclGetUniqueId failed")?;
+        check_nccl_result(result, "ncclGetUniqueId")?;
         Ok(Self {
             unique_id,
             world_size,
@@ -104,10 +118,10 @@ impl NcclBootstrap {
         );
 
         let mut unique_id = ncclUniqueId { internal: [0; 128] };
-        // Cast u8 slice to i8 for the internal array (same binary representation)
-        let internal_slice: &[i8] =
-            unsafe { std::slice::from_raw_parts(bytes[8..136].as_ptr() as *const i8, 128) };
-        unique_id.internal.copy_from_slice(internal_slice);
+        // Copy bytes directly using transmute to handle both i8 and u8 internal arrays
+        // (ARM64 uses u8, x86_64 uses i8 - same binary representation)
+        let internal_bytes: &[u8; 128] = bytes[8..136].try_into().unwrap();
+        unique_id.internal = unsafe { std::mem::transmute(*internal_bytes) };
 
         Ok(Self {
             unique_id,
@@ -139,8 +153,18 @@ impl NcclBootstrap {
         );
 
         let mut comm: ncclComm_t = std::ptr::null_mut();
+        tracing::debug!(
+            "Calling ncclCommInitRank: rank={}, world_size={}",
+            rank,
+            self.world_size
+        );
         let result = unsafe { ncclCommInitRank(&mut comm, self.world_size, self.unique_id, rank) };
-        check_nccl_result(result).context("ncclCommInitRank failed")?;
+        check_nccl_result(result, &format!("ncclCommInitRank(rank={}, world_size={})", rank, self.world_size))?;
+        tracing::info!(
+            "NCCL communicator initialized successfully: rank={}, world_size={}",
+            rank,
+            self.world_size
+        );
 
         Ok(comm)
     }
@@ -190,9 +214,12 @@ mod tests {
     #[test]
     fn test_serialize_deserialize() {
         // We can test serialization without actually calling NCCL
+        // Use transmute to create the internal array in a platform-agnostic way
+        // (ARM64 uses [u8; 128], x86_64 uses [i8; 128])
+        let internal_bytes: [u8; 128] = [42u8; 128];
         let bootstrap = NcclBootstrap {
             unique_id: ncclUniqueId {
-                internal: [42i8; 128],
+                internal: unsafe { std::mem::transmute(internal_bytes) },
             },
             world_size: 4,
         };
@@ -202,7 +229,9 @@ mod tests {
 
         let restored = NcclBootstrap::deserialize(&bytes).unwrap();
         assert_eq!(restored.world_size, 4);
-        assert_eq!(restored.unique_id.internal, [42i8; 128]);
+        // Compare as bytes to be platform-agnostic
+        let restored_bytes: [u8; 128] = unsafe { std::mem::transmute(restored.unique_id.internal) };
+        assert_eq!(restored_bytes, [42u8; 128]);
     }
 
     #[test]

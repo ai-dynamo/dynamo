@@ -388,14 +388,25 @@ impl BlockTransferHandler {
         let is_rank0 = rank == 0;
         let use_bcast = request.to_pool() == &Device && request.from_pool() != &Device;
 
-        tracing::debug!(
-            "Performing replicated transfer of {} blocks from {:?} to {:?} (rank={}, bcast={})",
-            request.blocks().len(),
-            request.from_pool(),
-            request.to_pool(),
-            rank,
-            use_bcast
-        );
+        if use_bcast {
+            tracing::info!(
+                "NCCL replicated transfer: {} blocks from {:?} to {:?}, rank={}, \
+                 rank0 will load from storage then broadcast to all GPUs",
+                request.blocks().len(),
+                request.from_pool(),
+                request.to_pool(),
+                rank
+            );
+        } else {
+            tracing::debug!(
+                "Replicated transfer: {} blocks from {:?} to {:?} (rank={}, bcast={})",
+                request.blocks().len(),
+                request.from_pool(),
+                request.to_pool(),
+                rank,
+                use_bcast
+            );
+        }
 
         // Device → Device: all ranks do local transfer (no broadcast)
         if request.from_pool() == &Device && request.to_pool() == &Device {
@@ -462,6 +473,16 @@ impl BlockTransferHandler {
         // Get destination block indices (the Device blocks to broadcast)
         let dst_indices: Vec<usize> = request.blocks().iter().map(|(_, to)| *to).collect();
 
+        let rank = self.nccl_config.rank();
+        let world_size = self.nccl_config.world_size();
+        tracing::info!(
+            "NCCL broadcast starting: rank={}/{}, num_blocks={}, block_indices={:?}",
+            rank,
+            world_size,
+            dst_indices.len(),
+            dst_indices
+        );
+
         // Create NCCL group and broadcast all blocks
         let group = unsafe { NcclGroup::new()? };
 
@@ -479,6 +500,13 @@ impl BlockTransferHandler {
         self.context.cuda_event(tx)?;
         rx.await
             .map_err(|_| anyhow::anyhow!("CUDA event channel closed"))?;
+
+        tracing::info!(
+            "NCCL broadcast completed: rank={}/{}, num_blocks={}",
+            rank,
+            world_size,
+            dst_indices.len()
+        );
 
         Ok(())
     }
