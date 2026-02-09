@@ -69,6 +69,17 @@ This directory also includes lightweight tools for:
 
 Detailed information is provided in the `prefix_data_generator` directory.
 
+## Benchmarking Tools
+
+This directory contains several benchmarking tools for different use cases:
+
+- **[General Benchmarking Framework](utils/)** - Python-based wrapper around AIPerf for benchmarking any HTTP endpoints (see [complete guide](../docs/benchmarks/benchmarking.md))
+- **[LLM Benchmarking Scripts](llm/)** - Specialized scripts (`perf.sh` and `plot_pareto.py`) for detailed LLM performance analysis and Pareto frontier visualization
+- **[Router Benchmarking](router/)** - Scripts for benchmarking Dynamo router with prefix caching
+- **[Profiler Tools](profiler/)** - Performance profiling utilities for SLA-driven deployments
+
 ## Comprehensive Guide
 
 For detailed documentation, configuration options, and advanced usage, see the [complete benchmarking guide](../docs/benchmarks/benchmarking.md).
+
+For LLM-specific benchmarking with Pareto plots, see the [LLM Benchmarking Guide](llm/README.md).
