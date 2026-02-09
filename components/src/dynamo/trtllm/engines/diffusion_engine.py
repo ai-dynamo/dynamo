@@ -77,7 +77,7 @@ class DiffusionEngine:
             "ditWanPipeline",
             ["video_diffusion"],
         ),
-        # TODO(nv-yna): Add support for WanImageToVideoPipeline, FluxPipeline, etc.
+        # TODO: Add support for WanImageToVideoPipeline, FluxPipeline, etc.
     }
 
     @classmethod

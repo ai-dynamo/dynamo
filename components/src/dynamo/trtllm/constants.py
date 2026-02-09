@@ -30,7 +30,7 @@ class Modality(Enum):
     TEXT = "text"
     MULTIMODAL = "multimodal"
     VIDEO_DIFFUSION = "video_diffusion"
-    # TODO(nv-yna): Add IMAGE_DIFFUSION support in follow-up PR
+    # TODO: Add IMAGE_DIFFUSION support in follow-up PR
 
     @classmethod
     def is_diffusion(cls, modality: "Modality") -> bool:

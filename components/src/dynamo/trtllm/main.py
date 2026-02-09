@@ -147,7 +147,7 @@ async def init(
         if modality == Modality.VIDEO_DIFFUSION:
             await init_video_diffusion_worker(runtime, config, shutdown_event)
             return
-        # TODO(nv-yna): Add IMAGE_DIFFUSION support in follow-up PR
+        # TODO: Add IMAGE_DIFFUSION support in follow-up PR
 
     # LLM modalities (text, multimodal) use the existing init_llm_worker logic
     await init_llm_worker(runtime, config, shutdown_event)
