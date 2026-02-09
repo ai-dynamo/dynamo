@@ -57,6 +57,11 @@ class VideoGenerationHandler(BaseGenerativeHandler):
         self.component = component
         self.engine = engine
         self.config = config
+        # Serialize pipeline access — visual_gen is not thread-safe (global
+        # singleton configs, mutable instance state, unprotected CUDA graph cache).
+        # asyncio.Lock suspends waiting coroutines cooperatively so the event
+        # loop stays free for health checks and signal handling.
+        self._generate_lock = asyncio.Lock()
 
     def _parse_size(self, size: Optional[str]) -> tuple[int, int]:
         """Parse 'WxH' string to (width, height) tuple.
@@ -190,22 +195,24 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 f"size={width}x{height}, frames={num_frames}, steps={num_inference_steps}"
             )
 
-            # Run generation in thread pool (blocking operation)
+            # Run generation in thread pool (blocking operation).
+            # Lock ensures only one request uses the pipeline at a time.
             # TODO(nv-yna): Add cancellation support. This requires:
             # 1. visual_gen to expose a cancellation hook in the denoising loop
             # 2. Passing a cancellation token/event to engine.generate()
             # 3. Checking context.cancelled() and propagating to the pipeline
-            frames = await asyncio.to_thread(
-                self.engine.generate,
-                prompt=req.prompt,
-                negative_prompt=req.negative_prompt,
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                seed=req.seed,
-            )
+            async with self._generate_lock:
+                frames = await asyncio.to_thread(
+                    self.engine.generate,
+                    prompt=req.prompt,
+                    negative_prompt=req.negative_prompt,
+                    height=height,
+                    width=width,
+                    num_frames=num_frames,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    seed=req.seed,
+                )
 
             # Determine output format
             response_format = req.response_format or "url"

@@ -4,15 +4,19 @@
 """Unit tests for video diffusion components.
 
 Tests for Modality enum, DiffusionConfig, DiffusionEngine auto-detection,
-VideoGenerationHandler helpers, and video protocol types.
+VideoGenerationHandler helpers, video protocol types, and concurrency safety.
 
 These tests do NOT require visual_gen or GPU - they test logic only.
 """
 
+import asyncio
 import json
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -601,3 +605,116 @@ class TestNvVideosResponse:
         assert dumped["status"] == "completed"
         assert len(dumped["data"]) == 1
         assert dumped["data"][0]["url"] == "/tmp/video.mp4"
+
+
+# =============================================================================
+# Part 6: Concurrency Safety Tests
+# =============================================================================
+
+
+class ConcurrencyTracker:
+    """Tracks concurrent access to a mock engine.generate() call.
+
+    Simulates what visual_gen does: single-threaded pipeline that is unsafe
+    for concurrent access. Records the max number of simultaneous callers
+    to prove whether concurrent access occurs.
+    """
+
+    def __init__(self, sleep_seconds: float = 0.1):
+        self._active_count = 0
+        self._lock = threading.Lock()
+        self.max_concurrent = 0
+        self.sleep_seconds = sleep_seconds
+
+    def generate(self, **kwargs):
+        """Mock engine.generate() that tracks concurrent access."""
+        with self._lock:
+            self._active_count += 1
+            if self._active_count > self.max_concurrent:
+                self.max_concurrent = self._active_count
+
+        # Simulate GPU work — gives other threads a window to enter
+        time.sleep(self.sleep_seconds)
+
+        with self._lock:
+            self._active_count -= 1
+
+        # Return fake frames (numpy-like shape)
+        import numpy as np
+
+        return np.zeros((4, 64, 64, 3), dtype=np.uint8)
+
+
+class TestVideoHandlerConcurrency:
+    """Tests that VideoGenerationHandler serializes pipeline access.
+
+    The visual_gen pipeline is not thread-safe. Without a lock, concurrent
+    requests via asyncio.to_thread() would enter engine.generate()
+    simultaneously, corrupting shared state.
+    """
+
+    def _make_handler(self):
+        """Create a VideoGenerationHandler with mock engine and config."""
+        from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
+            VideoGenerationHandler,
+        )
+
+        tracker = ConcurrencyTracker(sleep_seconds=0.1)
+
+        mock_engine = MagicMock()
+        mock_engine.generate = tracker.generate
+
+        config = DiffusionConfig(
+            output_dir="/tmp/test_videos",
+            default_fps=24,
+            default_seconds=4,
+        )
+
+        handler = VideoGenerationHandler(
+            component=MagicMock(),
+            engine=mock_engine,
+            config=config,
+        )
+
+        return handler, tracker
+
+    def _make_request(self):
+        """Create a minimal valid video generation request dict."""
+        return {
+            "prompt": "a test video",
+            "model": "test-model",
+        }
+
+    async def _drain_generator(self, handler, request):
+        """Run handler.generate() and drain the async generator."""
+        async for _ in handler.generate(request, MagicMock()):
+            pass
+
+    def test_concurrent_requests_are_serialized(self):
+        """Test that concurrent requests don't enter engine.generate() simultaneously.
+
+        Fires 3 requests concurrently. With proper serialization (asyncio.Lock),
+        max_concurrent should be 1. Without it, max_concurrent would be > 1.
+        """
+
+        async def run():
+            handler, tracker = self._make_handler()
+
+            requests = [self._make_request() for _ in range(3)]
+
+            with patch(
+                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4",
+                return_value="/tmp/test.mp4",
+            ):
+                await asyncio.gather(
+                    *(self._drain_generator(handler, req) for req in requests)
+                )
+
+            return tracker
+
+        tracker = asyncio.run(run())
+
+        assert tracker.max_concurrent == 1, (
+            f"Expected max_concurrent=1 (serialized), got {tracker.max_concurrent}. "
+            "Pipeline was accessed concurrently — this would corrupt visual_gen state."
+        )
