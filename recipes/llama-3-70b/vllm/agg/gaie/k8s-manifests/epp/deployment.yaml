@@ -44,11 +44,9 @@ spec:
             requests:
               memory: "1Gi"
               cpu: "1"
-              ephemeral-storage: "256Mi"
             limits:
               memory: "2Gi"
               cpu: "2"
-              ephemeral-storage: "1Gi"
           args:
             - -pool-name
             - "llama3-70b-agg-pool"
