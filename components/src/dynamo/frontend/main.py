@@ -199,6 +199,13 @@ def parse_args():
         help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
     )
     parser.add_argument(
+        "--durable-kv-events",
+        action="store_true",
+        dest="durable_kv_events",
+        default=False,
+        help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
+    )
+    parser.add_argument(
         "--no-track-active-blocks",
         action="store_false",
         dest="router_track_active_blocks",
@@ -224,6 +231,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
+    )
+    parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. When > 0, enables request migration on worker disconnect (default: 0).",
     )
     parser.add_argument(
         "--active-decode-blocks-threshold",
@@ -304,6 +317,8 @@ def parse_args():
 
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
+    if flags.migration_limit < 0 or flags.migration_limit > 4294967295:
+        parser.error("--migration-limit must be between 0 and 4294967295 (0=disabled)")
 
     return flags
 
@@ -324,6 +339,10 @@ async def async_main():
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
     os.environ["DYN_EVENT_PLANE"] = flags.event_plane
+    logger.info(
+        f"Request migration {'enabled' if flags.migration_limit > 0 else 'disabled'} "
+        f"(limit: {flags.migration_limit})"
+    )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
@@ -342,11 +361,18 @@ async def async_main():
 
     # NATS is needed when:
     # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    # 2. Durable KV events (JetStream) is explicitly requested, OR
+    # 3. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    # Note: NATS Core (without JetStream) is the default for KV events when durable_kv_events=False
     enable_nats = flags.request_plane == "nats" or (
-        flags.event_plane == "nats"
-        and flags.router_mode == "kv"
-        and (flags.use_kv_events or flags.router_replica_sync)
+        flags.router_mode == "kv"
+        and (
+            flags.durable_kv_events
+            or (
+                flags.event_plane == "nats"
+                and (flags.use_kv_events or flags.router_replica_sync)
+            )
+        )
     )
 
     loop = asyncio.get_running_loop()
@@ -364,6 +390,7 @@ async def async_main():
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
+            durable_kv_events=flags.durable_kv_events,
             router_replica_sync=flags.router_replica_sync,
             router_track_active_blocks=flags.router_track_active_blocks,
             router_track_output_blocks=flags.router_track_output_blocks,
@@ -393,6 +420,7 @@ async def async_main():
             active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
             enforce_disagg=flags.enforce_disagg,
         ),
+        "migration_limit": flags.migration_limit,
     }
 
     if flags.model_name:

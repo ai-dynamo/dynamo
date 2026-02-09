@@ -32,8 +32,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "--enforce-eager",
             "--max-model-len",
             "8192",
-            "--migration-limit",
-            "3",
         ]
 
         # Set debug logging environment
