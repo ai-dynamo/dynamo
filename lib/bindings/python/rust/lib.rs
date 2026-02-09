@@ -374,13 +374,17 @@ fn register_llm<'p>(
             .media_fetcher(media_fetcher.map(|m| m.inner));
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
+
+        // Convert lora_identifier (Option<String>) to Option<LoraInfo>
+        let lora_info = lora_identifier
+            .as_ref()
+            .map(|name| llm_rs::model_card::LoraInfo {
+                name: name.clone(),
+                max_gpu_lora_count: None,
+            });
+
         local_model
-            .attach(
-                &endpoint.inner,
-                model_type_obj,
-                model_input,
-                lora_identifier.as_deref(),
-            )
+            .attach(&endpoint.inner, model_type_obj, model_input, lora_info)
             .await
             .map_err(to_pyerr)?;
 

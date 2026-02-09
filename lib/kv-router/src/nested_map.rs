@@ -20,15 +20,24 @@
 //! synchronous and thread-safe (via `DashMap` and `RwLock`). To get the full
 //! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
 //! in a `ThreadPoolIndexer`.
+use async_trait::async_trait;
 use dashmap::DashMap;
+use flume::unbounded;
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::JoinHandle;
+
+use std::time::Duration;
 
 use crate::indexer::SyncIndexer;
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
 };
+
+use crate::compute_block_hash_for_seq;
+use crate::indexer::{KvIndexerInterface, KvRouterError};
 
 /// Entry for the innermost level of the index.
 ///
@@ -141,6 +150,7 @@ impl SyncIndexer for PositionalIndexer {
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.jump_search_matches(sequence, early_exit)
     }
+}
 
     fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
         Self::apply_event_impl(&self.index, &self.worker_blocks, event)
@@ -183,6 +193,7 @@ impl PositionalIndexer {
         match op {
             KvCacheEventData::Stored(store_data) => {
                 Self::store_blocks_impl(index, worker_blocks, worker, store_data, id)?;
+
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
@@ -212,6 +223,8 @@ impl PositionalIndexer {
         // Determine starting position based on parent_hash
         let start_pos = match store_data.parent_hash {
             Some(parent_hash) => {
+                // Find parent position from worker_blocks
+
                 let Some(worker_map) = worker_blocks.get(&worker) else {
                     tracing::warn!(
                         worker_id = worker.worker_id.to_string(),
@@ -245,11 +258,13 @@ impl PositionalIndexer {
             let seq_hash = block_data.block_hash;
 
             // Insert into index: position -> local_hash -> seq_hash -> worker
-            let pos_map = index.entry(position).or_default();
-            pos_map
-                .entry(local_hash)
-                .and_modify(|entry| entry.insert(seq_hash, worker))
-                .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+            {
+                let pos_map = index.entry(position).or_default();
+                pos_map
+                    .entry(local_hash)
+                    .and_modify(|entry| entry.insert(seq_hash, worker))
+                    .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+            }
 
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
             let worker_map = worker_blocks.entry(worker).or_default();
@@ -367,9 +382,9 @@ impl PositionalIndexer {
     }
 }
 
-// ============================================================================
-// Jump-based search methods (read operations)
-// ============================================================================
+// -----------------------------------------------------------------------------
+// Jump-based search methods (associated functions for use in worker threads)
+// -----------------------------------------------------------------------------
 
 impl PositionalIndexer {
     /// Compute sequence hash incrementally from previous hash and current local hash.
@@ -447,8 +462,7 @@ impl PositionalIndexer {
                 break;
             }
 
-            let workers_at_pos =
-                self.get_workers_lazy(pos, sequence[pos], seq_hashes, sequence);
+            let workers_at_pos = self.get_workers_lazy(pos, sequence[pos], seq_hashes, sequence);
 
             match workers_at_pos {
                 Some(workers) => {
@@ -557,8 +571,22 @@ impl PositionalIndexer {
 
             if num_workers_at_next == active.len() {
                 current_pos = next_pos;
+            } else if num_workers_at_next == 0 {
+                // No active workers match at jump destination
+                // Scan the range to find where each worker drained
+                self.linear_scan_drain(
+                    local_hashes,
+                    &mut seq_hashes,
+                    &mut active,
+                    &mut scores,
+                    current_pos + 1,
+                    next_pos + 1,
+                    false,
+                );
+                current_pos = next_pos;
             } else {
-                // Some or all workers drained in between - scan the range
+                // Partial match - some workers drained in between
+                // Scan the range to find exact drain points
                 self.linear_scan_drain(
                     local_hashes,
                     &mut seq_hashes,

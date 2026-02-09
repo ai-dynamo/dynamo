@@ -874,7 +874,9 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
     let mut interval = interval(Duration::from_secs_f64(1.0 / args.arrival_rate));
 
     while start.elapsed() < Duration::from_secs(args.duration) {
-        let seq = sequences[request_id as usize % sequences.len()].local_hashes.clone();
+        let seq = sequences[request_id as usize % sequences.len()]
+            .local_hashes
+            .clone();
 
         // Track in-flight
         let current = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
