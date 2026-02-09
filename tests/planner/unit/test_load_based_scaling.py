@@ -148,6 +148,27 @@ class TestDirectRouterMetricsClient:
         assert result["w1"]["active_prefill_tokens"] == 100.0
         assert result["w2"]["active_prefill_tokens"] == 200.0
 
+    def test_parse_rust_labels_without_namespace_model(self):
+        """Rust KV router emits metrics with worker_id/dp_rank/worker_type but no dynamo_namespace/model."""
+        client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
+        text = (
+            "# HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens\n"
+            "# TYPE dynamo_frontend_worker_active_prefill_tokens gauge\n"
+            'dynamo_frontend_worker_active_prefill_tokens{worker_id="123",dp_rank="0",worker_type="prefill"} 500\n'
+            'dynamo_frontend_worker_active_decode_blocks{worker_id="456",dp_rank="0",worker_type="decode"} 30\n'
+            'dynamo_frontend_worker_last_time_to_first_token_seconds{worker_id="123",dp_rank="0",worker_type="prefill"} 0.15\n'
+            'dynamo_frontend_worker_last_input_sequence_tokens{worker_id="123",dp_rank="0",worker_type="prefill"} 2000\n'
+            'dynamo_frontend_worker_last_inter_token_latency_seconds{worker_id="456",dp_rank="0",worker_type="decode"} 0.03\n'
+        )
+        result = client._parse_prometheus_text(text, "any-model")
+        assert "123" in result
+        assert "456" in result
+        assert result["123"]["active_prefill_tokens"] == 500.0
+        assert result["123"]["last_ttft"] == 0.15
+        assert result["123"]["last_isl"] == 2000.0
+        assert result["456"]["active_decode_blocks"] == 30.0
+        assert abs(result["456"]["last_itl"] - 0.03) < 1e-6
+
 
 # ── PrefillPlanner load-based scaling tests ─────────────────────────────
 

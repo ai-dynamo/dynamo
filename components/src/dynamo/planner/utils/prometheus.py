@@ -236,10 +236,14 @@ class DirectRouterMetricsClient:
             for sample in family.samples:
                 labels = sample.labels
 
-                # Filter by dynamo_namespace and model
-                if labels.get("dynamo_namespace") != self.dynamo_namespace:
+                # Filter by dynamo_namespace and model if present in labels.
+                # Per-worker gauge metrics (from KV router) may not carry these
+                # labels — they only have worker_id/dp_rank/worker_type.
+                ns_label = labels.get("dynamo_namespace")
+                if ns_label is not None and ns_label != self.dynamo_namespace:
                     continue
-                if labels.get("model", "").lower() != model_name.lower():
+                model_label = labels.get("model")
+                if model_label is not None and model_label.lower() != model_name.lower():
                     continue
 
                 worker_id = labels.get("worker_id", "unknown")
