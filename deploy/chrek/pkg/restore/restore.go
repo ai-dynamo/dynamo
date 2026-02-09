@@ -96,6 +96,11 @@ func logProcessCgroupPath(pid int, log *logrus.Entry) {
 }
 
 func logProcessFilteredMountInfo(pid int, log *logrus.Entry) {
+	// Mountinfo dumps are very large; only emit them in DEBUG mode.
+	if !log.Logger.IsLevelEnabled(logrus.DebugLevel) {
+		return
+	}
+
 	path := fmt.Sprintf("/proc/%d/mountinfo", pid)
 	f, err := os.Open(path)
 	if err != nil {
@@ -131,9 +136,15 @@ func logProcessFilteredMountInfo(pid int, log *logrus.Entry) {
 		"pid":   pid,
 		"path":  path,
 		"count": len(selected),
-	}).Info("Filtered mountinfo snapshot count")
+	}).Debug("Filtered mountinfo snapshot count")
 	if len(selected) > 0 {
-		log.Infof("Filtered mountinfo snapshot (pid=%d):\n%s", pid, strings.Join(selected, "\n"))
+		for i, line := range selected {
+			log.WithFields(logrus.Fields{
+				"pid":   pid,
+				"index": i + 1,
+				"total": len(selected),
+			}).Debugf("Filtered mountinfo: %s", line)
+		}
 	}
 }
 
