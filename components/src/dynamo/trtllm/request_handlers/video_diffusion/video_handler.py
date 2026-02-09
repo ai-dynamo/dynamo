@@ -213,7 +213,8 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             if response_format == "url":
                 # Encode to MP4 and save to file
-                output_path = encode_to_mp4(
+                output_path = await asyncio.to_thread(
+                    encode_to_mp4,
                     frames,
                     self.config.output_dir,
                     request_id,
@@ -222,7 +223,9 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 video_data = VideoData(url=output_path)
             else:
                 # Encode to base64
-                video_bytes = encode_to_mp4_bytes(frames, fps=fps)
+                video_bytes = await asyncio.to_thread(
+                    encode_to_mp4_bytes, frames, fps=fps
+                )
                 b64_video = base64.b64encode(video_bytes).decode("utf-8")
                 video_data = VideoData(b64_json=b64_video)
 
