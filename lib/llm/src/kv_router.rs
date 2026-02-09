@@ -30,6 +30,7 @@ pub mod config;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
+pub mod queue;
 pub mod recorder;
 pub mod scheduler;
 pub mod sequence;
