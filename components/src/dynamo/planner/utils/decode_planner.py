@@ -29,8 +29,10 @@ class DecodePlanner(BasePlanner):
         if x_sla is None:
             return None
 
-        if not self.cached_per_worker_metrics:
+        if not self.cached_load_metrics.recent:
             return None
+
+        recent = self.cached_load_metrics.recent
 
         num_workers = self.shared_state.num_d_workers
         if num_workers == 0:
@@ -41,10 +43,10 @@ class DecodePlanner(BasePlanner):
             f"slope={self.itl_regression.slope:.6f}, intercept={self.itl_regression.intercept:.3f}"
         )
 
-        # Scale up: ALL workers above target
+        # Scale up: ALL workers above target (use recent metrics)
         all_above = all(
             m.get("active_decode_blocks", 0.0) > x_sla
-            for m in self.cached_per_worker_metrics.values()
+            for m in recent.values()
         )
         if all_above:
             logger.info(
@@ -53,13 +55,13 @@ class DecodePlanner(BasePlanner):
             )
             return num_workers + 1
 
-        # Scale down: ALL workers below boundary
+        # Scale down: ALL workers below boundary (use recent metrics)
         if num_workers > 1:
             sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             all_below = all(
                 m.get("active_decode_blocks", 0.0) < boundary
-                for m in self.cached_per_worker_metrics.values()
+                for m in recent.values()
             )
             if all_below:
                 logger.info(

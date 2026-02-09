@@ -180,7 +180,6 @@ class DisaggPlanner:
                 current_time - self.shared_state.last_loadbased_adjustment_time
                 >= self.args.loadbased_adjustment_interval
             ):
-                self.shared_state.last_loadbased_adjustment_time = time.time()
                 logger.info("New load-based adjustment interval started!")
 
                 # Query DGD for fresh worker counts
@@ -210,14 +209,12 @@ class DisaggPlanner:
                 p_desired = self.prefill_planner.loadbased_plan_adjustment()
                 d_desired = self.decode_planner.loadbased_plan_adjustment()
 
-                if p_desired is None and d_desired is None:
-                    await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
-                    continue
+                final_p = p_desired if p_desired is not None else self.shared_state.num_p_workers
+                final_d = d_desired if d_desired is not None else self.shared_state.num_d_workers
 
-                p_current = self.shared_state.num_p_workers
-                d_current = self.shared_state.num_d_workers
-                final_p = p_desired if p_desired is not None else p_current
-                final_d = d_desired if d_desired is not None else d_current
+                if final_p == self.shared_state.num_p_workers and final_d == self.shared_state.num_d_workers:
+                    logger.info("Load-based scaling: no scaling needed, skipping")
+                    continue
 
                 # Enforce lower bounds from throughput-based
                 if self.enable_throughput:
@@ -228,8 +225,8 @@ class DisaggPlanner:
                 final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.args)
 
                 logger.info(
-                    f"Load-based disagg scaling: prefill {p_current}->{final_p}, "
-                    f"decode {d_current}->{final_d}"
+                    f"Load-based disagg scaling: prefill {self.shared_state.num_p_workers}->{final_p}, "
+                    f"decode {self.shared_state.num_d_workers}->{final_d}"
                 )
 
                 self.prefill_planner.update_predicted_replicas_metric(final_p)
@@ -251,5 +248,6 @@ class DisaggPlanner:
                     await self.prefill_planner.connector.set_component_replicas(
                         target_replicas, blocking=True
                     )
+                self.shared_state.last_loadbased_adjustment_time = time.time()
 
             await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)

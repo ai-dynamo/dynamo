@@ -26,7 +26,9 @@ from dynamo.planner.utils.perf_interpolation import (
 )
 from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
 from dynamo.planner.utils.prometheus import (
+    CachedLoadMetrics,
     DirectRouterMetricsClient,
+    Metrics,
     PrometheusAPIClient,
 )
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
@@ -35,31 +37,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class Metrics:
-    ttft: Optional[float] = None
-    itl: Optional[float] = None
-    num_req: Optional[float] = None
-    isl: Optional[float] = None
-    osl: Optional[float] = None
-    request_duration: Optional[float] = None
-    p_load: Optional[float] = None
-    d_load: Optional[float] = None
-
-    def is_valid(self) -> bool:
-        """Check if all metrics are valid (not None and not NaN)."""
-        return (
-            self.ttft is not None
-            and self.itl is not None
-            and self.isl is not None
-            and self.osl is not None
-            and not math.isnan(self.ttft)
-            and not math.isnan(self.itl)
-            and not math.isnan(self.isl)
-            and not math.isnan(self.osl)
-        )
 
 
 class PlannerPrometheusMetrics:
@@ -442,7 +419,7 @@ class BasePlanner:
             self.router_metrics_client = DirectRouterMetricsClient(
                 args.loadbased_router_metrics_url, args.namespace
             )
-            self.cached_per_worker_metrics: dict[str, dict[str, float]] = {}
+            self.cached_load_metrics = CachedLoadMetrics()
 
             from dynamo.planner.utils.load_based_regression import (
                 LoadBasedRegressionModel,
@@ -772,17 +749,22 @@ class BasePlanner:
     async def observe_engine_load_stats(self) -> None:
         """Query DirectRouterMetricsClient for per-worker metrics, update regression."""
         worker_type = self.component_type.value  # "prefill" or "decode"
-        typed_metrics = self.router_metrics_client.get_averaged_metrics(worker_type)
-        if typed_metrics is None:
+        result = self.router_metrics_client.get_recent_and_averaged_metrics(
+            worker_type
+        )
+        if result is None:
             logger.warning(
                 f"No per-worker metrics available yet for {worker_type} (buffer empty)"
             )
             return
 
-        self.cached_per_worker_metrics = typed_metrics
+        recent, averaged = result
+        self.cached_load_metrics = CachedLoadMetrics(
+            recent=recent, averaged=averaged
+        )
 
         if self.component_type == SubComponentType.PREFILL:
-            for wid, m in self.cached_per_worker_metrics.items():
+            for wid, m in recent.items():
                 active_prefill = m.get("active_prefill_tokens", 0.0)
                 last_isl = m.get("last_isl", 0.0)
                 last_ttft = m.get("last_ttft", 0.0)
@@ -790,16 +772,18 @@ class BasePlanner:
                     x = active_prefill + last_isl
                     # last_ttft is in seconds from Prometheus, convert to ms
                     y = last_ttft * 1000
+                    logger.info(f"{SubComponentType.PREFILL.value} Worker {wid} observed status: TTFT {y:.2f}ms @ prefill tokens {x:.2f}")
                     self.ttft_regression.add_observation(x, y)
 
         elif self.component_type == SubComponentType.DECODE:
-            for wid, m in self.cached_per_worker_metrics.items():
+            for wid, m in recent.items():
                 active_decode = m.get("active_decode_blocks", 0.0)
                 last_itl = m.get("last_itl", 0.0)
                 if last_itl > 0 and active_decode > 0:
                     x = active_decode
                     # last_itl is in seconds from Prometheus, convert to ms
                     y = last_itl * 1000
+                    logger.info(f"{SubComponentType.DECODE.value} Worker {wid} observed status: ITL {y:.2f}ms @ decode blocks {x:.2f}")
                     self.itl_regression.add_observation(x, y)
 
     def loadbased_plan_adjustment(self) -> Optional[int]:
@@ -857,7 +841,6 @@ class BasePlanner:
                 current_time - self.shared_state.last_loadbased_adjustment_time
                 >= self.args.loadbased_adjustment_interval
             ):
-                self.shared_state.last_loadbased_adjustment_time = time.time()
                 logger.info("New load-based adjustment interval started!")
 
                 # Query DGD for fresh worker counts
@@ -871,7 +854,7 @@ class BasePlanner:
                 await self.observe_engine_load_stats()
 
                 # Reconcile DGD worker count with router Prometheus count
-                prom_count = len(self.cached_per_worker_metrics)
+                prom_count = len(self.cached_load_metrics.recent)
                 dgd_count = (
                     num_p if self.component_type == SubComponentType.PREFILL else num_d
                 )
@@ -881,7 +864,6 @@ class BasePlanner:
                         f"router metrics reports {prom_count} workers. "
                         "Skipping load-based scaling adjustment."
                     )
-                    await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
                     continue
 
                 desired_replicas = self.loadbased_plan_adjustment()
@@ -897,6 +879,8 @@ class BasePlanner:
                     desired_replicas = self.apply_component_budget(desired_replicas)
                     self.update_predicted_replicas_metric(desired_replicas)
                     await self._apply_scaling_blocking(desired_replicas)
+
+                self.shared_state.last_loadbased_adjustment_time = time.time()
 
             await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
 

@@ -15,7 +15,10 @@
 
 import asyncio
 import logging
+import math
 import typing
+from dataclasses import dataclass, field
+from typing import Optional
 
 import aiohttp
 from prometheus_api_client import PrometheusConnect
@@ -27,6 +30,46 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Metrics:
+    ttft: Optional[float] = None
+    itl: Optional[float] = None
+    num_req: Optional[float] = None
+    isl: Optional[float] = None
+    osl: Optional[float] = None
+    request_duration: Optional[float] = None
+    p_load: Optional[float] = None
+    d_load: Optional[float] = None
+
+    def is_valid(self) -> bool:
+        """Check if all metrics are valid (not None and not NaN)."""
+        return (
+            self.ttft is not None
+            and self.itl is not None
+            and self.isl is not None
+            and self.osl is not None
+            and not math.isnan(self.ttft)
+            and not math.isnan(self.itl)
+            and not math.isnan(self.isl)
+            and not math.isnan(self.osl)
+        )
+
+
+@dataclass
+class CachedLoadMetrics:
+    """Container for load metrics used by load-based scaling.
+
+    Attributes:
+        recent:   Most recent per-worker metrics (from the latest sample).
+                  Keyed by worker_id -> {metric_name: value}.
+        averaged: Metrics averaged over the load adjustment interval and all workers.
+                  Flat dict {metric_name: value}.
+    """
+
+    recent: dict[str, dict[str, float]] = field(default_factory=dict)
+    averaged: dict[str, float] = field(default_factory=dict)
 
 
 class FrontendMetric(BaseModel):
@@ -295,10 +338,10 @@ class DirectRouterMetricsClient:
                     self._sample_buffer.pop(0)
             await asyncio.sleep(sample_interval)
 
-    def get_averaged_metrics(
+    def get_recent_and_averaged_metrics(
         self, worker_type: str
-    ) -> typing.Optional[dict[str, dict[str, float]]]:
-        """Return averaged per-worker metrics for the given worker_type.
+    ) -> typing.Optional[tuple[dict[str, dict[str, float]], dict[str, float]]]:
+        """Return both the most recent per-worker metrics and cluster-averaged metrics.
 
         Called by the load-based loop at decision time. Non-blocking.
 
@@ -307,40 +350,40 @@ class DirectRouterMetricsClient:
                          the worker_type label are included.
 
         Returns:
-            {worker_id: {"active_prefill_tokens": float, ...}} or None if empty.
+            A tuple of (recent, averaged):
+            - recent:   {worker_id: {metric: float}} from the latest sample
+            - averaged: {metric: float} averaged over all samples and all workers
+            Returns None if the sample buffer is empty.
         """
         if not self._sample_buffer:
             return None
 
-        # Accumulate sums and counts per (worker_id, metric_name)
-        worker_sums: dict[str, dict[str, float]] = {}
-        worker_counts: dict[str, dict[str, int]] = {}
+        # --- Recent: last sample only ---
+        latest_sample = self._sample_buffer[-1]
+        recent: dict[str, dict[str, float]] = {}
+        for worker_id, metrics in latest_sample.get(worker_type, {}).items():
+            recent[worker_id] = dict(metrics)
+
+        # --- Averaged: across all samples AND all workers ---
+        metric_sums: dict[str, float] = {}
+        metric_counts: dict[str, int] = {}
 
         for sample in self._sample_buffer:
             typed_workers = sample.get(worker_type, {})
             for worker_id, metrics in typed_workers.items():
-                if worker_id not in worker_sums:
-                    worker_sums[worker_id] = {}
-                    worker_counts[worker_id] = {}
                 for metric_name, value in metrics.items():
-                    worker_sums[worker_id][metric_name] = (
-                        worker_sums[worker_id].get(metric_name, 0.0) + value
+                    metric_sums[metric_name] = (
+                        metric_sums.get(metric_name, 0.0) + value
                     )
-                    worker_counts[worker_id][metric_name] = (
-                        worker_counts[worker_id].get(metric_name, 0) + 1
+                    metric_counts[metric_name] = (
+                        metric_counts.get(metric_name, 0) + 1
                     )
 
-        if not worker_sums:
+        if not metric_sums and not recent:
             return None
 
-        # Average
-        result: dict[str, dict[str, float]] = {}
-        for worker_id in worker_sums:
-            result[worker_id] = {}
-            for metric_name in worker_sums[worker_id]:
-                count = worker_counts[worker_id][metric_name]
-                result[worker_id][metric_name] = (
-                    worker_sums[worker_id][metric_name] / count
-                )
+        averaged: dict[str, float] = {}
+        for metric_name in metric_sums:
+            averaged[metric_name] = metric_sums[metric_name] / metric_counts[metric_name]
 
-        return result
+        return recent, averaged

@@ -89,12 +89,29 @@ class LoadBasedRegressionModel:
         if coef <= 0:
             logger.warning(
                 f"Regression slope is non-positive ({coef:.6f}), "
-                "skipping load-based scaling this interval"
+                "falling back to observation-based heuristic"
             )
-            return None
+            return self._fallback_x_from_observations(target_y)
 
         x_sla = (target_y - intercept) / coef
         return max(0.0, x_sla)
+
+    def _fallback_x_from_observations(self, target_y: float) -> float:
+        """Fallback when regression slope is non-positive.
+
+        Returns the minimum x among observations where y < target_y.
+        If all observations have y >= target_y, returns the smallest x overall.
+        """
+        below = [(x, y) for x, y in self._observations if y < target_y]
+        if below:
+            result = min(x for x, _ in below)
+        else:
+            result = min(x for x, _ in self._observations)
+        logger.info(
+            f"Fallback x from observations: {result:.1f} "
+            f"(points below SLA: {len(below)}/{len(self._observations)})"
+        )
+        return max(0.0, result)
 
     def has_sufficient_data(self) -> bool:
         """Check if enough observations have been collected (cold start guard)."""

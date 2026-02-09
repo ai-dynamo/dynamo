@@ -29,16 +29,14 @@ class PrefillPlanner(BasePlanner):
         if x_sla is None:
             return None
 
-        if not self.cached_per_worker_metrics:
+        if not self.cached_load_metrics.recent:
             return None
 
-        # Compute averaged ISL across workers
-        isl_values = [
-            m.get("last_isl", 0.0)
-            for m in self.cached_per_worker_metrics.values()
-            if m.get("last_isl", 0.0) > 0
-        ]
-        avg_isl = sum(isl_values) / len(isl_values) if isl_values else 0.0
+        recent = self.cached_load_metrics.recent
+        averaged = self.cached_load_metrics.averaged
+
+        # Averaged ISL across all workers in the past adjustment interval
+        avg_isl = averaged.get("last_isl", 0.0)
         target_active_tokens = x_sla - avg_isl
 
         num_workers = self.shared_state.num_p_workers
@@ -51,10 +49,10 @@ class PrefillPlanner(BasePlanner):
             f"slope={self.ttft_regression.slope:.6f}, intercept={self.ttft_regression.intercept:.3f}"
         )
 
-        # Scale up: ALL workers above target
+        # Scale up: ALL workers above target (use recent metrics)
         all_above = all(
             m.get("active_prefill_tokens", 0.0) > target_active_tokens
-            for m in self.cached_per_worker_metrics.values()
+            for m in recent.values()
         )
         if all_above:
             logger.info(
@@ -63,7 +61,7 @@ class PrefillPlanner(BasePlanner):
             )
             return num_workers + 1
 
-        # Scale down: ALL workers below boundary
+        # Scale down: use averaged active_prefill_tokens (cluster-wide average)
         if num_workers > 1:
             sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
             boundary = (
@@ -71,7 +69,7 @@ class PrefillPlanner(BasePlanner):
             )
             all_below = all(
                 m.get("active_prefill_tokens", 0.0) < boundary
-                for m in self.cached_per_worker_metrics.values()
+                for m in recent.values()
             )
             if all_below:
                 logger.info(
