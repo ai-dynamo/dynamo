@@ -8,6 +8,7 @@
 produces a bar chart comparing TTFT across tiers."""
 
 import argparse
+import copy
 import json
 import os
 import subprocess
@@ -41,6 +42,29 @@ def split_trace(requests, distribution, seed):
         tier: [r for r, label in zip(requests, labels) if label == i]
         for i, tier in enumerate(TIERS)
     }
+
+
+def offset_hash_ids(tier_requests):
+    """Return a deep copy of tier_requests with all hash_ids shifted by max_hash_id + 1.
+
+    Preserves the prefix tree structure (relative ordering and sharing)
+    while ensuring no KV cache hits from a previous run.
+    """
+    max_hash_id = max(
+        h
+        for requests in tier_requests.values()
+        for req in requests
+        for h in req["hash_ids"]
+    )
+    offset = max_hash_id + 1
+    shifted = {}
+    for tier, requests in tier_requests.items():
+        shifted[tier] = []
+        for req in requests:
+            r = copy.copy(req)
+            r["hash_ids"] = [h + offset for h in r["hash_ids"]]
+            shifted[tier].append(r)
+    return shifted
 
 
 def write_trace_file(requests, path):
@@ -251,11 +275,15 @@ def main():
     )
 
     # Run 2: With priority tagging
+    # Offset hash_ids so the second run doesn't benefit from KV cache warmth
+    tier_requests_shifted = offset_hash_ids(tier_requests)
     priority_dir = os.path.join(args.output_dir, "priority")
-    logger.info("=== Running with priority tagging ===")
+    logger.info(
+        "=== Running with priority tagging (hash_ids offset to avoid cache warmth) ==="
+    )
     run_concurrent_streams(
         args,
-        tier_requests,
+        tier_requests_shifted,
         priority_values,
         priority_dir,
         tag_priority=True,
