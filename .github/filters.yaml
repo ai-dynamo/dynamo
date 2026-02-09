@@ -7,6 +7,8 @@
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
+#   frontend -> frontend EPP image build
+#   fern     -> fern docs lint, sync, and version release
 #
 # Filters for coverage only (no CI triggered):
 #   docs, examples, ignore, planner
@@ -24,6 +26,9 @@ docs:
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
+
+fern:
+  - 'fern/**'
 
 examples:
   - 'recipes/**'
@@ -57,6 +62,7 @@ ignore:
   - 'container/Dockerfile.local_dev'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
+  - 'container/dev/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -65,11 +71,14 @@ ci: &ci
   - '.github/scripts/parse_buildkit_output.py'
 
 core:
+  # Exclude documentation files first, then include patterns override for specific paths
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
   - *ci
   - 'container/build.sh'
   - 'container/Dockerfile'
   - '.dockerignore'
-  - 'container/dev/**'
   - 'container/deps/*'
   - '.cargo/config.toml'
   - 'lib/**'
@@ -78,27 +87,28 @@ core:
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/gpu_memory_service/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
-  - '!**/*.md'
-  - '!**/*.rst'
-  - '!**/*.txt'
 
 operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  - 'docs/kubernetes/api_reference.md'
 
 deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
+  - 'deploy/chrek/**'
 
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
+  - 'components/src/dynamo/global_router/**'
 
 vllm:
   - 'container/Dockerfile.vllm'
@@ -118,3 +128,25 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
+
+frontend:
+  - *ci
+  - '.cargo/config.toml'
+  - 'lib/**'
+  - '*.toml'
+  - '*.lock'
+  - 'container/build.sh'
+  - 'container/Dockerfile'
+  - 'container/deps/*'
+  - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/frontend/**'
+  - 'components/src/dynamo/common/**'
+  - 'deploy/inference-gateway/**'
+
+rust:
+  - '.github/workflows/pre-merge.yml'
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - 'deny.toml'

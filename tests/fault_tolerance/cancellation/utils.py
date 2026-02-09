@@ -36,7 +36,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             frontend_port=0,  # allocate a free port (xdist-safe)
             router_mode="round-robin",
             extra_env=extra_env,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
 
 

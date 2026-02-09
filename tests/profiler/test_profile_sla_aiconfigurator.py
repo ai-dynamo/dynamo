@@ -128,12 +128,11 @@ class TestProfileSlaAiconfigurator:
         "backend, aic_backend_version",
         [
             ("trtllm", None),
-            ("trtllm", "0.20.0"),
-            ("trtllm", "1.0.0rc3"),
+            ("trtllm", "1.2.0rc5"),
             ("vllm", None),
-            ("vllm", "0.11.0"),
+            ("vllm", "0.12.0"),
             ("sglang", None),
-            ("sglang", "0.5.1.post1"),
+            ("sglang", "0.5.6.post2"),
         ],
     )
     @pytest.mark.parametrize(

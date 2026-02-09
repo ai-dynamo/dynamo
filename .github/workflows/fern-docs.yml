@@ -1,0 +1,428 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Consolidated Fern Documentation Workflow
+#
+# This workflow handles all Fern documentation automation:
+#
+# 1. LINT (PRs): Validates Fern configuration and checks for broken links
+#    - Triggers on pull requests when fern/** files change
+#    - Runs `fern check` and `fern docs broken-links`
+#
+# 2. SYNC vNEXT (push to main): Syncs fern/ from main to docs-website branch
+#    - Triggers on push to main when fern/** files change
+#    - Preserves versioned documentation snapshots on docs-website branch
+#
+# 3. VERSION RELEASE (tags): Creates versioned documentation snapshot
+#    - Triggers on new version tags (vX.Y.Z format)
+#    - Creates pages-vX.Y.Z/ directory on docs-website branch
+#    - Updates docs.yml with new version entry
+
+name: Fern Docs
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+    tags:
+      # Match only clean semver tags: vX.Y.Z
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to release (e.g., v0.9.0). Leave empty to sync vNext.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # Detect changed files for conditional job execution
+  changed-files:
+    runs-on: ubuntu-latest
+    # Skip for tag pushes - version release doesn't need changed-files check
+    if: github.ref_type != 'tag'
+    outputs:
+      fern: ${{ steps.changes.outputs.fern }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for changes
+        id: changes
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
+
+  #############################################################################
+  # LINT JOBS - Run on PRs when fern/** files change
+  #############################################################################
+
+  fern-check:
+    name: Fern Configuration Check
+    needs: changed-files
+    if: |
+      github.ref_type != 'tag' &&
+      needs.changed-files.outputs.fern == 'true' &&
+      (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api
+
+      - name: Validate Fern configuration
+        working-directory: fern
+        run: fern check
+
+  fern-broken-links:
+    name: Fern Broken Links Check
+    needs: changed-files
+    if: |
+      github.ref_type != 'tag' &&
+      needs.changed-files.outputs.fern == 'true' &&
+      (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api
+
+      - name: Check for broken links
+        working-directory: fern
+        run: fern docs broken-links
+
+  #############################################################################
+  # SYNC vNEXT - Run on push to main when fern/** files change
+  #############################################################################
+
+  sync-vnext:
+    name: Sync vNext to docs-website
+    needs: changed-files
+    if: |
+      github.ref == 'refs/heads/main' &&
+      (needs.changed-files.outputs.fern == 'true' || github.event_name == 'workflow_dispatch') &&
+      (github.event.inputs.tag == '' || github.event.inputs.tag == null)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-checkout
+          fetch-depth: 1
+
+      - name: Checkout docs-website branch
+        uses: actions/checkout@v4
+        with:
+          ref: docs-website
+          path: fern-checkout
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          cd fern-checkout
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync vNext content from main
+        run: |
+          # Sync pages/ directory (vNext content)
+          echo "Syncing pages/ from main to docs-website branch..."
+          rm -rf fern-checkout/fern/pages
+          cp -r main-checkout/fern/pages fern-checkout/fern/pages
+
+          # Sync versions/next.yml (vNext navigation)
+          echo "Syncing versions/next.yml from main to docs-website branch..."
+          cp main-checkout/fern/versions/next.yml fern-checkout/fern/versions/next.yml
+
+          # Sync assets/ directory
+          echo "Syncing assets/ from main to docs-website branch..."
+          rm -rf fern-checkout/fern/assets
+          cp -r main-checkout/fern/assets fern-checkout/fern/assets
+
+          # Sync fern.config.json
+          echo "Syncing fern.config.json from main to docs-website branch..."
+          cp main-checkout/fern/fern.config.json fern-checkout/fern/fern.config.json
+
+          # Sync .gitignore if it exists
+          if [ -f main-checkout/fern/.gitignore ]; then
+            cp main-checkout/fern/.gitignore fern-checkout/fern/.gitignore
+          fi
+
+          # Sync convert_callouts.py script
+          if [ -f main-checkout/fern/convert_callouts.py ]; then
+            cp main-checkout/fern/convert_callouts.py fern-checkout/fern/convert_callouts.py
+          fi
+
+      - name: Convert GitHub callouts to Fern format
+        run: |
+          echo "Converting GitHub-style callouts to Fern format in pages/..."
+          python3 fern-checkout/fern/convert_callouts.py --dir fern-checkout/fern/pages
+          echo "Callout conversion complete."
+
+      - name: Update docs.yml preserving versions
+        run: |
+          cd fern-checkout/fern
+
+          # Extract the list of versioned entries from current docs.yml (on docs-website branch)
+          # These are entries after "path: ./versions/next.yml"
+          # We need to preserve them while updating the rest from main
+
+          # Get version entries (lines containing "display-name: v" and their path lines)
+          VERSION_ENTRIES=$(awk '/- display-name: v/{found=1} found{print; if(/path:/) found=0}' docs.yml)
+
+          # Copy docs.yml from main as base
+          cp ../../main-checkout/fern/docs.yml docs.yml
+
+          # If we had version entries, append them after the next.yml line
+          if [ -n "$VERSION_ENTRIES" ]; then
+            echo "Preserving version entries:"
+            echo "$VERSION_ENTRIES"
+
+            # Create a temp file with the version entries properly indented
+            echo "$VERSION_ENTRIES" > /tmp/version_entries.txt
+
+            # Insert version entries after the next.yml path line
+            sed -i '/path: \.\/versions\/next\.yml/r /tmp/version_entries.txt' docs.yml
+          fi
+
+          echo "Updated docs.yml:"
+          cat docs.yml
+
+      - name: Check for changes
+        id: changes
+        run: |
+          cd fern-checkout
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes detected"
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Changes detected:"
+            git status --short
+          fi
+
+      - name: Commit and push changes
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          cd fern-checkout
+
+          git add -A
+          git commit -m "docs(fern): sync vNext from main
+
+          Automated sync of fern/ directory from main branch.
+          Preserves versioned documentation snapshots.
+
+          Source commit: ${{ github.sha }}"
+
+          git push origin docs-website
+
+          echo "Successfully synced vNext docs to docs-website branch"
+
+  #############################################################################
+  # VERSION RELEASE - Run on new version tags (vX.Y.Z)
+  #############################################################################
+
+  release-version:
+    name: Release Version to docs-website
+    # Run on tag push OR manual dispatch with a tag specified
+    if: |
+      github.ref_type == 'tag' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.tag != null)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+
+          # Validate tag format (must be vX.Y.Z exactly)
+          if ! echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid tag format: $TAG. Must be vX.Y.Z (e.g., v0.9.0)"
+            exit 1
+          fi
+
+          # Extract version without 'v' prefix
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Processing version: $VERSION (tag: $TAG)"
+
+      - name: Checkout docs-website branch
+        uses: actions/checkout@v4
+        with:
+          ref: docs-website
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if version already exists
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          if [ -d "fern/pages-$TAG" ]; then
+            echo "::error::Version $TAG already exists (fern/pages-$TAG directory found)"
+            exit 1
+          fi
+
+          if [ -f "fern/versions/$TAG.yml" ]; then
+            echo "::error::Version $TAG already exists (fern/versions/$TAG.yml found)"
+            exit 1
+          fi
+
+          echo "Version $TAG does not exist yet, proceeding with release"
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create versioned pages directory
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          echo "Creating fern/pages-$TAG/ from fern/pages/..."
+
+          # Copy current pages/ to pages-vX.Y.Z/
+          cp -r fern/pages "fern/pages-$TAG"
+
+          echo "Created fern/pages-$TAG/"
+          ls -la "fern/pages-$TAG/" | head -20
+
+      - name: Update GitHub links to 'main' to version tag
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          echo "Updating GitHub links from 'tree/main' to 'tree/$TAG' in fern/pages-$TAG/..."
+
+          # Find all markdown files and replace tree/main with tree/vX.Y.Z
+          find "fern/pages-$TAG" -name "*.md" -o -name "*.mdx" | while read file; do
+            if grep -q "github.com/ai-dynamo/dynamo/tree/main" "$file"; then
+              echo "Updating: $file"
+              sed -i "s|github.com/ai-dynamo/dynamo/tree/main|github.com/ai-dynamo/dynamo/tree/$TAG|g" "$file"
+            fi
+          done
+
+          # Also update blob/main references (for direct file links)
+          find "fern/pages-$TAG" -name "*.md" -o -name "*.mdx" | while read file; do
+            if grep -q "github.com/ai-dynamo/dynamo/blob/main" "$file"; then
+              echo "Updating blob links: $file"
+              sed -i "s|github.com/ai-dynamo/dynamo/blob/main|github.com/ai-dynamo/dynamo/blob/$TAG|g" "$file"
+            fi
+          done
+
+          echo "GitHub link update complete."
+
+      - name: Convert GitHub callouts to Fern format
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          echo "Converting GitHub-style callouts to Fern format in pages-$TAG/..."
+          python3 fern/convert_callouts.py --dir "fern/pages-$TAG"
+          echo "Callout conversion complete."
+
+      - name: Create version config file
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSION_FILE="fern/versions/$TAG.yml"
+
+          echo "Creating version config: $VERSION_FILE"
+
+          # Copy next.yml as template
+          cp fern/versions/next.yml "$VERSION_FILE"
+
+          # Update the comment at the top
+          sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
+          sed -i "s|# Matching https://docs.nvidia.com/dynamo/latest/|# Snapshot from tag $TAG|" "$VERSION_FILE"
+
+          # Update all page paths from ../pages/ to ../pages-vX.Y.Z/
+          sed -i "s|path: \.\./pages/|path: ../pages-$TAG/|g" "$VERSION_FILE"
+
+          echo "Created $VERSION_FILE"
+          echo "First 30 lines:"
+          head -30 "$VERSION_FILE"
+
+      - name: Update docs.yml with new version
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          DOCS_FILE="fern/docs.yml"
+
+          echo "Updating $DOCS_FILE to include $TAG..."
+
+          # Check if version already in docs.yml
+          if grep -q "display-name: $TAG" "$DOCS_FILE"; then
+            echo "Version $TAG already in docs.yml, skipping update"
+            exit 0
+          fi
+
+          # Insert new version after "Next" entry
+          # The new version should be inserted after the "path: ./versions/next.yml" line
+          # Use a temp file approach for reliable multi-line insertion
+          awk -v tag="$TAG" '
+            /path: \.\/versions\/next\.yml/ {
+              print
+              print "  - display-name: " tag
+              print "    path: ./versions/" tag ".yml"
+              next
+            }
+            { print }
+          ' "$DOCS_FILE" > "${DOCS_FILE}.tmp" && mv "${DOCS_FILE}.tmp" "$DOCS_FILE"
+
+          echo "Updated docs.yml versions section:"
+          grep -A 20 "^versions:" "$DOCS_FILE"
+
+      - name: Commit and push changes
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          git add "fern/pages-$TAG/"
+          git add "fern/versions/$TAG.yml"
+          git add fern/docs.yml
+
+          git commit -m "docs(fern): release version $TAG
+
+          - Created fern/pages-$TAG/ with documentation snapshot
+          - Created fern/versions/$TAG.yml version navigation config
+          - Updated fern/docs.yml to include $TAG in version list
+
+          Automated by fern-docs workflow
+          Source tag: $TAG"
+
+          git push origin docs-website
+
+          echo "Successfully released documentation for $TAG on docs-website branch"

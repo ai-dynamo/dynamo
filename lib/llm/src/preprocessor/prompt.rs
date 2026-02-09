@@ -28,7 +28,7 @@ use crate::preprocessor::media::MediaDecoder;
 pub mod deepseek_v32;
 mod template;
 
-pub use template::ContextMixins;
+pub use template::{ChatTemplate, ContextMixins};
 
 #[derive(Debug)]
 pub enum TokenInput {
@@ -52,10 +52,18 @@ pub enum PromptInput {
 pub trait OAIChatLikeRequest {
     fn model(&self) -> String;
     fn messages(&self) -> Value;
+    fn typed_messages(
+        &self,
+    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+        None
+    }
     fn tools(&self) -> Option<Value> {
         None
     }
     fn tool_choice(&self) -> Option<Value> {
+        None
+    }
+    fn response_format(&self) -> Option<Value> {
         None
     }
 
@@ -90,6 +98,7 @@ pub trait OAIPromptFormatter: Send + Sync + 'static {
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String>;
 }
 
+#[derive(Clone)]
 pub enum PromptFormatter {
     OAI(Arc<dyn OAIPromptFormatter>),
 }

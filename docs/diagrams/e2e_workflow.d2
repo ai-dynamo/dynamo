@@ -1,0 +1,51 @@
+direction: right
+
+install: {
+  label: "Install"
+  shape: rectangle
+  install_detail: |md
+    pip3 install
+    aiconfigurator
+  |
+}
+
+configure: {
+  label: "Configure"
+  shape: rectangle
+  configure_detail: |md
+    Model, GPUs,
+    SLA targets
+  |
+}
+
+compare: {
+  label: "Compare"
+  shape: rectangle
+  compare_detail: |md
+    Agg vs disagg
+    rankings
+  |
+}
+
+deploy: {
+  label: "Deploy"
+  shape: rectangle
+  deploy_detail: |md
+    Apply DGD
+    manifest
+  |
+}
+
+validate: {
+  label: "Validate"
+  shape: rectangle
+  validate_detail: |md
+    Benchmark
+    with AIPerf
+  |
+}
+
+install -> configure
+configure -> compare
+compare -> deploy
+deploy -> validate

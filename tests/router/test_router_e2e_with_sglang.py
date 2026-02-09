@@ -25,7 +25,7 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
     pytest.mark.e2e,
@@ -87,6 +87,7 @@ class SGLangProcess:
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
+        durable_kv_events: bool = False,
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -103,6 +104,7 @@ class SGLangProcess:
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -171,6 +173,9 @@ class SGLangProcess:
                     [
                         "--dp-size",
                         str(data_parallel_size),
+                        "--tp-size",
+                        str(data_parallel_size),
+                        "--enable-dp-attention",
                     ]
                 )
 
@@ -179,6 +184,10 @@ class SGLangProcess:
             kv_events_port = 20080 + worker_idx
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
+
+            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
+            if durable_kv_events:
+                command.append("--durable-kv-events")
 
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
@@ -203,7 +212,7 @@ class SGLangProcess:
                 health_check_ports=[],
                 health_check_urls=[],
                 log_dir=request.node.name,
-                terminate_existing=False,
+                terminate_all_matching_process_names=False,
             )
             self.worker_processes.append(process)
             if data_parallel_size is not None:
@@ -245,7 +254,7 @@ class SGLangProcess:
                 if process.data_dir:
                     process._remove_directory(process.data_dir)
 
-                process._terminate_existing()
+                process._terminate_all_matching_process_names()
                 logger.info(
                     f"[SGLangProcess] Launching process {i} (pid will be assigned)..."
                 )
@@ -313,7 +322,7 @@ class SGLangProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_kv_router_basic(
     request,
@@ -369,7 +378,7 @@ def test_sglang_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.skip(reason="Broken by sglang changes")
 # TODO: Re-enable this test once https://github.com/sgl-project/sglang/pull/14934 is merged
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,
@@ -414,7 +423,7 @@ def test_router_decisions_sglang_multiple_workers(
 
 @pytest.mark.gpu_2
 @pytest.mark.post_merge
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_sglang_dp(
     request,
@@ -466,13 +475,12 @@ def test_router_decisions_sglang_dp(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize(
-    "store_backend,use_nats_core,request_plane",
+    "store_backend,durable_kv_events,request_plane",
     [
-        ("etcd", False, "nats"),  # JetStream mode
-        # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
-        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for SGLang
+        ("etcd", False, "tcp"),
     ],
-    ids=["jetstream"],  # "nats_core" and "file" commented out
+    ids=["nats_core"],
+    indirect=["durable_kv_events", "request_plane"],
 )
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_indexers_sync(
@@ -482,7 +490,7 @@ def test_sglang_indexers_sync(
     file_storage_backend,
     set_ucx_tls_no_mm,
     store_backend,
-    use_nats_core,
+    durable_kv_events,
     request_plane,
 ):
     """
@@ -490,12 +498,15 @@ def test_sglang_indexers_sync(
     with SGLang workers. This test verifies that both routers converge to the same internal state.
 
     Tests with configuration:
-    - jetstream: etcd backend, JetStream for KV events, NATS request plane
+    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+                 (includes NATS interruption/recovery testing)
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
+    nats_process, _etcd_process = runtime_services_dynamic_ports
+
     logger.info(
         f"Starting SGLang indexers sync test: store_backend={store_backend}, "
-        f"use_nats_core={use_nats_core}, request_plane={request_plane}"
+        f"durable_kv_events={durable_kv_events}, request_plane={request_plane}"
     )
 
     N_SGLANG_WORKERS = 2
@@ -510,12 +521,14 @@ def test_sglang_indexers_sync(
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
             store_backend=store_backend,
+            durable_kv_events=durable_kv_events,
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)
         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+        # When using durable_kv_events=True, use JetStream mode for the router
         _test_router_indexers_sync(
             engine_workers=sglang_workers,
             block_size=PAGE_SIZE,
@@ -523,6 +536,9 @@ def test_sglang_indexers_sync(
             num_workers=N_SGLANG_WORKERS,
             store_backend=store_backend,
             request_plane=request_plane,
+            test_nats_interruption=not durable_kv_events,
+            nats_server=nats_process if not durable_kv_events else None,
+            durable_kv_events=durable_kv_events,
         )
 
         logger.info("SGLang indexers sync test completed successfully")
