@@ -86,7 +86,7 @@ Dynamo exposes several categories of metrics:
 - **Frontend Metrics** (`dynamo_frontend_*`) - Request handling, token processing, and latency measurements
 - **Component Metrics** (`dynamo_component_*`) - Request counts, processing times, byte transfers, and system uptime
 - **Specialized Component Metrics** (e.g., `dynamo_preprocessor_*`) - Component-specific metrics
-- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus.md) (`vllm:*`), [SGLang](../backends/sglang/prometheus.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm_*`)
+- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [SGLang](../backends/sglang/prometheus.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm_*`), [vLLM](../backends/vllm/prometheus.md) (`vllm:*`)
 
 ## Runtime Hierarchy
 
@@ -194,7 +194,7 @@ curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
 **Timeline:**
 ```
 Timeline:    0, 1, ...
-Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (vLLM, SGLang, TRT)
+Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (SGLang, TRT, vLLM)
              │request start                     │received                              │
              |                                  |                                      |
              │                                  ├──> start prefill ──> first token ──> |last token
