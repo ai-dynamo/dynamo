@@ -104,6 +104,14 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 		return nil, fmt.Errorf("failed to create checkpoint directory: %w", err)
 	}
 
+	// Open image directory FD for CRIU — must stay open through both configure and capture
+	// phases since CRIU's swrk child process inherits this FD.
+	imageDir, imageDirFD, err := common.OpenPathForCRIU(checkpointDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open image directory: %w", err)
+	}
+	defer imageDir.Close()
+
 	// Phase 1: Introspect container state
 	state, err := c.introspect(ctx, params.ContainerID)
 	if err != nil {
@@ -111,7 +119,7 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, params CheckpointParams, 
 	}
 
 	// Phase 2: Configure CRIU options and build checkpoint metadata
-	criuOpts, data, err := c.configure(state, params, cfg, checkpointDir)
+	criuOpts, data, err := c.configure(state, params, cfg, checkpointDir, imageDirFD)
 	if err != nil {
 		return nil, err
 	}
@@ -176,14 +184,8 @@ func (c *Checkpointer) configure(
 	params CheckpointParams,
 	cfg *Config,
 	checkpointDir string,
+	imageDirFD int32,
 ) (*criurpc.CriuOpts, *CheckpointMetadata, error) {
-	// Open image directory FD
-	imageDir, imageDirFD, err := common.OpenPathForCRIU(checkpointDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open image directory: %w", err)
-	}
-	defer imageDir.Close()
-
 	// Build CRIU options from config
 	criuOpts := BuildCRIUOpts(&cfg.CRIU, CRIUDumpParams{
 		PID:        state.PID,
