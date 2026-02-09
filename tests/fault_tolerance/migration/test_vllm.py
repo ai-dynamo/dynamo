@@ -25,6 +25,9 @@ from .utils import DynamoFrontendProcess, run_migration_test
 
 logger = logging.getLogger(__name__)
 
+SHORT_GRACE_PERIOD_S = 1
+LONG_GRACE_PERIOD_S = 10
+
 pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_1,
@@ -35,7 +38,13 @@ pytestmark = [
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
     pytest.mark.parametrize(
-        "immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"]
+        "immediate_kill, grace_period_s",
+        [(True, 0), (False, SHORT_GRACE_PERIOD_S), (False, LONG_GRACE_PERIOD_S)],
+        ids=[
+            "worker_failure",
+            "graceful_shutdown_short_grace_period",
+            "graceful_shutdown_long_grace_period",
+        ],
     ),
     pytest.mark.parametrize(
         "request_api",
@@ -80,6 +89,7 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
+        grace_period_s: int,
         is_prefill: bool | None = None,
     ):
         self.worker_id = worker_id
@@ -126,6 +136,7 @@ class DynamoWorkerProcess(ManagedProcess):
             ] = f"2008{worker_id[-1]}"  # TODO: use dynamic port allocation
 
         env["DYN_LOG"] = "debug"
+        env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = str(grace_period_s)
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy
         # requests to workers interfering with the test process which may cause
@@ -202,6 +213,7 @@ def test_request_migration_vllm_aggregated(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    grace_period_s,
     immediate_kill,
     request_api,
     stream,
@@ -219,15 +231,20 @@ def test_request_migration_vllm_aggregated(
     # Step 1: Start the frontend
     with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
-
         # Step 2: Start 2 workers
-        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
+        with DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            grace_period_s=grace_period_s,
+        ) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
             with DynamoWorkerProcess(
                 request,
                 "worker2",
                 frontend.frontend_port,
+                grace_period_s=grace_period_s,
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
@@ -241,6 +258,11 @@ def test_request_migration_vllm_aggregated(
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
+                    grace_period_s=grace_period_s,
+                    expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
+                    expect_request_success=migration_limit > 0
+                    or grace_period_s > SHORT_GRACE_PERIOD_S,
+                    expect_unregistration_log=not immediate_kill,
                 )
 
 
@@ -252,6 +274,7 @@ def test_request_migration_vllm_prefill(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    grace_period_s,
     immediate_kill,
     request_api,
     stream,
@@ -280,6 +303,7 @@ def test_request_migration_vllm_prefill(
             "worker0",
             frontend.frontend_port,
             is_prefill=False,
+            grace_period_s=grace_period_s,
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
@@ -289,6 +313,7 @@ def test_request_migration_vllm_prefill(
                 "worker1",
                 frontend.frontend_port,
                 is_prefill=True,
+                grace_period_s=grace_period_s,
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
 
@@ -297,6 +322,7 @@ def test_request_migration_vllm_prefill(
                     "worker2",
                     frontend.frontend_port,
                     is_prefill=True,
+                    grace_period_s=grace_period_s,
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
 
@@ -311,6 +337,11 @@ def test_request_migration_vllm_prefill(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
+                        grace_period_s=grace_period_s,
+                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
+                        expect_request_success=migration_limit > 0
+                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_unregistration_log=not immediate_kill,
                     )
 
 
@@ -331,6 +362,7 @@ def test_request_migration_vllm_kv_transfer(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    grace_period_s,
     immediate_kill,
     request_api,
     stream,
@@ -359,6 +391,7 @@ def test_request_migration_vllm_kv_transfer(
             "worker0",
             frontend.frontend_port,
             is_prefill=True,
+            grace_period_s=grace_period_s,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
@@ -368,6 +401,7 @@ def test_request_migration_vllm_kv_transfer(
                 "worker1",
                 frontend.frontend_port,
                 is_prefill=False,
+                grace_period_s=grace_period_s,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
 
@@ -376,6 +410,7 @@ def test_request_migration_vllm_kv_transfer(
                     "worker2",
                     frontend.frontend_port,
                     is_prefill=False,
+                    grace_period_s=grace_period_s,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
 
@@ -390,6 +425,11 @@ def test_request_migration_vllm_kv_transfer(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
+                        grace_period_s=grace_period_s,
+                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
+                        expect_request_success=migration_limit > 0
+                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_unregistration_log=not immediate_kill,
                     )
 
 
@@ -410,6 +450,7 @@ def test_request_migration_vllm_decode(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    grace_period_s,
     immediate_kill,
     request_api,
     stream,
@@ -442,6 +483,7 @@ def test_request_migration_vllm_decode(
             "worker0",
             frontend.frontend_port,
             is_prefill=True,
+            grace_period_s=grace_period_s,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
@@ -451,6 +493,7 @@ def test_request_migration_vllm_decode(
                 "worker1",
                 frontend.frontend_port,
                 is_prefill=False,
+                grace_period_s=grace_period_s,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
 
@@ -459,6 +502,7 @@ def test_request_migration_vllm_decode(
                     "worker2",
                     frontend.frontend_port,
                     is_prefill=False,
+                    grace_period_s=grace_period_s,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
 
@@ -473,4 +517,9 @@ def test_request_migration_vllm_decode(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         wait_for_new_response_before_stop=True,
+                        grace_period_s=grace_period_s,
+                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
+                        expect_request_success=migration_limit > 0
+                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_unregistration_log=not immediate_kill,
                     )

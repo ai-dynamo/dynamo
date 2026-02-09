@@ -96,7 +96,7 @@ def start_completion_request(
     response_list: list[tuple[str | None | Exception, float]] = []
 
     def send_request():
-        prompt = "Tell me a long long long story about yourself?"
+        prompt = "Tell me a long long long story about yourself? That is at least 8000 tokens long."
         if use_long_prompt:
             prompt += " Make sure it is" + " long" * 8000 + "!"
         timeout = 240  # Extended timeout for long request
@@ -105,6 +105,7 @@ def start_completion_request(
             "model": FAULT_TOLERANCE_MODEL_NAME,
             "prompt": prompt,
             "stream": stream,
+            "max_tokens": 16384,
         }
         headers = {"Content-Type": "application/json"}
 
@@ -216,7 +217,7 @@ def start_chat_completion_request(
     response_list: list[tuple[str | None | Exception, float]] = []
 
     def send_request():
-        prompt = "Tell me a long long long story about yourself?"
+        prompt = "Tell me a long long long story about yourself? That is at least 8000 tokens long."
         if use_long_prompt:
             prompt += " Make sure it is" + " long" * 8000 + "!"
         timeout = 240  # Extended timeout for long request
@@ -225,6 +226,7 @@ def start_chat_completion_request(
             "model": FAULT_TOLERANCE_MODEL_NAME,
             "messages": [{"role": "user", "content": prompt}],
             "stream": stream,
+            "max_tokens": 16384,
         }
         headers = {"Content-Type": "application/json"}
 
@@ -426,32 +428,53 @@ def validate_response(
     )
 
 
+def verify_migration_requested(frontend_process: DynamoFrontendProcess) -> str:
+    """
+    Verify that migration was requested by the worker before it is stopped.
+    """
+    log_content = frontend_process.read_logs()
+    assert (
+        "Stream disconnected... recreating stream..." in log_content
+    ), "migration request expected, but 'Stream disconnected... recreating stream...' message not found in logs"
+    return log_content
+
+
 def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
     """
     Verify that migration occurred by checking frontend logs for stream disconnection message.
-
-    Args:
-        frontend_process: The frontend process to check logs for
     """
-    log_path = frontend_process.log_path
-    log_content = ""
-    for i in range(10):
-        try:
-            with open(log_path, "r") as f:
-                log_content = f.read()
-        except Exception as e:
-            pytest.fail(f"Could not read frontend log file {log_path}: {e}")
-        # Make sure this message is captured if any with the polling
-        if "Cannot recreate stream: " in log_content:
-            break
-        time.sleep(0.005)
-
-    assert (
-        "Stream disconnected... recreating stream..." in log_content
-    ), "'Stream disconnected... recreating stream...' message not found in logs"
+    log_content = verify_migration_requested(frontend_process)
     assert (
         "Cannot recreate stream: " not in log_content
-    ), "'Cannot recreate stream: ...' error found in logs"
+    ), "migration expected, but 'Cannot recreate stream: ...' error found in logs"
+
+
+# def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
+#     """
+#     Verify that migration occurred by checking frontend logs for stream disconnection message.
+
+#     Args:
+#         frontend_process: The frontend process to check logs for
+#     """
+#     log_path = frontend_process.log_path
+#     log_content = ""
+#     for i in range(10):
+#         try:
+#             with open(log_path, "r") as f:
+#                 log_content = f.read()
+#         except Exception as e:
+#             pytest.fail(f"Could not read frontend log file {log_path}: {e}")
+#         # Make sure this message is captured if any with the polling
+#         if "Cannot recreate stream: " in log_content:
+#             break
+#         time.sleep(0.005)
+
+#     assert (
+#         "Stream disconnected... recreating stream..." in log_content
+#     ), "'Stream disconnected... recreating stream...' message not found in logs"
+#     assert (
+#         "Cannot recreate stream: " not in log_content
+#     ), "'Cannot recreate stream: ...' error found in logs"
 
 
 def _parse_migration_metric(
@@ -538,6 +561,21 @@ def verify_migration_metrics(
         )
 
 
+def wait_for_log_message(
+    process: ManagedProcess,
+    pattern: str,
+    timeout_s: float = 3.0,
+    poll_interval_s: float = 0.05,
+) -> bool:
+    """Wait for a log pattern to appear in the process log."""
+    start = time.time()
+    while time.time() - start < timeout_s:
+        if pattern in process.read_logs():
+            return True
+        time.sleep(poll_interval_s)
+    return False
+
+
 def run_migration_test(
     frontend: DynamoFrontendProcess,
     worker1: ManagedProcess,
@@ -549,6 +587,10 @@ def run_migration_test(
     stream: bool,
     use_long_prompt: bool = False,
     wait_for_new_response_before_stop: bool = False,
+    grace_period_s: int | None = None,
+    expect_migration_request: bool | None = None,
+    expect_request_success: bool | None = None,
+    expect_unregistration_log: bool = False,
 ) -> None:
     """
     Run the common migration test flow after frontend and workers are started.
@@ -558,12 +600,16 @@ def run_migration_test(
         worker1: First worker process
         worker2: Second worker process
         receiving_pattern: Log pattern to identify which worker received the request
-        migration_limit: Migration limit setting (0 = disabled)
+        migration_limit: Migration limit setting. If expect_migration_request is True, verify migration happened if this is greater than 0.
         immediate_kill: True for immediate kill, False for graceful shutdown
         use_chat_completion: Whether to use chat completion API (True) or completion API (False)
         stream: Whether to use streaming responses
         use_long_prompt: Whether to use long prompt (for prefill tests)
         wait_for_new_response_before_stop: Whether to wait for response before stopping (for decode tests)
+        grace_period_s: Grace period in seconds for graceful shutdown (for timeout tuning)
+        expect_migration_request: Whether migration is requested by the worker before it is stopped.
+        expect_request_success: Whether the request is expected to complete successfully
+        expect_unregistration_log: Whether to require endpoint unregistration log in worker logs
     """
     # Step 1: Send the request
     if use_chat_completion:
@@ -589,18 +635,25 @@ def run_migration_test(
         logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
         terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
     else:
+        termination_timeout = 10
+        if grace_period_s is not None:
+            termination_timeout = max(termination_timeout, grace_period_s + 5)
         logger.info(
             f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
         )
-        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
+        terminate_process_tree(
+            worker.get_pid(), immediate_kill=False, timeout=termination_timeout
+        )
 
     # Step 5: Validate response based on migration setting
-    if migration_limit > 0:
+    if expect_unregistration_log:
+        assert wait_for_log_message(
+            worker,
+            "Received shutdown signal; unregistering endpoints from discovery",
+        ), "Endpoint unregistration log not found in worker logs"
+
+    if expect_request_success:
         validate_response(request_thread, response_list, validate_delay=stream)
-        verify_migration_occurred(frontend)
-        verify_migration_metrics(
-            frontend.frontend_port, expected_ongoing_request_count=1
-        )
     else:
         try:
             validate_response(request_thread, response_list, validate_delay=stream)
@@ -613,8 +666,20 @@ def run_migration_test(
                 or "Request failed with status" in error_str
             ), f"Unexpected error: {e}"
 
-        try:
+    if expect_migration_request:
+        verify_migration_requested(frontend)
+
+        if migration_limit > 0:
             verify_migration_occurred(frontend)
-            pytest.fail("Migration unexpectedly occurred when disabled")
+            verify_migration_metrics(
+                frontend.frontend_port, expected_ongoing_request_count=1
+            )
+    else:
+        try:
+            verify_migration_requested(frontend)
+            pytest.fail("Migration requested unexpectedly.")
         except AssertionError as e:
-            assert "'Cannot recreate stream: ...' error found in logs" in str(e)
+            assert (
+                "migration request expected, but 'Stream disconnected... recreating stream...' message not found in logs"
+                in str(e)
+            )
