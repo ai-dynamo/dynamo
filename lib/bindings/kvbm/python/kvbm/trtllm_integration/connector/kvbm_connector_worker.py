@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -148,13 +149,21 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         mappings = self._llm_args.parallel_config.to_mapping()
         self.rank = mappings.rank
 
-        # Always attempt NCCL replicated mode for MLA support
+        # NCCL replicated mode for MLA support - controlled by feature flag
+        # Set DYN_KVBM_NCCL_MLA_MODE=true to enable NCCL broadcast optimization for MLA models
         nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
+        enable_nccl_mla = os.environ.get("DYN_KVBM_NCCL_MLA_MODE", "false").lower() in ("true", "1", "yes")
 
-        logger.info("Attempting KVBM NCCL replicated mode for MLA support")
-        nccl_rank, nccl_world_size = _get_mpi_info()
+        if enable_nccl_mla:
+            logger.info("KVBM NCCL MLA mode enabled via DYN_KVBM_NCCL_MLA_MODE")
+            nccl_rank, nccl_world_size = _get_mpi_info()
+        else:
+            logger.info(
+                "KVBM NCCL MLA mode disabled. Set DYN_KVBM_NCCL_MLA_MODE=true to enable "
+                "NCCL broadcast optimization for MLA models (e.g., DeepSeek)."
+            )
 
-        if nccl_rank is not None and nccl_world_size is not None:
+        if enable_nccl_mla and nccl_rank is not None and nccl_world_size is not None:
             try:
                 nccl_comm_ptr = _create_kvbm_nccl_comm(
                     nccl_rank, nccl_world_size
@@ -172,11 +181,12 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
                     "cargo build -p kvbm --features nccl"
                 )
                 nccl_rank, nccl_world_size, nccl_comm_ptr = None, None, None
-        else:
+        elif enable_nccl_mla:
             logger.info(
                 "KVBM: MPI not available, using standard sharded mode. "
                 "For NCCL replicated mode, ensure MPI is initialized."
             )
+        # else: NCCL MLA mode disabled, no additional logging needed
 
         self._connector = RustKvConnectorWorker(
             self.drt,
