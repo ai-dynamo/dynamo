@@ -419,10 +419,6 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Block size for KV cache.
     kv_block_size: u32,
 
-    /// Counter for pending + in-flight event operations (used by flush).
-    /// Incremented when an event is sent, decremented after processing completes.
-    pending_events: Arc<AtomicUsize>,
-
     /// Handles to worker threads for joining on shutdown.
     thread_handles: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -448,14 +444,11 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
         let mut thread_handles = Vec::new();
-        let pending_events = Arc::new(AtomicUsize::new(0));
-
         for _ in 0..num_workers {
             let (event_sender, event_receiver) = flume::unbounded::<Option<RouterEvent>>();
             worker_event_senders.push(event_sender);
 
             let backend = Arc::clone(&backend);
-            let pending_events = Arc::clone(&pending_events);
 
             let handle = std::thread::spawn(move || {
                 loop {
@@ -463,7 +456,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                         if let Err(e) = backend.apply_event(event) {
                             tracing::warn!("Failed to apply event: {:?}", e);
                         }
-                        pending_events.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     } else {
                         // Channel closed or received None (shutdown signal)
                         break;
@@ -480,7 +472,6 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             worker_event_channels: worker_event_senders,
             num_workers,
             kv_block_size,
-            pending_events,
             thread_handles: Mutex::new(thread_handles),
         }
     }
@@ -490,17 +481,18 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         &self.backend
     }
 
-    /// Wait for all pending events to be processed.
+    /// Wait for all worker channels to drain.
     ///
-    /// Used primarily for testing and benchmarking to ensure all write operations
-    /// have completed before checking results.
+    /// Used primarily for testing and benchmarking to ensure all queued events
+    /// have been picked up by workers before checking results.
     pub async fn flush(&self) {
         loop {
-            let pending = self
-                .pending_events
-                .load(std::sync::atomic::Ordering::SeqCst);
+            let all_empty = self
+                .worker_event_channels
+                .iter()
+                .all(|ch| ch.is_empty());
 
-            if pending == 0 {
+            if all_empty {
                 break;
             }
 
@@ -538,15 +530,8 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             idx % self.num_workers
         });
 
-        // Increment pending counter BEFORE sending to avoid race with flush
-        self.pending_events
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
         // Send event to the assigned worker thread
         if let Err(e) = self.worker_event_channels[thread_idx].send(Some(event)) {
-            // Decrement counter since the event won't be processed
-            self.pending_events
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(
                 "Failed to send event to worker thread {}: {:?}",
                 thread_idx,
@@ -595,17 +580,21 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn flush(&self) -> usize {
-        let curr_size = self
-            .pending_events
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let curr_size: usize = self
+            .worker_event_channels
+            .iter()
+            .map(|ch| ch.len())
+            .sum();
         loop {
-            if self
-                .pending_events
-                .load(std::sync::atomic::Ordering::SeqCst)
-                == 0
-            {
+            let all_empty = self
+                .worker_event_channels
+                .iter()
+                .all(|ch| ch.is_empty());
+
+            if all_empty {
                 break;
             }
+
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         curr_size
