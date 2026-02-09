@@ -148,6 +148,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             args.min_num_gpus_per_engine = min_gpu
             args.max_num_gpus_per_engine = max_gpu
             args.num_gpus_per_node = gpus_per_node  # type: ignore[assignment]
+            args.gpu_memory_gib = vram_mib / 1024
     else:
         # use default values for GPUs
         if args.min_num_gpus_per_engine == 0:

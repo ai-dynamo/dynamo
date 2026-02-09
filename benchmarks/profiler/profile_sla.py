@@ -243,7 +243,10 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling prefill with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, EngineType.PREFILL
+                num_gpus,
+                args.model_info,
+                EngineType.PREFILL,
+                gpu_memory_gib=getattr(args, "gpu_memory_gib", None),
             )
 
             for mapping in candidate_mappings:
@@ -296,9 +299,23 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(prefill_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready(
-                        timeout=getattr(args, "deployment_timeout", 1800)
-                    )
+                    try:
+                        await client.wait_for_deployment_ready(
+                            timeout=getattr(args, "deployment_timeout", 1800)
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            f"Deployment for mapping {mapping.label()} with {num_gpus} GPUs "
+                            f"failed to become ready within timeout during prefill profiling, skipping"
+                        )
+                        add_profiling_error(
+                            f"Mapping {mapping.label()} with {num_gpus} GPUs timed out "
+                            f"during prefill profiling"
+                        )
+                        logger.info("Cleaning up timed-out deployment...")
+                        await client.delete_deployment()
+                        deployment_clients.remove(client)
+                        continue
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -350,7 +367,10 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling decode with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, EngineType.DECODE
+                num_gpus,
+                args.model_info,
+                EngineType.DECODE,
+                gpu_memory_gib=getattr(args, "gpu_memory_gib", None),
             )
 
             for mapping in candidate_mappings:
@@ -401,9 +421,23 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(decode_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready(
-                        timeout=getattr(args, "deployment_timeout", 1800)
-                    )
+                    try:
+                        await client.wait_for_deployment_ready(
+                            timeout=getattr(args, "deployment_timeout", 1800)
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            f"Deployment for mapping {mapping.label()} with {num_gpus} GPUs "
+                            f"failed to become ready within timeout during decode profiling, skipping"
+                        )
+                        add_profiling_error(
+                            f"Mapping {mapping.label()} with {num_gpus} GPUs timed out "
+                            f"during decode profiling"
+                        )
+                        logger.info("Cleaning up timed-out deployment...")
+                        await client.delete_deployment()
+                        deployment_clients.remove(client)
+                        continue
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
