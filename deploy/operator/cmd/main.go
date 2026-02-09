@@ -55,6 +55,7 @@ import (
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -122,6 +123,7 @@ func init() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	utilruntime.Must(gaiev1.Install(scheme))
+	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
