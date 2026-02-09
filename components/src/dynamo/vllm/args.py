@@ -451,11 +451,9 @@ def parse_args() -> Config:
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
-    config.enable_local_indexer = args.enable_local_indexer
+    config.enable_local_indexer = not args.durable_kv_events
     # For omni mode, use vLLM (AsyncOmni) tokenizer on backend
-    config.use_vllm_tokenizer = (
-        args.use_vllm_tokenizer or args.omni or not args.durable_kv_events
-    )
+    config.use_vllm_tokenizer = args.use_vllm_tokenizer or args.omni
     config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config
 
