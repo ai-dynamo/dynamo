@@ -17,7 +17,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use dynamo_kv_router::{
     ConcurrentRadixTree,
     bench_utils::{LatencyStats, SequenceData, generate_sequences},
-    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer},
+    indexer::{
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer,
+    },
     nested_map::PositionalIndexer,
     protocols::{LocalBlockHash, RouterEvent},
 };
@@ -762,8 +764,11 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
 
     // Benchmark nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
-        let mut indexer =
-            ThreadPoolIndexer::new(PositionalIndexer::new(args.jump_size), args.num_shards, args.common.block_size);
+        let mut indexer = ThreadPoolIndexer::new(
+            PositionalIndexer::new(args.jump_size),
+            args.num_shards,
+            args.common.block_size,
+        );
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
         results.push(result);
         indexer.shutdown();
@@ -771,9 +776,15 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
     }
 
     // Benchmark concurrent radix tree indexer
-    if matches!(args.indexer_type, IndexerType::Concurrent | IndexerType::All) {
-        let mut indexer =
-            ThreadPoolIndexer::new(ConcurrentRadixTree::new(), args.num_shards, args.common.block_size);
+    if matches!(
+        args.indexer_type,
+        IndexerType::Concurrent | IndexerType::All
+    ) {
+        let mut indexer = ThreadPoolIndexer::new(
+            ConcurrentRadixTree::new(),
+            args.num_shards,
+            args.common.block_size,
+        );
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
         results.push(result);
         indexer.shutdown();
@@ -1356,8 +1367,11 @@ async fn run_stress_mode(args: StressArgs) {
 
     // Test nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
-        let indexer =
-            ThreadPoolIndexer::new(PositionalIndexer::new(args.jump_size), args.num_shards, args.common.block_size);
+        let indexer = ThreadPoolIndexer::new(
+            PositionalIndexer::new(args.jump_size),
+            args.num_shards,
+            args.common.block_size,
+        );
 
         println!(
             "\n  Applying {} store events to PositionalIndexer...",
@@ -1401,9 +1415,15 @@ async fn run_stress_mode(args: StressArgs) {
     }
 
     // Test concurrent radix tree indexer
-    if matches!(args.indexer_type, IndexerType::Concurrent | IndexerType::All) {
-        let indexer =
-            ThreadPoolIndexer::new(ConcurrentRadixTree::new(), args.num_shards, args.common.block_size);
+    if matches!(
+        args.indexer_type,
+        IndexerType::Concurrent | IndexerType::All
+    ) {
+        let indexer = ThreadPoolIndexer::new(
+            ConcurrentRadixTree::new(),
+            args.num_shards,
+            args.common.block_size,
+        );
 
         println!(
             "\n  Applying {} store events to ConcurrentRadixTree...",
@@ -1460,7 +1480,6 @@ async fn run_stress_mode(args: StressArgs) {
 
 #[tokio::main]
 async fn main() {
-
     let cli = Cli::parse();
 
     match cli.command {

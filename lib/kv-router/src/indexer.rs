@@ -60,10 +60,7 @@ use std::sync::OnceLock;
 use std::{
     collections::VecDeque,
     iter,
-    sync::{
-        atomic::AtomicUsize,
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex, atomic::AtomicUsize},
     thread::JoinHandle,
     time::Duration,
 };
@@ -2100,8 +2097,16 @@ mod tests {
         match variant {
             "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics)),
             "sharded" => Box::new(KvIndexerSharded::new(token, 4, kv_block_size, metrics)),
-            "flat" => Box::new(ThreadPoolIndexer::new(PositionalIndexer::new(32), 4, kv_block_size)),
-            "concurrent" => Box::new(ThreadPoolIndexer::new(ConcurrentRadixTree::new(), 4, kv_block_size)),
+            "flat" => Box::new(ThreadPoolIndexer::new(
+                PositionalIndexer::new(32),
+                4,
+                kv_block_size,
+            )),
+            "concurrent" => Box::new(ThreadPoolIndexer::new(
+                ConcurrentRadixTree::new(),
+                4,
+                kv_block_size,
+            )),
             _ => panic!("Unknown variant: {}", variant),
         }
     }

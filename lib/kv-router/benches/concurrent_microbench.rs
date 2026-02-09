@@ -134,7 +134,6 @@ struct Args {
     write_ratio: f64,
 }
 
-
 /// Pre-generated sequence data for benchmarking
 #[derive(Clone)]
 struct SequenceData {
@@ -429,7 +428,12 @@ fn bench_concurrent(
                     let mut warmup_iter = 0;
                     while warmup_start.elapsed() < warmup {
                         let query = get_query_for_thread(
-                            thread_id, warmup_iter, &sequences, query_mode, num_threads, &mut rng,
+                            thread_id,
+                            warmup_iter,
+                            &sequences,
+                            query_mode,
+                            num_threads,
+                            &mut rng,
                         );
                         let _ = tree.find_matches_impl(&query, false);
                         warmup_iter += 1;
@@ -442,7 +446,12 @@ fn bench_concurrent(
                     let mut iter = 0;
                     while start.elapsed() < duration {
                         let query = get_query_for_thread(
-                            thread_id, iter, &sequences, query_mode, num_threads, &mut rng,
+                            thread_id,
+                            iter,
+                            &sequences,
+                            query_mode,
+                            num_threads,
+                            &mut rng,
                         );
                         let op_start = Instant::now();
                         let _ = tree.find_matches_impl(&query, false);
@@ -450,7 +459,10 @@ fn bench_concurrent(
                         iter += 1;
                     }
 
-                    ThreadResult { latencies, ops_count: iter }
+                    ThreadResult {
+                        latencies,
+                        ops_count: iter,
+                    }
                 })
             })
             .collect();
@@ -510,11 +522,17 @@ fn bench_mixed_workload(
                         if is_write && !write_sequences.is_empty() {
                             let seq_idx = rng.random_range(0..write_sequences.len());
                             let event_id = write_event_counter.fetch_add(1, Ordering::Relaxed);
-                            let event = write_sequences[seq_idx].to_store_event(event_id + 1_000_000);
+                            let event =
+                                write_sequences[seq_idx].to_store_event(event_id + 1_000_000);
                             let _ = tree.apply_event(event);
                         } else {
                             let query = get_query_for_thread(
-                                thread_id, warmup_iter, &read_sequences, query_mode, num_threads, &mut rng,
+                                thread_id,
+                                warmup_iter,
+                                &read_sequences,
+                                query_mode,
+                                num_threads,
+                                &mut rng,
                             );
                             let _ = tree.find_matches_impl(&query, false);
                         }
@@ -535,13 +553,19 @@ fn bench_mixed_workload(
                         if is_write && !write_sequences.is_empty() {
                             let seq_idx = rng.random_range(0..write_sequences.len());
                             let event_id = write_event_counter.fetch_add(1, Ordering::Relaxed);
-                            let event = write_sequences[seq_idx].to_store_event(event_id + 1_000_000);
+                            let event =
+                                write_sequences[seq_idx].to_store_event(event_id + 1_000_000);
                             let _ = tree.apply_event(event);
                             write_latencies.push(op_start.elapsed());
                             write_count += 1;
                         } else {
                             let query = get_query_for_thread(
-                                thread_id, iter, &read_sequences, query_mode, num_threads, &mut rng,
+                                thread_id,
+                                iter,
+                                &read_sequences,
+                                query_mode,
+                                num_threads,
+                                &mut rng,
                             );
                             let _ = tree.find_matches_impl(&query, false);
                             read_latencies.push(op_start.elapsed());
@@ -567,8 +591,14 @@ fn bench_mixed_workload(
     let total_writes: usize = results.iter().map(|r| r.write_count).sum();
     let total_ops = total_reads + total_writes;
 
-    let all_read_latencies: Vec<Duration> = results.iter().flat_map(|r| r.read_latencies.clone()).collect();
-    let all_write_latencies: Vec<Duration> = results.into_iter().flat_map(|r| r.write_latencies).collect();
+    let all_read_latencies: Vec<Duration> = results
+        .iter()
+        .flat_map(|r| r.read_latencies.clone())
+        .collect();
+    let all_write_latencies: Vec<Duration> = results
+        .into_iter()
+        .flat_map(|r| r.write_latencies)
+        .collect();
 
     let read_latency_stats = LatencyStats::from_durations(all_read_latencies, duration);
     let write_latency_stats = LatencyStats::from_durations(all_write_latencies, duration);
@@ -668,7 +698,9 @@ fn phase_scaling(args: &Args, read_sequences: &[SequenceData], write_sequences: 
 
     let duration = Duration::from_secs(args.duration_secs);
     let warmup = Duration::from_secs(args.warmup_secs);
-    let num_cpus = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(4);
+    let num_cpus = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
     let thread_counts = get_thread_counts(args, num_cpus);
     let use_mixed = args.write_ratio > 0.0 && !write_sequences.is_empty();
 
@@ -745,7 +777,10 @@ fn phase_scaling(args: &Args, read_sequences: &[SequenceData], write_sequences: 
             .unwrap_or(results[0].total_throughput_ops_sec);
 
         // Print combined analysis table
-        println!("\n--- Scaling Analysis (Mixed Workload: {:.1}% writes) ---", args.write_ratio * 100.0);
+        println!(
+            "\n--- Scaling Analysis (Mixed Workload: {:.1}% writes) ---",
+            args.write_ratio * 100.0
+        );
         println!(
             "{:>10} | {:>15} | {:>12} | {:>12} | {:>10} | {:>8}",
             "threads", "throughput", "read_p50", "write_p50", "efficiency", "speedup"
@@ -755,16 +790,12 @@ fn phase_scaling(args: &Args, read_sequences: &[SequenceData], write_sequences: 
         // RadixTree baseline row
         println!(
             "{:>10} | {:>12.2} ops/s | {:>12.3?} | {:>12} | {:>10} | {:>8}",
-            "RadixTree",
-            radix_stats.throughput_ops_sec,
-            radix_stats.p50,
-            "-",
-            "-",
-            "1.00x"
+            "RadixTree", radix_stats.throughput_ops_sec, radix_stats.p50, "-", "-", "1.00x"
         );
 
         for result in &results {
-            let efficiency = result.total_throughput_ops_sec / (result.num_threads as f64 * baseline_throughput);
+            let efficiency =
+                result.total_throughput_ops_sec / (result.num_threads as f64 * baseline_throughput);
             let speedup = result.total_throughput_ops_sec / radix_stats.throughput_ops_sec;
             println!(
                 "{:>10} | {:>12.2} ops/s | {:>12.3?} | {:>12.3?} | {:>9.1}% | {:>7.2}x",
@@ -792,7 +823,9 @@ fn phase_scaling(args: &Args, read_sequences: &[SequenceData], write_sequences: 
         } else {
             println!("  ConcurrentRadixTree did not beat RadixTree in tested thread counts");
             if let Some(best) = results.iter().max_by(|a, b| {
-                a.total_throughput_ops_sec.partial_cmp(&b.total_throughput_ops_sec).unwrap()
+                a.total_throughput_ops_sec
+                    .partial_cmp(&b.total_throughput_ops_sec)
+                    .unwrap()
             }) {
                 println!(
                     "  Best concurrent result: {} threads with {:.2}x relative throughput",
@@ -854,7 +887,8 @@ fn phase_scaling(args: &Args, read_sequences: &[SequenceData], write_sequences: 
         );
 
         for result in &results {
-            let efficiency = result.throughput_ops_sec / (result.num_threads as f64 * baseline_throughput);
+            let efficiency =
+                result.throughput_ops_sec / (result.num_threads as f64 * baseline_throughput);
             let speedup = result.throughput_ops_sec / radix_stats.throughput_ops_sec;
             println!(
                 "{:>10} | {:>12.2} ops/s | {:>12.3?} | {:>12.3?} | {:>9.1}% | {:>7.2}x",
@@ -882,7 +916,9 @@ fn phase_scaling(args: &Args, read_sequences: &[SequenceData], write_sequences: 
         } else {
             println!("  ConcurrentRadixTree did not beat RadixTree in tested thread counts");
             if let Some(best) = results.iter().max_by(|a, b| {
-                a.throughput_ops_sec.partial_cmp(&b.throughput_ops_sec).unwrap()
+                a.throughput_ops_sec
+                    .partial_cmp(&b.throughput_ops_sec)
+                    .unwrap()
             }) {
                 println!(
                     "  Best concurrent result: {} threads with {:.2}x relative throughput",
@@ -907,7 +943,9 @@ fn phase_mixed(args: &Args, read_sequences: &[SequenceData], write_sequences: &[
 
     let duration = Duration::from_secs(args.duration_secs);
     let warmup = Duration::from_secs(args.warmup_secs);
-    let num_cpus = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(4);
+    let num_cpus = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
     let thread_counts = get_thread_counts(args, num_cpus);
 
     // Test different write ratios
@@ -919,7 +957,11 @@ fn phase_mixed(args: &Args, read_sequences: &[SequenceData], write_sequences: &[
 
     println!("Thread counts: {:?}", thread_counts);
     println!("Write ratios: {:?}", write_ratios);
-    println!("Read sequences: {}, Write sequences: {}", read_sequences.len(), write_sequences.len());
+    println!(
+        "Read sequences: {}, Write sequences: {}",
+        read_sequences.len(),
+        write_sequences.len()
+    );
     println!("Duration per point: {}s", args.duration_secs);
 
     let read_sequences_arc = Arc::new(read_sequences.to_vec());
@@ -935,7 +977,11 @@ fn phase_mixed(args: &Args, read_sequences: &[SequenceData], write_sequences: &[
             // Rebuild tree for each configuration to start fresh
             let tree = Arc::new(build_concurrent_tree(read_sequences));
 
-            print!("  threads={:>3}, write_ratio={:>5.1}%... ", num_threads, write_ratio * 100.0);
+            print!(
+                "  threads={:>3}, write_ratio={:>5.1}%... ",
+                num_threads,
+                write_ratio * 100.0
+            );
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             let result = bench_mixed_workload(
@@ -965,7 +1011,13 @@ fn phase_mixed(args: &Args, read_sequences: &[SequenceData], write_sequences: &[
     println!("\n--- Mixed Workload Analysis ---");
     println!(
         "{:>8} | {:>12} | {:>14} | {:>14} | {:>12} | {:>12} | {:>12}",
-        "threads", "write_ratio", "total_ops/s", "read_ops/s", "write_ops/s", "read_p50", "read_p99"
+        "threads",
+        "write_ratio",
+        "total_ops/s",
+        "read_ops/s",
+        "write_ops/s",
+        "read_p50",
+        "read_p99"
     );
     println!("{}", "-".repeat(100));
 
@@ -1030,11 +1082,18 @@ fn phase_mixed(args: &Args, read_sequences: &[SequenceData], write_sequences: &[
                     .unwrap_or(&ratio_results[0]);
                 let best = ratio_results
                     .iter()
-                    .max_by(|a, b| a.total_throughput_ops_sec.partial_cmp(&b.total_throughput_ops_sec).unwrap())
+                    .max_by(|a, b| {
+                        a.total_throughput_ops_sec
+                            .partial_cmp(&b.total_throughput_ops_sec)
+                            .unwrap()
+                    })
                     .unwrap();
 
                 let max_threads = ratio_results.iter().map(|r| r.num_threads).max().unwrap();
-                let max_result = ratio_results.iter().find(|r| r.num_threads == max_threads).unwrap();
+                let max_result = ratio_results
+                    .iter()
+                    .find(|r| r.num_threads == max_threads)
+                    .unwrap();
                 let efficiency = max_result.total_throughput_ops_sec
                     / (max_threads as f64 * baseline.total_throughput_ops_sec);
 
@@ -1079,7 +1138,9 @@ fn main() {
         std::process::exit(1);
     }
 
-    let num_cpus = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(4);
+    let num_cpus = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
 
     println!("Concurrent Radix Tree Benchmark");
     println!("================================\n");
@@ -1087,11 +1148,17 @@ fn main() {
     if let Some(preset) = args.preset {
         println!("  Preset:               {:?}", preset);
     }
-    println!("  Tree size:            {} (worker, block) pairs", args.size);
+    println!(
+        "  Tree size:            {} (worker, block) pairs",
+        args.size
+    );
     println!("  Depth:                {} blocks/sequence", args.depth);
     println!("  Sequences:            {}", num_sequences);
     println!("  Workers:              {}", args.num_workers);
-    println!("  Prefix prompt ratio:  {:.1}%", args.prefix_prompt_ratio * 100.0);
+    println!(
+        "  Prefix prompt ratio:  {:.1}%",
+        args.prefix_prompt_ratio * 100.0
+    );
     println!("  Prefix prompt groups: {}", args.num_prefix_prompts);
     println!("  Duration:             {}s per phase", args.duration_secs);
     println!("  Warmup:               {}s", args.warmup_secs);

@@ -147,7 +147,12 @@ impl SyncIndexer for PositionalIndexer {
     }
 
     fn remove_worker(&self, worker_id: WorkerId) {
-        Self::remove_or_clear_worker_blocks_impl(&self.index, &self.worker_blocks, worker_id, false);
+        Self::remove_or_clear_worker_blocks_impl(
+            &self.index,
+            &self.worker_blocks,
+            worker_id,
+            false,
+        );
     }
 
     fn dump_events(&self) -> Vec<RouterEvent> {

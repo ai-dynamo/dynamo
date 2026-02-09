@@ -97,7 +97,8 @@ pub struct ConcurrentRadixTree {
     /// Outer `RwLock` protects the worker-level map; inner `RwLock` per worker
     /// protects that worker's block-hash map, so writers targeting different
     /// workers only contend on the outer read lock.
-    lookup: RwLock<HashMap<WorkerWithDpRank, RwLock<HashMap<ExternalSequenceBlockHash, SharedBlock>>>>,
+    lookup:
+        RwLock<HashMap<WorkerWithDpRank, RwLock<HashMap<ExternalSequenceBlockHash, SharedBlock>>>>,
 }
 
 impl Default for ConcurrentRadixTree {
@@ -128,7 +129,9 @@ impl Drop for ConcurrentRadixTree {
 
         // Iteratively free any uniquely-owned blocks without recursion
         while let Some(block) = stack.pop() {
-            if let Ok(rwlock) = Arc::try_unwrap(block) && let Ok(mut inner) = rwlock.into_inner() {
+            if let Ok(rwlock) = Arc::try_unwrap(block)
+                && let Ok(mut inner) = rwlock.into_inner()
+            {
                 stack.extend(inner.children.drain().map(|(_, v)| v));
             }
         }
@@ -158,7 +161,11 @@ impl ConcurrentRadixTree {
     ///
     /// An `OverlapScores` representing the match scores.
     /// Note: `frequencies` field will be empty since frequency tracking is not supported.
-    pub fn find_matches_impl(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
+    pub fn find_matches_impl(
+        &self,
+        sequence: &[LocalBlockHash],
+        early_exit: bool,
+    ) -> OverlapScores {
         let mut scores = OverlapScores::new();
 
         if sequence.is_empty() {
@@ -192,7 +199,9 @@ impl ConcurrentRadixTree {
             let lookup = self.lookup.read().unwrap();
             for worker in scores.scores.keys() {
                 if let Some(inner_lock) = lookup.get(worker) {
-                    scores.tree_sizes.insert(*worker, inner_lock.read().unwrap().len());
+                    scores
+                        .tree_sizes
+                        .insert(*worker, inner_lock.read().unwrap().len());
                 }
             }
             return scores;
@@ -259,7 +268,9 @@ impl ConcurrentRadixTree {
             let lookup = self.lookup.read().unwrap();
             for worker in scores.scores.keys() {
                 if let Some(inner_lock) = lookup.get(worker) {
-                    scores.tree_sizes.insert(*worker, inner_lock.read().unwrap().len());
+                    scores
+                        .tree_sizes
+                        .insert(*worker, inner_lock.read().unwrap().len());
                 }
             }
         }
@@ -359,7 +370,9 @@ impl ConcurrentRadixTree {
                 match parent_guard.children.get(&block_data.tokens_hash) {
                     Some(existing) => {
                         // Verify our simplifying assumption: block_hash is uniform across workers
-                        if let Ok(existing_guard) = existing.read() && existing_guard.block_hash != Some(block_data.block_hash) {
+                        if let Ok(existing_guard) = existing.read()
+                            && existing_guard.block_hash != Some(block_data.block_hash)
+                        {
                             tracing::warn!(
                                 expected = ?block_data.block_hash,
                                 actual = ?existing_guard.block_hash,
@@ -470,7 +483,9 @@ impl ConcurrentRadixTree {
         while let Some(current) = stack.pop() {
             let guard = current.read().unwrap();
             for child in guard.children.values() {
-                if let Ok(child_guard) = child.read() && let Some(hash) = child_guard.block_hash {
+                if let Ok(child_guard) = child.read()
+                    && let Some(hash) = child_guard.block_hash
+                {
                     result.push(hash);
                     stack.push(child.clone());
                 }
@@ -663,10 +678,13 @@ mod tests {
 
         assert_eq!(trie.lookup.read().unwrap().len(), 1);
         assert_eq!(
-            trie.lookup.read().unwrap()
+            trie.lookup
+                .read()
+                .unwrap()
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
-                .read().unwrap()
+                .read()
+                .unwrap()
                 .len(),
             3
         );
@@ -712,10 +730,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            trie.lookup.read().unwrap()
+            trie.lookup
+                .read()
+                .unwrap()
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
-                .read().unwrap()
+                .read()
+                .unwrap()
                 .len(),
             2
         );
@@ -724,10 +745,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            trie.lookup.read().unwrap()
+            trie.lookup
+                .read()
+                .unwrap()
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
-                .read().unwrap()
+                .read()
+                .unwrap()
                 .len(),
             1
         );
@@ -750,7 +774,6 @@ mod tests {
             result.unwrap_err(),
             KvCacheEventError::ParentBlockNotFound
         ));
-
     }
 
     #[test]
@@ -771,14 +794,19 @@ mod tests {
         trie.clear_all_blocks(worker_0);
 
         assert!(
-            trie.lookup.read().unwrap()
+            trie.lookup
+                .read()
+                .unwrap()
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
         assert!(
-            trie.lookup.read().unwrap()
+            trie.lookup
+                .read()
+                .unwrap()
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
                 .unwrap()
-                .read().unwrap()
+                .read()
+                .unwrap()
                 .is_empty()
         );
 
@@ -806,7 +834,10 @@ mod tests {
         trie.remove_worker(worker_0);
 
         assert!(
-            !trie.lookup.read().unwrap()
+            !trie
+                .lookup
+                .read()
+                .unwrap()
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
         assert_eq!(trie.lookup.read().unwrap().len(), 1);
@@ -911,12 +942,8 @@ mod tests {
                 let tree = trie.clone();
                 thread::spawn(move || {
                     for j in 0..10 {
-                        let _ = tree.apply_event(create_store_event(
-                            i,
-                            j,
-                            vec![1, 2, 3, 4 + j],
-                            None,
-                        ));
+                        let _ =
+                            tree.apply_event(create_store_event(i, j, vec![1, 2, 3, 4 + j], None));
                     }
                 })
             })
@@ -976,7 +1003,10 @@ mod tests {
         use super::*;
         use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
 
-        fn make_indexer(num_workers: usize, kv_block_size: u32) -> ThreadPoolIndexer<ConcurrentRadixTree> {
+        fn make_indexer(
+            num_workers: usize,
+            kv_block_size: u32,
+        ) -> ThreadPoolIndexer<ConcurrentRadixTree> {
             ThreadPoolIndexer::new(ConcurrentRadixTree::new(), num_workers, kv_block_size)
         }
 
@@ -1154,29 +1184,20 @@ mod tests {
 
             for worker_id in 0..4 {
                 indexer
-                    .apply_event(create_store_event(
-                        worker_id,
-                        1,
-                        vec![1, 2, 3, 4, 5],
-                        None,
-                    ))
+                    .apply_event(create_store_event(worker_id, 1, vec![1, 2, 3, 4, 5], None))
                     .await;
             }
             indexer.flush().await;
 
-            let sequence = vec![
-                LocalBlockHash(1),
-                LocalBlockHash(2),
-                LocalBlockHash(3),
-            ];
+            let sequence = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
 
             let mut handles = Vec::new();
             for _ in 0..10 {
                 let idx = indexer.clone();
                 let seq = sequence.clone();
-                handles.push(tokio::spawn(async move {
-                    idx.find_matches(seq).await.unwrap()
-                }));
+                handles.push(tokio::spawn(
+                    async move { idx.find_matches(seq).await.unwrap() },
+                ));
             }
 
             for handle in handles {
