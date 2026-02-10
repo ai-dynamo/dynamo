@@ -57,8 +57,6 @@ tensorrtllm_models/
 tensorrtllm_checkpoints/
 tensorrtllm_engines/
 api_server_models/
-server/
-!lib/gpu_memory_service/server/
 # Replay/Snapshot test artifacts
 *.new
 lib/llm/tests/data/sample-models/models--meta-llama--Llama-3.1-70B-Instruct/
@@ -123,3 +121,11 @@ package-lock.json
 
 # Compiled static libraries
 *.a
+
+
+# START Ruler Generated Files
+/../../../.config/.cursor/instructions.md
+/../../../.config/.cursor/instructions.md.bak
+/../../../.config/CLAUDE.md
+/../../../.config/CLAUDE.md.bak
+# END Ruler Generated Files

@@ -17,7 +17,7 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::cache_stats::CacheStatsTracker;
-use crate::{get_current_cancel_token, get_current_tokio_handle};
+use crate::dynamo::{get_current_cancel_token, get_current_tokio_handle};
 
 use super::*;
 

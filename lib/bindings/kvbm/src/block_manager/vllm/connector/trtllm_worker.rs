@@ -15,7 +15,7 @@ use crate::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{block_manager::distributed::VllmTensor, to_pyerr};
 use dynamo_runtime::DistributedRuntime;
 
-use crate::{
+use crate::dynamo::{
     extract_distributed_runtime_from_obj, get_current_cancel_token, get_current_tokio_handle,
 };
 use anyhow;

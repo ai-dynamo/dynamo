@@ -886,7 +886,7 @@ checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
 dependencies = [
  "glob",
  "libc",
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1179,7 +1179,16 @@ version = "0.17.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf99ab37ee7072d64d906aa2dada9a3422f1d975cdf8c8055a573bc84897ed8"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "cudarc"
+version = "0.19.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aed81f178e780f3d5d354d12b4c5c5a484c4a9c329ecd037ac57f2a0e0648397"
+dependencies = [
+ "libloading 0.9.0",
 ]
 
 [[package]]
@@ -1649,7 +1658,7 @@ dependencies = [
  "bytes",
  "candle-core",
  "chrono",
- "cudarc",
+ "cudarc 0.19.2",
  "dashmap 5.5.3",
  "derive-getters",
  "derive_builder",
@@ -1732,7 +1741,7 @@ name = "dynamo-memory"
 version = "0.9.0"
 dependencies = [
  "anyhow",
- "cudarc",
+ "cudarc 0.19.2",
  "dynamo-config",
  "libc",
  "nix 0.30.1",
@@ -1792,7 +1801,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "cudarc",
+ "cudarc 0.17.8",
  "derive-getters",
  "dlpark",
  "dynamo-async-openai",
@@ -3697,6 +3706,16 @@ name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if 1.0.4",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if 1.0.4",
  "windows-link 0.2.1",
@@ -7659,7 +7678,7 @@ checksum = "90b70b37e9074642bc5f60bb23247fd072a84314ca9e71cdf8527593406a0dd3"
 dependencies = [
  "gemm 0.18.2",
  "half",
- "libloading",
+ "libloading 0.8.9",
  "memmap2",
  "num",
  "num-traits",
