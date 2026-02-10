@@ -765,9 +765,11 @@ class BasePlanner:
             )
             return
 
-        recent, averaged = result
+        recent, per_worker_averaged, cluster_averaged = result
         self.cached_load_metrics = CachedLoadMetrics(
-            recent=recent, averaged=averaged
+            recent=recent,
+            per_worker_averaged=per_worker_averaged,
+            cluster_averaged=cluster_averaged,
         )
 
         if self.component_type == SubComponentType.PREFILL:

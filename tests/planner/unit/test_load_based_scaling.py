@@ -142,18 +142,19 @@ class TestDirectRouterMetricsClient:
         ]
         result = client.get_recent_and_averaged_metrics("prefill")
         assert result is not None
-        recent, averaged = result
+        recent, per_worker_avg, cluster_avg = result
         assert recent["w1"]["active_prefill_tokens"] == 100.0
-        # averaged is now flat (across workers)
-        assert averaged["active_prefill_tokens"] == 100.0
+        assert per_worker_avg["w1"]["active_prefill_tokens"] == 100.0
+        assert cluster_avg["active_prefill_tokens"] == 100.0
         # decode workers not included
         assert "w2" not in recent
 
         result_d = client.get_recent_and_averaged_metrics("decode")
         assert result_d is not None
-        recent_d, averaged_d = result_d
+        recent_d, per_worker_avg_d, cluster_avg_d = result_d
         assert recent_d["w2"]["active_decode_blocks"] == 50.0
-        assert averaged_d["active_decode_blocks"] == 50.0
+        assert per_worker_avg_d["w2"]["active_decode_blocks"] == 50.0
+        assert cluster_avg_d["active_decode_blocks"] == 50.0
 
     def test_get_recent_and_averaged_multiple_samples(self):
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
@@ -164,11 +165,13 @@ class TestDirectRouterMetricsClient:
         ]
         result = client.get_recent_and_averaged_metrics("prefill")
         assert result is not None
-        recent, averaged = result
+        recent, per_worker_avg, cluster_avg = result
         # Recent should be the last sample
         assert abs(recent["w1"]["active_prefill_tokens"] - 300.0) < 1e-6
-        # Averaged is flat across all samples and workers
-        assert abs(averaged["active_prefill_tokens"] - 200.0) < 1e-6
+        # Per-worker averaged over time
+        assert abs(per_worker_avg["w1"]["active_prefill_tokens"] - 200.0) < 1e-6
+        # Cluster averaged (same as per-worker when only 1 worker)
+        assert abs(cluster_avg["active_prefill_tokens"] - 200.0) < 1e-6
 
     def test_parse_multiple_workers(self):
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
@@ -306,7 +309,7 @@ class TestPrefillLoadBasedScaling:
                 "last_ttft": 0.30,
             },
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result == 3  # scale up from 2 to 3
@@ -347,7 +350,7 @@ class TestPrefillLoadBasedScaling:
                 "last_ttft": 0.15,
             },
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result == 2  # scale down from 3 to 2
@@ -379,7 +382,7 @@ class TestPrefillLoadBasedScaling:
                 "last_ttft": 0.15,
             },
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result is None
@@ -404,7 +407,7 @@ class TestPrefillLoadBasedScaling:
                 "last_ttft": 0.5,
             },
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result is None
@@ -432,7 +435,7 @@ class TestDecodeLoadBasedScaling:
             "w1": {"active_decode_blocks": 100.0, "last_itl": 0.06},
             "w2": {"active_decode_blocks": 95.0, "last_itl": 0.055},
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result == 3
@@ -460,7 +463,7 @@ class TestDecodeLoadBasedScaling:
             "w2": {"active_decode_blocks": 15.0, "last_itl": 0.025},
             "w3": {"active_decode_blocks": 20.0, "last_itl": 0.03},
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result == 2
@@ -479,7 +482,7 @@ class TestDecodeLoadBasedScaling:
         metrics = {
             "w1": {"active_decode_blocks": 200.0, "last_itl": 0.1},
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         assert result is None
@@ -512,7 +515,7 @@ class TestLowerBoundEnforcement:
             }
             for i in range(5)
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         result = planner.loadbased_plan_adjustment()
         # Even though load-based wants to scale down, the result should be
@@ -545,7 +548,7 @@ class TestLowerBoundEnforcement:
             }
             for i in range(3)
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         # boundary = target * (3-1)/3 * 0/100 = 0
         # all workers at 0 which is NOT less than 0 (it's equal)
@@ -593,7 +596,7 @@ class TestWorkerCountReconciliation:
         planner = PrefillPlanner(None, args, shared_state=shared_state)
         planner.model_name = "test-model"
 
-        # get_recent_and_averaged_metrics("prefill") returns (recent, averaged)
+        # get_recent_and_averaged_metrics("prefill") returns (recent, per_worker_avg, cluster_avg)
         prefill_metrics = {
             "w1": {
                 "active_prefill_tokens": 500.0,
@@ -603,6 +606,7 @@ class TestWorkerCountReconciliation:
         }
         planner.prometheus_engine_client = Mock()
         planner.prometheus_engine_client.get_recent_and_averaged_metrics.return_value = (
+            prefill_metrics,
             prefill_metrics,
             _avg(prefill_metrics),
         )
@@ -627,6 +631,7 @@ class TestWorkerCountReconciliation:
         }
         planner.prometheus_engine_client = Mock()
         planner.prometheus_engine_client.get_recent_and_averaged_metrics.return_value = (
+            decode_metrics,
             decode_metrics,
             _avg(decode_metrics),
         )
@@ -660,7 +665,7 @@ class TestWorkerCountReconciliation:
                 "last_ttft": 0.25,
             },
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         # The mismatch should be detectable by comparing counts
         prom_count = len(planner.cached_load_metrics.recent)
@@ -690,7 +695,7 @@ class TestWorkerCountReconciliation:
                 "last_ttft": 0.30,
             },
         }
-        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, averaged=_avg(metrics))
+        planner.cached_load_metrics = CachedLoadMetrics(recent=metrics, per_worker_averaged=metrics, cluster_averaged=_avg(metrics))
 
         prom_count = len(planner.cached_load_metrics.recent)
         dgd_count = shared_state.num_p_workers

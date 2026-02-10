@@ -62,14 +62,17 @@ class CachedLoadMetrics:
     """Container for load metrics used by load-based scaling.
 
     Attributes:
-        recent:   Most recent per-worker metrics (from the latest sample).
-                  Keyed by worker_id -> {metric_name: value}.
-        averaged: Metrics averaged over the load adjustment interval and all workers.
-                  Flat dict {metric_name: value}.
+        recent:              Most recent per-worker metrics (from the latest sample).
+                             Keyed by worker_id -> {metric_name: value}.
+        per_worker_averaged: Per-worker metrics averaged over time (not across workers).
+                             Keyed by worker_id -> {metric_name: value}.
+        cluster_averaged:    Metrics averaged over time and all workers.
+                             Flat dict {metric_name: value}.
     """
 
     recent: dict[str, dict[str, float]] = field(default_factory=dict)
-    averaged: dict[str, float] = field(default_factory=dict)
+    per_worker_averaged: dict[str, dict[str, float]] = field(default_factory=dict)
+    cluster_averaged: dict[str, float] = field(default_factory=dict)
 
 
 class FrontendMetric(BaseModel):
@@ -326,8 +329,14 @@ class DirectRouterMetricsClient:
 
     def get_recent_and_averaged_metrics(
         self, worker_type: str
-    ) -> typing.Optional[tuple[dict[str, dict[str, float]], dict[str, float]]]:
-        """Return both the most recent per-worker metrics and cluster-averaged metrics.
+    ) -> typing.Optional[
+        tuple[
+            dict[str, dict[str, float]],
+            dict[str, dict[str, float]],
+            dict[str, float],
+        ]
+    ]:
+        """Return recent, per-worker time-averaged, and cluster-averaged metrics.
 
         Called by the load-based loop at decision time. Non-blocking.
 
@@ -336,9 +345,10 @@ class DirectRouterMetricsClient:
                          the worker_type label are included.
 
         Returns:
-            A tuple of (recent, averaged):
-            - recent:   {worker_id: {metric: float}} from the latest sample
-            - averaged: {metric: float} averaged over all samples and all workers
+            A tuple of (recent, per_worker_averaged, cluster_averaged):
+            - recent:              {worker_id: {metric: float}} from the latest sample
+            - per_worker_averaged: {worker_id: {metric: float}} averaged over time per worker
+            - cluster_averaged:    {metric: float} averaged over all samples and all workers
             Returns None if the sample buffer is empty.
         """
         if not self._sample_buffer:
@@ -350,26 +360,54 @@ class DirectRouterMetricsClient:
         for worker_id, metrics in latest_sample.get(worker_type, {}).items():
             recent[worker_id] = dict(metrics)
 
-        # --- Averaged: across all samples AND all workers ---
-        metric_sums: dict[str, float] = {}
-        metric_counts: dict[str, int] = {}
+        # --- Per-worker averaged: across time, grouped by worker_id ---
+        pw_sums: dict[str, dict[str, float]] = {}
+        pw_counts: dict[str, dict[str, int]] = {}
 
         for sample in self._sample_buffer:
             typed_workers = sample.get(worker_type, {})
             for worker_id, metrics in typed_workers.items():
+                if worker_id not in pw_sums:
+                    pw_sums[worker_id] = {}
+                    pw_counts[worker_id] = {}
                 for metric_name, value in metrics.items():
-                    metric_sums[metric_name] = (
-                        metric_sums.get(metric_name, 0.0) + value
+                    pw_sums[worker_id][metric_name] = (
+                        pw_sums[worker_id].get(metric_name, 0.0) + value
                     )
-                    metric_counts[metric_name] = (
-                        metric_counts.get(metric_name, 0) + 1
+                    pw_counts[worker_id][metric_name] = (
+                        pw_counts[worker_id].get(metric_name, 0) + 1
                     )
 
-        if not metric_sums and not recent:
+        if not pw_sums and not recent:
             return None
 
-        averaged: dict[str, float] = {}
-        for metric_name in metric_sums:
-            averaged[metric_name] = metric_sums[metric_name] / metric_counts[metric_name]
+        per_worker_averaged: dict[str, dict[str, float]] = {}
+        for worker_id in pw_sums:
+            per_worker_averaged[worker_id] = {}
+            for metric_name in pw_sums[worker_id]:
+                per_worker_averaged[worker_id][metric_name] = (
+                    pw_sums[worker_id][metric_name]
+                    / pw_counts[worker_id][metric_name]
+                )
 
-        return recent, averaged
+        # --- Cluster averaged: across time AND worker_id ---
+        cluster_sums: dict[str, float] = {}
+        cluster_counts: dict[str, int] = {}
+        for worker_id in pw_sums:
+            for metric_name in pw_sums[worker_id]:
+                cluster_sums[metric_name] = (
+                    cluster_sums.get(metric_name, 0.0)
+                    + pw_sums[worker_id][metric_name]
+                )
+                cluster_counts[metric_name] = (
+                    cluster_counts.get(metric_name, 0)
+                    + pw_counts[worker_id][metric_name]
+                )
+
+        cluster_averaged: dict[str, float] = {}
+        for metric_name in cluster_sums:
+            cluster_averaged[metric_name] = (
+                cluster_sums[metric_name] / cluster_counts[metric_name]
+            )
+
+        return recent, per_worker_averaged, cluster_averaged

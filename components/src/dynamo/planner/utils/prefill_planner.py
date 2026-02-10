@@ -33,10 +33,10 @@ class PrefillPlanner(BasePlanner):
             return None
 
         recent = self.cached_load_metrics.recent
-        averaged = self.cached_load_metrics.averaged
+        cluster_averaged = self.cached_load_metrics.cluster_averaged
 
         # Averaged ISL across all workers in the past adjustment interval
-        avg_isl = averaged.get("last_isl", 0.0)
+        avg_isl = cluster_averaged.get("last_isl", 0.0)
         target_active_tokens = x_sla - avg_isl
 
         num_workers = self.shared_state.num_p_workers

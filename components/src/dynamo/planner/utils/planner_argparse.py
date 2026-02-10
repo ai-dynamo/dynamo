@@ -45,8 +45,8 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         default=SLAPlannerDefaults.mode,
-        choices=["disagg", "prefill", "decode"],
-        help="Planner mode: disagg (prefill+decode), prefill-only, or decode-only",
+        choices=["disagg", "prefill", "decode", "agg"],
+        help="Planner mode: disagg (prefill+decode), prefill-only, decode-only, or agg (aggregated)",
     )
     parser.add_argument(
         "--no-operation",

@@ -19,6 +19,7 @@ import logging
 
 from pydantic import BaseModel
 
+from dynamo.planner.utils.agg_planner import AggPlanner
 from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.disagg_planner import DisaggPlanner
 from dynamo.planner.utils.planner_argparse import (
@@ -49,6 +50,8 @@ async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespac
         planner = PrefillPlanner(runtime, args)
     elif mode == "decode":
         planner = DecodePlanner(runtime, args)
+    elif mode == "agg":
+        planner = AggPlanner(runtime, args)
     else:
         raise ValueError(f"Invalid planner mode: {mode}")
     await planner._async_init()
