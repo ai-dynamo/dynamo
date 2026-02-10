@@ -125,7 +125,7 @@ jobs:
             RESULT=""
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-${PLATFORM}"$'\n'
+                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-${{ inputs.platform }}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
             echo "tags<<EOF" >> $GITHUB_OUTPUT
