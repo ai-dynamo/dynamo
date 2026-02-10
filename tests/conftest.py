@@ -381,6 +381,22 @@ def pytest_collection_modifyitems(config, items):
         config.models_to_download = models_to_download
 
 
+def pytest_sessionfinish(session, exitstatus):
+    """Print collected models when running in collect-only mode.
+
+    This enables CI scripts to discover which models a test run needs
+    without executing the tests.  The cache-models GitHub Action parses
+    the MODELS_NEEDED line to selectively pre-copy only the required
+    models from the S3 mount.
+    """
+    import sys
+
+    models = getattr(session.config, "models_to_download", None)
+    if models and session.config.option.collectonly:
+        sys.stdout.write(f"\nMODELS_NEEDED:{','.join(sorted(models))}\n")
+        sys.stdout.flush()
+
+
 class EtcdServer(ManagedProcess):
     def __init__(self, request, port=2379, timeout=300):
         # Allocate free ports if port is 0

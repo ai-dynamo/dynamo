@@ -46,10 +46,14 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
-  local_models_dir:
-    description: 'Host path to pre-staged HuggingFace models (org/model layout). Mounted read-only into the test container and set as DYNAMO_LOCAL_MODELS_DIR. Leave empty to skip.'
+  local_models_cache:
+    description: 'Path to pre-copied local model cache (output of cache-models action). Mounted read-only into the test container as DYNAMO_LOCAL_MODELS_DIR. Leave empty to skip.'
     required: false
     default: ''
+  local_models_dir:
+    description: 'Container-side path for DYNAMO_LOCAL_MODELS_DIR (must match the org/model layout). Only used when local_models_cache is set.'
+    required: false
+    default: '/models/ci/models'
 
 runs:
   using: "composite"
@@ -243,24 +247,13 @@ runs:
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
         echo "▶️ Executing: $PYTEST_CMD"
 
-        # Pre-copy models from the S3 FUSE mount to a local directory on the
-        # shared work volume.  FUSE mounts don't propagate through Docker bind
-        # mounts into nested containers (Errno 107 / SIGBUS on mmap), so we
-        # copy once in the runner container (which has direct FUSE access) and
-        # mount the regular-file copy into the test container.
+        # Mount the pre-copied model cache (from cache-models action) into the
+        # test container.  If no cache was provided, tests fall back to
+        # downloading from HuggingFace via conftest.py.
         LOCAL_MODELS_FLAGS=""
-        if [[ -n "${{ inputs.local_models_dir }}" && -d "${{ inputs.local_models_dir }}" ]]; then
-          LOCAL_CACHE="$(pwd)/.local_model_cache"
-          echo "📦 Pre-copying models from ${{ inputs.local_models_dir }} to ${LOCAL_CACHE} ..."
-          start_cp=$(date +%s)
-          mkdir -p "${LOCAL_CACHE}"
-          cp -ru "${{ inputs.local_models_dir }}/." "${LOCAL_CACHE}/" 2>/dev/null || \
-            echo "⚠️  Some files failed to copy (FUSE mount may be degraded), continuing with what we have"
-          end_cp=$(date +%s)
-          echo "⏱️  Model copy took $((end_cp - start_cp))s"
-          LOCAL_MODELS_FLAGS="-v ${LOCAL_CACHE}:${{ inputs.local_models_dir }}:ro --env DYNAMO_LOCAL_MODELS_DIR=${{ inputs.local_models_dir }}"
-        elif [[ -n "${{ inputs.local_models_dir }}" ]]; then
-          echo "⚠️  Local models dir ${{ inputs.local_models_dir }} not found, will download from HuggingFace"
+        if [[ -n "${{ inputs.local_models_cache }}" ]]; then
+          echo "📦 Mounting local model cache: ${{ inputs.local_models_cache }} -> ${{ inputs.local_models_dir }}"
+          LOCAL_MODELS_FLAGS="-v ${{ inputs.local_models_cache }}:${{ inputs.local_models_dir }}:ro --env DYNAMO_LOCAL_MODELS_DIR=${{ inputs.local_models_dir }}"
         fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${LOCAL_MODELS_FLAGS} --rm -w /workspace \

@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Cache Models'
+description: >
+  Discover which HuggingFace models a pytest run needs (via --collect-only)
+  and pre-copy only those from the S3 FUSE mount to local disk.  The output
+  cache_dir can be bind-mounted into the test container so that conftest.py
+  symlinks into the HF cache without touching FUSE at runtime.
+
+inputs:
+  image_tag:
+    description: 'Container image with the test code (used for pytest --collect-only)'
+    required: true
+  pytest_marks:
+    description: 'Pytest marker expression, e.g. "pre_merge and vllm and gpu_1"'
+    required: true
+  local_models_dir:
+    description: 'Host path to S3-backed FUSE model mount (org/model layout)'
+    required: true
+    default: '/models/ci/models'
+
+outputs:
+  cache_dir:
+    description: 'Path to the local model cache directory (empty if nothing was copied)'
+    value: ${{ steps.copy.outputs.cache_dir }}
+  models:
+    description: 'Comma-separated list of models discovered'
+    value: ${{ steps.discover.outputs.models }}
+
+runs:
+  using: "composite"
+  steps:
+    # Step 1: Discover which models the test run needs.
+    # Runs pytest --collect-only inside the test image (no GPU, no mounts).
+    # The conftest.py pytest_sessionfinish hook prints MODELS_NEEDED:<csv>.
+    - id: discover
+      shell: bash
+      run: |
+        MARKS="${{ inputs.pytest_marks }}"
+        if [[ -z "$MARKS" ]]; then
+          echo "No pytest marks provided, skipping model discovery"
+          echo "models=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "Discovering models needed for marks: ${MARKS}"
+
+        COLLECT_OUTPUT=$(docker run --rm -w /workspace \
+          ${{ inputs.image_tag }} \
+          pytest --collect-only --continue-on-collection-errors -q \
+            -m "${MARKS}" 2>&1) || true
+
+        MODELS_LINE=$(echo "$COLLECT_OUTPUT" | grep '^MODELS_NEEDED:' | tail -1)
+
+        if [[ -n "$MODELS_LINE" ]]; then
+          MODELS="${MODELS_LINE#MODELS_NEEDED:}"
+          echo "Discovered models: ${MODELS}"
+          echo "models=${MODELS}" >> $GITHUB_OUTPUT
+        else
+          echo "No models discovered (no MODELS_NEEDED line in collect output)"
+          echo "models=" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 2: Copy discovered models from the FUSE mount to local disk.
+    # Skips gracefully if the mount doesn't exist or a model is missing.
+    - id: copy
+      shell: bash
+      run: |
+        MODELS="${{ steps.discover.outputs.models }}"
+        LOCAL_MODELS_DIR="${{ inputs.local_models_dir }}"
+
+        if [[ -z "$MODELS" ]]; then
+          echo "No models to cache"
+          echo "cache_dir=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        if [[ ! -d "$LOCAL_MODELS_DIR" ]]; then
+          echo "WARNING: Local models directory $LOCAL_MODELS_DIR does not exist"
+          echo "Tests will fall back to downloading from HuggingFace"
+          echo "cache_dir=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        CACHE_DIR="$(pwd)/.local_model_cache"
+        mkdir -p "$CACHE_DIR"
+        start_time=$(date +%s)
+        COPIED=0
+        SKIPPED=0
+
+        IFS=',' read -ra MODEL_LIST <<< "$MODELS"
+        for model in "${MODEL_LIST[@]}"; do
+          SRC="${LOCAL_MODELS_DIR}/${model}"
+          DST="${CACHE_DIR}/${model}"
+
+          if [[ ! -d "$SRC" ]]; then
+            echo "WARNING: Model '${model}' not found at ${SRC}, will download from HuggingFace"
+            SKIPPED=$((SKIPPED + 1))
+            continue
+          fi
+
+          mkdir -p "$(dirname "$DST")"
+          echo "Copying ${model} ..."
+          if cp -r "$SRC" "$DST" 2>/dev/null; then
+            COPIED=$((COPIED + 1))
+          else
+            echo "WARNING: Failed to copy ${model} (FUSE mount may be degraded), will download from HuggingFace"
+            rm -rf "$DST"
+            SKIPPED=$((SKIPPED + 1))
+          fi
+        done
+
+        end_time=$(date +%s)
+        echo "Model cache: ${COPIED} copied, ${SKIPPED} skipped, $((end_time - start_time))s elapsed"
+
+        if [[ $COPIED -gt 0 ]]; then
+          echo "cache_dir=${CACHE_DIR}" >> $GITHUB_OUTPUT
+        else
+          echo "cache_dir=" >> $GITHUB_OUTPUT
+        fi

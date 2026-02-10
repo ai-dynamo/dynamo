@@ -62,6 +62,16 @@ on:
         required: false
         type: boolean
         default: false
+      run_cpu_tests:
+        description: 'Run CPU-only tests (gpu_0)'
+        required: false
+        type: boolean
+        default: true
+      run_gpu_tests:
+        description: 'Run GPU tests (gpu_1, amd64 only)'
+        required: false
+        type: boolean
+        default: true
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -258,9 +268,47 @@ jobs:
           else
             echo "✅ Sanity check passed"
           fi
+      # Build the pytest marker expression for model caching based on which
+      # test stages are enabled.  This ensures we cache exactly the models
+      # needed and avoid redundant copies when both stages share models.
+      - name: Determine cache marker expression
+        id: cache-marks
+        if: ${{ inputs.run_cpu_tests || inputs.run_gpu_tests }}
+        shell: bash
+        run: |
+          RUN_CPU="${{ inputs.run_cpu_tests }}"
+          # GPU tests only run on amd64; treat as disabled on other platforms
+          RUN_GPU="false"
+          if [[ "${{ inputs.run_gpu_tests }}" == "true" && "${{ inputs.platform }}" == "amd64" ]]; then
+            RUN_GPU="true"
+          fi
+
+          if [[ "$RUN_CPU" == "true" && "$RUN_GPU" == "true" ]]; then
+            # Both stages: use broad expression (union of gpu_0 + gpu_1)
+            MARKS="${{ format('pre_merge and {0}', inputs.framework) }}"
+          elif [[ "$RUN_CPU" == "true" ]]; then
+            MARKS="${{ format('pre_merge and {0} and gpu_0', inputs.framework) }}"
+          elif [[ "$RUN_GPU" == "true" ]]; then
+            MARKS="${{ format('pre_merge and {0} and gpu_1', inputs.framework) }}"
+          else
+            MARKS=""
+          fi
+          echo "marks=${MARKS}" >> $GITHUB_OUTPUT
+          echo "Cache marker expression: ${MARKS}"
+
+      - name: Cache models
+        id: cache-models
+        if: ${{ steps.cache-marks.outputs.marks != '' }}
+        uses: ./.github/actions/cache-models
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ steps.cache-marks.outputs.marks }}
+          local_models_dir: ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
+
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
+        if: ${{ inputs.run_cpu_tests }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
@@ -272,12 +320,12 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
-          local_models_dir: ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
+          local_models_cache: ${{ steps.cache-models.outputs.cache_dir }}
 
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
-        if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
+        if: ${{ inputs.run_gpu_tests && inputs.platform == 'amd64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
@@ -289,7 +337,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
-          local_models_dir: ${{ env.DYNAMO_LOCAL_MODELS_DIR }}
+          local_models_cache: ${{ steps.cache-models.outputs.cache_dir }}
 
 # ============================================================================
 # COPY TO ACR
