@@ -199,21 +199,46 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
-    "epd_multimodal_image_and_embeddings": TRTLLMConfig(
-        name="epd_multimodal_image_and_embeddings",
+    # TensorRT-LLM Multimodal Tests for Nightly CI Pipeline
+    # Reference: Linear OPS-3014
+    # These tests validate multimodal inference capabilities with TensorRT-LLM
+    # using both aggregated and disaggregated deployment architectures.
+    #
+    # Test Coverage from OPS-3014:
+    # - agg_multimodal: Covered by aggregated_multimodal_router (gpu_1)
+    # - disagg_multimodal: Covered by disaggregated_multimodal (gpu_2)
+    # - epd_multimodal: EPD (Encode-Prefill-Decode) multimodal with llava model (gpu_2)
+    #
+    # NOTE: Llama-4-Scout multimodal tests (agg_multimodal_llama, disagg_multimodal_llama)
+    # require 8 GPUs and new launch scripts. These will be added in a future PR once
+    # CI infrastructure supports gpu_8 runners and launch scripts are available.
+    "epd_multimodal": TRTLLMConfig(
+        name="epd_multimodal",
         directory=trtllm_dir,
-        script_name="epd_multimodal_image_and_embeddings.sh",
+        script_name="epd_multimodal_image.sh",  # Uses existing EPD script
         marks=[
-            pytest.mark.gpu_4,
+            pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.nightly,
+            pytest.mark.timeout(900),  # 15 minutes for multimodal processing overhead
         ],
         model="llava-hf/llava-v1.6-mistral-7b-hf",
         frontend_port=DefaultPort.FRONTEND.value,
-        timeout=1200,
-        delayed_start=120,
-        request_payloads=[multimodal_payload_default()],
+        timeout=900,
+        delayed_start=120,  # Multimodal models require longer loading time
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["image"],
+            )
+        ],
+        env={
+            # Override GPU assignments to fit on 2 GPUs (encode shares with prefill)
+            "PREFILL_CUDA_VISIBLE_DEVICES": "0",
+            "DECODE_CUDA_VISIBLE_DEVICES": "1",
+            "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+        },
     ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
