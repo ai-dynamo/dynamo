@@ -14,6 +14,7 @@
 pub mod media;
 pub mod prompt;
 pub mod tools;
+pub mod url_whitelist;
 use anyhow::Context;
 use anyhow::{Result, bail};
 use dynamo_async_openai::types::{
@@ -365,6 +366,11 @@ impl OpenAIPreprocessor {
                     }
                     _ => continue,
                 };
+
+                // Validate URL against whitelist (SSRF prevention).
+                // Rejects private/loopback addresses and URLs not matching
+                // DYN_ALLOWED_URL_PATTERNS when the env var is configured.
+                url_whitelist::check_url_allowed(&url)?;
 
                 #[cfg(feature = "media-nixl")]
                 if self.media_loader.is_some() {

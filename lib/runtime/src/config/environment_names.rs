@@ -270,6 +270,16 @@ pub mod llm {
     /// LoRA cache directory path
     pub const DYN_LORA_PATH: &str = "DYN_LORA_PATH";
 
+    /// Comma-separated URL patterns for allowed media URLs (SSRF prevention).
+    ///
+    /// Supports a trailing `*` wildcard for prefix matching.
+    /// Example: `https://i.pinimg.com/*,https://cdn.example.com/*`
+    ///
+    /// When set, only matching URLs are permitted in multimodal content fields
+    /// (`image_url`, `video_url`, `audio_url`), and private/loopback addresses
+    /// are always blocked. When unset, all URLs are allowed (default).
+    pub const DYN_ALLOWED_URL_PATTERNS: &str = "DYN_ALLOWED_URL_PATTERNS";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -446,6 +456,7 @@ mod tests {
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
+            llm::DYN_ALLOWED_URL_PATTERNS,
             llm::metrics::DYN_METRICS_PREFIX,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
