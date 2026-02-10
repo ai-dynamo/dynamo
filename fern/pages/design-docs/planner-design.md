@@ -13,30 +13,7 @@ The Planner is Dynamo's autoscaling controller. It observes system metrics, pred
 
 ## Architecture
 
-```text
-┌──────────────────────────────────────────────────────────┐
-│                    Planner Component                     │
-│                                                          │
-│  ┌───────────────┐ ┌───────────────┐ ┌────────────────┐  │
-│  │    Metric     │ │     Load      │ │  Performance   │  │
-│  │   Collector   │ │   Predictor   │ │  Interpolator  │  │
-│  │  (Prometheus) │ │ (ARIMA/etc.)  │ │  (JSON data)   │  │
-│  └───────┬───────┘ └───────┬───────┘ └───────┬────────┘  │
-│          │                 │                  │          │
-│          ▼                 ▼                  ▼          │
-│  ┌───────────────────────────────────────────────────┐   │
-│  │              Scaling Algorithm                    │   │
-│  └───────────────────────┬───────────────────────────┘   │
-│                          │                               │
-│  ┌───────────────────────▼───────────────────────────┐   │
-│  │               Connector Layer                     │   │
-│  │  ┌───────────────────┐  ┌───────────────────────┐ │   │
-│  │  │ KubernetesConn.   │  │   VirtualConn.        │ │   │
-│  │  │ (PATCH DGD)       │  │   (Runtime bridge)    │ │   │
-│  │  └───────────────────┘  └───────────────────────┘ │   │
-│  └───────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────┘
-```
+![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](../assets/img/planner-architecture.svg)
 
 ## Scaling Algorithm
 
