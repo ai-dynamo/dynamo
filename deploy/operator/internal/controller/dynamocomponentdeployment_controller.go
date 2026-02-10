@@ -1352,8 +1352,11 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 
 	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace,
+		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,    // e.g. "worker"
+		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // result of ComputeDynamoNamespace(k8sNamespace, dgdName)
+		// The original user provided component name (the service map key, e.g. "VllmDecodeWorker" in the DGD).
+		// Needed to disambiguate amongst distinct components with the same component type within a DGD (e.g prefill/decode workers).
+		commonconsts.KubeLabelDynamoComponent: opt.dynamoComponentDeployment.Spec.ServiceName,
 	}
 	// // If using LeaderWorkerSet, modify selector to only target leaders
 	if opt.dynamoComponentDeployment.IsMultinode() {
