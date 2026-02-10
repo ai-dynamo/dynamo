@@ -128,6 +128,9 @@ pub mod frontend_service {
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
+    /// Tokenizer latency in milliseconds
+    pub const TOKENIZER_LATENCY_MS: &str = "tokenizer_latency_ms";
+
     /// Total number of output tokens generated (counter that updates in real-time)
     pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
 
@@ -187,6 +190,19 @@ pub mod frontend_service {
 
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
+
+    /// Label name for tokenizer operation
+    pub const OPERATION_LABEL: &str = "operation";
+
+    /// Operation label values for tokenizer latency metric
+    pub mod operation {
+        /// Tokenization operation
+        pub const TOKENIZE: &str = "tokenize";
+
+        /// Detokenization operation
+        /// Currently unused, will be added next.
+        pub const DETOKENIZE: &str = "detokenize";
+    }
 
     /// Migration type label values
     pub mod migration_type {

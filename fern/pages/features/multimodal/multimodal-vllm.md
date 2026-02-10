@@ -212,7 +212,7 @@ flowchart LR
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/agg_multimodal_llama.sh
+bash launch/agg_multimodal.sh --model meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8
 ```
 
 **Client:**
