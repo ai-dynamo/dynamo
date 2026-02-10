@@ -84,8 +84,6 @@ pub enum RouterMode {
     RoundRobin,
     Random,
     KV,
-    /// Direct routing - reads worker ID from each request's routing hints.
-    /// Used when an external router (e.g., EPP) handles worker selection.
     Direct,
 }
 
