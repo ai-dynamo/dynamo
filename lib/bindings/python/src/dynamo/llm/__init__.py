@@ -6,7 +6,7 @@
 import logging
 
 from dynamo._core import ApproxKvIndexer as ApproxKvIndexer
-from dynamo._core import EngineFactoryUnsupportedModelTypeError, EngineType
+from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService

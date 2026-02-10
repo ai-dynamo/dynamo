@@ -12,7 +12,7 @@ use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
-use dynamo_llm::entrypoint::EngineFactoryCallback;
+use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
@@ -25,7 +25,6 @@ use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
 use super::model_card::ModelDeploymentCard;
-use crate::EngineFactoryUnsupportedModelTypeError as PyEngineFactoryUnsupportedModelTypeError;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
 
@@ -181,14 +180,14 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     is_prefill: bool,
     migration_limit: u32,
-    engine_factory: Option<PyEngineFactory>,
+    chat_engine_factory: Option<PyEngineFactory>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, migration_limit=0, engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -208,7 +207,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         is_prefill: bool,
         migration_limit: u32,
-        engine_factory: Option<PyObject>,
+        chat_engine_factory: Option<PyObject>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -219,12 +218,12 @@ impl EntrypointArgs {
             ));
         }
 
-        // Capture TaskLocals at registration time for the engine factory callback
-        let engine_factory = engine_factory
+        // Capture TaskLocals at registration time for the chat engine factory callback
+        let chat_engine_factory = chat_engine_factory
             .map(|callback| {
                 let locals = pyo3_async_runtimes::tokio::get_current_locals(py).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to get TaskLocals for engine_factory: {}",
+                        "Failed to get TaskLocals for chat_engine_factory: {}",
                         e
                     ))
                 })?;
@@ -253,7 +252,7 @@ impl EntrypointArgs {
             namespace,
             is_prefill,
             migration_limit,
-            engine_factory,
+            chat_engine_factory,
         })
     }
 }
@@ -316,8 +315,8 @@ pub fn make_engine<'p>(
     })
 }
 
-/// Convert a PyEngineFactory to a Rust EngineFactoryCallback
-fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallback {
+/// Convert a PyEngineFactory to a Rust ChatEngineFactoryCallback
+fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryCallback {
     let callback = factory.callback;
     let locals = factory.locals;
 
@@ -345,7 +344,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallb
                     // Call Python async function to get a coroutine
                     let coroutine = callback
                         .call1(py, (py_instance_id, py_card_obj))
-                        .map_err(|e| anyhow::anyhow!("Failed to call engine_factory: {e}"))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to call chat_engine_factory: {e}"))?;
 
                     // Use the TaskLocals captured at registration time
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
@@ -353,19 +352,9 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallb
                 })?;
 
                 // Await the Python coroutine (GIL is released during await)
-                let py_result = py_future.await.map_err(|e| {
-                    Python::with_gil(|py| {
-                        if e.is_instance_of::<PyEngineFactoryUnsupportedModelTypeError>(py) {
-                            anyhow::Error::new(
-                                dynamo_llm::entrypoint::EngineFactoryUnsupportedModelTypeError::new(
-                                    e.to_string(),
-                                ),
-                            )
-                        } else {
-                            anyhow::anyhow!("engine_factory callback failed: {}", e)
-                        }
-                    })
-                })?;
+                let py_result = py_future
+                    .await
+                    .map_err(|e| anyhow::anyhow!("chat_engine_factory callback failed: {}", e))?;
 
                 // Extract PythonAsyncEngine from the Python result and wrap in Arc
                 let engine: OpenAIChatCompletionsStreamingEngine = Python::with_gil(|py| {
@@ -395,11 +384,13 @@ async fn select_engine(
             }
         }
         EngineType::Dynamic => {
-            //  Convert Python engine factory to Rust callback
-            let engine_factory = args.engine_factory.map(py_engine_factory_to_callback);
+            //  Convert Python chat engine factory to Rust callback
+            let chat_engine_factory = args
+                .chat_engine_factory
+                .map(py_engine_factory_to_callback);
             RsEngineConfig::Dynamic {
                 model: Box::new(local_model),
-                engine_factory,
+                chat_engine_factory,
             }
         }
         EngineType::Mocker => {

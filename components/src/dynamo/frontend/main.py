@@ -58,7 +58,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, flags).engine_factory
+    return EngineFactory(runtime, router_config, flags)
 
 
 def validate_model_name(value):
@@ -88,7 +88,9 @@ def parse_args():
 
     # We need to know before we parse the arguments
     full_args = " ".join(sys.argv)
-    is_vllm = "--processor vllm" in full_args or "--processor=vllm" in full_args
+    is_vllm = (
+        "--chat-processor vllm" in full_args or "--chat-processor=vllm" in full_args
+    )
 
     if not is_vllm:
         # Normal case, Dynamo processor
@@ -104,7 +106,9 @@ def parse_args():
             try:
                 from vllm.utils.argparse_utils import FlexibleArgumentParser
             except ModuleNotFoundError:
-                logger.exception("Flag '--processor vllm' requires vllm be installed.")
+                logger.exception(
+                    "Flag '--chat-processor vllm' requires vllm be installed."
+                )
                 sys.exit(1)
 
         parser = FlexibleArgumentParser(
@@ -327,7 +331,8 @@ def parse_args():
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--processor",
+        "--chat-processor",
+        dest="chat_processor",
         type=str,
         choices=["dynamo", "vllm"],
         default="dynamo",
@@ -341,7 +346,7 @@ def parse_args():
             parser = FrontendArgs.add_cli_args(parser)
             parser = AsyncEngineArgs.add_cli_args(parser)
         except ModuleNotFoundError:
-            logger.exception("Flag '--processor vllm' requires vllm be installed.")
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
 
     flags = parser.parse_args()
@@ -467,10 +472,11 @@ async def async_main():
     if flags.kserve_grpc_server and flags.grpc_metrics_port:
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
 
-    if flags.processor == "vllm":
-        # TODO: Do we also need to tell the engine factory when the model is removed,
-        # so it can "stop" vllm?
-        kwargs["engine_factory"] = setup_engine_factory(runtime, router_config, flags)
+    if flags.chat_processor == "vllm":
+        chat_engine_factory = setup_engine_factory(
+            runtime, router_config, flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

@@ -1523,7 +1523,7 @@ class EntrypointArgs:
         namespace: Optional[str] = None,
         is_prefill: bool = False,
         migration_limit: int = 0,
-        engine_factory: Optional[Callable] = None,
+        chat_engine_factory: Optional[Callable] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -1546,7 +1546,7 @@ class EntrypointArgs:
             namespace: Dynamo namespace for model discovery scoping
             is_prefill: Whether this is a prefill worker
             migration_limit: Maximum number of request migrations (0=disabled)
-            engine_factory: Optional Python engine factory callback
+            chat_engine_factory: Optional Python chat completions engine factory callback
         """
         ...
 
