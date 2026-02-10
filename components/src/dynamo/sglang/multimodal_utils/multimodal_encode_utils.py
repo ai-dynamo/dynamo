@@ -198,29 +198,38 @@ def get_qwen_image_features(
     )
     output = vision_encoder(pixel_values, grid_thw=grid_thw)
 
-    # DEBUG: what does HF return?
-    logger.warning(
-        f"[DEBUG-1] vision_encoder output: type={type(output).__name__}, "
-        f"has_deepstack={hasattr(output, 'deepstack_features')}, "
-        f"deepstack_value={getattr(output, 'deepstack_features', 'N/A')!r:.200}, "
-        f"has_last_hidden_state={hasattr(output, 'last_hidden_state')}, "
-        f"last_hidden_state_shape="
-        f"{output.last_hidden_state.shape if hasattr(output, 'last_hidden_state') and output.last_hidden_state is not None else 'N/A'}"
-    )
+    # HuggingFace vision models return different types depending on
+    # return_dict (default False for standalone models):
+    #   tuple:     (last_hidden_state, deepstack_features_tuple)
+    #   dataclass: .last_hidden_state + .deepstack_features
+    #   tensor:    raw tensor (unlikely but handled)
 
-    # HuggingFace returns a dataclass with separate fields;
-    # SGLang expects a single concatenated tensor.
-    if hasattr(output, "deepstack_features") and output.deepstack_features:
-        result = torch.cat(
-            [output.last_hidden_state] + output.deepstack_features, dim=-1
-        )
+    if isinstance(output, tuple):
+        last_hidden_state = output[0]
+        deepstack = output[1] if len(output) > 1 else None
     elif hasattr(output, "last_hidden_state"):
-        result = output.last_hidden_state
+        last_hidden_state = output.last_hidden_state
+        deepstack = getattr(output, "deepstack_features", None)
     else:
-        result = output
+        # Raw tensor — return as-is
+        logger.warning(
+            f"[DEBUG] vision_encoder returned raw tensor: shape={output.shape}"
+        )
+        return output
+
+    # Concatenate deepstack features if present.
+    # Qwen3-VL: deepstack is a tuple of 3 tensors, each (n, 2048).
+    # Result: (n, 2048 + 2048*3) = (n, 8192)
+    if deepstack:
+        if isinstance(deepstack, (tuple, list)):
+            result = torch.cat([last_hidden_state] + list(deepstack), dim=-1)
+        else:
+            result = torch.cat([last_hidden_state, deepstack], dim=-1)
+    else:
+        result = last_hidden_state
 
     logger.warning(
-        f"[DEBUG-2] get_qwen_image_features result: shape={result.shape}, dtype={result.dtype}"
+        f"[DEBUG] get_qwen_image_features: shape={result.shape}, dtype={result.dtype}"
     )
     return result
 
