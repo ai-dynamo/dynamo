@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import io
+import logging
+import os
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# Copied from trtllm video diffusion PR
+
+def frames_to_numpy(images: list) -> np.ndarray:
+    """Convert a list of PIL Images to a numpy array suitable for video encoding.
+
+    Args:
+        images: List of PIL Image objects (video frames).
+
+    Returns:
+        Numpy array of shape ``(num_frames, height, width, 3)`` with dtype
+        ``uint8`` and values in ``[0, 255]``.
+
+    Raises:
+        ValueError: If no images are provided or images have inconsistent sizes.
+    """
+    if not images:
+        raise ValueError("No images provided for video encoding")
+
+    frames = []
+    for img in images:
+        arr = np.array(img.convert("RGB"))
+        frames.append(arr)
+
+    # Validate consistent sizes
+    shapes = {f.shape for f in frames}
+    if len(shapes) > 1:
+        raise ValueError(
+            f"Inconsistent frame sizes detected: {shapes}. "
+            "All frames must have the same dimensions."
+        )
+
+    return np.stack(frames, axis=0)
+
+
+def encode_to_mp4(
+    frames: np.ndarray,
+    output_dir: str,
+    request_id: str,
+    fps: int = 16,
+) -> str:
+    """Encode numpy frames to an MP4 file on disk.
+
+    Args:
+        frames: Video frames as numpy array of shape
+            ``(num_frames, height, width, 3)`` with uint8 values ``[0, 255]``.
+        output_dir: Directory to save the output video.
+        request_id: Unique request identifier (used in filename).
+        fps: Frames per second for the output video.
+
+    Returns:
+        Absolute path to the saved MP4 file.
+
+    Raises:
+        ImportError: If ``imageio`` is not available.
+        RuntimeError: If encoding fails.
+    """
+    try:
+        import imageio.v3 as iio
+    except ImportError:
+        try:
+            import imageio as iio
+        except ImportError as err:
+            raise ImportError(
+                "imageio is required for video encoding. "
+                "Install with: pip install imageio[ffmpeg]"
+            ) from err
+
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{request_id}.mp4")
+
+    logger.info(f"Encoding {len(frames)} frames to {output_path} at {fps} fps")
+
+    try:
+        # imageio.v3 API
+        if hasattr(iio, "imwrite"):
+            iio.imwrite(output_path, frames, fps=fps, codec="libx264")
+        else:
+            # Fall back to v2 API
+            writer = iio.get_writer(output_path, fps=fps, codec="libx264")
+            try:
+                for frame in frames:
+                    writer.append_data(frame)
+            finally:
+                writer.close()
+
+        logger.info(f"Video saved to {output_path}")
+        return output_path
+
+    except Exception as e:
+        logger.exception(f"Failed to encode video: {e}")
+        raise RuntimeError(f"Video encoding failed: {e}") from e
+
+
+def encode_to_mp4_bytes(
+    frames: np.ndarray,
+    fps: int = 16,
+) -> bytes:
+    """Encode numpy frames to MP4 bytes in memory.
+
+    Args:
+        frames: Video frames as numpy array of shape
+            ``(num_frames, height, width, 3)`` with uint8 values ``[0, 255]``.
+        fps: Frames per second for the output video.
+
+    Returns:
+        MP4 video as raw bytes.
+
+    Raises:
+        ImportError: If ``imageio`` is not available.
+        RuntimeError: If encoding fails.
+    """
+    try:
+        import imageio.v3 as iio
+    except ImportError:
+        try:
+            import imageio as iio
+        except ImportError as err:
+            raise ImportError(
+                "imageio is required for video encoding. "
+                "Install with: pip install imageio[ffmpeg]"
+            ) from err
+
+    logger.info(f"Encoding {len(frames)} frames to bytes at {fps} fps")
+
+    try:
+        buffer = io.BytesIO()
+
+        if hasattr(iio, "imwrite"):
+            # v3 API - write to buffer
+            iio.imwrite(buffer, frames, extension=".mp4", fps=fps, codec="libx264")
+        else:
+            # v2 API
+            writer = iio.get_writer(
+                buffer, format="FFMPEG", mode="I", fps=fps, codec="libx264"
+            )
+            try:
+                for frame in frames:
+                    writer.append_data(frame)
+            finally:
+                writer.close()
+
+        video_bytes = buffer.getvalue()
+        logger.info(f"Encoded video to {len(video_bytes)} bytes")
+        return video_bytes
+
+    except Exception as e:
+        logger.exception(f"Failed to encode video to bytes: {e}")
+        raise RuntimeError(f"Video encoding to bytes failed: {e}") from e
