@@ -11,8 +11,8 @@ import (
 
 	"github.com/checkpoint-restore/go-criu/v7/crit"
 	"github.com/checkpoint-restore/go-criu/v7/crit/images/fdinfo"
-	remap_file_path "github.com/checkpoint-restore/go-criu/v7/crit/images/remap-file-path"
 	"github.com/checkpoint-restore/go-criu/v7/crit/images/regfile"
+	remap_file_path "github.com/checkpoint-restore/go-criu/v7/crit/images/remap-file-path"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 )

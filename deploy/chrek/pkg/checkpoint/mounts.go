@@ -32,17 +32,17 @@ type MountPolicy struct {
 // BuildMountPolicy classifies mounts into CRIU extMnt and skipMnt lists.
 //
 // Rule order and precedence (top to bottom):
-// 1) Skip non-OCI proc/sys submounts and non-OCI runtime /run submounts.
-//    These mounts are typically node/kernel/runtime specific and are the
-//    highest-risk source of cross-node restore failures, so skip wins.
-// 2) Externalize mounts owned by runtime/OCI:
-//    - "/" (rootfs is recreated by runtime in OCI restore path)
-//    - OCI mount destinations
-//    - OCI masked/readonly paths
-// 3) Externalize non-OCI bind-like mounts (mount root is not "/" or ".").
-//    This captures runtime-injected file mounts (for example driver files)
-//    so CRIU does not try to recreate them from checkpoint data.
-// 4) Anything else is left unflagged and handled by CRIU default behavior.
+//  1. Skip non-OCI proc/sys submounts and non-OCI runtime /run submounts.
+//     These mounts are typically node/kernel/runtime specific and are the
+//     highest-risk source of cross-node restore failures, so skip wins.
+//  2. Externalize mounts owned by runtime/OCI:
+//     - "/" (rootfs is recreated by runtime in OCI restore path)
+//     - OCI mount destinations
+//     - OCI masked/readonly paths
+//  3. Externalize non-OCI bind-like mounts (mount root is not "/" or ".").
+//     This captures runtime-injected file mounts (for example driver files)
+//     so CRIU does not try to recreate them from checkpoint data.
+//  4. Anything else is left unflagged and handled by CRIU default behavior.
 //
 // Precedence: skip > externalize. If a path is classified as skipped, it is
 // removed from the externalized set.
