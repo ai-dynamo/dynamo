@@ -75,7 +75,8 @@ docker compose -f deploy/docker-compose.yml up -d
 We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd like to build your own container from source:
 
 ```bash
-./container/build.sh --framework VLLM
+python container/render.py --framework vllm --short-output
+docker build -f container/rendered.Dockerfile -t dynamo:latest-vllm .
 ```
 
 ### Run container
