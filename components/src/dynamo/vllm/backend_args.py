@@ -190,7 +190,7 @@ class DynamoVllmArgGroup(ArgGroup):
             g,
             flag_name="--boundary-ratio",
             env_var="DYN_VLLM_BOUNDARY_RATIO",
-            default=None,
+            default=0.875,
             arg_type=float,
             help=(
                 "Boundary split ratio for low/high DiT transformers. "
@@ -316,13 +316,12 @@ class DynamoVllmConfig(ConfigBase):
     layerwise_num_gpu_layers: int = 1
     vae_use_slicing: bool = False
     vae_use_tiling: bool = False
-    boundary_ratio: Optional[float] = None
+    boundary_ratio: float = 0.875
     flow_shift: Optional[float] = None
     diffusion_cache_backend: Optional[str] = None
     diffusion_cache_config: Optional[str] = None
     enable_cache_dit_summary: bool = False
     enable_cpu_offload: bool = False
-    enforce_eager: bool = False
 
     # Diffusion parallel configuration
     ulysses_degree: int = 1

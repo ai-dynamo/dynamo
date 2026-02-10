@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator, Dict
 
 from vllm import SamplingParams
 from vllm_omni.entrypoints import AsyncOmni
-from vllm_omni.inputs.data import OmniTextPrompt, OmniTokensPrompt
+from vllm_omni.inputs.data import OmniTokensPrompt
 
 try:
     from vllm_omni.diffusion.data import DiffusionParallelConfig
@@ -98,7 +98,6 @@ class BaseOmniHandler(BaseWorkerHandler):
             "diffusion_cache_config",
             "enable_cache_dit_summary",
             "enable_cpu_offload",
-            "enforce_eager",
         ]
         for param in diffusion_params:
             if hasattr(config, param):
@@ -221,7 +220,7 @@ class BaseOmniHandler(BaseWorkerHandler):
 
         output = request_output.outputs[0]
 
-        delta_text = output.text[len(previous_text):]
+        delta_text = output.text[len(previous_text) :]
 
         chunk = {
             "id": request_id,
