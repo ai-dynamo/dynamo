@@ -7,6 +7,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
+use pyo3::create_exception;
 use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
@@ -73,6 +74,12 @@ type JsonServerStreamingIngress =
 static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
+
+create_exception!(
+    _core,
+    EngineFactoryUnsupportedModelTypeError,
+    pyo3::exceptions::PyException
+);
 
 // Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
@@ -178,6 +185,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
+    m.add(
+        "EngineFactoryUnsupportedModelTypeError",
+        m.py().get_type::<EngineFactoryUnsupportedModelTypeError>(),
+    )?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
@@ -527,6 +538,10 @@ impl ModelType {
     const Images: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Images,
     };
+
+    fn supports_chat(&self) -> bool {
+        self.inner.supports_chat()
+    }
 
     fn __or__(&self, other: &Self) -> Self {
         ModelType {

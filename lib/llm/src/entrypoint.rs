@@ -20,6 +20,20 @@ use crate::{
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
+#[derive(Debug, thiserror::Error)]
+#[error("engine factory unsupported model type: {message}")]
+pub struct EngineFactoryUnsupportedModelTypeError {
+    message: String,
+}
+
+impl EngineFactoryUnsupportedModelTypeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 /// Callback type for engine factory (async)
 pub type EngineFactoryCallback = Arc<
     dyn Fn(

@@ -25,6 +25,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
 from dynamo.llm import (
+    EngineFactoryUnsupportedModelTypeError,
     KvPushRouter,
     ModelCardInstanceId,
     ModelDeploymentCard,
@@ -400,6 +401,11 @@ class EngineFactory:
         Called by Rust when a model is discovered.
         """
         logger.debug("Engine_factory called with MDC: %s", mdc.to_json_str())
+        model_type = mdc.model_type()
+        if not model_type.supports_chat():
+            raise EngineFactoryUnsupportedModelTypeError(
+                f"model type {model_type} is not supported by this factory"
+            )
         loop = asyncio.get_running_loop()
 
         source_path = mdc.source_path()

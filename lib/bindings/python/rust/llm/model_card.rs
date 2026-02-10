@@ -10,8 +10,6 @@ pub(crate) struct ModelDeploymentCard {
     pub(crate) inner: RsModelDeploymentCard,
 }
 
-impl ModelDeploymentCard {}
-
 #[pymethods]
 impl ModelDeploymentCard {
     // Previously called "from_local_path"
@@ -39,6 +37,12 @@ impl ModelDeploymentCard {
 
     fn name(&self) -> &str {
         self.inner.name()
+    }
+
+    fn model_type(&self) -> ModelType {
+        ModelType {
+            inner: self.inner.model_type,
+        }
     }
 
     fn runtime_config(&self, py: Python<'_>) -> PyResult<PyObject> {

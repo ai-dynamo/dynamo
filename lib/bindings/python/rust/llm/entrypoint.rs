@@ -25,6 +25,7 @@ use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
 use super::model_card::ModelDeploymentCard;
+use crate::EngineFactoryUnsupportedModelTypeError as PyEngineFactoryUnsupportedModelTypeError;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
 
@@ -352,9 +353,19 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallb
                 })?;
 
                 // Await the Python coroutine (GIL is released during await)
-                let py_result = py_future
-                    .await
-                    .map_err(|e| anyhow::anyhow!("engine_factory callback failed: {}", e))?;
+                let py_result = py_future.await.map_err(|e| {
+                    Python::with_gil(|py| {
+                        if e.is_instance_of::<PyEngineFactoryUnsupportedModelTypeError>(py) {
+                            anyhow::Error::new(
+                                dynamo_llm::entrypoint::EngineFactoryUnsupportedModelTypeError::new(
+                                    e.to_string(),
+                                ),
+                            )
+                        } else {
+                            anyhow::anyhow!("engine_factory callback failed: {}", e)
+                        }
+                    })
+                })?;
 
                 // Extract PythonAsyncEngine from the Python result and wrap in Arc
                 let engine: OpenAIChatCompletionsStreamingEngine = Python::with_gil(|py| {

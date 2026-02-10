@@ -492,11 +492,27 @@ impl ModelWatcher {
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
-                // Use Python to create the chat engine
-                let chat_engine = if let Some(ref factory) = self.engine_factory {
-                    factory(mcid.clone(), card.clone())
-                        .await
-                        .context("python engine_factory")?
+                let factory_engine = if let Some(ref factory) = self.engine_factory {
+                    match factory(mcid.clone(), card.clone()).await {
+                        Ok(engine) => Some(engine),
+                        Err(err)
+                            if err.is::<entrypoint::EngineFactoryUnsupportedModelTypeError>() =>
+                        {
+                            tracing::debug!(
+                                model_name = card.name(),
+                                error = %err,
+                                "engine_factory does not support this model type; falling back to build_routed_pipeline"
+                            );
+                            None
+                        }
+                        Err(err) => return Err(err).context("python engine_factory"),
+                    }
+                } else {
+                    None
+                };
+
+                let chat_engine = if let Some(engine) = factory_engine {
+                    engine
                 } else {
                     entrypoint::build_routed_pipeline::<
                         NvCreateChatCompletionRequest,
