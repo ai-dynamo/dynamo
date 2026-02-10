@@ -11,6 +11,9 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
 
+# Model name used for KubernetesConnector in remote execution mode
+MANAGED_MODEL_NAME = "managed"
+
 
 class ScaleRequestHandler:
     """Handles incoming scale requests in GlobalPlanner.
@@ -82,7 +85,7 @@ class ScaleRequestHandler:
             if connector_key not in self.connectors:
                 connector = KubernetesConnector(
                     dynamo_namespace=request.caller_namespace,
-                    model_name="managed",  # Not used for remote execution
+                    model_name=MANAGED_MODEL_NAME,  # Not used for remote execution
                     k8s_namespace=request.k8s_namespace,
                     parent_dgd_name=request.graph_deployment_name,
                 )
