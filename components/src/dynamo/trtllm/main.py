@@ -52,16 +52,17 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
-from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
 from dynamo.trtllm.utils.trtllm_utils import Config, cmd_line_args, deep_update
+from dynamo.trtllm.workers import init_video_diffusion_worker
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -135,9 +136,38 @@ async def init(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
     """
-    Instantiate and serve
+    Instantiate and serve based on modality.
+
+    For video_diffusion modality, delegates to the video diffusion worker.
+    For text/multimodal, uses the LLM worker.
     """
     logging.info(f"Initializing the worker with config: {config}")
+
+    # Check modality and dispatch to appropriate worker
+    modality = Modality(config.modality)
+
+    if Modality.is_diffusion(modality):
+        if modality == Modality.VIDEO_DIFFUSION:
+            await init_video_diffusion_worker(runtime, config, shutdown_event)
+            return
+        # TODO: Add IMAGE_DIFFUSION support in follow-up PR
+
+    # LLM modalities (text, multimodal) use the existing init_llm_worker logic
+    await init_llm_worker(runtime, config, shutdown_event)
+
+
+async def init_llm_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+) -> None:
+    """Initialize and run the LLM worker.
+
+    This function handles text and multimodal LLM modalities using TensorRT-LLM.
+
+    Args:
+        runtime: The Dynamo distributed runtime.
+        config: Configuration parsed from command line.
+        shutdown_event: Event to signal shutdown.
+    """
 
     encode_client = None
     if config.encode_endpoint:
