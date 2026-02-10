@@ -1,0 +1,37 @@
+name: Test Claude API Connection
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches:
+      - 'nmailhot/test-claude'  # Trigger on this specific branch
+
+permissions:
+  pull-requests: write
+  checks: write
+  contents: read
+
+jobs:
+  test-claude-connection:
+    name: Test Claude Connection
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install anthropic requests
+
+      - name: Test Claude API with Fake Error
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/workflows/test_claude_simple.py
