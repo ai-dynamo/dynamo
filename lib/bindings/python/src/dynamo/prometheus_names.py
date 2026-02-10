@@ -169,6 +169,7 @@ class labels:
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     WORKER_TYPE = "worker_type"
 
+
 class model_info:
     # Model load time in seconds
     LOAD_TIME_SECONDS = "model_load_time_seconds"
