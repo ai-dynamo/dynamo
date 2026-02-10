@@ -20,7 +20,7 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
-from dynamo.common.utils.namespace import get_namespace
+from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -269,7 +269,7 @@ async def parse_args(args: list[str]) -> Config:
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
     # otherwise fall back to default endpoints
-    namespace = get_namespace()
+    namespace = get_worker_namespace()
 
     # If --embedding-worker is set, also set SGLang's --is-embedding flag
     if dynamo_config.embedding_worker:
