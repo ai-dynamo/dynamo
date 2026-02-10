@@ -145,3 +145,4 @@ class StatLoggerFactory:
     def init_publish(self):
         if self.created_logger:
             self.created_logger.init_publish()
+# Validation test: vllm-only changes should trigger deploy tests with main-operator
