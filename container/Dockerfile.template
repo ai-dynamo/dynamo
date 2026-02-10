@@ -35,7 +35,7 @@
 {% endif %}
 
 # --- VLLM Stages
-{% if framework "vllm" %}
+{% if framework == "vllm" %}
     {% include "templates/vllm_framework.Dockerfile" %}
     {% if target != "framework" %}
         {% include "templates/vllm_framework.Dockerfile" %}
@@ -45,7 +45,7 @@
 {% endif %}
 
 # --- TRTLLM Stages
-{% if framework "trtllm" %}
+{% if framework == "trtllm" %}
     {% include "templates/trtllm_framework.Dockerfile" %}
     {% if target != "framework" %}
         {% include "templates/trtllm_framework.Dockerfile" %}
