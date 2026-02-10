@@ -89,6 +89,7 @@ modelexpress-client = { version = "0.2.0" }
 modelexpress-common = { version = "0.2.0" }
 
 humantime = { version = "2.2.0" }
+indexmap = { version = "2" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.13", features = ["std", "async"] }
 parking_lot = "0.12.5"
