@@ -231,6 +231,7 @@ jobs:
   deploy-operator:
     runs-on: prod-default-small-v2
     if: |
+      always() &&
       needs.changed-files.outputs.core == 'true' &&
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
