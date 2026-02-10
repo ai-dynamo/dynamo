@@ -17,11 +17,19 @@ permissions:
 
 jobs:
   ok-to-test:
-    if: github.event.pull_request.head.repo.fork == true
     runs-on: ubuntu-latest
     environment: external_collaborator
     steps:
+      - name: Check if PR is from a fork
+        id: fork_check
+        run: |
+          if [[ "${{ github.event.pull_request.head.repo.fork }}" == "true" ]]; then
+            echo "is_fork=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fork=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Comment /ok to test for approved contributor
+        if: steps.fork_check.outputs.is_fork == 'true'
         uses: actions/github-script@v7
         env:
           APPROVED_EXTERNAL_CONTRIBUTORS: ${{ secrets.APPROVED_EXTERNAL_CONTRIBUTORS }}
