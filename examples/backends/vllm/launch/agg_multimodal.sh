@@ -59,7 +59,7 @@ if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
     MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 elif [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len=108960"
+    MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --gpu-memory-utilization 0.85 --max-model-len=108960"
 fi
 
 # Start vLLM worker with vision model
