@@ -93,17 +93,17 @@ sc.azurelustre.csi.azure.com   azurelustre.csi.azure.com   Retain
 ```
 The recommendation for storage options for the Dynamo caches are:
 
-Model Cache storing raw model artifacts, configuration files, tokenizers etc.<br>
-Persistence: Required to avoid repeated downloads and reduce cold-start latency.<br>
-Recommended storage: Azure Managed Lustre (shared, high throughput) or Azure Disk (single-replica, persistent).
+- Model Cache storing raw model artifacts, configuration files, tokenizers etc.<br>
+  - Persistence: Required to avoid repeated downloads and reduce cold-start latency.<br>
+  - Recommended storage: Azure Managed Lustre (shared, high throughput) or Azure Disk (single-replica, persistent).
 
-Compilation Cache stores backend-specific compiled artifacts (e.g., TensorRT engines).<br>
-Persistence: Optional<br>
-Recommended storage: Local CSI (fast, node-local) or Azure Disk (persistent when GPU configuration is fixed).
+- Compilation Cache stores backend-specific compiled artifacts (e.g., TensorRT engines).<br>
+  - Persistence: Optional<br>
+  - Recommended storage: Local CSI (fast, node-local) or Azure Disk (persistent when GPU configuration is fixed).
 
-Performance Cache stores runtime tuning and profiling data.<br>
-Persistence: Not required<br>
-Recommended storage: Local CSI (or other ephemeral storage).
+- Performance Cache stores runtime tuning and profiling data.<br>
+  - Persistence: Not required<br>
+  - Recommended storage: Local CSI (or other ephemeral storage).
 
 cache.yaml example:
 ```bash
@@ -146,10 +146,18 @@ spec:
 
 ## Running on AKS Spot VMs based GPU node pools
 
-When deploying Dynamo on AKS with GPU-enabled [Spot VM](https://azure.microsoft.com/en-us/products/virtual-machines/spot) node pools, AKS will automatically apply additional taints to those Spot nodes to prevent standard workloads from being scheduled on them by default.
-
-Because of these taints, workloads (including the Dynamo CRD controller, Platform components, and any GPU workloads) must include corresponding tolerations in their Helm charts. Without these tolerations, Kubernetes will not schedule pods onto the Spot VM node pools, and GPU resources will remain unused.
-
+When deploying Dynamo on AKS with GPU-enabled [Spot VM](https://azure.microsoft.com/en-us/products/virtual-machines/spot) node pools, AKS will automatically apply the following taint to those Spot nodes to prevent standard workloads from being scheduled on them by default.
+```bash
+kubernetes.azure.com/scalesetpriority=spot:NoSchedule
+```
+Because of these taints, workloads (including the Dynamo CRD controller, Platform components, and any GPU workloads) must include below tolerations in their Helm charts. Without these tolerations, Kubernetes will not schedule pods onto the Spot VM node pools, and GPU resources will remain unused.
+```bash
+tolerations:
+  - key: kubernetes.azure.com/scalesetpriority
+    operator: Equal
+    value: spot
+    effect: NoSchedule
+```
 To schedule Dynamo platform components and jobs onto these nodes, use the provided dynamo/examples/deployments/AKS/values-aks-spot.yaml, which includes all required tolerations for:
 - Dynamo operator controller manager
 - Webhook CA inject and cert generation jobs
