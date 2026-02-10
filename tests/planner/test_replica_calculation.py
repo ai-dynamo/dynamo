@@ -36,9 +36,130 @@ sys.modules["dynamo.runtime"] = mock_runtime
 sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
 
 # Now import after mocking
-from dynamo.planner.utils.planner_core import Metrics, Planner  # noqa: E402
+from dynamo.planner.utils.planner_core import (  # noqa: E402
+    DecodePlanner,
+    Metrics,
+    PlannerSharedState,
+    PrefillPlanner,
+    _apply_global_gpu_budget,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+
+class PlannerHarness:
+    def __init__(self, prefill_planner, decode_planner, shared_state):
+        self.prefill_planner = prefill_planner
+        self.decode_planner = decode_planner
+        self.shared_state = shared_state
+        self.last_target_replicas = []
+
+    async def make_adjustments(self):
+        if not self.shared_state.last_metrics.is_valid():
+            return
+
+        p_endpoints, d_endpoints = await self.prefill_planner.get_workers_info()
+        self.shared_state.p_endpoints = p_endpoints
+        self.shared_state.d_endpoints = d_endpoints
+
+        next_num_p = self.prefill_planner.plan_adjustment()
+        next_num_d = self.decode_planner.plan_adjustment()
+        if next_num_p is None or next_num_d is None:
+            return
+
+        next_num_p, next_num_d = _apply_global_gpu_budget(
+            next_num_p, next_num_d, self.prefill_planner.args
+        )
+        self.prefill_planner.update_predicted_replicas_metric(next_num_p)
+        self.decode_planner.update_predicted_replicas_metric(next_num_d)
+
+        target_replicas = [
+            {
+                "sub_component_type": "prefill",
+                "component_name": self.prefill_planner.prefill_component_name,
+                "desired_replicas": next_num_p,
+            },
+            {
+                "sub_component_type": "decode",
+                "component_name": self.prefill_planner.decode_component_name,
+                "desired_replicas": next_num_d,
+            },
+        ]
+        self.last_target_replicas = target_replicas
+
+        if not self.prefill_planner.args.no_operation:
+            await self.prefill_planner.connector.set_component_replicas(
+                target_replicas, blocking=False
+            )
+
+    def __getattr__(self, name):
+        shared_attrs = {
+            "num_req_predictor",
+            "isl_predictor",
+            "osl_predictor",
+            "connector",
+            "prometheus_api_client",
+            "args",
+        }
+        prefill_attrs = {
+            "prefill_interpolator",
+            "prefill_component_name",
+            "p_correction_factor",
+        }
+        decode_attrs = {
+            "decode_interpolator",
+            "decode_component_name",
+            "d_correction_factor",
+        }
+        if name == "last_metrics":
+            return self.shared_state.last_metrics
+        if name == "get_workers_info":
+            return self.prefill_planner.get_workers_info
+        if name in shared_attrs:
+            return getattr(self.prefill_planner, name)
+        if name in prefill_attrs:
+            return getattr(self.prefill_planner, name)
+        if name in decode_attrs:
+            return getattr(self.decode_planner, name)
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if name in {"prefill_planner", "decode_planner", "shared_state"}:
+            return super().__setattr__(name, value)
+        shared_attrs = {
+            "num_req_predictor",
+            "isl_predictor",
+            "osl_predictor",
+            "connector",
+            "prometheus_api_client",
+            "args",
+            "get_workers_info",
+        }
+        prefill_attrs = {"prefill_interpolator", "p_correction_factor"}
+        decode_attrs = {"decode_interpolator", "d_correction_factor"}
+        if name == "last_metrics":
+            self.shared_state.last_metrics = value
+            return None
+        if name in shared_attrs:
+            # Store locally to support patch.object lifecycle (set/del).
+            object.__setattr__(self, name, value)
+            setattr(self.prefill_planner, name, value)
+            setattr(self.decode_planner, name, value)
+            return None
+        if name in prefill_attrs:
+            setattr(self.prefill_planner, name, value)
+            return None
+        if name in decode_attrs:
+            setattr(self.decode_planner, name, value)
+            return None
+        return super().__setattr__(name, value)
+
+
+def _replica_count(target_replicas, component_name, default=1):
+    for replica in target_replicas:
+        if replica.get("component_name") == component_name:
+            return replica.get("desired_replicas", default)
+    return default
 
 
 @pytest.fixture
@@ -75,8 +196,10 @@ def planner():
     with patch("dynamo.planner.utils.planner_core.Gauge") as mock_gauge:
         mock_gauge.return_value = Mock()
 
-        # Create planner instance
-        planner = Planner(mock_runtime, args)
+        shared_state = PlannerSharedState()
+        prefill_planner = PrefillPlanner(mock_runtime, args, shared_state=shared_state)
+        decode_planner = DecodePlanner(mock_runtime, args, shared_state=shared_state)
+        planner = PlannerHarness(prefill_planner, decode_planner, shared_state)
 
         # Mock the interpolators to return fixed values for testing
         planner.prefill_interpolator = Mock()
@@ -165,19 +288,18 @@ class TestReplicaCalculation:
 
         # Extract the calculated values from the log calls or by checking the mock calls
         # Since we mocked the connector, we can check what replicas were requested
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
-            prefill_component = "VllmPrefillWorker"
-            calculated_prefill_replicas = call_args.get(prefill_component, 1)
+        prefill_component = "VllmPrefillWorker"
+        calculated_prefill_replicas = _replica_count(
+            planner.last_target_replicas, prefill_component
+        )
+        print(f"Expected prefill replicas: {expected_prefill_replicas}")
+        print(f"Calculated prefill replicas: {calculated_prefill_replicas}")
 
-            print(f"Expected prefill replicas: {expected_prefill_replicas}")
-            print(f"Calculated prefill replicas: {calculated_prefill_replicas}")
-
-            # Allow for small differences due to min_endpoint constraints
-            assert (
-                max(expected_prefill_replicas, planner.args.min_endpoint)
-                == calculated_prefill_replicas
-            )
+        # Allow for small differences due to min_endpoint constraints
+        assert (
+            max(expected_prefill_replicas, planner.args.min_endpoint)
+            == calculated_prefill_replicas
+        )
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -230,19 +352,18 @@ class TestReplicaCalculation:
         asyncio.run(planner.make_adjustments())
 
         # Check the results
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
-            decode_component = "VllmDecodeWorker"
-            calculated_decode_replicas = call_args.get(decode_component, 1)
+        decode_component = "VllmDecodeWorker"
+        calculated_decode_replicas = _replica_count(
+            planner.last_target_replicas, decode_component
+        )
+        print(f"Expected decode replicas: {expected_decode_replicas}")
+        print(f"Calculated decode replicas: {calculated_decode_replicas}")
 
-            print(f"Expected decode replicas: {expected_decode_replicas}")
-            print(f"Calculated decode replicas: {calculated_decode_replicas}")
-
-            # Allow for small differences due to min_endpoint constraints
-            assert (
-                max(expected_decode_replicas, planner.args.min_endpoint)
-                == calculated_decode_replicas
-            )
+        # Allow for small differences due to min_endpoint constraints
+        assert (
+            max(expected_decode_replicas, planner.args.min_endpoint)
+            == calculated_decode_replicas
+        )
 
     @pytest.mark.parametrize(
         "num_req,decode_thpt,expected_p,expected_d",
@@ -304,20 +425,20 @@ class TestReplicaCalculation:
         asyncio.run(planner.make_adjustments())
 
         # Verify results
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
+        prefill_replicas = _replica_count(
+            planner.last_target_replicas, "VllmPrefillWorker"
+        )
+        decode_replicas = _replica_count(
+            planner.last_target_replicas, "VllmDecodeWorker"
+        )
+        print(f"Load {num_req} req/s: P={prefill_replicas}, D={decode_replicas}")
 
-            prefill_replicas = call_args.get("VllmPrefillWorker", 1)
-            decode_replicas = call_args.get("VllmDecodeWorker", 1)
-
-            print(f"Load {num_req} req/s: P={prefill_replicas}, D={decode_replicas}")
-
-            assert (
-                prefill_replicas == expected_p
-            ), f"Prefill replicas mismatch: expected {expected_p}, got {prefill_replicas}"
-            assert (
-                decode_replicas == expected_d
-            ), f"Decode replicas mismatch: expected {expected_d}, got {decode_replicas}"
+        assert (
+            prefill_replicas == expected_p
+        ), f"Prefill replicas mismatch: expected {expected_p}, got {prefill_replicas}"
+        assert (
+            decode_replicas == expected_d
+        ), f"Decode replicas mismatch: expected {expected_d}, got {decode_replicas}"
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -359,24 +480,24 @@ class TestReplicaCalculation:
         asyncio.run(planner.make_adjustments())
 
         # Verify that total GPU usage doesn't exceed budget
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
+        prefill_replicas = _replica_count(
+            planner.last_target_replicas, "VllmPrefillWorker"
+        )
+        decode_replicas = _replica_count(
+            planner.last_target_replicas, "VllmDecodeWorker"
+        )
+        total_gpus = (
+            prefill_replicas * planner.args.prefill_engine_num_gpu
+            + decode_replicas * planner.args.decode_engine_num_gpu
+        )
 
-            prefill_replicas = call_args.get("VllmPrefillWorker", 1)
-            decode_replicas = call_args.get("VllmDecodeWorker", 1)
+        print(
+            f"GPU budget test: P={prefill_replicas}, D={decode_replicas}, Total GPUs={total_gpus}"
+        )
 
-            total_gpus = (
-                prefill_replicas * planner.args.prefill_engine_num_gpu
-                + decode_replicas * planner.args.decode_engine_num_gpu
-            )
-
-            print(
-                f"GPU budget test: P={prefill_replicas}, D={decode_replicas}, Total GPUs={total_gpus}"
-            )
-
-            assert (
-                total_gpus <= planner.args.max_gpu_budget
-            ), "Total GPU usage exceeds budget"
+        assert (
+            total_gpus <= planner.args.max_gpu_budget
+        ), "Total GPU usage exceeds budget"
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -417,20 +538,20 @@ class TestReplicaCalculation:
         asyncio.run(planner.make_adjustments())
 
         # Verify minimum constraints are respected
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
+        prefill_replicas = _replica_count(
+            planner.last_target_replicas, "VllmPrefillWorker"
+        )
+        decode_replicas = _replica_count(
+            planner.last_target_replicas, "VllmDecodeWorker"
+        )
+        print(f"Min endpoint test: P={prefill_replicas}, D={decode_replicas}")
 
-            prefill_replicas = call_args.get("VllmPrefillWorker", 1)
-            decode_replicas = call_args.get("VllmDecodeWorker", 1)
-
-            print(f"Min endpoint test: P={prefill_replicas}, D={decode_replicas}")
-
-            assert (
-                prefill_replicas >= planner.args.min_endpoint
-            ), "Prefill replicas below minimum"
-            assert (
-                decode_replicas >= planner.args.min_endpoint
-            ), "Decode replicas below minimum"
+        assert (
+            prefill_replicas >= planner.args.min_endpoint
+        ), "Prefill replicas below minimum"
+        assert (
+            decode_replicas >= planner.args.min_endpoint
+        ), "Decode replicas below minimum"
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -482,17 +603,17 @@ class TestReplicaCalculation:
         asyncio.run(planner.make_adjustments())
 
         # Verify that correction factor was effectively clamped
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
-            prefill_replicas = call_args.get("VllmPrefillWorker", 1)
+        prefill_replicas = _replica_count(
+            planner.last_target_replicas, "VllmPrefillWorker"
+        )
 
-            print(
-                f"Correction factor clamping test: Expected={expected_prefill_replicas}, Got={prefill_replicas}"
-            )
+        print(
+            f"Correction factor clamping test: Expected={expected_prefill_replicas}, Got={prefill_replicas}"
+        )
 
-            assert prefill_replicas == max(
-                expected_prefill_replicas, planner.args.min_endpoint
-            ), "Prefill correction factor should be clamped to 1"
+        assert prefill_replicas == max(
+            expected_prefill_replicas, planner.args.min_endpoint
+        ), "Prefill correction factor should be clamped to 1"
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -501,62 +622,59 @@ class TestReplicaCalculation:
         """Test handling of d_correction_factor <= 0."""
         # Test both 0 and negative values
         for correction_factor in [0.0, -1.0]:
-            with patch.object(planner, "connector") as mock_connector:
-                planner.p_correction_factor = 1.0
-                planner.d_correction_factor = correction_factor
+            planner.p_correction_factor = 1.0
+            planner.d_correction_factor = correction_factor
 
-                # Mock predictor outputs
-                planner.num_req_predictor.predict_next.return_value = 10
-                planner.isl_predictor.predict_next.return_value = 3000
-                planner.osl_predictor.predict_next.return_value = 150
+            # Mock predictor outputs
+            planner.num_req_predictor.predict_next.return_value = 10
+            planner.isl_predictor.predict_next.return_value = 3000
+            planner.osl_predictor.predict_next.return_value = 150
 
-                # Mock interpolator outputs
-                planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = (
-                    40000
-                )
-                planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-                    10000,
-                    0.01,
-                    0.5,
-                )
+            # Mock interpolator outputs
+            planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 40000
+            planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
+                10000,
+                0.01,
+                0.5,
+            )
 
-                # Set up metrics
-                planner.last_metrics = Metrics(
-                    num_req=10,
-                    isl=3000,
-                    osl=150,
-                    ttft=80.0,
-                    itl=10.0,
-                    request_duration=100.0,
-                )
+            # Set up metrics
+            planner.last_metrics = Metrics(
+                num_req=10,
+                isl=3000,
+                osl=150,
+                ttft=80.0,
+                itl=10.0,
+                request_duration=100.0,
+            )
 
-                # Mock workers info
-                async def mock_get_workers_info():
-                    return (["prefill1"], ["decode1"])
+            # Mock workers info
+            async def mock_get_workers_info():
+                return (["prefill1"], ["decode1"])
 
-                planner.get_workers_info = mock_get_workers_info
+            planner.get_workers_info = mock_get_workers_info
 
-                # Mock interpolation calls
-                planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-                planner.decode_interpolator.interpolate_itl.return_value = 10.0
+            # Mock interpolation calls
+            planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
+            planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
-                # Run calculation
-                asyncio.run(planner.make_adjustments())
+            # Run calculation
+            asyncio.run(planner.make_adjustments())
 
-                # Should handle gracefully without crashing
-                # The code should use args.itl directly instead of dividing by 0
-                if mock_connector.set_component_replicas.called:
-                    call_args = mock_connector.set_component_replicas.call_args[0][0]
-                    decode_replicas = call_args.get("VllmDecodeWorker", 1)
+            # Should handle gracefully without crashing
+            # The code should use args.itl directly instead of dividing by 0
+            decode_replicas = _replica_count(
+                planner.last_target_replicas, "VllmDecodeWorker"
+            )
 
-                    print(
-                        f"Correction factor {correction_factor} test: Decode replicas={decode_replicas}"
-                    )
+            print(
+                f"Correction factor {correction_factor} test: Decode replicas={decode_replicas}"
+            )
 
-                    # Should get a valid result (not crash)
-                    assert (
-                        decode_replicas >= 1
-                    ), f"Should handle correction factor {correction_factor} gracefully"
+            # Should get a valid result (not crash)
+            assert (
+                decode_replicas >= 1
+            ), f"Should handle correction factor {correction_factor} gracefully"
 
     @pytest.mark.nightly
     @pytest.mark.gpu_2
@@ -608,23 +726,23 @@ class TestReplicaCalculation:
         # Run calculation
         asyncio.run(planner.make_adjustments())
 
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
+        prefill_replicas = _replica_count(
+            planner.last_target_replicas, "VllmPrefillWorker"
+        )
+        decode_replicas = _replica_count(
+            planner.last_target_replicas, "VllmDecodeWorker"
+        )
+        print(
+            f"Multi-GPU test: P={prefill_replicas} (expected ~{expected_prefill_replicas}), D={decode_replicas} (expected ~{expected_decode_replicas})"
+        )
 
-            prefill_replicas = call_args.get("VllmPrefillWorker", 1)
-            decode_replicas = call_args.get("VllmDecodeWorker", 1)
-
-            print(
-                f"Multi-GPU test: P={prefill_replicas} (expected ~{expected_prefill_replicas}), D={decode_replicas} (expected ~{expected_decode_replicas})"
-            )
-
-            # Verify calculations account for multiple GPUs per engine
-            assert prefill_replicas == max(
-                expected_prefill_replicas, planner.args.min_endpoint
-            )
-            assert decode_replicas == max(
-                expected_decode_replicas, planner.args.min_endpoint
-            )
+        # Verify calculations account for multiple GPUs per engine
+        assert prefill_replicas == max(
+            expected_prefill_replicas, planner.args.min_endpoint
+        )
+        assert decode_replicas == max(
+            expected_decode_replicas, planner.args.min_endpoint
+        )
 
     @pytest.mark.weekly
     @pytest.mark.gpu_2
@@ -668,31 +786,31 @@ class TestReplicaCalculation:
         # Run calculation
         asyncio.run(planner.make_adjustments())
 
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
+        prefill_replicas = _replica_count(
+            planner.last_target_replicas, "VllmPrefillWorker"
+        )
+        decode_replicas = _replica_count(
+            planner.last_target_replicas, "VllmDecodeWorker"
+        )
+        # Verify total GPU usage doesn't exceed budget
+        total_gpus = (
+            prefill_replicas * planner.args.prefill_engine_num_gpu
+            + decode_replicas * planner.args.decode_engine_num_gpu
+        )
 
-            prefill_replicas = call_args.get("VllmPrefillWorker", 1)
-            decode_replicas = call_args.get("VllmDecodeWorker", 1)
+        print(
+            f"Complex GPU budget test: P={prefill_replicas}, D={decode_replicas}, Total GPUs={total_gpus}"
+        )
 
-            # Verify total GPU usage doesn't exceed budget
-            total_gpus = (
-                prefill_replicas * planner.args.prefill_engine_num_gpu
-                + decode_replicas * planner.args.decode_engine_num_gpu
-            )
-
-            print(
-                f"Complex GPU budget test: P={prefill_replicas}, D={decode_replicas}, Total GPUs={total_gpus}"
-            )
-
-            assert (
-                total_gpus <= planner.args.max_gpu_budget
-            ), "Total GPU usage should not exceed budget"
-            assert (
-                prefill_replicas >= planner.args.min_endpoint
-            ), "Should respect min_endpoint for prefill"
-            assert (
-                decode_replicas >= planner.args.min_endpoint
-            ), "Should respect min_endpoint for decode"
+        assert (
+            total_gpus <= planner.args.max_gpu_budget
+        ), "Total GPU usage should not exceed budget"
+        assert (
+            prefill_replicas >= planner.args.min_endpoint
+        ), "Should respect min_endpoint for prefill"
+        assert (
+            decode_replicas >= planner.args.min_endpoint
+        ), "Should respect min_endpoint for decode"
 
 
 # No need for unittest.main() with pytest!

@@ -17,7 +17,6 @@ disaggregated mode, aggregated mode has less randomness chances.
 import logging
 import os
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -28,6 +27,8 @@ from typing import Any, Dict, List, Optional, TextIO
 
 import pytest
 import requests
+
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
@@ -45,16 +46,6 @@ pytestmark = [
 ]
 
 
-def _find_free_port() -> int:
-    """Find a free port by binding to port 0 and letting the OS assign one."""
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        s.listen(1)
-        port = s.getsockname()[1]
-    return port
-
-
 class LLMServerManager:
     """Manages LLM server lifecycle for determinism testing."""
 
@@ -68,13 +59,16 @@ class LLMServerManager:
         server_type: Optional[str] = ServerType.vllm,
     ):
         self.server_type = server_type
-        # Use provided port, env var, or find a free port to avoid conflicts
+        # Use provided port, env var, or allocate a dynamic port to avoid conflicts
         if port is not None:
             self.port = port
+            self.port_allocated = False  # Port provided by caller, don't deallocate
         elif os.environ.get("KVBM_SERVER_PORT"):
             self.port = int(os.environ["KVBM_SERVER_PORT"])
+            self.port_allocated = False  # Port from env var, don't deallocate
         else:
-            self.port = _find_free_port()
+            self.port = allocate_port(start_port=8000)
+            self.port_allocated = True  # Port allocated by us, must deallocate
         self.base_url = base_url or f"http://localhost:{self.port}"
         self.process: Optional[subprocess.Popen] = None
         self.cpu_cache_blocks = cpu_cache_blocks
@@ -279,6 +273,11 @@ class LLMServerManager:
             t.join(timeout=2)
         self._tee_threads = []
         self._close_log_files()
+
+        # Deallocate port if we allocated it
+        if self.port_allocated:
+            deallocate_port(self.port)
+            self.port_allocated = False
 
     def _close_log_files(self):
         if self.server_stdout_file:

@@ -235,6 +235,7 @@ fn test_system_storage_zero_size() {
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn test_disk_storage_temp() {
     let storage = DiskStorage::new(4096).unwrap();
@@ -245,6 +246,7 @@ fn test_disk_storage_temp() {
     assert!(storage.path().exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn test_disk_storage_at_path() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -278,6 +280,7 @@ fn test_system_storage_unregistered_no_nixl_descriptor() {
     assert!(storage.nixl_descriptor().is_none());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn test_disk_storage_unregistered_no_nixl_descriptor() {
     let storage = DiskStorage::new(4096).unwrap();
@@ -377,7 +380,8 @@ mod nixl_tests {
     // The current implementation uses mem::zeroed() which is invalid for types with NonNull
     // TODO: Fix NixlRegistered::into_storage() implementation
 
-    // Disk Storage Tests
+    // Disk Storage Tests (Linux only)
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_disk_storage_registration() {
         let storage = DiskStorage::new(4096).unwrap();
@@ -390,6 +394,7 @@ mod nixl_tests {
         assert!(registered.is_registered());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_disk_storage_descriptor_consistency() {
         let storage = DiskStorage::new(8192).unwrap();

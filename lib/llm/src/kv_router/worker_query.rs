@@ -1,83 +1,226 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use dynamo_runtime::component::Component;
+use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, PushRouter, ResponseStream, RouterMode,
     SingleIn, async_trait, network::Ingress,
 };
 use dynamo_runtime::protocols::maybe_error::MaybeError;
-use tokio::sync::{OnceCell, watch};
-use tokio_stream::StreamExt;
-
-use crate::kv_router::WORKER_KV_INDEXER_QUERY_ENDPOINT;
-use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
-use crate::kv_router::protocols::WorkerId;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::stream;
+use dynamo_runtime::traits::DistributedRuntimeProvider;
+use futures::StreamExt;
+use tokio::sync::mpsc;
 
-/// Router-side client for querying worker local KV indexers
+use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
+use crate::kv_router::protocols::{DpRank, RouterEvent, WorkerId};
+use crate::kv_router::worker_kv_indexer_query_endpoint;
+
+// Recovery retry configuration
+const RECOVERY_MAX_RETRIES: u32 = 8;
+const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
+
+/// Prefix for worker KV indexer query endpoint names.
+const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_dp";
+
+/// Router-side client for querying worker local KV indexers.
 ///
-/// Performs request/reply communication with workers via request plane endpoint routing.
-/// (Only queries workers that have `enable_local_indexer=true` in their MDC user_data)
-/// The client is spawned by KvRouter; it watches same discovery stream as the router.
+/// Discovers query endpoints via `ComponentEndpoints` discovery, filtering for
+/// the `worker_kv_indexer_query_dp{N}` name pattern. Recovers each
+/// `(worker_id, dp_rank)` individually as it appears in discovery.
+///
+/// Also handles worker lifecycle (add/remove) by tracking known endpoints and
+/// sending removal events to the router indexer when all dp_ranks for a worker
+/// disappear.
 pub struct WorkerQueryClient {
     component: Component,
-    /// Watch receiver for enable_local_indexer state per worker
-    model_runtime_config_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
-    router: OnceCell<Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
+    /// Routers keyed by dp_rank — each dp_rank has its own endpoint. Created lazily.
+    routers: Arc<DashMap<DpRank, Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>>,
+    /// Channel to send recovered events to the router indexer
+    kv_events_tx: mpsc::Sender<RouterEvent>,
+    /// Channel to send worker removal events to the router indexer
+    remove_worker_tx: mpsc::Sender<WorkerId>,
 }
 
 impl WorkerQueryClient {
-    /// Create a new WorkerQueryClient with a watch receiver for local indexer states
-    pub fn new(
+    /// Create a new WorkerQueryClient and spawn its background discovery loop.
+    ///
+    /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
+    /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
+    /// events when all dp_ranks for a worker disappear.
+    pub async fn spawn(
         component: Component,
-        model_runtime_config_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
-    ) -> Self {
-        Self {
-            component,
-            model_runtime_config_rx,
-            router: OnceCell::new(),
+        remove_worker_tx: mpsc::Sender<WorkerId>,
+        kv_events_tx: mpsc::Sender<RouterEvent>,
+    ) -> Result<Arc<Self>> {
+        let client = Arc::new(Self {
+            component: component.clone(),
+            routers: Arc::new(DashMap::new()),
+            kv_events_tx,
+            remove_worker_tx,
+        });
+
+        let client_bg = client.clone();
+        let cancel_token = component.drt().primary_token();
+        tokio::spawn(async move {
+            if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
+                tracing::error!("WorkerQueryClient discovery loop failed: {e}");
+            }
+        });
+
+        Ok(client)
+    }
+
+    /// Background loop: watches ComponentEndpoints, recovers per (worker_id, dp_rank).
+    async fn run_discovery_loop(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let discovery = self.component.drt().discovery();
+        let mut stream = discovery
+            .list_and_watch(
+                DiscoveryQuery::ComponentEndpoints {
+                    namespace: self.component.namespace().name(),
+                    component: self.component.name().to_string(),
+                },
+                Some(cancel_token.clone()),
+            )
+            .await?;
+
+        // Track known (worker_id, dp_rank) pairs to detect removals
+        let mut known: HashMap<WorkerId, HashSet<DpRank>> = HashMap::new();
+
+        while let Some(result) = stream.next().await {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
+            let event = match result {
+                Ok(event) => event,
+                Err(e) => {
+                    tracing::warn!("Discovery event error in WorkerQueryClient: {e}");
+                    continue;
+                }
+            };
+
+            match event {
+                DiscoveryEvent::Added(instance) => {
+                    let Some((worker_id, dp_rank)) = Self::parse_query_endpoint(&instance) else {
+                        continue;
+                    };
+
+                    if known.entry(worker_id).or_default().insert(dp_rank) {
+                        tracing::info!(
+                            "WorkerQueryClient: discovered worker {worker_id} dp_rank {dp_rank}, recovering"
+                        );
+                        match self
+                            .recover_from_worker(worker_id, dp_rank, None, None)
+                            .await
+                        {
+                            Ok(count) => {
+                                if count > 0 {
+                                    tracing::info!(
+                                        "Recovered {count} events from worker {worker_id} dp_rank {dp_rank}"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to recover from worker {worker_id} dp_rank {dp_rank}: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+                DiscoveryEvent::Removed(id) => {
+                    let Some((worker_id, dp_rank)) = Self::parse_instance_id(&id) else {
+                        continue;
+                    };
+
+                    if let Some(dp_ranks) = known.get_mut(&worker_id) {
+                        dp_ranks.remove(&dp_rank);
+                        if dp_ranks.is_empty() {
+                            known.remove(&worker_id);
+                            tracing::warn!(
+                                "WorkerQueryClient: all dp_ranks gone for worker {worker_id}, removing"
+                            );
+                            if let Err(e) = self.remove_worker_tx.send(worker_id).await {
+                                tracing::warn!(
+                                    "Failed to send worker removal for worker {worker_id}: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        Ok(())
     }
 
-    /// Check if a worker has local indexer enabled
-    pub fn has_local_indexer(&self, worker_id: WorkerId) -> bool {
-        self.model_runtime_config_rx
-            .borrow()
-            .get(&worker_id)
-            .map(|config| config.enable_local_indexer)
-            .unwrap_or(false)
+    /// Parse a query endpoint from a discovery instance.
+    /// Returns `(worker_id, dp_rank)` if the instance is a query endpoint, else None.
+    fn parse_query_endpoint(instance: &DiscoveryInstance) -> Option<(WorkerId, DpRank)> {
+        let DiscoveryInstance::Endpoint(inst) = instance else {
+            return None;
+        };
+        let dp_rank = inst.endpoint.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
+        let dp_rank: DpRank = dp_rank.parse().ok()?;
+        Some((inst.instance_id, dp_rank))
     }
 
-    /// Query a specific worker's local KV indexer and return its buffered events.
-    /// Returns an error if the worker does not have enable_local_indexer=true.
+    /// Parse a query endpoint from a discovery instance ID (for removals).
+    fn parse_instance_id(
+        id: &dynamo_runtime::discovery::DiscoveryInstanceId,
+    ) -> Option<(WorkerId, DpRank)> {
+        let dynamo_runtime::discovery::DiscoveryInstanceId::Endpoint(eid) = id else {
+            return None;
+        };
+        let dp_rank = eid.endpoint.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
+        let dp_rank: DpRank = dp_rank.parse().ok()?;
+        Some((eid.instance_id, dp_rank))
+    }
+
+    /// Get or create a router for the specified dp_rank's endpoint.
+    async fn get_router_for_dp_rank(
+        &self,
+        dp_rank: DpRank,
+    ) -> Result<Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>> {
+        if let Some(router) = self.routers.get(&dp_rank) {
+            return Ok(router.clone());
+        }
+
+        let endpoint_name = worker_kv_indexer_query_endpoint(dp_rank);
+        let endpoint = self.component.endpoint(&endpoint_name);
+        let client = endpoint.client().await?;
+        let router = Arc::new(
+            PushRouter::from_client_no_fault_detection(client, RouterMode::RoundRobin).await?,
+        );
+
+        Ok(self
+            .routers
+            .entry(dp_rank)
+            .or_insert(router)
+            .value()
+            .clone())
+    }
+
+    /// Query a specific worker's local KV indexer for a specific dp_rank.
     pub async fn query_worker(
         &self,
         worker_id: WorkerId,
+        dp_rank: DpRank,
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
-        // Check if worker has local indexer enabled
-        if !self.has_local_indexer(worker_id) {
-            anyhow::bail!(
-                "Worker {worker_id} does not have local indexer enabled (enable_local_indexer=false or not set in MDC user_data)"
-            );
-        }
-
-        let router = self
-            .router
-            .get_or_try_init(|| async {
-                let endpoint = self.component.endpoint(WORKER_KV_INDEXER_QUERY_ENDPOINT);
-                let client = endpoint.client().await?;
-                let router = PushRouter::from_client(client, RouterMode::RoundRobin).await?;
-                Ok::<_, anyhow::Error>(Arc::new(router))
-            })
-            .await?;
+        let router = self.get_router_for_dp_rank(dp_rank).await?;
 
         let request = WorkerKvQueryRequest {
             worker_id,
@@ -88,7 +231,7 @@ impl WorkerQueryClient {
             .direct(SingleIn::new(request), worker_id)
             .await
             .with_context(|| {
-                format!("Failed to send worker KV query request to worker {worker_id} via endpoint")
+                format!("Failed to send worker KV query to worker {worker_id} dp_rank {dp_rank}")
             })?;
 
         let response = stream
@@ -102,12 +245,136 @@ impl WorkerQueryClient {
 
         Ok(response)
     }
+
+    /// Query a worker's local KV indexer with exponential backoff retry.
+    async fn query_worker_with_retry(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<WorkerKvQueryResponse> {
+        let mut last_error = None;
+
+        for attempt in 0..RECOVERY_MAX_RETRIES {
+            match self
+                .query_worker(worker_id, dp_rank, start_event_id, end_event_id)
+                .await
+            {
+                Ok(resp) => {
+                    if attempt > 0 {
+                        tracing::info!(
+                            "Worker {worker_id} dp_rank {dp_rank} query succeeded after retry {attempt}"
+                        );
+                    }
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < RECOVERY_MAX_RETRIES - 1 {
+                        let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                        tracing::warn!(
+                            "Worker {worker_id} dp_rank {dp_rank} query failed on attempt {attempt}, \
+                             retrying after {backoff_ms}ms"
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("No response after {RECOVERY_MAX_RETRIES} retries")))
+    }
+
+    /// Recover missed KV events from a specific worker's dp_rank with retry logic.
+    ///
+    /// Called both by the internal discovery loop (initial recovery) and by the
+    /// event plane task in subscriber.rs (gap recovery).
+    pub async fn recover_from_worker(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<usize> {
+        tracing::debug!(
+            "Attempting recovery from worker {worker_id} dp_rank {dp_rank}, \
+             start_event_id: {start_event_id:?}, end_event_id: {end_event_id:?}"
+        );
+
+        let response = self
+            .query_worker_with_retry(worker_id, dp_rank, start_event_id, end_event_id)
+            .await?;
+
+        let events = match response {
+            WorkerKvQueryResponse::Events(events) => {
+                tracing::debug!(
+                    "Got {count} buffered events from worker {worker_id} dp_rank {dp_rank}",
+                    count = events.len()
+                );
+                events
+            }
+            WorkerKvQueryResponse::TreeDump(events) => {
+                tracing::info!(
+                    "Got tree dump from worker {worker_id} dp_rank {dp_rank} \
+                     (range too old or unspecified), count: {count}",
+                    count = events.len()
+                );
+                events
+            }
+            WorkerKvQueryResponse::TooNew {
+                requested_start,
+                requested_end,
+                newest_available,
+            } => {
+                tracing::warn!(
+                    "Requested range [{requested_start:?}, {requested_end:?}] is newer than \
+                     available (newest: {newest_available}) for worker {worker_id} dp_rank {dp_rank}"
+                );
+                return Ok(0);
+            }
+            WorkerKvQueryResponse::InvalidRange { start_id, end_id } => {
+                anyhow::bail!(
+                    "Invalid range for worker {worker_id} dp_rank {dp_rank}: \
+                     end_id ({end_id}) < start_id ({start_id})"
+                );
+            }
+            WorkerKvQueryResponse::Error(msg) => {
+                anyhow::bail!("Worker {worker_id} dp_rank {dp_rank} query error: {msg}");
+            }
+        };
+
+        let count = events.len();
+        if count == 0 {
+            tracing::debug!("No events to recover from worker {worker_id} dp_rank {dp_rank}");
+            return Ok(0);
+        }
+
+        tracing::info!("Recovered {count} events from worker {worker_id} dp_rank {dp_rank}");
+
+        for event in events {
+            if let Err(e) = self.kv_events_tx.send(event).await {
+                tracing::error!(
+                    "Failed to send recovered event to indexer for worker {worker_id} dp_rank {dp_rank}: {e}"
+                );
+                anyhow::bail!("Failed to send recovered event: {e}");
+            }
+        }
+
+        Ok(count)
+    }
 }
 
-// Worker-side endpoint registration for Router -> LocalKvIndexer query service
+// ============================================================================
+// Worker-side endpoint registration (unchanged)
+// ============================================================================
+
+/// Worker-side endpoint registration for Router -> LocalKvIndexer query service
 pub(crate) async fn start_worker_kv_query_endpoint(
     component: Component,
     worker_id: u64,
+    dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
 ) {
     let engine = Arc::new(WorkerKvQueryEngine {
@@ -119,26 +386,28 @@ pub(crate) async fn start_worker_kv_query_endpoint(
         Ok(ingress) => ingress,
         Err(e) => {
             tracing::error!(
-                "Failed to build WorkerKvQuery endpoint handler for worker {worker_id}: {e}"
+                "Failed to build WorkerKvQuery endpoint handler for worker {worker_id} dp_rank {dp_rank}: {e}"
             );
             return;
         }
     };
 
+    let endpoint_name = worker_kv_indexer_query_endpoint(dp_rank);
     tracing::info!(
-        "WorkerKvQuery endpoint starting for worker {worker_id} on endpoint '{}'",
-        WORKER_KV_INDEXER_QUERY_ENDPOINT
+        "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} on endpoint '{endpoint_name}'"
     );
 
     if let Err(e) = component
-        .endpoint(WORKER_KV_INDEXER_QUERY_ENDPOINT)
+        .endpoint(&endpoint_name)
         .endpoint_builder()
         .handler(ingress)
         .graceful_shutdown(true)
         .start()
         .await
     {
-        tracing::error!("WorkerKvQuery endpoint failed for worker {worker_id}: {e}");
+        tracing::error!(
+            "WorkerKvQuery endpoint failed for worker {worker_id} dp_rank {dp_rank}: {e}"
+        );
     }
 }
 
@@ -163,9 +432,6 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             request
         );
 
-        // This is a sanity check to ensure the request is for the correct worker.
-        // In production, this should never happen since the router should only
-        // send requests to the worker it is associated with.
         if request.worker_id != self.worker_id {
             let error_message = format!(
                 "WorkerKvQueryEngine::generate worker_id mismatch: request.worker_id={} this.worker_id={}",
@@ -196,7 +462,6 @@ mod tests {
     use crate::kv_router::RouterEvent;
     use crate::kv_router::indexer::KvIndexerMetrics;
     use crate::kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-    use tokio_stream::StreamExt;
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]

@@ -18,8 +18,82 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
 
-class BaseWorkerHandler(ABC):
-    """Abstract base class for SGLang worker handlers."""
+class BaseGenerativeHandler(ABC):
+    """Minimal base class for all generative handlers (LLM, diffusion, etc.).
+
+    Provides common infrastructure for:
+    - Component and configuration management
+    - Metrics and KV event publishing
+    - Distributed tracing integration
+    """
+
+    def __init__(
+        self,
+        component: Component,
+        config: Config,
+        publisher: Optional[DynamoSglangPublisher] = None,
+    ) -> None:
+        """Initialize base generative handler.
+
+        Args:
+            component: The Dynamo runtime component.
+            config: SGLang and Dynamo configuration.
+            publisher: Optional metrics publisher for the worker.
+        """
+        self.component = component
+        self.config = config
+
+        # Set up metrics and KV publishers
+        if publisher is not None:
+            self.metrics_publisher = publisher.metrics_publisher
+            self.kv_publisher = publisher.kv_publisher
+        else:
+            self.metrics_publisher = None
+            self.kv_publisher = None
+
+    @abstractmethod
+    async def generate(
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Generate response from request.
+
+        Args:
+            request: Request dict with input and parameters.
+            context: Context object for cancellation handling.
+
+        Yields:
+            Response data (format varies by handler implementation).
+        """
+        pass
+
+    def cleanup(self) -> None:
+        """Cleanup resources. Override in subclasses as needed."""
+        pass
+
+    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
+        """Get trace header dict for passing to generation functions.
+
+        Args:
+            context: Dynamo Context object containing trace information.
+
+        Returns:
+            Dict with traceparent header if trace context available, None otherwise.
+        """
+        trace_id = context.trace_id
+        span_id = context.span_id
+        if not trace_id or not span_id:
+            return None
+        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+
+
+class BaseWorkerHandler(BaseGenerativeHandler):
+    """Abstract base class for SGLang LLM worker handlers.
+
+    Extends BaseGenerativeHandler with LLM-specific functionality:
+    - SGLang Engine integration
+    - Tokenization and input parameter management
+    - Disaggregated serving support
+    """
 
     def __init__(
         self,
@@ -38,10 +112,14 @@ class BaseWorkerHandler(ABC):
             publisher: Optional metrics publisher for the worker.
             generate_endpoint: The endpoint handle for discovery registration.
         """
-        self.component = component
+        # Call parent constructor
+        super().__init__(component, config, publisher)
+
+        # LLM-specific initialization
         self.engine = engine
         self.config = config
         self.generate_endpoint = generate_endpoint
+        self.publisher = publisher
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
@@ -172,6 +250,73 @@ class BaseWorkerHandler(ABC):
         await self.engine.tokenizer_manager.stop_profile()
         return {"status": "ok", "message": "Profiling stopped"}
 
+    async def update_weights_from_disk(self, body: dict) -> dict:
+        """Update model weights from disk without restarting the server."""
+        from sglang.srt.managers.io_struct import UpdateWeightFromDiskReqInput
+
+        req = UpdateWeightFromDiskReqInput(**body)
+        (
+            success,
+            message,
+            num_paused_requests,
+        ) = await self.engine.tokenizer_manager.update_weights_from_disk(req, None)
+        return {
+            "success": success,
+            "message": message,
+            "num_paused_requests": num_paused_requests,
+        }
+
+    async def update_weights_from_tensor(self, body: dict) -> dict:
+        """Update model weights from tensors without restarting the server."""
+        from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
+
+        req = UpdateWeightsFromTensorReqInput(**body)
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_tensor(req, None)
+        return {"success": success, "message": message}
+
+    async def update_weights_from_distributed(self, body: dict) -> dict:
+        """Update model weights using distributed online synchronization."""
+        from sglang.srt.managers.io_struct import UpdateWeightsFromDistributedReqInput
+
+        req = UpdateWeightsFromDistributedReqInput(**body)
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_distributed(
+            req, None
+        )
+        return {"success": success, "message": message}
+
+    async def update_weights_from_ipc(self, body: dict) -> dict:
+        """Update model weights from IPC for checkpoint-engine integration."""
+        from sglang.srt.managers.io_struct import UpdateWeightsFromIPCReqInput
+
+        req = UpdateWeightsFromIPCReqInput(**body)
+        success, message = await self.engine.tokenizer_manager.update_weights_from_ipc(
+            req, None
+        )
+        if success and not self.engine.tokenizer_manager.initial_weights_loaded:
+            self.engine.tokenizer_manager.initial_weights_loaded = True
+        return {"success": success, "message": message}
+
+    async def update_weight_version(self, body: dict) -> dict:
+        """Update the active weight version without changing model weights."""
+        from sglang.srt.managers.io_struct import UpdateWeightVersionReqInput
+
+        req = UpdateWeightVersionReqInput(**body)
+        if req.abort_all_requests:
+            self.engine.tokenizer_manager.abort_request(abort_all=True)
+
+        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
+        return {
+            "success": True,
+            "message": f"Weight version updated to {req.new_version}",
+            "new_version": req.new_version,
+        }
+
     def register_engine_routes(self, runtime) -> None:
         """Register all engine routes for this handler.
 
@@ -185,6 +330,21 @@ class BaseWorkerHandler(ABC):
         )
         runtime.register_engine_route(
             "resume_memory_occupation", self.resume_memory_occupation
+        )
+        runtime.register_engine_route(
+            "update_weights_from_disk", self.update_weights_from_disk
+        )
+        runtime.register_engine_route(
+            "update_weights_from_tensor", self.update_weights_from_tensor
+        )
+        runtime.register_engine_route(
+            "update_weights_from_distributed", self.update_weights_from_distributed
+        )
+        runtime.register_engine_route(
+            "update_weights_from_ipc", self.update_weights_from_ipc
+        )
+        runtime.register_engine_route(
+            "update_weight_version", self.update_weight_version
         )
 
     @abstractmethod
@@ -202,7 +362,8 @@ class BaseWorkerHandler(ABC):
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
-        pass
+        if self.publisher is not None:
+            self.publisher.cleanup()
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
@@ -271,21 +432,6 @@ class BaseWorkerHandler(ABC):
             bootstrap_host = f"[{bootstrap_host}]"
 
         return bootstrap_host, bootstrap_port
-
-    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
-        """Get trace header dict for passing to SGLang's external_trace_header parameter.
-
-        Args:
-            context: Dynamo Context object containing trace information.
-
-        Returns:
-            Dict with traceparent header if trace context available, None otherwise.
-        """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
     async def _handle_cancellation(
         self, request_id_future: asyncio.Future, context: Context

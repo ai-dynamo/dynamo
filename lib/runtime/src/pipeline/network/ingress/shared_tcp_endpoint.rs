@@ -673,10 +673,7 @@ mod tests {
     #[tokio::test]
     async fn test_graceful_shutdown_waits_for_inflight_tcp_requests() {
         // Initialize tracing for test debugging
-        let _ = tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(tracing::Level::DEBUG)
-            .try_init();
+        crate::logging::init();
 
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -877,10 +874,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_pool_bounds_concurrency() {
-        let _ = tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(tracing::Level::DEBUG)
-            .try_init();
+        crate::logging::init();
 
         // Use a small pool size for testing
         let pool_size = 3;

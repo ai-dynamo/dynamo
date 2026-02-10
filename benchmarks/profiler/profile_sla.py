@@ -50,6 +50,10 @@ from benchmarks.profiler.utils.profile_prefill import (
     profile_prefill_aiconfigurator,
 )
 from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
+from benchmarks.profiler.utils.profiler_status import (
+    ProfilerStatus,
+    write_profiler_status,
+)
 from benchmarks.profiler.webui.select_config import (
     add_profiling_error,
     clear_profiling_errors,
@@ -142,6 +146,14 @@ async def run_profile(args):
     if not args.aic_backend:
         args.aic_backend = args.backend
 
+    # Write initial status for external jobs to monitor
+    os.makedirs(args.output_dir, exist_ok=True)
+    write_profiler_status(
+        args.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Profiler job started",
+    )
+
     try:
         config_modifier = CONFIG_MODIFIERS[args.backend]
 
@@ -160,7 +172,7 @@ async def run_profile(args):
         logger.info(f"Profiling GPU counts: {profile_num_gpus}")
         os.makedirs(args.output_dir, exist_ok=True)
 
-        model_name = config_modifier.get_model_name(config)
+        model_name, model_path = config_modifier.get_model_name(config)
 
         # Determine sweep max context length: allow user-provided cap to override model's if smaller
         use_specified_max_context_len = getattr(args, "max_context_length", None)
@@ -231,7 +243,8 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling prefill with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, EngineType.PREFILL
+                num_gpus,
+                args.model_info,
             )
 
             for mapping in candidate_mappings:
@@ -284,9 +297,23 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(prefill_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready(
-                        timeout=getattr(args, "deployment_timeout", 1800)
-                    )
+                    try:
+                        await client.wait_for_deployment_ready(
+                            timeout=getattr(args, "deployment_timeout", 1800)
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            f"Deployment for mapping {mapping.label()} with {num_gpus} GPUs "
+                            f"failed to become ready within timeout during prefill profiling, skipping"
+                        )
+                        add_profiling_error(
+                            f"Mapping {mapping.label()} with {num_gpus} GPUs timed out "
+                            f"during prefill profiling"
+                        )
+                        logger.info("Cleaning up timed-out deployment...")
+                        await client.delete_deployment()
+                        deployment_clients.remove(client)
+                        continue
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -302,7 +329,7 @@ async def run_profile(args):
                         args.isl,
                         ai_perf_artifact_dir,
                         model_name,
-                        model_name,
+                        model_path,
                         base_url,
                         attention_dp_size=mapping.get_attn_dp_size(),
                     )
@@ -338,7 +365,8 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling decode with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, EngineType.DECODE
+                num_gpus,
+                args.model_info,
             )
 
             for mapping in candidate_mappings:
@@ -389,9 +417,23 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(decode_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready(
-                        timeout=getattr(args, "deployment_timeout", 1800)
-                    )
+                    try:
+                        await client.wait_for_deployment_ready(
+                            timeout=getattr(args, "deployment_timeout", 1800)
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            f"Deployment for mapping {mapping.label()} with {num_gpus} GPUs "
+                            f"failed to become ready within timeout during decode profiling, skipping"
+                        )
+                        add_profiling_error(
+                            f"Mapping {mapping.label()} with {num_gpus} GPUs timed out "
+                            f"during decode profiling"
+                        )
+                        logger.info("Cleaning up timed-out deployment...")
+                        await client.delete_deployment()
+                        deployment_clients.remove(client)
+                        continue
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -449,7 +491,7 @@ async def run_profile(args):
                                 num_request,
                                 ai_perf_artifact_dir,
                                 model_name,
-                                model_name,
+                                model_path,
                                 base_url=base_url,
                                 num_gpus=num_gpus,
                                 attention_dp_size=mapping.get_attn_dp_size(),
@@ -490,6 +532,12 @@ async def run_profile(args):
                 error_msg = "No prefill results produced; skipping recommendations."
                 logger.error(error_msg)
                 add_profiling_error(error_msg)
+                write_profiler_status(
+                    args.output_dir,
+                    status=ProfilerStatus.FAILED,
+                    error=error_msg,
+                    message="Profiler failed: no prefill results produced",
+                )
                 return
 
             if args.pick_with_webui:
@@ -527,6 +575,12 @@ async def run_profile(args):
                     error_msg = "No decode results produced; skipping recommendations."
                     logger.error(error_msg)
                     add_profiling_error(error_msg)
+                    write_profiler_status(
+                        args.output_dir,
+                        status=ProfilerStatus.FAILED,
+                        error=error_msg,
+                        message="Profiler failed: no decode results produced",
+                    )
                     return
                 if min(decode_data.itl) > args.itl:
                     warning_msg = "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
@@ -631,7 +685,7 @@ async def run_profile(args):
             profile_prefill(
                 work_dir,
                 model_name,
-                model_name,
+                model_path,
                 base_url,
                 best_prefill_gpus,
                 sweep_max_context_length,
@@ -718,7 +772,7 @@ async def run_profile(args):
             profile_decode(
                 work_dir,
                 model_name,
-                model_name,
+                model_path,
                 base_url,
                 best_decode_gpus,
                 max_kv_tokens,
@@ -759,8 +813,26 @@ async def run_profile(args):
             else:
                 yaml.safe_dump(mocker_config, f, sort_keys=False)
 
+        # Write success status with output files
+        write_profiler_status(
+            args.output_dir,
+            status=ProfilerStatus.SUCCESS,
+            message="Profiler completed successfully",
+            outputs={
+                "config_with_planner": "config_with_planner.yaml",
+                "mocker_config_with_planner": "mocker_config_with_planner.yaml",
+                "disagg_config": "disagg_config.yaml",
+            },
+        )
+
     except Exception as e:
-        logger.error(f"Profile job failed with error: {e}")
+        logger.exception("Profile job failed with error")
+        write_profiler_status(
+            args.output_dir,
+            status=ProfilerStatus.FAILED,
+            error=str(e),
+            message=f"Profiler failed with exception: {type(e).__name__}",
+        )
         raise
     finally:
         # Always clean up any remaining deployments, even if the job failed

@@ -231,7 +231,7 @@ impl std::ops::Deref for NixlAgent {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::*;
 

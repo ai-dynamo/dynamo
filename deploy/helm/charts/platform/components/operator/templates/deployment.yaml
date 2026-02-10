@@ -63,6 +63,7 @@ spec:
         env:
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
+        imagePullPolicy: {{ .Values.controllerManager.kubeRbacProxy.image.pullPolicy | quote }}
         image: {{ .Values.controllerManager.kubeRbacProxy.image.repository }}:{{
           .Values.controllerManager.kubeRbacProxy.image.tag | default .Chart.AppVersion
           }}
@@ -95,7 +96,7 @@ spec:
         {{- end }}
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
-        {{- else if and .Values.etcd .Values.etcd.enabled }}
+        {{- else }}
           - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}.svc.cluster.local:2379
         {{- end }}
         {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
@@ -131,6 +132,7 @@ spec:
         {{- if not .Values.namespaceRestriction.enabled }}
           - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
           - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
+          - --epp-cluster-role-name={{ include "dynamo-operator.fullname" . }}-epp
         {{- end }}
         {{- if .Values.discoveryBackend }}
           - --discovery-backend={{ .Values.discoveryBackend }}
@@ -145,6 +147,29 @@ spec:
         {{- if .Values.webhook.enabled }}
           - --enable-webhooks=true
         {{- end }}
+        {{- if .Values.checkpoint.enabled }}
+          - --checkpoint-enabled=true
+          - --checkpoint-storage-type={{ .Values.checkpoint.storage.type }}
+          - --checkpoint-signal-host-path={{ .Values.checkpoint.storage.signalHostPath }}
+          - --checkpoint-criu-timeout={{ .Values.checkpoint.criu.timeout }}
+          - --checkpoint-init-container-image={{ .Values.checkpoint.initContainerImage }}
+          {{- if eq .Values.checkpoint.storage.type "pvc" }}
+          - --checkpoint-pvc-name={{ .Values.checkpoint.storage.pvc.pvcName }}
+          - --checkpoint-pvc-base-path={{ .Values.checkpoint.storage.pvc.basePath }}
+          {{- end }}
+          {{- if eq .Values.checkpoint.storage.type "s3" }}
+          - --checkpoint-s3-uri={{ .Values.checkpoint.storage.s3.uri }}
+          {{- if .Values.checkpoint.storage.s3.credentialsSecretRef }}
+          - --checkpoint-s3-credentials-secret={{ .Values.checkpoint.storage.s3.credentialsSecretRef }}
+          {{- end }}
+          {{- end }}
+          {{- if eq .Values.checkpoint.storage.type "oci" }}
+          - --checkpoint-oci-uri={{ .Values.checkpoint.storage.oci.uri }}
+          {{- if .Values.checkpoint.storage.oci.credentialsSecretRef }}
+          - --checkpoint-oci-credentials-secret={{ .Values.checkpoint.storage.oci.credentialsSecretRef }}
+          {{- end }}
+          {{- end }}
+        {{- end }}
         command:
         - /manager
         env:
@@ -153,6 +178,7 @@ spec:
         envFrom:
         - secretRef:
             name: dynamo-deployment-env
+        imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | quote }}
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag
 | default .Chart.AppVersion }}
         livenessProbe:

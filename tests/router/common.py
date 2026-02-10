@@ -48,7 +48,9 @@ class KVRouterProcess(ManagedProcess):
         enforce_disagg: bool = False,
         blocks_threshold: float | None = None,
         tokens_threshold: float | None = None,
+        tokens_threshold_frac: float | None = None,
         request_plane: str = "nats",
+        durable_kv_events: bool = False,
     ):
         command = [
             "python3",
@@ -75,6 +77,14 @@ class KVRouterProcess(ManagedProcess):
         if tokens_threshold is not None:
             command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
 
+        if tokens_threshold_frac is not None:
+            command.extend(
+                ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
+            )
+
+        if durable_kv_events:
+            command.append("--durable-kv-events")
+
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
 
@@ -88,7 +98,7 @@ class KVRouterProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
             ],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         self.port = frontend_port
 
@@ -525,10 +535,10 @@ async def send_request_via_python_kv_router(
             stream = await kv_python_router.generate(
                 token_ids=token_ids,
                 model=model_name,
-                stop_conditions=stop_conditions,
-                sampling_options=sampling_options,
-                output_options=output_options,
-                router_config_override=router_config_override,
+                stop_conditions=stop_conditions,  # type: ignore[arg-type]
+                sampling_options=sampling_options,  # type: ignore[arg-type]
+                output_options=output_options,  # type: ignore[arg-type]
+                router_config_override=router_config_override,  # type: ignore[arg-type]
                 worker_id=worker_id,
                 dp_rank=dp_rank,
             )
@@ -693,6 +703,7 @@ def _test_router_two_routers(
     test_payload: dict,
     num_requests: int,
     store_backend: str = "etcd",
+    skip_consumer_verification: bool = False,
 ):
     """Test two KV routers with alternating requests and consumer lifecycle verification.
 
@@ -701,8 +712,8 @@ def _test_router_two_routers(
     This test:
     1. Starts two KV routers on different ports
     2. Sends requests alternating between the two routers
-    3. Verifies that both routers create durable consumers
-    4. Verifies consumers are cleaned up when routers exit
+    3. Verifies that both routers create durable consumers (unless skipped)
+    4. Verifies consumers are cleaned up when routers exit (unless skipped)
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -712,6 +723,7 @@ def _test_router_two_routers(
         test_payload: Test payload to send to /v1/chat/completions
         num_requests: Number of concurrent requests to send
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        skip_consumer_verification: Skip JetStream consumer verification (for NATS Core mode).
 
     Raises:
         AssertionError: If consumer lifecycle verification fails
@@ -846,8 +858,14 @@ def _test_router_two_routers(
             finally:
                 await nc.close()
 
-        # Run consumer lifecycle verification
-        asyncio.run(verify_consumer_lifecycle())
+        # Run consumer lifecycle verification (skip for NATS Core mode)
+        if skip_consumer_verification:
+            logger.info("Skipping JetStream consumer verification (NATS Core mode)")
+            # Clean up routers manually since we're not doing consumer verification
+            for kv_router in kv_routers:
+                kv_router.__exit__(None, None, None)
+        else:
+            asyncio.run(verify_consumer_lifecycle())
 
         # Clear the kv_routers list since we've already cleaned them up
         kv_routers = []
@@ -1208,7 +1226,7 @@ def _test_router_overload_503(
                 )
             ],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         kv_router.__enter__()
 
@@ -1321,6 +1339,7 @@ def _test_router_indexers_sync(
     request_plane: str = "nats",
     test_nats_interruption: bool = False,
     nats_server: Optional["NatsServer"] = None,
+    durable_kv_events: bool = False,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1351,6 +1370,7 @@ def _test_router_indexers_sync(
         request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
         test_nats_interruption: If True, test NATS interruption recovery. Defaults to False.
         nats_server: NatsServer instance for stop/start (required if test_nats_interruption=True).
+        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
 
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
@@ -1361,7 +1381,10 @@ def _test_router_indexers_sync(
     # Use async to manage the test flow
     async def test_sync():
         # Create KvRouterConfig with lower snapshot threshold for testing
-        kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
+        kv_router_config = KvRouterConfig(
+            router_snapshot_threshold=20,
+            durable_kv_events=durable_kv_events,
+        )
 
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
@@ -1676,6 +1699,7 @@ def _test_router_decisions_disagg(
     test_payload: dict,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    durable_kv_events: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -1697,6 +1721,7 @@ def _test_router_decisions_disagg(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -1716,6 +1741,7 @@ def _test_router_decisions_disagg(
             store_backend,
             enforce_disagg=True,
             request_plane=request_plane,
+            durable_kv_events=durable_kv_events,
         )
         kv_router.__enter__()
 
@@ -1827,7 +1853,7 @@ def _test_router_decisions_disagg(
                         verify_response_timing(timing_info)
 
                     # Small delay between requests
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)
 
             return prefill_worker_ids, decode_worker_ids
 
@@ -1895,6 +1921,7 @@ def _test_router_decisions(
     test_dp_rank: bool = False,
     block_size: int = BLOCK_SIZE,
     use_kv_events: bool = True,
+    durable_kv_events: bool = False,
 ):
     """Validate KV cache prefix reuse and worker routing by sending requests diverging prefixes.
 
@@ -1915,6 +1942,7 @@ def _test_router_decisions(
         test_dp_rank: If True, also forces and validates dp_rank routing (for data parallel setups)
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with TTL-based expiration (--no-kv-events mode).
+        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
 
     Raises:
         AssertionError: If routing decisions don't follow KV cache prefix reuse as expected
@@ -1923,6 +1951,7 @@ def _test_router_decisions(
     kv_router_config = KvRouterConfig(
         router_snapshot_threshold=20,
         use_kv_events=use_kv_events,
+        durable_kv_events=durable_kv_events,
     )
     kv_push_router = KvPushRouter(
         endpoint=endpoint,
@@ -1932,24 +1961,8 @@ def _test_router_decisions(
 
     # Use async to manage the test flow
     async def test_sync():
-        # Calculate expected number of instances
-        # With data parallelism:
-        # - vLLM/SGLang: each DP rank registers as a separate instance
-        # - Mockers: all DP ranks share the same worker instance ID (instance_ids returns worker IDs)
-        if test_dp_rank:
-            if (
-                hasattr(engine_workers, "data_parallel_size")
-                and engine_workers.data_parallel_size is not None
-            ):
-                # vLLM/SGLang: each DP rank registers as a separate instance
-                expected_num_instances = (
-                    engine_workers.num_workers * engine_workers.data_parallel_size
-                )
-            else:
-                # Mockers with dp_size or no DP: instance_ids() returns worker IDs
-                expected_num_instances = engine_workers.num_workers
-        else:
-            expected_num_instances = engine_workers.num_workers
+        # Workers register one instance per process (not per dp_rank)
+        expected_num_instances = engine_workers.num_workers
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
@@ -2400,6 +2413,52 @@ def _test_busy_threshold_endpoint(
                     data = await response.json()
                     logger.info(
                         f"POST /busy_threshold (invalid tokens) response: {data}"
+                    )
+
+                # Test 10: Set active_prefill_tokens_threshold_frac (fraction of max_num_batched_tokens)
+                test_frac_threshold = 0.8
+                logger.info(
+                    f"Testing POST /busy_threshold to set active_prefill_tokens_threshold_frac={test_frac_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold_frac": test_frac_threshold,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set frac) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_prefill_tokens_threshold_frac")
+                        == test_frac_threshold
+                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set frac) response: {data}")
+
+                # Test 11: Verify frac threshold appears in GET /busy_threshold list
+                logger.info(
+                    "Testing GET /busy_threshold to verify frac threshold in list"
+                )
+                async with session.get(busy_threshold_url) as response:
+                    assert (
+                        response.status == 200
+                    ), f"GET /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    thresholds = data.get("thresholds", [])
+                    model_entry = next(
+                        (t for t in thresholds if t["model"] == model_name), None
+                    )
+                    assert (
+                        model_entry is not None
+                    ), f"Expected model '{model_name}' in thresholds: {data}"
+                    assert (
+                        model_entry.get("active_prefill_tokens_threshold_frac")
+                        == test_frac_threshold
+                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    logger.info(
+                        f"GET /busy_threshold (after set frac) response: {data}"
                     )
 
                 logger.info("All busy_threshold endpoint tests passed!")

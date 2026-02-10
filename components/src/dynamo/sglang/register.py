@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import socket
-from typing import Optional
+from typing import Any, Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
@@ -56,7 +56,6 @@ async def _register_llm_with_runtime_config(
             server_args.model_path,
             server_args.served_model_name,
             kv_cache_block_size=server_args.page_size,
-            migration_limit=dynamo_args.migration_limit,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
         )
@@ -161,7 +160,18 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.tool_call_parser
-    runtime_config.enable_local_indexer = dynamo_args.enable_local_indexer
+    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+    is_decode_worker = server_args.disaggregation_mode == "decode"
+    runtime_config.enable_local_indexer = (
+        dynamo_args.enable_local_indexer and not is_decode_worker
+    )
+
+    # Set data_parallel_size for DP attention mode
+    # This enables the router to correctly track per-(worker_id, dp_rank) pairs
+    dp_size = getattr(server_args, "dp_size", 1) or 1
+    runtime_config.data_parallel_size = dp_size
+    if dp_size > 1:
+        logging.info(f"Registering with data_parallel_size={dp_size}")
 
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
@@ -262,3 +272,43 @@ async def register_llm_with_readiness_gate(
         readiness_gate.set()
 
     logging.info("Model registration succeeded; processing queued requests")
+
+
+async def register_image_diffusion_model(
+    generator: Any,  # DiffGenerator
+    endpoint: Endpoint,
+    server_args: ServerArgs,
+    readiness_gate: Optional[asyncio.Event] = None,
+) -> None:
+    """Register diffusion model with Dynamo runtime.
+
+    Args:
+        generator: The SGLang DiffGenerator instance.
+        endpoint: The Dynamo endpoint for generation requests.
+        server_args: SGLang server configuration.
+        readiness_gate: Optional event to signal when registration completes.
+
+    Note:
+        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
+    """
+    # Use model_path as the model name (diffusion workers don't have served_model_name)
+    model_name = server_args.model_path
+
+    try:
+        await register_llm(
+            ModelInput.Text,
+            ModelType.Images,
+            endpoint,
+            model_name,
+            model_name,
+        )
+        logging.info(f"Successfully registered diffusion model: {model_name}")
+    except Exception as e:
+        logging.error(f"Failed to register diffusion model: {e}")
+        raise RuntimeError("Image diffusion model registration failed")
+
+    # Signal readiness
+    if readiness_gate:
+        readiness_gate.set()
+
+    logging.info(f"Image diffusion model ready: {model_name}")

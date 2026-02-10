@@ -13,21 +13,22 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = []
+default = ["media-nixl", "block-manager"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
 testing-full = ["testing-cuda", "testing-nixl"]
-testing-cuda = ["dep:cudarc"]
-testing-nixl = ["dep:nixl-sys"]
+testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
+testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
 testing-etcd = []
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec", "dep:dynamo-memory"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
+media-nixl = ["dep:nixl-sys", "dep:flate2"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
-kv-router-stress = ["dep:clap", "dep:indicatif"]
+bench = ["dynamo-kv-router/bench"]
+kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 
 [[bench]]
 name = "tokenizer"
@@ -38,10 +39,18 @@ name = "transfer_context_v2"
 harness = false
 required-features = ["block-manager", "testing-cuda"]
 
+[[bench]]
+name = "kv_router_bench"
+harness = false
+required-features = ["kv-router-stress"]
+
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }
-dynamo-memory = { path = "../memory", optional = true }
+dynamo-tokens = { workspace = true }
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
+dynamo-memory = { workspace = true }
+dynamo-mocker = { workspace = true }
 
 # workspace
 aho-corasick = "1.1"
@@ -107,6 +116,9 @@ aligned-vec = { version = "0.6.4", optional = true }
 nixl-sys = { workspace = true, optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
+
+# media-nixl (zlib compression for NIXL metadata)
+flate2 = { version = "1", optional = true }
 
 # block_manager_bench
 clap = { version = "4.5.49", features = ["derive"], optional = true }
@@ -208,8 +220,3 @@ name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
 
-[[bench]]
-name = "radix_tree_microbench"
-path = "benches/radix_tree_microbench.rs"
-harness = false
-required-features = ["kv-router-stress"]

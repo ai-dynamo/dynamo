@@ -41,7 +41,8 @@ This will start both etcd and NATS with the required configurations in the backg
 - **`ping.sh`** - Simple test script to verify the setup is working
 - **`prefix_ratio_benchmark.py`** - Main benchmarking script that sweeps prefix ratios
 - **`real_data_benchmark.py`** - Benchmarking script that uses real mooncake-style trace data
-- **`plot_prefix_ratio_comparison.py`** - Generates comparison plots from benchmark results
+- **`agent_benchmark.py`** - Concurrency-based benchmarking for multi-turn conversation traces
+- **`mock_server.py`** - Simple mock server to receive and log requests from aiperf
 
 ## Usage Instructions
 
@@ -126,7 +127,7 @@ To see all available router arguments, run:
 python -m dynamo.frontend --help
 ```
 
-For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md).
+For detailed explanations of router arguments (especially KV cache routing parameters), see the [Router Guide](../../docs/components/router/router_guide.md).
 
 > [!Note]
 > If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
@@ -145,7 +146,7 @@ When you launch prefill workers using `run_engines.sh --prefill`, the frontend a
 - Uses the same routing mode as the frontend's `--router-mode` setting
 - Seamlessly integrates with your decode workers for token generation
 
-No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
+No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [Router Guide](../../docs/components/router/router_guide.md#disaggregated-serving) for more details.
 
 > [!Note]
 > The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh)
@@ -244,6 +245,61 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 > pip install git+https://github.com/ai-dynamo/aiperf.git
 > ```
 > However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
+
+### Step 4 (Alternative): Agent Benchmark (Concurrency-Based Multi-Turn)
+
+For benchmarking with multi-turn conversation traces using concurrency-based load generation (instead of timestamp-based replay), use `agent_benchmark.py`. This is useful for testing how the system handles multiple concurrent agent sessions.
+
+```bash
+python agent_benchmark.py --input-dataset trace.jsonl --concurrency 10
+```
+
+**Key parameters:**
+- `--concurrency`: Number of concurrent sessions to maintain (default: 10)
+- `--delay`: Override delay (ms) between turns within a session. Set to 0 to remove all delays.
+
+Examples:
+
+```bash
+# Run with 20 concurrent sessions using delays from trace file
+python agent_benchmark.py --input-dataset trace.jsonl --concurrency 20
+
+# Run with no delays between turns (stress test)
+python agent_benchmark.py --input-dataset trace.jsonl --concurrency 10 --delay 0
+
+# Run with fixed 1-second delay between turns
+python agent_benchmark.py --input-dataset trace.jsonl --concurrency 10 --delay 1000
+```
+
+### Trace Dataset Format (JSONL)
+
+Both `real_data_benchmark.py` and `agent_benchmark.py` accept trace datasets in JSONL format (one JSON object per line). The format is compatible with [Mooncake trace format](https://github.com/kvcache-ai/Mooncake).
+
+#### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `input_length` | int | Number of input tokens for this request |
+| `output_length` | int | Number of output tokens to generate |
+| `session_id` | string | Groups turns into multi-turn conversations. Requests with the same `session_id` are processed sequentially. |
+| `hash_ids` | list[int] | List of hash IDs representing prefix blocks for KV cache routing. Shared hash IDs indicate shared prefixes. |
+| `delay` | int | Delay in milliseconds to wait before sending this turn (applied after the previous turn in the same session completes). Not applied to first turns. |
+
+#### Example Trace File
+
+```jsonl
+{"session_id": "conv_0", "input_length": 9176, "output_length": 152, "hash_ids": [0, 1, 2, 3, 4, 5]}
+{"session_id": "conv_0", "input_length": 9368, "output_length": 104, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7], "delay": 500}
+{"session_id": "conv_0", "input_length": 9516, "output_length": 164, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "delay": 500}
+{"session_id": "conv_1", "input_length": 9445, "output_length": 143, "hash_ids": [0, 1, 2, 10, 11, 12, 13]}
+{"session_id": "conv_1", "input_length": 9628, "output_length": 123, "hash_ids": [0, 1, 2, 10, 11, 12, 13, 14, 15], "delay": 500}
+```
+
+In this example:
+- `conv_0` and `conv_1` are two separate conversations that can run concurrently
+- Within each conversation, turns are processed sequentially
+- Subsequent turns have a 500ms delay after the previous turn completes
+- `hash_ids` show prefix sharing: both conversations share prefix blocks `[0, 1, 2]`
 
 ## Benchmarking Results
 

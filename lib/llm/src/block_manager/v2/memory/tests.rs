@@ -110,7 +110,7 @@ mod cuda_tests {
 // Tests for NIXL registration would require a real NIXL agent,
 // so we'll skip those for now. In practice, you'd mock the agent
 // or use integration tests.
-#[cfg(feature = "testing-nixl")]
+#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 mod nixl_tests {
     use super::super::registered::register_with_nixl;
     use super::*;

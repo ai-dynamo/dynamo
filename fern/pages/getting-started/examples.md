@@ -1,50 +1,30 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Examples"
 ---
 
-Explore practical examples to get started with NVIDIA Dynamo.
+The examples below assume you build the latest image yourself from source. If using a prebuilt image, follow the examples from the corresponding branch.
 
-## Quick Start Examples
+## Hello World
 
-The [examples directory](https://github.com/ai-dynamo/dynamo/tree/main/examples) in the Dynamo repository contains ready-to-run examples for various use cases.
+Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph.
 
-### Backend Examples
+[View Hello World Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/runtime/hello_world)
 
-| Backend | Description | Link |
-|---------|-------------|------|
-| **vLLM** | Run inference with vLLM backend | [examples/backends/vllm](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm) |
-| **SGLang** | Run inference with SGLang backend | [examples/backends/sglang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang) |
-| **TensorRT-LLM** | Run inference with TensorRT-LLM backend | [examples/backends/trtllm](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm) |
+## vLLM
 
-### Deployment Examples
+Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with vLLM.
 
-| Example | Description | Link |
-|---------|-------------|------|
-| **Basic Deployment** | Simple single-node deployment | [examples/basics](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics) |
-| **Kubernetes** | Deploy on Kubernetes | [examples/deployments](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments) |
-| **Multimodal** | Vision and multimodal models | [examples/multimodal](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal) |
+[View vLLM Backend Guide](../backends/vllm/README.md)
 
-### Custom Backend Examples
+## SGLang
 
-Learn how to create custom backends:
+Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with SGLang.
 
-| Example | Description | Link |
-|---------|-------------|------|
-| **Custom Backend** | Build your own backend | [examples/custom_backend](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend) |
+[View SGLang Backend Guide](../backends/sglang/README.md)
 
-## Running Examples
+## TensorRT-LLM
 
-Most examples can be run directly after installing Dynamo:
+Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with TensorRT-LLM.
 
-```bash
-# Clone the repository
-git clone https://github.com/ai-dynamo/dynamo.git
-cd dynamo
-
-# Navigate to an example
-cd examples/backends/sglang
-
-# Follow the README in each example directory
-```
+[View TensorRT-LLM Backend Guide](../backends/trtllm/README.md)
