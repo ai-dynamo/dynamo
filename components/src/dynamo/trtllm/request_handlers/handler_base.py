@@ -68,6 +68,9 @@ class RequestHandlerConfig:
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
+    max_seq_len: Optional[
+        int
+    ] = None  # Model's maximum sequence length for dynamic max_tokens default
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
@@ -98,6 +101,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.connector = config.connector
         # Store runtime reference for graceful shutdown
         self.runtime = config.runtime
+        self.max_seq_len = config.max_seq_len
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
 
@@ -651,8 +655,28 @@ class HandlerBase(BaseGenerativeHandler):
                     )
 
         max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
+        if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
+        elif self.max_seq_len is not None:
+            # Dynamic default: use remaining context window when max_tokens not specified
+            # This mirrors the fix applied to the vLLM backend in PR #4156
+            if self.multimodal_processor and processed_input is not None:
+                # Multimodal request - skip dynamic default as we can't accurately
+                # calculate total input tokens (images consume additional context)
+                logging.debug(
+                    "Skipping dynamic max_tokens default for multimodal request "
+                    "(image tokens not accounted for in token_ids)"
+                )
+            else:
+                # Text-only request - safe to calculate dynamic default
+                token_ids = request.get("token_ids", [])
+                input_length = len(token_ids)
+                dynamic_default = max(1, self.max_seq_len - input_length)
+                sampling_params.max_tokens = dynamic_default
+                logging.debug(
+                    f"Using dynamic default max_tokens={dynamic_default} "
+                    f"(max_seq_len={self.max_seq_len}, input_length={input_length})"
+                )
 
         ignore_eos = request["stop_conditions"].get("ignore_eos")
         if ignore_eos:

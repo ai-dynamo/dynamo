@@ -474,6 +474,7 @@ async def init_llm_worker(
             connector=connector,
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
+            max_seq_len=config.max_seq_len,  # Pass max_seq_len for dynamic max_tokens default
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.encoder_cache_capacity_gb,
