@@ -1,0 +1,53 @@
+direction: down
+
+coord: "Coordination Layer" {
+  style.font-size: 32
+  direction: right
+
+  sd: "Service Discovery" {
+    style.font-size: 28
+
+    k8s: "K8s: CRDs + API" {
+      style.font-size: 22
+      shape: rectangle
+    }
+    bm: "Bare metal: etcd" {
+      style.font-size: 22
+      shape: rectangle
+    }
+  }
+
+  nats: "NATS (Optional)" {
+    style.font-size: 28
+
+    kv: "KV Cache Events" {
+      style.font-size: 22
+      shape: rectangle
+    }
+    rs: "Router Replica Sync" {
+      style.font-size: 22
+      shape: rectangle
+    }
+    js: "JetStream Persistence" {
+      style.font-size: 22
+      shape: rectangle
+    }
+  }
+}
+
+frontend: Frontend {
+  style.font-size: 28
+  shape: rectangle
+}
+plan: Planner {
+  style.font-size: 28
+  shape: rectangle
+}
+worker: Worker {
+  style.font-size: 28
+  shape: rectangle
+}
+
+coord -> frontend
+coord -> plan
+coord -> worker

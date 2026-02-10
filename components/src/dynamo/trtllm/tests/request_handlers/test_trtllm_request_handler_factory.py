@@ -5,7 +5,9 @@
 
 import pytest
 
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.trtllm.request_handlers.handlers import (
     AggregatedHandler,
     PrefillHandler,
@@ -29,6 +31,14 @@ def mock_config():
 class TestRequestHandlerFactory:
     """Tests for RequestHandlerFactory."""
 
+    def test_invalid_mode_raises(self, mock_config):
+        """Test factory raises ValueError for invalid disaggregation_mode."""
+        mock_config.disaggregation_mode.value = "invalid_mode"
+        factory = RequestHandlerFactory()
+
+        with pytest.raises(ValueError, match="Invalid disaggregation_mode"):
+            factory.get_request_handler(mock_config)
+
     def test_creates_aggregated_handler(self, mock_config):
         """Test factory creates AggregatedHandler for prefill_and_decode mode."""
         factory = RequestHandlerFactory()
@@ -44,16 +54,8 @@ class TestRequestHandlerFactory:
 
         assert isinstance(handler, PrefillHandler)
 
-    def test_invalid_mode_raises(self, mock_config):
-        """Test factory raises ValueError for invalid disaggregation_mode."""
-        mock_config.disaggregation_mode.value = "invalid_mode"
-        factory = RequestHandlerFactory()
-
-        with pytest.raises(ValueError, match="Invalid disaggregation_mode"):
-            factory.get_request_handler(mock_config)
-
     def test_prefill_handler_with_encoder_cache(self):
-        """Test factory creates PrefillHandler with EncoderCacheManager when capacity > 0."""
+        """Test factory creates PrefillHandler with MultimodalEmbeddingCacheManager when capacity > 0."""
         mock_config = create_mock_request_handler_config(
             disaggregation_mode="prefill",
             encoder_cache_capacity_gb=1.0,
@@ -62,7 +64,7 @@ class TestRequestHandlerFactory:
         handler = factory.get_request_handler(mock_config)
 
         assert isinstance(handler, PrefillHandler)
-        assert isinstance(handler._encoder_cache, EncoderCacheManager)
+        assert isinstance(handler._encoder_cache, MultimodalEmbeddingCacheManager)
 
     def test_prefill_handler_without_encoder_cache(self):
         """Test factory creates PrefillHandler with no cache when capacity is 0."""

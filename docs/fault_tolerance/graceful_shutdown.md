@@ -83,30 +83,16 @@ generate_endpoint.serve_endpoint(
 |-----------|------------------|-----------|
 | **Frontend** | N/A (HTTP server) | HTTP server handles its own shutdown |
 | **Prefill Workers** | `graceful_shutdown=True` | Prefill operations must complete to avoid wasted computation |
-| **Decode Workers** | Conditional | If migration is enabled (`migration_limit > 0`), shutdown immediately to allow migration; otherwise wait |
+| **Decode Workers** | `graceful_shutdown=True` | Decode operations should complete to avoid wasted computation |
 | **Router** | `graceful_shutdown=True` | Ensure routing decisions complete |
 
-### Decode Worker Migration Integration
+### Migration Integration
 
-Decode workers use conditional draining based on whether request migration is supported:
+Backend workers always use `graceful_shutdown=True`, meaning they wait for in-flight requests to complete until the engine is stopped. Request migration is configured at the **frontend** level via `--migration-limit`:
 
-```python
-generate_endpoint.serve_endpoint(
-    handler.generate,
-    graceful_shutdown=config.migration_limit <= 0,  # If no migration, wait for requests
-    ...
-)
-```
-
-When `migration_limit > 0`:
-- Worker shuts down immediately (`graceful_shutdown=False`)
-- In-flight requests are migrated to healthy workers
-- No request loss occurs
-
-When `migration_limit <= 0`:
-- Worker waits for in-flight requests (`graceful_shutdown=True`)
-- Migration is not available
-- Requests complete on the shutting-down worker
+- When migration is enabled at the frontend, disconnected streams from failed workers are automatically retried on healthy workers
+- Workers don't need to know about migration configuration - they simply complete their work or signal incomplete streams
+- See [Request Migration Architecture](./request_migration.md) for details on how migration works
 
 ## Resource Cleanup
 
@@ -233,15 +219,15 @@ Match `terminationGracePeriodSeconds` to your expected request completion time:
 - Short requests (< 10s): 30s grace period
 - Long generation (> 30s): 120s+ grace period
 
-### 2. Enable Request Migration for Decode Workers
+### 2. Enable Request Migration
 
-If using disaggregated serving, enable migration for decode workers:
+Enable migration at the frontend to allow request recovery when workers shut down:
 
-```python
---migration-limit 3  # Allow up to 3 migration attempts
+```bash
+python3 -m dynamo.frontend ... --migration-limit 3  # Allow up to 3 migration attempts
 ```
 
-This allows immediate shutdown while preserving request state.
+This allows the frontend to automatically retry disconnected streams on healthy workers.
 
 ### 3. Monitor Shutdown Metrics
 

@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
@@ -134,33 +135,37 @@ class LoadGenerator:
         start_time = time.time()
         # More generous timeout for high-load tests - allow 2x duration + 2 minutes buffer
         timeout = max(duration_sec * 2 + 120, int(duration_sec * 2.5))
+
+        # Write stdout/stderr to files instead of using PIPE. aiperf may fork
+        # child processes that inherit pipe FDs; if those children outlive aiperf,
+        # communicate() blocks forever waiting for EOF. File-based output avoids
+        # this entirely. We also run aiperf in its own process group so that
+        # os.killpg() can clean up the entire tree on timeout.
+        stdout_path = os.path.join(artifact_dir, "aiperf.stdout.log")
+        stderr_path = os.path.join(artifact_dir, "aiperf.stderr.log")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
+            with open(stdout_path, "wb") as stdout_f, open(
+                stderr_path, "wb"
+            ) as stderr_f:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=stdout_f,
+                    stderr=stderr_f,
+                    start_new_session=True,
                 )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                logger.error("aiperf timed out")
-                raise RuntimeError("Load generation timed out")
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await proc.wait()
+                    logger.error("aiperf timed out")
+                    raise RuntimeError("Load generation timed out")
 
             end_time = time.time()
             actual_duration = end_time - start_time
-
-            # Persist logs for debugging
-            try:
-                with open(os.path.join(artifact_dir, "aiperf.stdout.log"), "wb") as f:
-                    f.write(stdout or b"")
-                with open(os.path.join(artifact_dir, "aiperf.stderr.log"), "wb") as f:
-                    f.write(stderr or b"")
-            except Exception:
-                pass
 
             if proc.returncode == 0:
                 logger.info("Load generation completed successfully")
