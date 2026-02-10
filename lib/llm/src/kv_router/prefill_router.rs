@@ -487,24 +487,23 @@ impl PrefillRouter {
             .get()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
-        if self.router_mode.is_kv_routing() {
-            let kv_router = match prefill_router {
-                InnerPrefillRouter::KvRouter(r) => r,
-                _ => anyhow::bail!("Expected KvRouter for KV routing mode"),
-            };
-            let (worker, _overlap) = kv_router
-                .chooser
-                .find_best_match(None, token_ids, None, update_states, lora_name)
-                .await?;
-            Ok((worker.worker_id, worker.dp_rank))
-        } else {
-            let worker_id = if update_states {
-                prefill_router.select_next_worker()
-            } else {
-                prefill_router.peek_next_worker()
+        match prefill_router {
+            InnerPrefillRouter::KvRouter(r) => {
+                let (worker, _overlap) = r
+                    .chooser
+                    .find_best_match(None, token_ids, None, update_states, lora_name)
+                    .await?;
+                Ok((worker.worker_id, worker.dp_rank))
             }
-            .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-            Ok((worker_id, 0))
+            InnerPrefillRouter::SimpleRouter(r) => {
+                let worker_id = if update_states {
+                    r.select_next_worker()
+                } else {
+                    r.peek_next_worker()
+                }
+                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+                Ok((worker_id, 0))
+            }
         }
     }
 
