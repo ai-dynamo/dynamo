@@ -44,6 +44,7 @@ async def init_worker(
             await init_video_diffusion_worker(runtime, config, shutdown_event)
             return
         # TODO: Add IMAGE_DIFFUSION support in follow-up PR
+        raise ValueError(f"Unsupported diffusion modality: {modality}")
 
     # LLM modalities (text, multimodal) use the LLM worker
     from dynamo.trtllm.workers.llm_worker import init_llm_worker
