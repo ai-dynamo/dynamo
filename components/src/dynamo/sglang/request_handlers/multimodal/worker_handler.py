@@ -143,11 +143,6 @@ class EmbeddingsProcessor:
         # pixel_values not needed — precomputed_embeddings bypasses the encoder
         mm_item.pop("pixel_values", None)
 
-        logger.warning(
-            f"[DEBUG-4] create_multimodal_item: precomputed shape={precomputed.shape}, "
-            f"mm_item keys={list(mm_item.keys())}, "
-            f"has_precomputed_embeddings={'precomputed_embeddings' in mm_item}"
-        )
         return mm_item
 
 
