@@ -183,7 +183,7 @@ jobs:
               --platform=${{ inputs.platform }} \
               --cuda-version=${{ inputs.cuda_version }} \
               --show-result \
-              --short-output
+              --output-short-filename
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-remote-build

@@ -26,17 +26,32 @@
     {% endif %}
 {% endif %}
 
-# --- Framework Stages
+# --- SGLang Stages
 {% if framework == "sglang" %}
     # SGLang is the only framework without a `framework` target currently, needs special treatment
     {% include "templates/sglang_runtime.Dockerfile" %}
-{% elif target == "framework" and framework != "dynamo" %}
-    {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
-{% elif ( target == "runtime" or target == "dev" or target == "local-dev" ) and framework != "dynamo" %}
-    {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
-    {% include "templates/" ~ framework ~ "_runtime.Dockerfile" %}
 {% else %}
-# --- No framework stages included
+# --- No SGLANG stages included
+{% endif %}
+
+# --- VLLM Stages
+{% if framework "vllm" %}
+    {% include "templates/vllm_framework.Dockerfile" %}
+    {% if target != "framework" %}
+        {% include "templates/vllm_framework.Dockerfile" %}
+    {% endif %}
+{% else %}
+# --- No VLLM stages included
+{% endif %}
+
+# --- TRTLLM Stages
+{% if framework "trtllm" %}
+    {% include "templates/trtllm_framework.Dockerfile" %}
+    {% if target != "framework" %}
+        {% include "templates/trtllm_framework.Dockerfile" %}
+    {% endif %}
+{% else %}
+# --- No TRTLLM stages included
 {% endif %}
 
 {% if make_efa == true and target == "runtime" %}

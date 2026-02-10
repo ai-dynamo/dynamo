@@ -77,7 +77,7 @@ runs:
             --platform=${{ inputs.platform }} \
             --cuda-version=${{ inputs.cuda_version }} \
             --show-result \
-            --short-output
+            --output-short-filename
         echo "::endgroup::"
     - name: Build EPP image
       if: ${{ inputs.target == 'frontend' }}

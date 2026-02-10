@@ -35,6 +35,10 @@ vllm:
   base_image: nvcr.io/nvidia/cuda-dl-base
   runtime_image: nvcr.io/nvidia/cuda
   runtime_image_tag: ${CUDA_VERSION}.0-runtime-ubuntu24.04
+  cuda12.9:
+    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+  cuda13.0:
+    base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
   vllm_ref: v0.14.1
   flashinf_ref: v0.5.3
   lmcache_ref: 0.3.12
@@ -43,10 +47,6 @@ vllm:
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
-  cuda12.9:
-    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-  cuda13.0:
-    base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
 
 sglang:
   base_image: nvcr.io/nvidia/cuda-dl-base
