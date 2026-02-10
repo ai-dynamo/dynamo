@@ -34,6 +34,135 @@ const (
 	DGDRPhaseDeploying DGDRPhase = "Deploying"
 	DGDRPhaseDeployed  DGDRPhase = "Deployed"
 	DGDRPhaseFailed    DGDRPhase = "Failed"
+
+	// Condition types
+	// ConditionTypeSucceeded is the aggregate condition for the DGDR lifecycle.
+	// True = pipeline completed successfully; False = in progress or failed.
+	// Reason and Message reflect the current stage or error.
+	ConditionTypeSucceeded = "Succeeded"
+
+	ConditionTypeValidation      = "Validation"
+	ConditionTypeProfiling       = "Profiling"
+	ConditionTypeSpecGenerated   = "SpecGenerated"
+	ConditionTypeDeploymentReady = "DeploymentReady"
+
+	// Event reasons
+	EventReasonInitialized          = "Initialized"
+	EventReasonValidationFailed     = "ValidationFailed"
+	EventReasonProfilingJobCreated  = "ProfilingJobCreated"
+	EventReasonProfilingJobFailed   = "ProfilingJobFailed"
+	EventReasonAIConfiguratorFailed = "AIConfiguratorFailed"
+	EventReasonSpecGenerated        = "SpecGenerated"
+	EventReasonSpecChangeRejected   = "SpecChangeRejected"
+	EventReasonDeploymentCreated    = "DeploymentCreated"
+	EventReasonDeploymentReady      = "DeploymentReady"
+	EventReasonDeploymentDegraded   = "DeploymentDegraded"
+	EventReasonDeploymentDeleted    = "DeploymentDeleted"
+
+	// Label keys
+	LabelApp           = "app"
+	LabelDGDR          = "dgdr"
+	LabelDGDRName      = "dgdr.nvidia.com/name"
+	LabelDGDRNamespace = "dgdr.nvidia.com/namespace"
+	LabelManagedBy     = "nvidia.com/managed-by"
+
+	// Label values
+	LabelValueDynamoProfiler = "dynamo-profiler"
+	LabelValueAICProfiler    = "aic-profiler"
+	LabelValueDynamoOperator = "dynamo-operator"
+)
+
+// ProfilingPhase represents a sub-phase within the profiling pipeline.
+// When the DGDR Phase is "Profiling", this value indicates which step
+// of the profiling pipeline is currently executing.
+// +kubebuilder:validation:Enum=Initializing;SweepingPrefill;SweepingDecode;SelectingConfig;BuildingCurves;GeneratingDGD;Done
+type ProfilingPhase string
+
+const (
+
+	// Profiler is loading the DGD template, detecting GPU hardware,
+	// and resolving the model architecture from HuggingFace.
+	ProfilingPhaseInitializing ProfilingPhase = "Initializing"
+
+	// Sweeping parallelization strategies (TP/TEP/DEP) across GPU counts
+	// for prefill, measuring TTFT at each configuration.
+	ProfilingPhaseSweepingPrefill ProfilingPhase = "SweepingPrefill"
+
+	// Sweeping parallelization strategies and concurrency levels
+	// for decode, measuring ITL at each configuration.
+	ProfilingPhaseSweepingDecode ProfilingPhase = "SweepingDecode"
+
+	// Filtering results against SLA targets and selecting the most
+	// cost-efficient configuration that meets TTFT/ITL requirements.
+	ProfilingPhaseSelectingConfig ProfilingPhase = "SelectingConfig"
+
+	// Building detailed interpolation curves (ISL→TTFT for prefill,
+	// KV-usage×context-length→ITL for decode) using the selected configs.
+	ProfilingPhaseBuildingCurves ProfilingPhase = "BuildingCurves"
+
+	// Packaging profiling data into a ConfigMap and generating
+	// the final DGD YAML with planner integration.
+	ProfilingPhaseGeneratingDGD ProfilingPhase = "GeneratingDGD"
+
+	// Profiling pipeline finished successfully.
+	ProfilingPhaseDone ProfilingPhase = "Done"
+)
+
+// Profiling condition Reasons.
+//
+// Hybrid A+D approach: the status.profilingPhase field is the canonical source
+// of the current profiling sub-phase, while the Profiling condition's Reason
+// mirrors the phase for kubectl-describe readability. On failure, the Reason
+// is set to "<Phase>Failed" to encode both the phase and the error in one field.
+const (
+	// ProfilingReasonInitializing indicates the profiler is loading the DGD template,
+	// detecting GPU hardware, and resolving the model architecture.
+	ProfilingReasonInitializing = "Initializing"
+
+	// ProfilingReasonSweepingPrefill indicates the profiler is sweeping parallelization
+	// strategies (TP/TEP/DEP) across GPU counts for prefill, measuring TTFT.
+	ProfilingReasonSweepingPrefill = "SweepingPrefill"
+
+	// ProfilingReasonSweepingDecode indicates the profiler is sweeping parallelization
+	// strategies and concurrency levels for decode, measuring ITL.
+	ProfilingReasonSweepingDecode = "SweepingDecode"
+
+	// ProfilingReasonSelectingConfig indicates the profiler is filtering results against
+	// SLA targets and selecting the most cost-efficient configuration.
+	ProfilingReasonSelectingConfig = "SelectingConfig"
+
+	// ProfilingReasonBuildingCurves indicates the profiler is building interpolation
+	// curves (ISL→TTFT, KV-usage×context-length→ITL) for planner integration.
+	ProfilingReasonBuildingCurves = "BuildingCurves"
+
+	// ProfilingReasonGeneratingDGD indicates the profiler is packaging data into a
+	// ConfigMap and generating the final DGD YAML.
+	ProfilingReasonGeneratingDGD = "GeneratingDGD"
+
+	// ProfilingReasonInitializingFailed indicates the initialization phase failed.
+	ProfilingReasonInitializingFailed = "InitializingFailed"
+
+	// ProfilingReasonSweepingPrefillFailed indicates the prefill sweep phase failed.
+	ProfilingReasonSweepingPrefillFailed = "SweepingPrefillFailed"
+
+	// ProfilingReasonSweepingDecodeFailed indicates the decode sweep phase failed.
+	ProfilingReasonSweepingDecodeFailed = "SweepingDecodeFailed"
+
+	// ProfilingReasonSelectingConfigFailed indicates the config selection phase failed.
+	ProfilingReasonSelectingConfigFailed = "SelectingConfigFailed"
+
+	// ProfilingReasonBuildingCurvesFailed indicates the curve-building phase failed.
+	ProfilingReasonBuildingCurvesFailed = "BuildingCurvesFailed"
+
+	// ProfilingReasonGeneratingDGDFailed indicates the DGD generation phase failed.
+	ProfilingReasonGeneratingDGDFailed = "GeneratingDGDFailed"
+
+	// ProfilingReasonCompleted indicates the profiling pipeline finished successfully.
+	ProfilingReasonCompleted = "Completed"
+
+	// ProfilingReasonJobCreationFailed indicates the Kubernetes Job for profiling
+	// could not be created.
+	ProfilingReasonJobCreationFailed = "JobCreationFailed"
 )
 
 // OptimizationType specifies the profiling optimization strategy.
@@ -233,6 +362,11 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// +optional
 	Phase DGDRPhase `json:"phase,omitempty"`
 
+	// ProfilingPhase indicates the current sub-phase of the profiling pipeline.
+	// Only meaningful when Phase is "Profiling". Cleared when profiling completes or fails.
+	// +optional
+	ProfilingPhase ProfilingPhase `json:"profilingPhase,omitempty"`
+
 	// DGDName is the name of the generated or created DynamoGraphDeployment.
 	// +optional
 	DGDName string `json:"dgdName,omitempty"`
@@ -282,6 +416,9 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Profiling",type=string,JSONPath=`.status.profilingPhase`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`,priority=1
+// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`,priority=1
 // +kubebuilder:printcolumn:name="DGD",type=string,JSONPath=`.status.dgdName`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 type DynamoGraphDeploymentRequest struct {
@@ -294,6 +431,8 @@ type DynamoGraphDeploymentRequest struct {
 	// Status reflects the current observed state of this deployment request.
 	Status DynamoGraphDeploymentRequestStatus `json:"status,omitempty"`
 }
+
+const hello = batchv1.JobComplete
 
 // +kubebuilder:object:root=true
 
@@ -316,6 +455,16 @@ func (s *DynamoGraphDeploymentRequest) SetPhase(phase DGDRPhase) {
 // GetPhase returns the current lifecycle phase.
 func (d *DynamoGraphDeploymentRequest) GetPhase() DGDRPhase {
 	return d.Status.Phase
+}
+
+// SetProfilingPhase updates the profiling sub-phase.
+func (d *DynamoGraphDeploymentRequest) SetProfilingPhase(phase ProfilingPhase) {
+	d.Status.ProfilingPhase = phase
+}
+
+// ClearProfilingPhase resets the profiling sub-phase (e.g., on completion or failure).
+func (d *DynamoGraphDeploymentRequest) ClearProfilingPhase() {
+	d.Status.ProfilingPhase = ""
 }
 
 // AddStatusCondition adds or updates a condition in the status.
