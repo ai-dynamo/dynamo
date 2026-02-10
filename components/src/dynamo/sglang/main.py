@@ -4,8 +4,8 @@
 import asyncio
 import logging
 import os
-import signal
 import sys
+import time
 
 import sglang as sgl
 import uvloop
@@ -13,6 +13,7 @@ import uvloop
 from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -22,11 +23,7 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import (
-    DynamoSglangPublisher,
-    setup_prometheus_registry,
-    setup_sgl_metrics,
-)
+from dynamo.sglang.publisher import DynamoSglangPublisher, setup_sgl_metrics
 from dynamo.sglang.register import (
     register_image_diffusion_model,
     register_llm_with_readiness_gate,
@@ -92,32 +89,13 @@ async def worker():
 
         config.server_args.load_format = setup_gms(config.server_args)
 
-    loop = asyncio.get_running_loop()
-
-    # Set DYN_EVENT_PLANE environment variable based on config
-    os.environ["DYN_EVENT_PLANE"] = config.dynamo_args.event_plane
-
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND use_kv_events is True
-    enable_nats = config.dynamo_args.request_plane == "nats" or (
-        config.dynamo_args.event_plane == "nats" and config.dynamo_args.use_kv_events
+    dynamo_args = config.dynamo_args
+    runtime, _ = create_runtime(
+        store_kv=dynamo_args.store_kv,
+        request_plane=dynamo_args.request_plane,
+        event_plane=dynamo_args.event_plane,
+        use_kv_events=dynamo_args.use_kv_events,
     )
-
-    runtime = DistributedRuntime(
-        loop,
-        config.dynamo_args.store_kv,
-        config.dynamo_args.request_plane,
-        enable_nats,
-    )
-
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     if config.dynamo_args.image_diffusion_worker:
         await init_image_diffusion(runtime, config)
@@ -148,7 +126,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    # Time model loading
+    start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
+    load_time = time.time() - start_time
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -162,9 +143,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+    # Record model load time immediately after publisher setup (which creates the gauges)
+    publisher.component_gauges.set_model_load_time(load_time)
+    logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
@@ -249,10 +230,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
     if server_args.node_rank >= 1:
@@ -336,10 +313,6 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
     if server_args.node_rank >= 1:
@@ -409,10 +382,6 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
-
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -736,12 +705,6 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
         logging.warning("Prefill warmup timed out after 1800s")
     except Exception as e:
         logging.warning(f"Prefill warmup failed: {e}")
-
-
-async def graceful_shutdown(runtime):
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
 
 
 def main():

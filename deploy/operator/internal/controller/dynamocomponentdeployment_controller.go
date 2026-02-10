@@ -460,14 +460,31 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
-	condition := metav1.Condition{
+	availableCondition := metav1.Condition{
 		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
 		Status:  componentReconcileResult.status,
 		Reason:  componentReconcileResult.reason,
 		Message: componentReconcileResult.message,
 	}
 
-	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, condition)
+	var componentReadyReason, componentReadyMessage string
+	if componentReconcileResult.status == metav1.ConditionTrue {
+		componentReadyReason = "ComponentReady"
+		componentReadyMessage = "DynamoComponent is ready"
+	} else {
+		componentReadyReason = "ComponentNotReady"
+		componentReadyMessage = "DynamoComponent is not ready"
+	}
+
+	componentReadyCondition := metav1.Condition{
+		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+		Status:  componentReconcileResult.status,
+		Reason:  componentReadyReason,
+		Message: componentReadyMessage,
+	}
+
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, availableCondition)
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, componentReadyCondition)
 	dynamoComponentDeployment.Status.Service = componentReconcileResult.serviceReplicaStatus
 	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
 

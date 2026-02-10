@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Creating Kubernetes Deployments
-
 The scripts in the `examples/<backend>/launch` folder like [agg.sh](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
 The corresponding YAML files like [agg.yaml](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg.yaml) show you how you could create a Kubernetes deployment for your inference graph.
 
@@ -261,4 +259,4 @@ spec:
 ```
 
 **For complete details on managing models and LoRA adapters, see:**
-📖 **[Managing Models with DynamoModel Guide](dynamomodel-guide.md)**
+📖 **[Managing Models with DynamoModel Guide](./dynamomodel-guide.md)**

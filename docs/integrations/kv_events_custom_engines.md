@@ -89,7 +89,6 @@ class CustomEnginePublisher:
             worker_id=worker_id,
             kv_block_size=block_size,
             dp_rank=dp_rank,
-            enable_local_indexer=False,
         )
 
     def on_blocks_stored(self, token_ids: list[int], block_hashes: list[int],
@@ -185,10 +184,10 @@ flowchart LR
 
 ### Part 1: ZMQ Subscriber (Dynamo Bindings)
 
-If your engine already publishes to ZMQ, use `ZmqKvEventPublisher` to subscribe and forward to NATS:
+If your engine already publishes to ZMQ, use `KvEventPublisher` with a `ZmqKvEventPublisherConfig` to subscribe and forward to NATS:
 
 ```python
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import KvEventPublisher, ZmqKvEventPublisherConfig
 
 # Configure the ZMQ subscriber
 config = ZmqKvEventPublisherConfig(
@@ -196,13 +195,12 @@ config = ZmqKvEventPublisherConfig(
     kv_block_size=block_size,
     zmq_endpoint="tcp://127.0.0.1:5557",  # Where your engine publishes
     zmq_topic="",                          # Subscribe to all topics
-    enable_local_indexer=False,
 )
 
 # Create publisher - it automatically subscribes to ZMQ and forwards to NATS
-kv_publisher = ZmqKvEventPublisher(
+kv_publisher = KvEventPublisher(
     component=component,
-    config=config,
+    zmq_config=config,
 )
 ```
 

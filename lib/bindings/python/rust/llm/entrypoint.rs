@@ -51,12 +51,13 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
         router_temperature: f64,
         use_kv_events: bool,
+        durable_kv_events: bool,
         router_replica_sync: bool,
         router_track_active_blocks: bool,
         router_track_output_blocks: bool,
@@ -72,6 +73,7 @@ impl KvRouterConfig {
                 overlap_score_weight,
                 router_temperature,
                 use_kv_events,
+                durable_kv_events,
                 router_replica_sync,
                 router_track_active_blocks,
                 router_track_output_blocks,
@@ -172,6 +174,7 @@ pub(crate) struct EntrypointArgs {
     extra_engine_args: Option<PathBuf>,
     namespace: Option<String>,
     is_prefill: bool,
+    migration_limit: u32,
     engine_factory: Option<PyEngineFactory>,
 }
 
@@ -179,7 +182,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, migration_limit=0, engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -198,6 +201,7 @@ impl EntrypointArgs {
         extra_engine_args: Option<PathBuf>,
         namespace: Option<String>,
         is_prefill: bool,
+        migration_limit: u32,
         engine_factory: Option<PyObject>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
@@ -242,6 +246,7 @@ impl EntrypointArgs {
             extra_engine_args,
             namespace,
             is_prefill,
+            migration_limit,
             engine_factory,
         })
     }
@@ -274,6 +279,7 @@ pub fn make_engine<'p>(
         .request_template(args.template_file.clone())
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
+        .migration_limit(Some(args.migration_limit))
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port)
