@@ -1367,9 +1367,6 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 	if isK8sDiscovery {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
-	}
-	// Discovery is enabled for non frontend components
-	if isK8sDiscovery && !opt.dynamoComponentDeployment.IsFrontendComponent() {
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
