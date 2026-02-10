@@ -81,14 +81,6 @@ impl InnerPrefillRouter {
             InnerPrefillRouter::KvRouter(_) => None,
         }
     }
-
-    /// Peek next worker without incrementing state (for non-KV modes only)
-    fn peek_next_worker(&self) -> Option<u64> {
-        match self {
-            InnerPrefillRouter::SimpleRouter(router) => router.peek_next_worker(),
-            InnerPrefillRouter::KvRouter(_) => None,
-        }
-    }
 }
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
