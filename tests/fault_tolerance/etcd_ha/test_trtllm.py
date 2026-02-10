@@ -40,9 +40,6 @@ class DynamoWorkerProcess(ManagedProcess):
             etcd_endpoints: List of ETCD endpoints for HA
             mode: One of "prefill_and_decode", "prefill", "decode"
         """
-        # Prefill workers require migration_limit=0 (no KV cache migration support)
-        migration_limit = "0" if mode == "prefill" else "3"
-
         command = [
             "python3",
             "-m",
@@ -55,8 +52,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.45",
             "--max-seq-len",
             "8192",
-            "--migration-limit",
-            migration_limit,
         ]
 
         # Add disaggregation-specific configuration
@@ -107,7 +102,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             log_dir=log_dir,
         )
 

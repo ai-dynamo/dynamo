@@ -33,7 +33,7 @@ impl CompletionChecker for CudaEventChecker {
     }
 }
 
-#[cfg(all(test, feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-cuda", feature = "testing-nixl"))]
 mod tests {
     use crate::block_manager::v2::physical::manager::TransportManager;
     use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;

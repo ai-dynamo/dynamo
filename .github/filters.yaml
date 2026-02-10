@@ -8,6 +8,7 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build
+#   fern     -> fern docs lint, sync, and version release
 #
 # Filters for coverage only (no CI triggered):
 #   docs, examples, ignore, planner
@@ -17,7 +18,6 @@ all:
 
 docs:
   - 'docs/**'
-  - 'fern/**'
   - '**/*.md'
   - '**/*.rst'
   - '**/*.txt'
@@ -26,6 +26,9 @@ docs:
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
+
+fern:
+  - 'fern/**'
 
 examples:
   - 'recipes/**'
@@ -68,6 +71,10 @@ ci: &ci
   - '.github/scripts/parse_buildkit_output.py'
 
 core:
+  # Exclude documentation files first, then include patterns override for specific paths
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
   - *ci
   - 'container/build.sh'
   - 'container/Dockerfile'
@@ -86,18 +93,19 @@ core:
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
-  - '!**/*.md'
-  - '!**/*.rst'
-  - '!**/*.txt'
 
 operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  - 'docs/kubernetes/api_reference.md'
 
 deploy:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'deploy/helm/**'
   - 'deploy/utils/**'
+  - 'deploy/chrek/**'
 
 planner:
   - 'components/src/dynamo/planner/**'
@@ -105,6 +113,8 @@ planner:
   - 'components/src/dynamo/global_router/**'
 
 vllm:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/Dockerfile.vllm'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
@@ -112,11 +122,15 @@ vllm:
   - 'components/src/dynamo/vllm/**'
 
 sglang:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/Dockerfile.sglang'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
 
 trtllm:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/Dockerfile.trtllm'
   - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
@@ -124,6 +138,8 @@ trtllm:
   - 'container/build_trtllm_wheel.sh'
 
 frontend:
+  - '!**/*.md'
+  - '!**/*.rst'
   - *ci
   - '.cargo/config.toml'
   - 'lib/**'

@@ -112,7 +112,9 @@ fn create_choice_stream(
         index,
         delta: ChatCompletionStreamResponseDelta {
             role,
-            content: Some(content.to_string()),
+            content: Some(
+                dynamo_async_openai::types::ChatCompletionMessageContent::Text(content.to_string()),
+            ),
             tool_calls,
             function_call: None,
             refusal: None,
@@ -533,23 +535,32 @@ impl JailedStream {
                     // Process each choice independently using the new architecture
                     for choice in &chat_response.choices {
                         if let Some(ref content) = choice.delta.content {
-                            let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
-                            let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
+                            // Jailing only applies to text content
+                            let text_content = match content {
+                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
+                                dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => None,
+                            };
 
-                            // Store metadata when any choice becomes jailed (first time only)
-                            if !choice_state.is_jailed && self.should_start_jail(content)
-                                && last_annotated_id.is_none() {
-                                    last_annotated_id = response.id.clone();
-                                    last_annotated_event = response.event.clone();
-                                    last_annotated_comment = response.comment.clone();
-                                }
+                            if let Some(text) = text_content {
+                                let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
+                                let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
 
-                            // Track actual stream finish reason in the choice state
-                            choice_state.stream_finish_reason = choice.finish_reason;
+                                // Store metadata when any choice becomes jailed (first time only)
+                                if !choice_state.is_jailed && self.should_start_jail(text)
+                                    && last_annotated_id.is_none() {
+                                        last_annotated_id = response.id.clone();
+                                        last_annotated_event = response.event.clone();
+                                        last_annotated_comment = response.comment.clone();
+                                    }
 
-                            // Process this choice and get emissions
-                            let emissions = choice_state.process_content(choice, content, &self).await;
-                            all_emissions.extend(emissions);
+                                // Track actual stream finish reason in the choice state
+                                choice_state.stream_finish_reason = choice.finish_reason;
+
+                                // Process this choice and get emissions
+                                let emissions = choice_state.process_content(choice, text, &self).await;
+                                all_emissions.extend(emissions);
+                            }
+                            // For multimodal content, pass through unchanged (no jailing)
                         } else {
                             // Handle choices without content (e.g., final chunks with finish_reason)
                             // Only filter out if this choice was ever jailed and lacks role

@@ -117,7 +117,7 @@ kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-For SLA-based autoscaling, see [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
+For SLA-based autoscaling, see [SLA Planner Guide](/docs/components/planner/planner_guide.md).
 
 ## Understanding Dynamo's Custom Resources
 
@@ -244,9 +244,23 @@ Key customization points include:
 - **[Operator Documentation](/docs/kubernetes/dynamo_operator.md)** - How the platform works
 - **[Service Discovery](/docs/kubernetes/service_discovery.md)** - Discovery backends and configuration
 - **[Helm Charts](/deploy/helm/README.md)** - For advanced users
+- **[Checkpointing](/docs/kubernetes/chrek/README.md)** - Fast pod startup with checkpoint/restore
 - **[GitOps Deployment with FluxCD](/docs/kubernetes/fluxcd.md)** - For advanced users
 - **[Logging](/docs/kubernetes/observability/logging.md)** - For logging setup
 - **[Multinode Deployment](/docs/kubernetes/deployment/multinode-deployment.md)** - For multinode deployment
 - **[Grove](/docs/kubernetes/grove.md)** - For grove details and custom installation
 - **[Monitoring](/docs/kubernetes/observability/metrics.md)** - For monitoring setup
 - **[Model Caching with Fluid](/docs/kubernetes/model_caching_with_fluid.md)** - For model caching with Fluid
+
+```{toctree}
+:hidden:
+
+Detailed Installation Guide <installation_guide>
+Dynamo Operator <dynamo_operator>
+Service Discovery <service_discovery>
+Webhooks <webhooks>
+Minikube Setup <deployment/minikube>
+Managing Models with DynamoModel <deployment/dynamomodel-guide>
+Autoscaling <autoscaling>
+Checkpointing <chrek/README>
+```

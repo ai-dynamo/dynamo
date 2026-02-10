@@ -298,15 +298,18 @@ class EncodeHelper:
         # for tokenizer loading. `model_type` is needed to retrieve the correct
         # multimodal placeholders and apply model-specific preprocessing.
 
-        # Pass tokenizer to reuse the pre-initialized tokenizer instead of
-        # creating a new one per request
-        inputs = default_multimodal_input_loader(
-            tokenizer=tokenizer,
-            model_dir=model_dir,
-            model_type=model_type,
-            modality="image",
-            prompts=[text_prompt],
-            media=image_urls[0],
+        # NOTE: default_multimodal_input_loader downloads images and preprocesses them
+        # synchronously. Wrap in asyncio.to_thread to allow concurrent image loading
+        # across multiple requests, improving throughput at high concurrency.
+        inputs = await asyncio.to_thread(
+            lambda: default_multimodal_input_loader(
+                tokenizer=tokenizer,
+                model_dir=model_dir,
+                model_type=model_type,
+                modality="image",
+                prompts=[text_prompt],
+                media=image_urls[0],
+            )
         )
 
         # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid

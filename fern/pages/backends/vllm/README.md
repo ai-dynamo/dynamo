@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "LLM Deployment using vLLM"
 ---
+
+# LLM Deployment using vLLM
 
 This directory contains reference implementations for deploying Large Language Models (LLMs) in various configurations using vLLM. For Dynamo integration, we leverage vLLM's native KV cache events, NIXL based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
@@ -22,7 +23,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
-- [Quick Start](#vllm-quick-start)
+- [Quick Start](#quick-start)
 - [Single Node Examples](#run-single-node-examples)
 - [Advanced Examples](#advanced-examples)
 - [Deploy on Kubernetes](#kubernetes-deployment)
@@ -35,13 +36,13 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | Feature | vLLM | Notes |
 |---------|------|-------|
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../router/kv-cache-routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../planner/sla-planner.md) | ✅ |  |
-| [**Load Based Planner**](../../planner/load-planner.md) | 🚧 | WIP |
-| [**KVBM**](../../kvbm/kvbm-architecture.md) | ✅ |  |
-| [**LMCache**](LMCache-Integration.md) | ✅ |  |
-| [**Prompt Embeddings**](prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md) | 🚧 | WIP |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
+| [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |
+| [**KVBM**](../../components/kvbm/README.md) | ✅ |  |
+| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
+| [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
 
@@ -55,13 +56,18 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
-### Start NATS and ETCD in the background
+### Start Infrastructure Services (Local Development Only)
 
-Start using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml)
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Pull or build container
 
@@ -81,9 +87,8 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 
 ## Run Single Node Examples
 
-<Warning>
-Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
-</Warning>
+> [!IMPORTANT]
+> Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
 
 ### Aggregated Serving
 
@@ -127,9 +132,8 @@ cd examples/backends/vllm
 bash launch/dep.sh
 ```
 
-<Tip>
-Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
-</Tip>
+> [!TIP]
+> Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
 
 ## Advanced Examples
 
@@ -140,7 +144,9 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
 This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
 
-**Guide:** [Speculative Decoding Quickstart](speculative-decoding.md)
+**Guide:** [Speculative Decoding Quickstart](../../features/speculative-decoding/speculative-decoding-vllm.md)
+
+> **See also:** [Speculative Decoding Feature Overview](../../features/speculative-decoding/README.md) for cross-backend documentation.
 
 ### Kubernetes Deployment
 
@@ -173,17 +179,11 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [KV Cache Routing](../../router/kv-cache-routing.md) on deterministic event IDs.
+See the high-level notes in [Router Design](../../design-docs/router-design.md#deterministic-event-ids) on deterministic event IDs.
 
 ## Request Migration
 
-You can enable [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
-
-```bash
-python3 -m dynamo.vllm ... --migration-limit=3
-```
-
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for details on how this works.
+Dynamo supports [request migration](../../fault-tolerance/request-migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for configuration details.
 
 ## Request Cancellation
 
