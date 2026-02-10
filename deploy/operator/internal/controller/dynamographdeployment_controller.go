@@ -1064,6 +1064,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
+
+	// During rolling updates, aggregate old worker service statuses into the result
+	// so that Replicas, ReadyReplicas, etc. reflect the total across old and new DCDs.
+	if rollingUpdateCtx.InProgress() {
+		oldWorkerStatuses, err := r.aggregateOldWorkerServiceStatuses(ctx, dynamoDeployment, rollingUpdateCtx)
+		if err != nil {
+			logger.Error(err, "failed to aggregate old worker service statuses")
+			// Non-fatal: continue with partial status
+		} else if len(oldWorkerStatuses) > 0 {
+			mergeWorkerServiceStatuses(result.ServiceStatus, oldWorkerStatuses)
+		}
+	}
+
 	return result, nil
 }
 

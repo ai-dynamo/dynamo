@@ -865,3 +865,238 @@ func TestGetWorkerInfoForWorkerHash(t *testing.T) {
 	assert.Equal(t, int32(1), status.services[consts.ComponentTypeDecode].readyReplicas)
 	assert.Equal(t, int32(3), status.totalReadyWorkers) // 2 + 1
 }
+
+func TestMergeWorkerServiceStatuses(t *testing.T) {
+	tests := []struct {
+		name              string
+		serviceStatuses   map[string]nvidiacomv1alpha1.ServiceReplicaStatus
+		oldWorkerStatuses map[string]nvidiacomv1alpha1.ServiceReplicaStatus
+		expected          map[string]nvidiacomv1alpha1.ServiceReplicaStatus
+	}{
+		{
+			name: "merges old and new for a single worker service",
+			serviceStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind:     "Deployment",
+					ComponentName:     "dgd-prefill-newhash1",
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(2)),
+				},
+			},
+			oldWorkerStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind:     "Deployment",
+					ComponentName:     "dgd-prefill-oldhash1",
+					Replicas:          1,
+					UpdatedReplicas:   0,
+					ReadyReplicas:     ptr.To(int32(1)),
+					AvailableReplicas: ptr.To(int32(1)),
+				},
+			},
+			expected: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind:     "Deployment",
+					ComponentName:     "dgd-prefill-newhash1",
+					ComponentNames:    []string{"dgd-prefill-newhash1", "dgd-prefill-oldhash1"},
+					Replicas:          3,
+					UpdatedReplicas:   2, // Only new are "updated"
+					ReadyReplicas:     ptr.To(int32(3)),
+					AvailableReplicas: ptr.To(int32(3)),
+				},
+			},
+		},
+		{
+			name: "no old statuses - no-op",
+			serviceStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind: "Deployment",
+					ComponentName: "dgd-prefill-newhash1",
+					Replicas:      2,
+					ReadyReplicas: ptr.To(int32(2)),
+				},
+			},
+			oldWorkerStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{},
+			expected: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind: "Deployment",
+					ComponentName: "dgd-prefill-newhash1",
+					Replicas:      2,
+					ReadyReplicas: ptr.To(int32(2)),
+				},
+			},
+		},
+		{
+			name:            "old exists but new doesn't yet",
+			serviceStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{},
+			oldWorkerStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind: "Deployment",
+					ComponentName: "dgd-prefill-oldhash1",
+					Replicas:      2,
+					ReadyReplicas: ptr.To(int32(2)),
+				},
+			},
+			expected: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{},
+		},
+		{
+			name: "handles nil ReadyReplicas and AvailableReplicas on old",
+			serviceStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind:     "Deployment",
+					ComponentName:     "dgd-prefill-newhash1",
+					Replicas:          2,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(1)),
+				},
+			},
+			oldWorkerStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind:     "Deployment",
+					ComponentName:     "dgd-prefill-oldhash1",
+					Replicas:          1,
+					ReadyReplicas:     nil,
+					AvailableReplicas: nil,
+				},
+			},
+			expected: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind:     "Deployment",
+					ComponentName:     "dgd-prefill-newhash1",
+					ComponentNames:    []string{"dgd-prefill-newhash1", "dgd-prefill-oldhash1"},
+					Replicas:          3,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(1)),
+				},
+			},
+		},
+		{
+			name: "frontend status untouched by merge",
+			serviceStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"frontend": {
+					ComponentKind: "Deployment",
+					ComponentName: "dgd-frontend",
+					Replicas:      1,
+					ReadyReplicas: ptr.To(int32(1)),
+				},
+				"prefill": {
+					ComponentKind: "Deployment",
+					ComponentName: "dgd-prefill-newhash1",
+					Replicas:      2,
+					ReadyReplicas: ptr.To(int32(2)),
+				},
+			},
+			oldWorkerStatuses: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"prefill": {
+					ComponentKind: "Deployment",
+					ComponentName: "dgd-prefill-oldhash1",
+					Replicas:      1,
+					ReadyReplicas: ptr.To(int32(1)),
+				},
+			},
+			expected: map[string]nvidiacomv1alpha1.ServiceReplicaStatus{
+				"frontend": {
+					ComponentKind: "Deployment",
+					ComponentName: "dgd-frontend",
+					Replicas:      1,
+					ReadyReplicas: ptr.To(int32(1)),
+				},
+				"prefill": {
+					ComponentKind:  "Deployment",
+					ComponentName:  "dgd-prefill-newhash1",
+					ComponentNames: []string{"dgd-prefill-newhash1", "dgd-prefill-oldhash1"},
+					Replicas:       3,
+					ReadyReplicas:  ptr.To(int32(3)),
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mergeWorkerServiceStatuses(tt.serviceStatuses, tt.oldWorkerStatuses)
+			assert.Equal(t, tt.expected, tt.serviceStatuses)
+		})
+	}
+}
+
+func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
+	t.Run("old DCD exists with status", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"prefill": {
+				ComponentType: consts.ComponentTypePrefill,
+				Replicas:      ptr.To(int32(2)),
+			},
+		})
+
+		oldDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-dgd-prefill-oldhash1",
+				Namespace: "default",
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoWorkerHash:          "oldhash1",
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypePrefill,
+					ServiceName:   "prefill",
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+					ComponentKind:   "Deployment",
+					ComponentName:   "test-dgd-prefill-oldhash1",
+					Replicas:        1,
+					UpdatedReplicas: 0,
+					ReadyReplicas:   ptr.To(int32(1)),
+				},
+			},
+		}
+
+		r := createTestReconciler(dgd, oldDCD)
+		ctx := context.Background()
+
+		rollingUpdateCtx := dynamo.RollingUpdateContext{
+			OldWorkerHash:     "oldhash1",
+			NewWorkerHash:     "newhash2",
+			OldWorkerReplicas: map[string]int32{"prefill": 1},
+			NewWorkerReplicas: map[string]int32{"prefill": 2},
+		}
+
+		statuses, err := r.aggregateOldWorkerServiceStatuses(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+
+		assert.Len(t, statuses, 1)
+		assert.Equal(t, "test-dgd-prefill-oldhash1", statuses["prefill"].ComponentName)
+		assert.Equal(t, int32(1), statuses["prefill"].Replicas)
+		assert.Equal(t, ptr.To(int32(1)), statuses["prefill"].ReadyReplicas)
+	})
+
+	t.Run("old DCD not found - skips gracefully", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"prefill": {
+				ComponentType: consts.ComponentTypePrefill,
+				Replicas:      ptr.To(int32(2)),
+			},
+		})
+
+		r := createTestReconciler(dgd)
+		ctx := context.Background()
+
+		rollingUpdateCtx := dynamo.RollingUpdateContext{
+			OldWorkerHash:     "oldhash1",
+			NewWorkerHash:     "newhash2",
+			OldWorkerReplicas: map[string]int32{"prefill": 1},
+			NewWorkerReplicas: map[string]int32{"prefill": 2},
+		}
+
+		statuses, err := r.aggregateOldWorkerServiceStatuses(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+
+		assert.Empty(t, statuses)
+	})
+}

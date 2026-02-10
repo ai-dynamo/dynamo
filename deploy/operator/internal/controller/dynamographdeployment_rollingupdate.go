@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
@@ -538,4 +539,81 @@ func (r *DynamoGraphDeploymentReconciler) deleteOldDCDs(
 	}
 
 	return nil
+}
+
+// aggregateOldWorkerServiceStatuses fetches old worker DCDs and returns their service statuses
+// keyed by service name. This allows merging old worker replica counts into the aggregated
+// service status during rolling updates.
+func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerServiceStatuses(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	rollingUpdateCtx dynamo.RollingUpdateContext,
+) (map[string]nvidiacomv1alpha1.ServiceReplicaStatus, error) {
+	logger := log.FromContext(ctx)
+	oldStatuses := make(map[string]nvidiacomv1alpha1.ServiceReplicaStatus)
+
+	for serviceName := range rollingUpdateCtx.OldWorkerReplicas {
+		oldDCDName := dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
+
+		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		err := r.Get(ctx, client.ObjectKey{Name: oldDCDName, Namespace: dgd.Namespace}, existingDCD)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Old worker DCD not found, skipping status aggregation",
+					"dcdName", oldDCDName,
+					"service", serviceName)
+				continue
+			}
+			return nil, fmt.Errorf("failed to get old worker DCD %s: %w", oldDCDName, err)
+		}
+
+		if existingDCD.Status.Service != nil {
+			oldStatuses[serviceName] = *existingDCD.Status.Service
+		}
+	}
+
+	return oldStatuses, nil
+}
+
+// mergeWorkerServiceStatuses merges old worker service statuses into the existing service statuses.
+// For each worker service present in both maps, it aggregates replica counts so that the status
+// reflects the total across old and new worker DCDs during a rolling update.
+func mergeWorkerServiceStatuses(
+	serviceStatuses map[string]nvidiacomv1alpha1.ServiceReplicaStatus,
+	oldWorkerStatuses map[string]nvidiacomv1alpha1.ServiceReplicaStatus,
+) {
+	for serviceName, oldStatus := range oldWorkerStatuses {
+		newStatus, exists := serviceStatuses[serviceName]
+		if !exists {
+			continue
+		}
+
+		// Build sorted ComponentNames from old and new DCD names
+		componentNames := []string{oldStatus.ComponentName, newStatus.ComponentName}
+		slices.Sort(componentNames)
+		newStatus.ComponentNames = componentNames
+
+		// Aggregate replica counts
+		newStatus.Replicas += oldStatus.Replicas
+		// UpdatedReplicas stays as-is (only new are "updated")
+		newStatus.ReadyReplicas = addOptionalInt32(newStatus.ReadyReplicas, oldStatus.ReadyReplicas)
+		newStatus.AvailableReplicas = addOptionalInt32(newStatus.AvailableReplicas, oldStatus.AvailableReplicas)
+
+		serviceStatuses[serviceName] = newStatus
+	}
+}
+
+// addOptionalInt32 adds two optional int32 pointers. Returns nil only if both are nil.
+func addOptionalInt32(a, b *int32) *int32 {
+	if a == nil && b == nil {
+		return nil
+	}
+	var sum int32
+	if a != nil {
+		sum += *a
+	}
+	if b != nil {
+		sum += *b
+	}
+	return &sum
 }
