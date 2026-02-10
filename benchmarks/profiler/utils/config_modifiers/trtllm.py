@@ -511,3 +511,35 @@ class TrtllmConfigModifier(BaseConfigModifier):
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
+
+    @classmethod
+    def set_decode_config(
+        cls,
+        config: dict,
+        max_batch_size: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """
+        Configure decode batch limits for decode profiling runs.
+
+        Removes any explicit max_batch_size / max_num_tokens overrides so
+        TRT-LLM falls back to its built-in default (2048), which is large
+        enough for the profiler's decode concurrency sweep.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        override_dict, args = parse_override_engine_args(args)
+
+        override_dict.pop("max_batch_size", None)
+        override_dict.pop("max_num_tokens", None)
+
+        override_str = json.dumps(override_dict)
+        args = append_argument(args, ["--override-engine-args", override_str])
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()

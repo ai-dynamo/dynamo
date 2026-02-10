@@ -210,7 +210,7 @@ def plot_decode_3d_surface(
     yi = np.linspace(min(y_context_length), max(y_context_length), 100)
     X, Y = np.meshgrid(xi, yi)
 
-    # Try cubic interpolation first, fallback to linear if Qhull error occurs
+    # Try cubic interpolation first, fallback to linear, then skip if degenerate
     try:
         Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
         Z_thpt = griddata(
@@ -218,10 +218,19 @@ def plot_decode_3d_surface(
         )
     except Exception as e:
         logger.warning(f"Cubic interpolation failed: {e}. Falling back to linear.")
-        Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="linear")
-        Z_thpt = griddata(
-            (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="linear"
-        )
+        try:
+            Z_itl = griddata(
+                (x_kv_usage, y_context_length), z_itl, (X, Y), method="linear"
+            )
+            Z_thpt = griddata(
+                (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="linear"
+            )
+        except Exception as e2:
+            logger.warning(
+                f"Linear interpolation also failed: {e2}. "
+                "Data may be degenerate (e.g. constant KV usage). Skipping 3D plot."
+            )
+            return
 
     # Plot ITL surface
     fig = plt.figure(figsize=(12, 10))

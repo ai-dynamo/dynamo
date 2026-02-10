@@ -6,7 +6,10 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
+from benchmarks.profiler.utils.defaults import (
+    DECODE_MAX_CONCURRENCY,
+    PREFILL_MAX_NUM_TOKENS,
+)
 from benchmarks.profiler.utils.model_info import (
     MOE_ADDITIONAL_TP_ARCHITECTURES,
     ModelInfo,
@@ -263,4 +266,12 @@ def apply_parallel_mapping_to_config(
             max_num_tokens=PREFILL_MAX_NUM_TOKENS * mapping.get_attn_dp_size(),
             component_type=prefill_component_type,
         )
+    elif phase == SubComponentType.DECODE:
+        # Allow the backend to configure decode-specific batch limits.
+        if hasattr(config_modifier, "set_decode_config"):
+            cfg = config_modifier.set_decode_config(
+                cfg,
+                max_batch_size=DECODE_MAX_CONCURRENCY,
+                component_type=SubComponentType.DECODE,
+            )
     return cfg
