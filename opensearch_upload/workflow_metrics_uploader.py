@@ -10,6 +10,16 @@ from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse
 import re
 
+# Import error classification modules
+try:
+    from error_classification.classifier import ErrorClassifier
+    from error_classification.error_extractor import ErrorExtractor
+    from error_classification.config import Config as ErrorConfig
+    ERROR_CLASSIFICATION_AVAILABLE = True
+except ImportError:
+    ERROR_CLASSIFICATION_AVAILABLE = False
+    print("⚠️  Error classification module not available")
+
 # Annotation field constants
 FIELD_ANNOTATION_COUNT = "l_annotation_count"
 FIELD_ANNOTATION_FAILURE_COUNT = "l_annotation_failure_count"
@@ -23,6 +33,11 @@ FIELD_RUNNER_PREFIX = "s_runner_prefix"
 # Retry field constants
 FIELD_RUN_ATTEMPT = "l_run_attempt"  # Which attempt this is (1, 2, 3...)
 FIELD_RETRY_COUNT = "l_retry_count"  # Number of retries (0, 1, 2...)
+
+# Error classification field constants
+FIELD_ERROR_TYPE = "s_error_type"  # Error category from classifier
+FIELD_ERROR_SUMMARY = "s_error_summary"  # Root cause summary
+FIELD_ERROR_CONFIDENCE = "f_error_confidence"  # Classification confidence score
 
 
 def process_annotations(
@@ -82,7 +97,43 @@ class WorkflowMetricsUploader:
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "workflow-metrics-uploader/1.0"
         }
-        
+
+        # Initialize error classification if enabled and available
+        self.enable_error_classification = os.getenv("ENABLE_ERROR_CLASSIFICATION", "false").lower() == "true"
+        self.error_classifier = None
+        self.error_extractor = None
+
+        if self.enable_error_classification and ERROR_CLASSIFICATION_AVAILABLE:
+            try:
+                # Check if API key is available
+                anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+                if anthropic_api_key:
+                    # Create config for error classifier
+                    error_config = ErrorConfig(
+                        anthropic_api_key=anthropic_api_key,
+                        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
+                        api_format=os.getenv("API_FORMAT", "anthropic"),
+                        api_base_url=os.getenv("API_BASE_URL"),
+                        error_classification_index=os.getenv("ERROR_CLASSIFICATION_INDEX"),
+                        opensearch_url=os.getenv("OPENSEARCH_URL"),
+                        opensearch_username=os.getenv("OPENSEARCH_USERNAME"),
+                        opensearch_password=os.getenv("OPENSEARCH_PASSWORD")
+                    )
+                    # Initialize classifier (OpenSearch client is optional for deduplication)
+                    self.error_classifier = ErrorClassifier(
+                        config=error_config,
+                        opensearch_client=None  # Deduplication handled separately for now
+                    )
+                    self.error_extractor = ErrorExtractor()
+                    print("✅ Error classification enabled")
+                else:
+                    print("⚠️  ANTHROPIC_API_KEY not set, error classification disabled")
+            except Exception as e:
+                print(f"⚠️  Error initializing classifier: {e}")
+                self.error_classifier = None
+        elif self.enable_error_classification:
+            print("⚠️  Error classification module not available, classification disabled")
+
         print(f"🚀 Initialized uploader for {self.repo}")
         print(f"📊 Will fetch workflows from the past {self.hours_back} hours")
     
@@ -474,7 +525,121 @@ class WorkflowMetricsUploader:
             print(
                 f"⚠️  Error fetching {annotation_type} annotations for {entity_name}: {e}"
             )
-    
+
+    def classify_job_errors(
+        self,
+        job_data: Dict[str, Any],
+        workflow_data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Extract and classify errors from a failed job.
+        Returns a dict mapping step names to classifications.
+
+        Args:
+            job_data: Job information
+            workflow_data: Optional workflow information for context
+
+        Returns:
+            Dict with 'job_classification' and 'step_classifications' keys
+        """
+        result = {
+            "job_classification": None,
+            "step_classifications": {}  # step_name -> classification
+        }
+
+        # Skip if error classification is not enabled or available
+        if not self.error_classifier or not self.enable_error_classification:
+            return result
+
+        # Only classify failed jobs
+        status = job_data.get("conclusion") or job_data.get("status", "unknown")
+        if status not in ["failure", "failed"]:
+            return result
+
+        try:
+            job_id = str(job_data["id"])
+            job_name = job_data.get("name", "")
+
+            print(f"   🤖 Classifying errors for job: {job_name}")
+
+            # Fetch job logs from GitHub API (once)
+            logs_url = f"https://api.github.com/repos/{self.repo}/actions/jobs/{job_id}/logs"
+            logs_response = requests.get(logs_url, headers=self.github_headers, timeout=30)
+
+            if logs_response.status_code != 200:
+                print(f"   ⚠️  Failed to fetch logs (HTTP {logs_response.status_code})")
+                return result
+
+            log_content = logs_response.text
+
+            # Extract errors from all failed steps
+            all_errors = self.error_extractor.extract_from_github_job_logs(
+                log_content=log_content,
+                context={"job_name": job_name}
+            )
+
+            if not all_errors:
+                print(f"   ⚠️  No errors extracted from job logs")
+                return result
+
+            print(f"   📝 Found {len(all_errors)} error(s) in job")
+
+            # Classify each error and map to steps
+            for error in all_errors:
+                step_name = error.metadata.get("step_name", "") if error.metadata else ""
+
+                # Classify the error
+                classification = self.error_classifier.classify_error(
+                    error_context=error,
+                    use_cache=True,  # Use caching to reduce API costs
+                    classification_method="batch"  # Called from batch uploader
+                )
+
+                # Store classification for this step
+                if step_name:
+                    result["step_classifications"][step_name] = {
+                        "error_type": classification.primary_category,
+                        "error_summary": classification.root_cause_summary,
+                        "error_confidence": classification.confidence_score
+                    }
+
+                    confidence_pct = int(classification.confidence_score * 100)
+                    print(f"      ✅ Step '{step_name}': {classification.primary_category} ({confidence_pct}%)")
+
+                # Use first error as job-level classification
+                if result["job_classification"] is None:
+                    result["job_classification"] = {
+                        "error_type": classification.primary_category,
+                        "error_summary": classification.root_cause_summary,
+                        "error_confidence": classification.confidence_score
+                    }
+
+            return result
+
+        except Exception as e:
+            print(f"   ⚠️  Error during classification: {e}")
+            return result
+
+    def add_error_classification_fields(
+        self,
+        db_data: Dict[str, Any],
+        classification: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Add error classification fields to job or step data.
+
+        Args:
+            db_data: The dictionary to add fields to (job_metrics or step_metrics)
+            classification: Pre-computed classification dict with error_type, error_summary, error_confidence
+        """
+        if not classification:
+            return
+
+        # Add classification fields to db_data
+        db_data[FIELD_ERROR_TYPE] = classification["error_type"]
+        db_data[FIELD_ERROR_SUMMARY] = classification["error_summary"]
+        db_data[FIELD_ERROR_CONFIDENCE] = classification["error_confidence"]
+
     def backfill_previous_attempts(self, workflow_data: Dict[str, Any]) -> int:
         """
         When a retry is detected, fetch and upload all previous attempts
@@ -506,11 +671,18 @@ class WorkflowMetricsUploader:
                 jobs_data = self.fetch_job_details(run_id)
                 if jobs_data and "jobs" in jobs_data:
                     for job in jobs_data["jobs"]:
-                        self.upload_job_metrics(job, attempt_data)
-                        
-                        # Upload steps for this job
+                        # Classify errors once for the entire job
+                        classifications = self.classify_job_errors(job, attempt_data)
+                        job_classification = classifications.get("job_classification")
+                        step_classifications = classifications.get("step_classifications", {})
+
+                        self.upload_job_metrics(job, attempt_data, job_classification)
+
+                        # Upload steps for this job with pre-computed classifications
                         for step_index, step in enumerate(job.get("steps", [])):
-                            self.upload_step_metrics(step, job, attempt_data, step_index)
+                            step_name = step.get("name", f"step_{step_index}")
+                            step_classification = step_classifications.get(step_name)
+                            self.upload_step_metrics(step, job, attempt_data, step_index, step_classification)
                 
                 sleep(0.5)  # Rate limiting
                 
@@ -590,7 +762,12 @@ class WorkflowMetricsUploader:
         
         return self.post_to_opensearch(self.workflow_index, workflow_metrics)
     
-    def upload_job_metrics(self, job_data: Dict[str, Any], workflow_data: Dict[str, Any]) -> bool:
+    def upload_job_metrics(
+        self,
+        job_data: Dict[str, Any],
+        workflow_data: Dict[str, Any],
+        error_classification: Optional[Dict[str, Any]] = None
+    ) -> bool:
         """Upload job metrics"""
         job_id = str(job_data["id"])
         job_name = job_data.get("name", "")
@@ -662,11 +839,21 @@ class WorkflowMetricsUploader:
             entity_id=job_id,
             entity_name=job_name
         )
-        
+
+        # Add error classification for failed jobs (pre-computed)
+        if error_classification:
+            self.add_error_classification_fields(job_metrics, error_classification)
+
         return self.post_to_opensearch(self.jobs_index, job_metrics)
     
-    def upload_step_metrics(self, step_data: Dict[str, Any], job_data: Dict[str, Any], 
-                          workflow_data: Dict[str, Any], step_index: int) -> bool:
+    def upload_step_metrics(
+        self,
+        step_data: Dict[str, Any],
+        job_data: Dict[str, Any],
+        workflow_data: Dict[str, Any],
+        step_index: int,
+        error_classification: Optional[Dict[str, Any]] = None
+    ) -> bool:
         """Upload step metrics"""
         job_id = str(job_data["id"])
         step_name = step_data.get("name", f"step_{step_index}")
@@ -721,7 +908,11 @@ class WorkflowMetricsUploader:
             "l_duration_sec": duration_sec,
             "@timestamp": completed_at or datetime.now(timezone.utc).isoformat()
         }
-        
+
+        # Add error classification for failed steps (pre-computed)
+        if error_classification:
+            self.add_error_classification_fields(step_metrics, error_classification)
+
         return self.post_to_opensearch(self.steps_index, step_metrics)
     
     def process_workflows(self):
@@ -761,15 +952,22 @@ class WorkflowMetricsUploader:
                     for job in jobs_data["jobs"]:
                         job_name = job.get("name", "")
                         print(f"  📤 Processing job: {job_name}")
-                        
-                        # Upload job metrics
-                        if self.upload_job_metrics(job, workflow):
+
+                        # Classify errors once for the entire job (if enabled and job failed)
+                        classifications = self.classify_job_errors(job, workflow)
+                        job_classification = classifications.get("job_classification")
+                        step_classifications = classifications.get("step_classifications", {})
+
+                        # Upload job metrics with classification
+                        if self.upload_job_metrics(job, workflow, job_classification):
                             jobs_processed += 1
-                        
-                        # Upload step metrics
+
+                        # Upload step metrics with pre-computed classifications
                         steps = job.get("steps", [])
                         for step_index, step in enumerate(steps):
-                            if self.upload_step_metrics(step, job, workflow, step_index):
+                            step_name = step.get("name", f"step_{step_index}")
+                            step_classification = step_classifications.get(step_name)
+                            if self.upload_step_metrics(step, job, workflow, step_index, step_classification):
                                 steps_processed += 1
                 
                 sleep(0.5)  # Rate limiting between workflows
