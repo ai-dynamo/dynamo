@@ -7,6 +7,7 @@ from dynamo.sglang.multimodal_utils.multimodal_chat_processor import (
 )
 from dynamo.sglang.multimodal_utils.multimodal_encode_utils import (
     encode_image_embeddings,
+    load_vision_model,
 )
 from dynamo.sglang.multimodal_utils.multimodal_image_loader import ImageLoader
 
@@ -14,5 +15,6 @@ __all__ = [
     "multimodal_request_to_sglang",
     "process_sglang_stream_response",
     "encode_image_embeddings",
+    "load_vision_model",
     "ImageLoader",
 ]

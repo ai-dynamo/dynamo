@@ -4,15 +4,15 @@
 import logging
 from typing import AsyncIterator
 
-import torch
 from sglang.srt.parser.conversation import chat_templates
-from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
+from transformers import AutoImageProcessor, AutoTokenizer
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.multimodal_utils import ImageLoader, encode_image_embeddings
+from dynamo.sglang.multimodal_utils.multimodal_encode_utils import load_vision_model
 from dynamo.sglang.protocol import SglangMultimodalRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -56,12 +56,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         self.image_processor = AutoImageProcessor.from_pretrained(
             self.model, trust_remote_code=True
         )
-        self.vision_model = AutoModel.from_pretrained(
-            self.model,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-        )
+        self.vision_model = load_vision_model(self.model)
 
         # Load tokenizer to convert image token string to integer ID
         self.tokenizer = AutoTokenizer.from_pretrained(
