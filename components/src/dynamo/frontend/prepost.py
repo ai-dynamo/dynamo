@@ -234,7 +234,29 @@ class StreamingPostProcessor:
 
         choice = None
         if delta_message is None:
-            pass
+            if self.in_progress_tool_calls:
+                choice = {
+                    "index": output.index,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            tool_call.model_dump(exclude_none=True)
+                            for _, tool_call in sorted(
+                                self.in_progress_tool_calls.items()
+                            )
+                        ],
+                    },
+                    "finish_reason": output.finish_reason,
+                    "logprobs": output.logprobs,
+                }
+                self.in_progress_tool_calls.clear()
+            elif output.finish_reason:
+                choice = {
+                    "index": output.index,
+                    "delta": {},
+                    "finish_reason": output.finish_reason,
+                    "logprobs": output.logprobs,
+                }
         elif delta_message.tool_calls:
             for tool_delta in delta_message.tool_calls:
                 existing = self.in_progress_tool_calls.get(tool_delta.index)

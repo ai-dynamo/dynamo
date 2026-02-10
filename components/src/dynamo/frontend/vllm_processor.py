@@ -63,6 +63,9 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
         return FinishReason.ERROR
     if raw_reason.startswith("abort"):
         return FinishReason.ABORT
+    if raw_reason.startswith("content_filter"):
+        logger.info("Router finish_reason indicates content filtering: %s", raw_reason)
+        raw_reason = "content_filter"
     mapped = _FINISH_REASON_MAP.get(raw_reason)
     if mapped is None:
         logger.warning("Unknown finish_reason from router: %s", raw_reason)

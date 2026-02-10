@@ -263,7 +263,7 @@ class ModelCardInstanceId:
     Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
     The instance_id is not currently exposed in the Python bindings.
     """
-    def triple(self) -> (str, str, str):
+    def triple(self) -> Tuple[str, str, str]:
         """
         Triple of namespace, component and endpoint this worker is serving.
         """
