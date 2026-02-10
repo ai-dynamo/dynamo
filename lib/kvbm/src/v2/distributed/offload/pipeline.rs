@@ -1467,9 +1467,10 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                 .into_iter()
                 .zip(sequence_hashes.iter())
                 .map(|(dst_block, seq_hash)| {
-                    shared
-                        .dst_manager
-                        .register_mutable_block_with_hash(dst_block, *seq_hash)
+                    let complete = dst_block
+                        .stage(*seq_hash, shared.dst_manager.block_size())
+                        .expect("block size mismatch");
+                    shared.dst_manager.register_block(complete)
                 })
                 .collect();
 
@@ -1696,8 +1697,10 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                 .into_iter()
                 .zip(sequence_hashes.iter())
                 .map(|(dst_block, seq_hash)| {
-                    self.dst_manager
-                        .register_mutable_block_with_hash(dst_block, *seq_hash)
+                    let complete = dst_block
+                        .stage(*seq_hash, self.dst_manager.block_size())
+                        .expect("block size mismatch");
+                    self.dst_manager.register_block(complete)
                 })
                 .collect();
 

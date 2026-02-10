@@ -872,8 +872,10 @@ impl InitiatorSession {
             .into_iter()
             .zip(self.local_g3_blocks.blocks().iter())
             .map(|(dst, src)| {
-                self.g2_manager
-                    .register_mutable_block_from_existing(dst, src)
+                let complete = dst
+                    .stage(src.sequence_hash(), self.g2_manager.block_size())
+                    .expect("block size mismatch");
+                self.g2_manager.register_block(complete)
             })
             .collect();
 
@@ -981,14 +983,16 @@ impl InitiatorSession {
             );
 
             // Step 4: Register pulled blocks with their sequence hashes
-            // Note: We use register_mutable_block_with_hash to set the sequence hash
-            // since we don't have the original block reference from the remote.
+            // We stage each block with the sequence hash from the remote,
+            // then register it to produce an immutable block.
             let new_g2_blocks: Vec<ImmutableBlock<G2>> = dst_blocks
                 .into_iter()
                 .zip(seq_hashes.iter())
                 .map(|(dst, seq_hash)| {
-                    self.g2_manager
-                        .register_mutable_block_with_hash(dst, *seq_hash)
+                    let complete = dst
+                        .stage(*seq_hash, self.g2_manager.block_size())
+                        .expect("block size mismatch");
+                    self.g2_manager.register_block(complete)
                 })
                 .collect();
 
@@ -1256,8 +1260,10 @@ impl InitiatorSession {
                     Ok(hash) => {
                         // Register the block with its sequence hash
                         // This adds it to the BlockRegistry for presence filtering
-                        let immutable =
-                            g2_manager.register_mutable_block_with_hash(dst_block, *seq_hash);
+                        let complete = dst_block
+                            .stage(*seq_hash, g2_manager.block_size())
+                            .expect("block size mismatch");
+                        let immutable = g2_manager.register_block(complete);
                         blocks.push(immutable);
                         success.push(hash);
                     }

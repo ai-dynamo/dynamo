@@ -359,8 +359,10 @@ impl ControllableSession {
             .into_iter()
             .zip(self.g3_blocks.blocks().iter())
             .map(|(dst, src)| {
-                self.g2_manager
-                    .register_mutable_block_from_existing(dst, src)
+                let complete = dst
+                    .stage(src.sequence_hash(), self.g2_manager.block_size())
+                    .expect("block size mismatch");
+                self.g2_manager.register_block(complete)
             })
             .collect();
 
