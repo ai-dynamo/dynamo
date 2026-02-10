@@ -57,6 +57,8 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
+    # Tokenizer latency in milliseconds
+    TOKENIZER_LATENCY_MS = "tokenizer_latency_ms"
     # Total number of output tokens generated (counter that updates in real-time)
     OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
@@ -98,6 +100,8 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
+    # Label name for tokenizer operation
+    OPERATION_LABEL = "operation"
 
 
 class kvbm:
