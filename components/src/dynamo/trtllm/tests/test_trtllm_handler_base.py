@@ -17,6 +17,20 @@ pytestmark = [
 
 
 @dataclass
+class MockGuidedDecodingParams:
+    """Mock of TRT-LLM's GuidedDecodingParams dataclass."""
+
+    json: object | None = None
+    regex: str | None = None
+    grammar: str | None = None
+    json_object: bool = False
+    structural_tag: str | None = None
+
+    def _validate(self):
+        pass
+
+
+@dataclass
 class MockSamplingParams:
     """Mock sampling params object for testing."""
 
@@ -26,6 +40,7 @@ class MockSamplingParams:
     repetition_penalty: float = 1.0
     seed: int | None = None
     ignore_eos: bool = False
+    guided_decoding: MockGuidedDecodingParams | None = None
 
     def __post_init__(self):
         """Called after dataclass initialization (including via replace())."""
@@ -150,3 +165,67 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
+
+
+class TestGuidedDecodingFromToolChoice:
+    """Regression tests for tool_choice=required causing 500 errors.
+
+    When the Dynamo Rust frontend receives tool_choice="required" + tools,
+    it converts them into a guided_decoding JSON schema and serializes it
+    as a plain dict over TCP. The TRT-LLM handler must convert this dict
+    into a proper GuidedDecodingParams object. Without conversion:
+
+        AttributeError: 'dict' object has no attribute 'json_object'
+    """
+
+    # Matches what the Rust frontend serializes when
+    # tool_choice="required" with a single tool definition.
+    GUIDED_DECODING_DICT = {
+        "json": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "anyOf": [
+                    {
+                        "properties": {
+                            "name": {"type": "string", "enum": ["get_weather"]},
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"location": {"type": "string"}},
+                                "required": ["location"],
+                            },
+                        },
+                        "required": ["name", "parameters"],
+                    }
+                ],
+            },
+        }
+    }
+
+    def test_guided_decoding_dict_overwrites_as_raw_dict(self):
+        """_override_sampling_params sets guided_decoding to a raw dict.
+
+        The Rust frontend serializes GuidedDecodingOptions as a JSON dict.
+        dataclasses.replace() blindly sets it on SamplingParams without
+        converting to GuidedDecodingParams, so downstream code that does
+        `self.guided_decoding.json_object` crashes with AttributeError.
+        """
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "temperature": 0.7,
+                "guided_decoding": self.GUIDED_DECODING_DICT,
+            }
+        }
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        # Bug: guided_decoding is a raw dict instead of GuidedDecodingParams
+        assert isinstance(result.guided_decoding, dict)
+        assert not isinstance(result.guided_decoding, MockGuidedDecodingParams)
+
+        # This is exactly what TRT-LLM does in sampling_params.py
+        # _get_guided_decoding_params() and it crashes:
+        with pytest.raises(AttributeError, match="json_object"):
+            _ = result.guided_decoding.json_object
