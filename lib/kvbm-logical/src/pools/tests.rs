@@ -207,7 +207,9 @@ fn test_mutable_block_stage_and_debug() {
     let seq_hash = crate::KvbmSequenceHashProvider::kvbm_sequence_hash(
         &testing::create_test_token_block(&[10, 11, 12, 13], 4),
     );
-    let complete_block = mutable_block.stage(seq_hash);
+    let complete_block = mutable_block
+        .stage(seq_hash, 4)
+        .expect("block size should match");
     assert_eq!(complete_block.sequence_hash(), seq_hash);
 }
 
@@ -288,10 +290,10 @@ fn test_weak_block_upgrade_via_upgrade_fn() {
     }; // original dropped — block returns to inactive pool
 
     // Upgrade should succeed via the upgrade_fn path (finds block in inactive pool)
-    let upgraded = weak_block.upgrade();
-    if let Some(block) = upgraded {
-        assert_eq!(block.sequence_hash(), seq_hash);
-    }
+    let upgraded = weak_block
+        .upgrade()
+        .expect("upgrade should succeed via upgrade_fn");
+    assert_eq!(upgraded.sequence_hash(), seq_hash);
 }
 
 #[test]

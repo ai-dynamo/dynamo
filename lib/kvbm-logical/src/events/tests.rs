@@ -6,6 +6,7 @@
 //! These tests verify the end-to-end flow from BlockRegistry through
 //! EventsManager, EventBatcher, and KvbmCacheEventsPublisher.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,7 +77,7 @@ async fn test_full_event_pipeline() {
         .unwrap();
 
     // 4. Register blocks (triggers Create events)
-    let seq_hashes: Vec<_> = (0..5).map(|i| create_seq_hash_at_position(i)).collect();
+    let seq_hashes: Vec<_> = (0..5).map(create_seq_hash_at_position).collect();
     let handles: Vec<_> = seq_hashes
         .iter()
         .map(|&hash| {
@@ -187,7 +188,6 @@ async fn test_type_switch_flushes_batch() {
         "Second batch should be Remove"
     );
 
-    // Keep handle2 alive
     drop(handle2);
 }
 
@@ -207,7 +207,7 @@ async fn test_max_batch_size_flush() {
         .batching_config(
             BatchingConfig::default()
                 .with_window(Duration::from_secs(60)) // Long window
-                .with_max_size(3),
+                .with_max_size(NonZeroUsize::new(3).unwrap()),
         )
         .build()
         .unwrap();
@@ -240,7 +240,7 @@ async fn test_max_batch_size_flush() {
         panic!("Expected Create batch");
     }
 
-    // Keep handles alive to prevent remove events interfering
+    // Drop handles to allow remove events to proceed
     drop(handles);
 }
 

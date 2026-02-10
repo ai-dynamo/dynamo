@@ -71,7 +71,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LruBackend<T> {
         let seq_hash = block.sequence_hash();
 
         // Assert we're not causing an eviction
-        debug_assert!(
+        assert!(
             self.cache.len() < self.cache.cap().get(),
             "LRU backend insert would cause eviction! len={}, cap={}. \
              This indicates insufficient capacity for all blocks.",

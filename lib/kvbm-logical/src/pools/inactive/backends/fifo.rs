@@ -3,7 +3,7 @@
 
 //! FIFO reuse policy for inactive registered blocks.
 //!
-//! Allocates blocks in first-in-first-out order based on insertion time.
+//! Allocates blocks in first-in-first-out order using a monotonic counter.
 //! Uses BTreeMap for O(log n) insertion/removal with priority key ordering.
 
 #![allow(dead_code)]
@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::{BlockId, InactiveBlock};
 
-/// Microseconds since epoch
+/// Monotonic sequence number used as priority key for FIFO ordering.
 pub type PriorityKey = u64;
 
 /// FIFO reuse policy
@@ -22,7 +22,7 @@ pub type PriorityKey = u64;
 pub struct FifoReusePolicy {
     keys: HashMap<BlockId, PriorityKey>,
     blocks: BTreeMap<PriorityKey, InactiveBlock>,
-    start_time: std::time::Instant,
+    next_seq: u64,
 }
 
 impl Default for FifoReusePolicy {
@@ -36,7 +36,7 @@ impl FifoReusePolicy {
         Self {
             keys: HashMap::new(),
             blocks: BTreeMap::new(),
-            start_time: std::time::Instant::now(),
+            next_seq: 0,
         }
     }
 }
@@ -47,7 +47,8 @@ impl ReusePolicy for FifoReusePolicy {
             !self.keys.contains_key(&inactive_block.block_id),
             "block already exists"
         );
-        let priority_key = self.start_time.elapsed().as_millis() as u64;
+        let priority_key = self.next_seq;
+        self.next_seq += 1;
         self.keys.insert(inactive_block.block_id, priority_key);
         self.blocks.insert(priority_key, inactive_block);
         Ok(())
@@ -92,8 +93,6 @@ impl ReusePolicy for FifoReusePolicy {
 mod tests {
     use super::*;
     use crate::testing::{TestMeta, create_staged_block};
-    use std::thread;
-    use std::time::Duration;
 
     // Use TestMeta instead of local TestData
     type TestData = TestMeta;
@@ -119,7 +118,7 @@ mod tests {
     fn test_fifo_ordering_basic() {
         let mut policy = FifoReusePolicy::new();
 
-        // Insert blocks with small delays to ensure different timestamps
+        // Insert blocks
         let block1 = create_inactive_block(1, 100);
         let block2 = create_inactive_block(2, 200);
         let block3 = create_inactive_block(3, 300);
@@ -129,9 +128,7 @@ mod tests {
         let seq_hash3 = block3.seq_hash;
 
         policy.insert(block1).unwrap();
-        thread::sleep(Duration::from_millis(1));
         policy.insert(block2).unwrap();
-        thread::sleep(Duration::from_millis(1));
         policy.insert(block3).unwrap();
 
         // Verify FIFO order - first inserted should come out first
@@ -158,7 +155,7 @@ mod tests {
     fn test_fifo_ordering_with_delays() {
         let mut policy = FifoReusePolicy::new();
 
-        // Insert blocks with measurable delays to ensure distinct priority keys
+        // Insert blocks
         let blocks = vec![
             create_inactive_block(10, 1000),
             create_inactive_block(20, 2000),
@@ -168,7 +165,6 @@ mod tests {
 
         for block in blocks {
             policy.insert(block).unwrap();
-            thread::sleep(Duration::from_millis(5)); // Ensure distinct timestamps
         }
 
         // Retrieve all blocks and verify FIFO order
@@ -196,7 +192,6 @@ mod tests {
 
         for block in blocks {
             policy.insert(block).unwrap();
-            thread::sleep(Duration::from_millis(1));
         }
 
         assert_eq!(policy.len(), 4);
@@ -282,9 +277,7 @@ mod tests {
 
         // Insert some blocks
         policy.insert(create_inactive_block(1, 100)).unwrap();
-        thread::sleep(Duration::from_millis(1));
         policy.insert(create_inactive_block(2, 200)).unwrap();
-        thread::sleep(Duration::from_millis(1));
         policy.insert(create_inactive_block(3, 300)).unwrap();
 
         // Remove the first one
@@ -292,14 +285,12 @@ mod tests {
         assert_eq!(first.block_id, 1);
 
         // Insert another block
-        thread::sleep(Duration::from_millis(1));
         policy.insert(create_inactive_block(4, 400)).unwrap();
 
         // Remove a specific block by ID
         policy.remove(3).unwrap();
 
         // Insert another block
-        thread::sleep(Duration::from_millis(1));
         policy.insert(create_inactive_block(5, 500)).unwrap();
 
         // The remaining blocks should come out in order: 2, 4, 5
@@ -319,22 +310,17 @@ mod tests {
     fn test_priority_key_ordering() {
         let mut policy = FifoReusePolicy::new();
 
-        // Record the start time for manual verification
-        let start = std::time::Instant::now();
-
-        // Insert blocks with controlled timing
-        let mut insertion_times = Vec::new();
-
+        // Insert blocks — monotonic counter guarantees unique, ordered keys
         for i in 1..=5 {
-            let elapsed_before = start.elapsed().as_millis() as u64;
             policy
                 .insert(create_inactive_block(i, i as u64 * 100))
                 .unwrap();
-            let elapsed_after = start.elapsed().as_millis() as u64;
-            insertion_times.push((i, elapsed_before, elapsed_after));
+        }
 
-            // Small delay to ensure different timestamps
-            thread::sleep(Duration::from_millis(2));
+        // Verify each key is unique and strictly increasing
+        let keys: Vec<PriorityKey> = (1..=5).map(|id| *policy.keys.get(&id).unwrap()).collect();
+        for window in keys.windows(2) {
+            assert!(window[0] < window[1], "keys must be strictly increasing");
         }
 
         // Retrieve all blocks and verify they come out in insertion order
@@ -345,15 +331,6 @@ mod tests {
 
         let expected_order: Vec<BlockId> = (1..=5).collect();
         assert_eq!(retrieval_order, expected_order);
-
-        // Print timing information for manual verification
-        println!("Insertion timing verification:");
-        for (block_id, before, after) in insertion_times {
-            println!(
-                "Block {}: inserted between {}ms and {}ms",
-                block_id, before, after
-            );
-        }
     }
 
     #[test]

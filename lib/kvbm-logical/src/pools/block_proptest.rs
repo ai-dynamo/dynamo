@@ -13,7 +13,7 @@ use super::{super::blocks::*, tests::*, *};
 pub(crate) mod tests {
     use super::*;
 
-    use crate::test_config::{
+    use crate::testing::config::{
         COMMON_TEST_BLOCK_SIZES, constants, generate_test_tokens, validate_test_block_size,
     };
 

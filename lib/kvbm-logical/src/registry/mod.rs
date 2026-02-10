@@ -5,7 +5,7 @@
 //!
 //! The [`BlockRegistry`] is the central coordination point for block deduplication in the
 //! KVBM system. It maps sequence hashes to registration handles using a
-//! [`PositionalRadixTree`], enabling efficient prefix-based lookups.
+//! [`dynamo_tokens::PositionalRadixTree`], enabling efficient prefix-based lookups.
 //!
 //! # Architecture
 //!

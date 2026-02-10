@@ -134,9 +134,9 @@ impl BlockRegistrationHandle {
 
     /// Fire all registered touch callbacks with this handle's sequence hash.
     pub fn touch(&self) {
-        let callbacks = self.inner.touch_callbacks.lock();
+        let callbacks: Vec<_> = self.inner.touch_callbacks.lock().clone();
         let seq_hash = self.inner.seq_hash;
-        for cb in callbacks.iter() {
+        for cb in &callbacks {
             cb(seq_hash);
         }
     }
