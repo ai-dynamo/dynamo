@@ -172,7 +172,13 @@ def get_qwen_image_features(
     vision_encoder: torch.nn.Module, image_embeds: Dict[str, Any]
 ) -> torch.Tensor:
     """
-    Extract image features using Qwen-style vision encoder.
+    Extract image features by calling the vision encoder's forward() method.
+
+    Uses forward() (i.e. calling the module directly) rather than
+    get_image_features() so that the full output is returned — including
+    deepstack features for Qwen3-VL.  forward() works for both:
+      - Qwen2.5-VL (AutoModel): returns (n, hidden_size)
+      - Qwen3-VL (Qwen3VLMoeVisionModel): returns (n, hidden_size * (1 + num_deepstack))
 
     Args:
         vision_encoder: The vision encoder model
@@ -182,38 +188,11 @@ def get_qwen_image_features(
         Processed image features tensor
 
     Raises:
-        ValueError: If grid_thw is not provided for Qwen model
+        ValueError: If grid_thw is not provided
     """
     pixel_values, grid_thw = _get_qwen_visual_inputs(
         vision_encoder, image_embeds, model_label="Qwen"
     )
-    return vision_encoder.get_image_features(pixel_values, grid_thw)  # type: ignore
-
-
-def get_qwen3_image_features(
-    vision_encoder: torch.nn.Module, image_embeds: Dict[str, Any]
-) -> torch.Tensor:
-    """
-    Extract image features using Qwen3-VL vision encoder.
-
-    Qwen3-VL uses a different API than Qwen2.5-VL:
-    - Called via visual(pixel_values, grid_thw=grid_thw) directly
-    - Outputs larger embeddings due to deepstack
-
-    Args:
-        vision_encoder: The vision encoder model (Qwen3VLMoeVisionModel or visual module)
-        image_embeds: Dictionary containing pixel values and grid information
-
-    Returns:
-        Processed image features tensor
-
-    Raises:
-        ValueError: If grid_thw is not provided for Qwen model
-    """
-    pixel_values, grid_thw = _get_qwen_visual_inputs(
-        vision_encoder, image_embeds, model_label="Qwen3-VL"
-    )
-    # Qwen3-VL uses the visual() method directly, not get_image_features()
     return vision_encoder(pixel_values, grid_thw=grid_thw)  # type: ignore
 
 
@@ -236,17 +215,12 @@ def encode_image_embeddings(
         Encoded embeddings tensor with normalized shape
 
     Raises:
-        ValueError: If projector is missing for LLaVA models
         NotImplementedError: If model is not supported
     """
     with torch.no_grad():
-        # Route through the correct encoder based on model
-        if is_qwen3_vl_model(model_name):
-            embeddings = get_qwen3_image_features(vision_encoder, image_embeds)
-        elif is_qwen_vl_model(model_name):
+        if is_qwen_vl_model(model_name):
             embeddings = get_qwen_image_features(vision_encoder, image_embeds)
         else:
-            # Provide more helpful error message with normalized model name
             normalized_name = normalize_model_name(model_name)
             raise NotImplementedError(
                 f"Model not supported: {normalized_name} (original: {model_name})"
