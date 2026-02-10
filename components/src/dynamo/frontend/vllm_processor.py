@@ -131,32 +131,13 @@ class VllmProcessor:
             if hasattr(sampling_params, k):
                 setattr(sampling_params, k, v)
 
-        # User request
-        sampling_fields = {
-            "n",
-            "presence_penalty",
-            "frequency_penalty",
-            "repetition_penalty",
-            "temperature",
-            "top_p",
-            "top_k",
-            "min_p",
-            "seed",
-            "stop",
-            "stop_token_ids",
-            "ignore_eos",
-            "min_tokens",
-            "prompt_logprobs",
-            "skip_special_tokens",
-            "spaces_between_special_tokens",
-            "truncate_prompt_tokens",
-            "include_stop_str_in_output",
-            "logit_bias",
-            "allowed_token_ids",
-            "bad_words",
-            "structured_outputs",
-        }
-        for k in sampling_fields:
+        # User request: copy fields supported by both request schema and
+        # SamplingParams, excluding fields handled separately below.
+        sampling_fields = (
+            set(getattr(SamplingParams, "__annotations__", ()))
+            & set(type(request_for_sampling).model_fields)
+        ) - {"max_tokens", "logprobs", "output_kind"}
+        for k in sorted(sampling_fields):
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
@@ -206,17 +187,15 @@ class VllmProcessor:
         if sp.n != 1:
             logger.error("Unsupported SamplingParams.n=%d, only n=1 is supported", sp.n)
             yield {
-                "id": request_id,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "error",
-                    }
-                ],
-                "created": int(time.time()),
-                "model": request["model"],
-                "object": "chat.completion.chunk",
+                "error": {
+                    "message": (
+                        f"Unsupported value: 'n={sp.n}'. "
+                        "This endpoint currently supports only n=1."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": "n",
+                    "code": "unsupported_value",
+                }
             }
             return
 

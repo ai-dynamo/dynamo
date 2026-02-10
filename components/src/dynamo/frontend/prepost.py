@@ -27,6 +27,12 @@ class PreprocessResult:
 def _materialize_assistant_tool_calls(
     messages: Sequence[Any],
 ) -> list[dict[str, Any] | Any]:
+    # Mistral chat templating expects assistant tool_calls to be materialized
+    # as a concrete list of dict-like values. Our validated message models may
+    # still carry non-list sequence-like containers here, which can break or
+    # mis-render when tokenize=True is used in-template. This helper converts
+    # model objects to dicts and normalizes assistant.tool_calls to list when
+    # possible, while preserving original values if they are not iterable.
     normalized: list[dict[str, Any] | Any] = []
     for message in messages:
         if hasattr(message, "model_dump"):
