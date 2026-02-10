@@ -23,6 +23,7 @@ use dynamo_async_openai::types::{
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -33,6 +34,7 @@ use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
+use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
@@ -92,6 +94,8 @@ pub struct LLMMetricAnnotation {
     /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_latency: Option<Duration>,
 }
 
 impl LLMMetricAnnotation {
@@ -212,13 +216,14 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
+        tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut builder = self.builder(request)?;
         let formatted_prompt = self
             .apply_template(request)
             .with_context(|| "Failed to apply prompt template")?;
         let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt)
+            .gather_tokens(request, &mut builder, formatted_prompt, tracker)
             .with_context(|| "Failed to gather tokens")?;
         self.gather_multi_modal_data(request, &mut builder)
             .await
@@ -422,6 +427,7 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
+        tracker: Option<&RequestTracker>,
     ) -> Result<HashMap<String, String>> {
         let mut annotations = HashMap::new();
         // match request type before any conversion/processing
@@ -480,12 +486,12 @@ impl OpenAIPreprocessor {
                                     tracing::warn!(
                                         "backend_instance_id provided but no token_data; tokenizing prompt"
                                     );
-                                    let encoding = self.tokenizer.encode(&prompt)?;
+                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
                                     (encoding.token_ids().to_vec(), false)
                                 }
                             } else {
                                 // No backend_instance_id provided, continue the normal flow.
-                                let encoding = self.tokenizer.encode(&prompt)?;
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -502,7 +508,7 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.tokenizer.encode(&texts[0])?;
+                                let encoding = self.encode_with_timing(&texts[0], tracker)?;
                                 builder.token_ids(encoding.token_ids().to_vec());
                             } else {
                                 bail!(
@@ -516,6 +522,19 @@ impl OpenAIPreprocessor {
             }
         }
         Ok(annotations)
+    }
+
+    fn encode_with_timing(
+        &self,
+        prompt: &str,
+        tracker: Option<&RequestTracker>,
+    ) -> anyhow::Result<Encoding> {
+        let encode_start = Instant::now();
+        let encoding = self.tokenizer.encode(prompt)?;
+        if let Some(t) = tracker {
+            t.record_tokenizer_latency(encode_start.elapsed());
+        }
+        Ok(encoding)
     }
 
     /// Preprocess an embedding request, handling both text and token ID inputs.
@@ -703,6 +722,7 @@ impl OpenAIPreprocessor {
                         decode_worker_id,
                         decode_dp_rank,
                         decode_worker_type,
+                        tokenizer_latency: tracker.as_ref().and_then(|t| t.tokenizer_latency()),
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -763,6 +783,7 @@ impl OpenAIPreprocessor {
                             decode_worker_id,
                             decode_dp_rank,
                             decode_worker_type,
+                            tokenizer_latency: tracker.as_ref().and_then(|t| t.tokenizer_latency()),
                         };
 
                         // Create annotation string
@@ -1024,12 +1045,15 @@ impl
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
+        let tracker = response_generator.tracker();
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations) = self.preprocess_request(&request).await?;
+        let (mut common_request, annotations) = self
+            .preprocess_request(&request, tracker.as_deref())
+            .await?;
 
         // Attach the timing tracker to the request so downstream components can record metrics
-        common_request.tracker = response_generator.tracker();
+        common_request.tracker = tracker;
 
         let mut response_generator = Box::new(response_generator);
 
@@ -1176,6 +1200,7 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
+        let tracker = response_generator.tracker();
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
 
@@ -1188,7 +1213,7 @@ impl
             HashMap::new()
         } else {
             // Normal path: tokenize the prompt
-            self.gather_tokens(&request, &mut builder, None)?
+            self.gather_tokens(&request, &mut builder, None, tracker.as_deref())?
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
@@ -1197,7 +1222,7 @@ impl
         let mut common_request = builder.build()?;
 
         // Attach the timing tracker to the request so downstream components can record metrics
-        common_request.tracker = response_generator.tracker();
+        common_request.tracker = tracker;
 
         // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
         if common_request.prompt_embeds.is_none() {
