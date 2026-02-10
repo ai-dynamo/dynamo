@@ -95,7 +95,6 @@ def install_graceful_shutdown(
     runtime: Any,
     *,
     signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),
-    chain_old_os_handlers: bool = False,
 ) -> tuple[asyncio.Event, Callable[[], Awaitable[None]]]:
     """
     Set up graceful shutdown + callback chaining.
