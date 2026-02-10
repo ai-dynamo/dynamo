@@ -23,11 +23,7 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import (
-    DynamoSglangPublisher,
-    setup_prometheus_registry,
-    setup_sgl_metrics,
-)
+from dynamo.sglang.publisher import DynamoSglangPublisher, setup_sgl_metrics
 from dynamo.sglang.register import (
     register_image_diffusion_model,
     register_llm_with_readiness_gate,
@@ -151,10 +147,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     publisher.component_gauges.set_model_load_time(load_time)
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
     if server_args.node_rank >= 1:
@@ -237,10 +229,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
-
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
@@ -325,10 +313,6 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
     if server_args.node_rank >= 1:
@@ -398,10 +382,6 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
-
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()

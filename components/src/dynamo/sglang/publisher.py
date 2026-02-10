@@ -292,6 +292,10 @@ def setup_prometheus_registry(
     registry collects sglang:* metrics which are exposed via the metrics server endpoint
     (set DYN_SYSTEM_PORT to a positive value to enable, e.g., DYN_SYSTEM_PORT=8081).
 
+    IMPORTANT: This function requires PROMETHEUS_MULTIPROC_DIR to be set, which only
+    happens when SGLang is started with --enable-metrics. Callers must guard this call
+    with an enable_metrics check.
+
     IMPORTANT: prometheus_client must be imported AFTER sgl.Engine() has called
     set_prometheus_multiproc_dir(). Importing at module level causes prometheus_client
     to initialize in single-process mode before PROMETHEUS_MULTIPROC_DIR is set,
@@ -309,17 +313,11 @@ def setup_prometheus_registry(
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
 
-    # Register callback for SGLang metrics
+    # Register callback for SGLang metrics (sglang:* prefixed)
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
         metric_prefix_filters=["sglang:"],
-    )
-
-    # Register callback for Dynamo component metrics using dedicated registry
-    register_engine_metrics_callback(
-        endpoint=generate_endpoint,
-        registry=DYNAMO_COMPONENT_REGISTRY,
     )
 
     return registry
@@ -342,8 +340,19 @@ async def setup_sgl_metrics(
     Returns:
         Tuple of (publisher instance, running asyncio task, metrics labels).
     """
-    # Create registry and register callbacks
-    setup_prometheus_registry(engine, generate_endpoint)
+    # Register SGLang multiprocess metrics only when --enable-metrics was passed.
+    # SGLang only calls set_prometheus_multiproc_dir() when enable_metrics=True,
+    # so MultiProcessCollector will crash without it.
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
+
+    # Always register the Dynamo component metrics callback (total_blocks,
+    # gpu_cache_usage, model_load_time). These use a dedicated registry that
+    # doesn't need MultiProcessCollector or PROMETHEUS_MULTIPROC_DIR.
+    register_engine_metrics_callback(
+        endpoint=generate_endpoint,
+        registry=DYNAMO_COMPONENT_REGISTRY,
+    )
 
     # Create all Dynamo component gauges using the dedicated registry
     component_gauges = LLMBackendMetrics(
