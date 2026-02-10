@@ -7,8 +7,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// NamespaceMetadata stores namespace information saved in checkpoint metadata.
-type NamespaceMetadata struct {
+// NamespaceManifestEntry stores namespace information saved in checkpoint manifests.
+type NamespaceManifestEntry struct {
 	Type       string `yaml:"type"`       // net, pid, mnt, etc.
 	Inode      uint64 `yaml:"inode"`      // Namespace inode
 	IsExternal bool   `yaml:"isExternal"` // Whether namespace is external (shared)
@@ -34,15 +34,15 @@ type NamespaceInfo struct {
 	IsExternal bool // Whether NS is external (shared with pause container)
 }
 
-// NewNamespaceMetadata constructs namespace metadata from introspected namespaces.
-func NewNamespaceMetadata(namespaces map[NamespaceType]*NamespaceInfo) []NamespaceMetadata {
+// NewNamespaceManifestEntries constructs namespace manifest entries from introspected namespaces.
+func NewNamespaceManifestEntries(namespaces map[NamespaceType]*NamespaceInfo) []NamespaceManifestEntry {
 	if len(namespaces) == 0 {
 		return nil
 	}
 
-	result := make([]NamespaceMetadata, 0, len(namespaces))
+	result := make([]NamespaceManifestEntry, 0, len(namespaces))
 	for nsType, nsInfo := range namespaces {
-		result = append(result, NamespaceMetadata{
+		result = append(result, NamespaceManifestEntry{
 			Type:       string(nsType),
 			Inode:      nsInfo.Inode,
 			IsExternal: nsInfo.IsExternal,
@@ -102,14 +102,10 @@ func GetAllNamespaces(pid int) (map[NamespaceType]*NamespaceInfo, error) {
 
 	namespaces := make(map[NamespaceType]*NamespaceInfo)
 	for _, nsType := range nsTypes {
-		info, err := GetNamespaceInfo(pid, nsType)
-		if err != nil {
-			// Some namespaces might not exist, skip them
-			continue
+		if info, err := GetNamespaceInfo(pid, nsType); err == nil {
+			namespaces[nsType] = info
 		}
-		namespaces[nsType] = info
 	}
 
 	return namespaces, nil
 }
-

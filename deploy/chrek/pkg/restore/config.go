@@ -1,5 +1,5 @@
-// config.go defines the RestoreConfig struct for CRIU restore operations.
-// CRIU options come from the saved CheckpointMetadata, not from this config.
+// config.go defines the RestoreRequest struct for CRIU restore operations.
+// CRIU options come from the saved CheckpointManifest, not from this request.
 //
 // The restore-entrypoint runs in placeholder containers which do NOT mount the
 // ConfigMap. Static defaults are hardcoded here; per-pod dynamic values come
@@ -30,9 +30,9 @@ const (
 	RestoreTriggerPath = "/tmp/restore-trigger"
 )
 
-// RestoreConfig holds the configuration for the restore entrypoint.
-// CRIU options are NOT stored here - they come from the saved CheckpointMetadata.
-type RestoreConfig struct {
+// RestoreRequest holds runtime request inputs for the restore entrypoint.
+// CRIU options are NOT stored here - they come from the saved CheckpointManifest.
+type RestoreRequest struct {
 	// === Per-pod dynamic values (from operator-injected env vars) ===
 
 	// CheckpointPath is the base directory containing checkpoints.
@@ -76,10 +76,10 @@ func (e *ConfigError) Error() string {
 	return fmt.Sprintf("config error: %s: %s", e.Field, e.Message)
 }
 
-// NewRestoreConfig creates a RestoreConfig with hardcoded defaults and
+// NewRestoreRequest creates a RestoreRequest with hardcoded defaults and
 // operator-injected environment variable values.
-func NewRestoreConfig(args []string) (*RestoreConfig, error) {
-	cfg := &RestoreConfig{
+func NewRestoreRequest(args []string) (*RestoreRequest, error) {
+	cfg := &RestoreRequest{
 		RestoreTrigger: RestoreTriggerPath,
 		ColdStartArgs:  args,
 	}
@@ -142,7 +142,7 @@ func checkpointDoneSucceeded(donePath string, log *logrus.Entry) bool {
 
 // ShouldRestore checks if a restore should be performed.
 // Returns the checkpoint path and true if restore should proceed.
-func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
+func ShouldRestore(cfg *RestoreRequest, log *logrus.Entry) (string, bool) {
 	// Method 1: Checkpoint location is set and checkpoint is fully complete
 	if cfg.CheckpointLocation != "" {
 		donePath := cfg.CheckpointLocation + "/" + checkpoint.CheckpointDoneFilename
@@ -154,13 +154,13 @@ func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
 			}
 		}
 
-		// Fallback: check for metadata.yaml but warn about potential race condition
-		metadataPath := cfg.CheckpointLocation + "/" + checkpoint.CheckpointDataFilename
-		if _, err := os.Stat(metadataPath); err == nil {
+		// Fallback: check for manifest.yaml but warn about potential race condition.
+		manifestPath := cfg.CheckpointLocation + "/" + checkpoint.CheckpointManifestFilename
+		if _, err := os.Stat(manifestPath); err == nil {
 			log.WithFields(logrus.Fields{
 				"path":    cfg.CheckpointLocation,
 				"warning": "checkpoint.done marker not found, checkpoint may be incomplete",
-			}).Warn("Checkpoint metadata found but checkpoint.done missing - checkpoint may still be in progress")
+			}).Warn("Checkpoint manifest found but checkpoint.done missing - checkpoint may still be in progress")
 		}
 	}
 
@@ -186,7 +186,7 @@ func ShouldRestore(cfg *RestoreConfig, log *logrus.Entry) (string, bool) {
 
 // WaitForCheckpoint waits for a checkpoint to become available.
 // If cfg.WaitTimeout is zero, waits indefinitely (until ctx is cancelled).
-func WaitForCheckpoint(ctx context.Context, cfg *RestoreConfig, log *logrus.Entry) (string, error) {
+func WaitForCheckpoint(ctx context.Context, cfg *RestoreRequest, log *logrus.Entry) (string, error) {
 	if cfg.WaitTimeout > 0 {
 		log.WithField("timeout", cfg.WaitTimeout).Info("Waiting for checkpoint")
 	} else {

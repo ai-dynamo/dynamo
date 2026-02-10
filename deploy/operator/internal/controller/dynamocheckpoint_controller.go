@@ -112,8 +112,11 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// Nothing to do, checkpoint is ready
 		return ctrl.Result{}, nil
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseFailed:
-		// Could implement retry logic here
-		return ctrl.Result{}, nil
+		// Re-evaluate the Job in case retries succeeded after a transient failure.
+		if ckpt.Status.JobName == "" {
+			return ctrl.Result{}, nil
+		}
+		return r.handleCreating(ctx, ckpt)
 	default:
 		// Unknown phase, reset to Pending
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
@@ -221,8 +224,15 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, nil
 	}
 
-	// Check if job failed
-	if job.Status.Failed > 0 {
+	// Check if job reached terminal Failed condition.
+	jobFailed := false
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+			jobFailed = true
+			break
+		}
+	}
+	if jobFailed {
 		logger.Info("Checkpoint Job failed", "job", job.Name)
 		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointFailed", "Checkpoint creation failed")
 

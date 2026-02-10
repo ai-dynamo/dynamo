@@ -72,7 +72,7 @@ func main() {
 
 	// Load configuration from hardcoded defaults + operator-injected env vars.
 	// os.Args[1:] are the cold start command args (passed by the operator via pod spec).
-	cfg, err := restore.NewRestoreConfig(os.Args[1:])
+	cfg, err := restore.NewRestoreRequest(os.Args[1:])
 	if err != nil {
 		log.WithError(err).Fatal("Failed to load restore configuration")
 	}

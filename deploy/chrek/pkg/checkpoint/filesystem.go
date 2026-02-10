@@ -3,7 +3,6 @@
 package checkpoint
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 )
 
@@ -65,27 +65,35 @@ func (c *FilesystemConfig) Validate() error {
 	return nil
 }
 
-// FilesystemMetadata holds runtime filesystem state captured at checkpoint time.
-type FilesystemMetadata struct {
+// FilesystemManifest holds runtime filesystem state captured at checkpoint time.
+type FilesystemManifest struct {
 	Exclusions      FilesystemConfig `yaml:"exclusions"`
 	UpperDir        string           `yaml:"upperDir,omitempty"`
-	MaskedPaths     []string         `yaml:"maskedPaths,omitempty"`
-	ReadonlyPaths   []string         `yaml:"readonlyPaths,omitempty"`
+	ExternalPaths   []string         `yaml:"externalPaths,omitempty"`
 	BindMountDests  []string         `yaml:"bindMountDests,omitempty"`
 	HasRootfsDiff   bool             `yaml:"hasRootfsDiff"`
 	HasDeletedFiles bool             `yaml:"hasDeletedFiles"`
 }
 
-// NewFilesystemMetadata constructs FilesystemMetadata from config, overlay state, and OCI spec.
-func NewFilesystemMetadata(exclusions FilesystemConfig, upperDir string, oci *ociState) FilesystemMetadata {
-	meta := FilesystemMetadata{
+// NewFilesystemManifest constructs FilesystemManifest from config, overlay state, and OCI spec.
+func NewFilesystemManifest(exclusions FilesystemConfig, upperDir string, ociSpec *specs.Spec) FilesystemManifest {
+	meta := FilesystemManifest{
 		Exclusions: exclusions,
 		UpperDir:   upperDir,
 	}
-	if oci != nil {
-		meta.MaskedPaths = oci.MaskedPaths
-		meta.ReadonlyPaths = oci.ReadonlyPaths
-		meta.BindMountDests = oci.BindMountDests
+	if ociSpec == nil {
+		return meta
+	}
+
+	if ociSpec.Linux != nil {
+		meta.ExternalPaths = make([]string, 0, len(ociSpec.Linux.MaskedPaths)+len(ociSpec.Linux.ReadonlyPaths))
+		meta.ExternalPaths = append(meta.ExternalPaths, ociSpec.Linux.MaskedPaths...)
+		meta.ExternalPaths = append(meta.ExternalPaths, ociSpec.Linux.ReadonlyPaths...)
+	}
+	for _, m := range ociSpec.Mounts {
+		if m.Type == "bind" {
+			meta.BindMountDests = append(meta.BindMountDests, m.Destination)
+		}
 	}
 	return meta
 }
@@ -104,56 +112,22 @@ func GetRootFS(pid int) (string, error) {
 // GetOverlayUpperDir extracts the overlay upperdir from mountinfo.
 // This is the writable layer of the container's filesystem.
 func GetOverlayUpperDir(pid int) (string, error) {
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", HostProcPath, pid)
-	file, err := os.Open(mountinfoPath)
+	mountInfo, err := ReadMountInfoFromHostProcPath(pid)
 	if err != nil {
-		return "", fmt.Errorf("failed to open mountinfo: %w", err)
+		return "", fmt.Errorf("failed to parse mountinfo: %w", err)
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
-
-		if len(fields) < 5 {
-			continue
-		}
-
-		mountPoint := fields[4]
-		if mountPoint != "/" {
-			continue
-		}
-
-		// Find the separator (-) to get fstype and options
-		sepIdx := -1
-		for i, f := range fields {
-			if f == "-" {
-				sepIdx = i
-				break
-			}
-		}
-
-		if sepIdx == -1 || sepIdx+2 >= len(fields) {
-			continue
-		}
-
-		fsType := fields[sepIdx+1]
-		if fsType != "overlay" {
+	for _, mount := range mountInfo {
+		if mount.MountPoint != "/" || mount.FSType != "overlay" {
 			continue
 		}
 
 		// Parse super options to find upperdir
-		superOptions := fields[sepIdx+3]
-		for _, opt := range strings.Split(superOptions, ",") {
+		for _, opt := range strings.Split(mount.SuperOptions, ",") {
 			if strings.HasPrefix(opt, "upperdir=") {
 				return strings.TrimPrefix(opt, "upperdir="), nil
 			}
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("error reading mountinfo: %w", err)
 	}
 
 	return "", fmt.Errorf("overlay upperdir not found for pid %d", pid)
@@ -242,11 +216,11 @@ func FindWhiteoutFiles(upperDir string) ([]string, error) {
 			relPath, _ := filepath.Rel(upperDir, path)
 			dir := filepath.Dir(relPath)
 			deletedFile := strings.TrimPrefix(name, ".wh.")
-			if dir == "." {
-				whiteouts = append(whiteouts, deletedFile)
-			} else {
-				whiteouts = append(whiteouts, filepath.Join(dir, deletedFile))
+			deletedPath := deletedFile
+			if dir != "." {
+				deletedPath = filepath.Join(dir, deletedFile)
 			}
+			whiteouts = append(whiteouts, deletedPath)
 		}
 		return nil
 	})
@@ -255,13 +229,13 @@ func FindWhiteoutFiles(upperDir string) ([]string, error) {
 }
 
 // CaptureRootfsState captures the overlay upperdir and deleted files after CRIU dump.
-// Updates the checkpoint metadata with rootfs diff information and saves it.
-func CaptureRootfsState(upperDir, checkpointDir string, data *CheckpointMetadata, log *logrus.Entry) {
+// Updates the checkpoint manifest with rootfs diff information and saves it.
+func CaptureRootfsState(upperDir, checkpointDir string, data *CheckpointManifest, log *logrus.Entry) {
 	if upperDir == "" || data == nil {
 		return
 	}
 
-	// Capture rootfs diff using exclusions from the checkpoint metadata
+	// Capture rootfs diff using exclusions from the checkpoint manifest.
 	configuredExclusions := data.Filesystem.Exclusions.GetAllExclusions()
 	log.WithFields(logrus.Fields{
 		"configured_exclusions": configuredExclusions,
@@ -287,8 +261,8 @@ func CaptureRootfsState(upperDir, checkpointDir string, data *CheckpointMetadata
 		log.Info("Recorded deleted files (whiteouts)")
 	}
 
-	// Update checkpoint metadata with rootfs diff info
-	if err := SaveCheckpointMetadata(checkpointDir, data); err != nil {
-		log.WithError(err).Warn("Failed to update checkpoint metadata with rootfs diff info")
+	// Update checkpoint manifest with rootfs diff info.
+	if err := WriteCheckpointManifest(checkpointDir, data); err != nil {
+		log.WithError(err).Warn("Failed to update checkpoint manifest with rootfs diff info")
 	}
 }

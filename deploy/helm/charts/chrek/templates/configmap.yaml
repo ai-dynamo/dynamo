@@ -56,10 +56,6 @@ data:
         # Additional custom exclusions
         additionalExclusions: {{ toYaml .Values.config.checkpoint.rootfsExclusions.additionalExclusions | nindent 10 }}
 
-      # Skip mount prefixes for cross-node restore (enumerated at checkpoint time)
-      skipMountPrefixes:
-        {{- toYaml .Values.config.checkpoint.skipMountPrefixes | nindent 8 }}
-
     # NOTE: Restore runtime configuration is NOT in this ConfigMap.
     # Placeholder containers do not mount it. Restore uses hardcoded defaults
-    # + operator-injected env vars. CRIU options come from saved CheckpointData.
+    # + operator-injected env vars. CRIU options come from saved checkpoint manifest.

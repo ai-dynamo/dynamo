@@ -209,11 +209,11 @@ func LogRestoreBoundaryDiagnostics(label string, restoredPID int, log *logrus.En
 }
 
 // Restore performs the CRIU restore operation using go-criu.
-// All CRIU options are read from the saved CheckpointMetadata - no hardcoding.
+// All CRIU options are read from the saved CheckpointManifest - no hardcoding.
 // Returns the PID of the restored process.
-func Restore(ctx context.Context, checkpointPath string, data *checkpoint.CheckpointMetadata, log *logrus.Entry) (int, error) {
+func Restore(ctx context.Context, checkpointPath string, data *checkpoint.CheckpointManifest, log *logrus.Entry) (int, error) {
 	if data == nil {
-		return 0, fmt.Errorf("checkpoint metadata is required")
+		return 0, fmt.Errorf("checkpoint manifest is required")
 	}
 
 	// Hardcoded restore constants
@@ -232,7 +232,7 @@ func Restore(ctx context.Context, checkpointPath string, data *checkpoint.Checkp
 	}
 	defer imageDir.Close()
 
-	// 2. Generate external mount mappings from saved CheckpointMetadata
+	// 2. Generate external mount mappings from saved CheckpointManifest
 	extMounts, err := GenerateExtMountMaps(data)
 	if err != nil {
 		return 0, fmt.Errorf("failed to generate mount maps: %w", err)
@@ -245,18 +245,18 @@ func Restore(ctx context.Context, checkpointPath string, data *checkpoint.Checkp
 	}
 	defer netNsFile.Close()
 
-	// 4. Open work directory if specified in checkpoint data
+	// 4. Open work directory if specified in checkpoint dump settings.
 	var workDirFile *os.File
 	var workDirFD int32 = -1
-	if data.CRIU.WorkDir != "" {
-		workDirFile, workDirFD = OpenWorkDir(data.CRIU.WorkDir, log)
+	if data.CRIUDump.CRIU.WorkDir != "" {
+		workDirFile, workDirFD = OpenWorkDir(data.CRIUDump.CRIU.WorkDir, log)
 		if workDirFile != nil {
 			defer workDirFile.Close()
 		}
 	}
 
-	// 5. Build CRIU options from saved checkpoint data
-	cfg := CRIURestoreConfig{
+	// 5. Build CRIU options from saved checkpoint manifest.
+	plan := CRIURestorePlan{
 		// File descriptors
 		ImageDirFD: imageDirFD,
 		WorkDirFD:  workDirFD,
@@ -264,18 +264,19 @@ func Restore(ctx context.Context, checkpointPath string, data *checkpoint.Checkp
 		// Paths
 		RootPath: rootPath,
 		LogFile:  logFile,
-		// Options from CheckpointMetadata.CRIU
-		LogLevel:          data.CRIU.LogLevel,
-		Timeout:           data.CRIU.Timeout,
-		ShellJob:          data.CRIU.ShellJob,
-		TcpClose:          data.CRIU.TcpClose,
-		FileLocks:         data.CRIU.FileLocks,
-		ExtUnixSk:         data.CRIU.ExtUnixSk,
-		ManageCgroupsMode: data.CRIU.ManageCgroupsMode,
+		// Options from CheckpointManifest.CRIUDump.CRIU
+		LogLevel:          data.CRIUDump.CRIU.LogLevel,
+		Timeout:           data.CRIUDump.CRIU.Timeout,
+		ShellJob:          data.CRIUDump.CRIU.ShellJob,
+		TcpClose:          data.CRIUDump.CRIU.TcpClose,
+		FileLocks:         data.CRIUDump.CRIU.FileLocks,
+		ExtUnixSk:         data.CRIUDump.CRIU.ExtUnixSk,
+		LinkRemap:         data.CRIUDump.CRIU.LinkRemap,
+		ManageCgroupsMode: data.CRIUDump.CRIU.ManageCgroupsMode,
 		// External mounts
 		ExtMountMaps: extMounts,
 	}
-	criuOpts := BuildRestoreCRIUOpts(cfg)
+	criuOpts := BuildCRIURestoreOptions(plan)
 
 	// 6. Reuse criu.conf from checkpoint time if it exists.
 	criuConfPath := filepath.Join(checkpointPath, checkpoint.CheckpointCRIUConfFilename)
@@ -341,7 +342,7 @@ func logCRIUErrors(checkpointPath, logFile string, log *logrus.Entry) {
 
 // Run is the main entry point for the restore entrypoint.
 // It orchestrates the entire restore process.
-func Run(ctx context.Context, cfg *RestoreConfig, log *logrus.Entry) error {
+func Run(ctx context.Context, cfg *RestoreRequest, log *logrus.Entry) error {
 	log.Info("=== Restore Entrypoint ===")
 	log.WithFields(logrus.Fields{
 		"checkpoint_path":          cfg.CheckpointPath,
@@ -396,10 +397,10 @@ func Run(ctx context.Context, cfg *RestoreConfig, log *logrus.Entry) error {
 		log.WithError(err).Error("Failed to apply deleted files")
 	}
 
-	// Load checkpoint metadata (contains CRIU config + mounts + namespaces)
-	data, err := checkpoint.LoadCheckpointMetadata(checkpointPath)
+	// Load checkpoint manifest (contains CRIU settings + mounts + namespaces).
+	data, err := checkpoint.ReadCheckpointManifest(checkpointPath)
 	if err != nil {
-		log.WithError(err).Error("Failed to load checkpoint metadata")
+		log.WithError(err).Error("Failed to load checkpoint manifest")
 		return ExecColdStart(cfg, log)
 	}
 

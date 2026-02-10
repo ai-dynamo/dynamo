@@ -1,4 +1,4 @@
-// storage.go provides checkpoint storage I/O: save/load metadata, listing, deletion.
+// storage.go provides checkpoint storage I/O: write/read manifests, listing, deletion.
 package checkpoint
 
 import (
@@ -10,33 +10,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SaveCheckpointMetadata writes checkpoint metadata to a YAML file in the checkpoint directory.
-func SaveCheckpointMetadata(checkpointDir string, data *CheckpointMetadata) error {
+// WriteCheckpointManifest writes a checkpoint manifest file in the checkpoint directory.
+func WriteCheckpointManifest(checkpointDir string, data *CheckpointManifest) error {
 	content, err := yaml.Marshal(data)
 	if err != nil {
-		return fmt.Errorf("failed to marshal checkpoint metadata: %w", err)
+		return fmt.Errorf("failed to marshal checkpoint manifest: %w", err)
 	}
 
-	metadataPath := filepath.Join(checkpointDir, CheckpointDataFilename)
-	if err := os.WriteFile(metadataPath, content, 0600); err != nil {
-		return fmt.Errorf("failed to write metadata file: %w", err)
+	manifestPath := filepath.Join(checkpointDir, CheckpointManifestFilename)
+	if err := os.WriteFile(manifestPath, content, 0600); err != nil {
+		return fmt.Errorf("failed to write checkpoint manifest: %w", err)
 	}
 
 	return nil
 }
 
-// LoadCheckpointMetadata reads checkpoint metadata from a checkpoint directory.
-func LoadCheckpointMetadata(checkpointDir string) (*CheckpointMetadata, error) {
-	metadataPath := filepath.Join(checkpointDir, CheckpointDataFilename)
+// ReadCheckpointManifest reads checkpoint manifest from a checkpoint directory.
+func ReadCheckpointManifest(checkpointDir string) (*CheckpointManifest, error) {
+	manifestPath := filepath.Join(checkpointDir, CheckpointManifestFilename)
 
-	content, err := os.ReadFile(metadataPath)
+	content, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata file: %w", err)
+		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}
 
-	var data CheckpointMetadata
+	var data CheckpointManifest
 	if err := yaml.Unmarshal(content, &data); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal checkpoint metadata: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal checkpoint manifest: %w", err)
 	}
 
 	return &data, nil
@@ -87,9 +87,9 @@ func ListCheckpoints(baseDir string) ([]string, error) {
 			continue
 		}
 
-		// Check if metadata file exists
-		metadataPath := filepath.Join(baseDir, entry.Name(), CheckpointDataFilename)
-		if _, err := os.Stat(metadataPath); err == nil {
+		// Check if manifest file exists.
+		manifestPath := filepath.Join(baseDir, entry.Name(), CheckpointManifestFilename)
+		if _, err := os.Stat(manifestPath); err == nil {
 			checkpoints = append(checkpoints, entry.Name())
 		}
 	}

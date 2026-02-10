@@ -12,9 +12,9 @@ import (
 
 // ServerConfig holds the configuration for the HTTP API server.
 type ServerConfig struct {
-	ListenAddr    string
-	NodeName      string
-	CheckpointCfg *checkpoint.Config
+	ListenAddr     string
+	NodeName       string
+	CheckpointSpec *checkpoint.CheckpointSpec
 }
 
 // Server is the HTTP API server for checkpoint operations.
@@ -36,7 +36,7 @@ func NewServer(cfg ServerConfig, checkpointer *checkpoint.Checkpointer) *Server 
 
 	// WriteTimeout must exceed the CRIU checkpoint timeout since /checkpoint
 	// blocks until the dump completes. Add 60s buffer for pre/post work.
-	writeTimeout := time.Duration(cfg.CheckpointCfg.CRIU.Timeout)*time.Second + 60*time.Second
+	writeTimeout := time.Duration(cfg.CheckpointSpec.CRIU.Timeout)*time.Second + 60*time.Second
 	if writeTimeout < 300*time.Second {
 		writeTimeout = 300 * time.Second
 	}

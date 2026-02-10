@@ -71,24 +71,24 @@ func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build checkpoint params
-	params := checkpoint.CheckpointParams{
+	params := checkpoint.CheckpointRequest{
 		ContainerID:   req.ContainerID,
 		ContainerName: req.ContainerName,
 		CheckpointID:  req.CheckpointID,
-		CheckpointDir: h.cfg.CheckpointCfg.BasePath,
+		CheckpointDir: h.cfg.CheckpointSpec.BasePath,
 		NodeName:      h.cfg.NodeName,
 		PodName:       req.PodName,
 		PodNamespace:  req.PodNamespace,
 	}
 
-	// Copy checkpoint config and disable CUDA if requested
-	checkpointCfg := *h.cfg.CheckpointCfg
+	// Copy checkpoint spec and disable CUDA if requested.
+	checkpointSpec := *h.cfg.CheckpointSpec
 	if req.DisableCUDA {
-		checkpointCfg.CRIU.LibDir = ""
+		checkpointSpec.CRIU.LibDir = ""
 	}
 
 	ctx := r.Context()
-	result, err := h.checkpointer.Checkpoint(ctx, params, &checkpointCfg)
+	result, err := h.checkpointer.Checkpoint(ctx, params, &checkpointSpec)
 	if err != nil {
 		log.Printf("Checkpoint failed: %v", err)
 		writeJSON(w, http.StatusInternalServerError, CheckpointResponse{
@@ -125,7 +125,7 @@ func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	checkpointIDs, err := checkpoint.ListCheckpoints(h.cfg.CheckpointCfg.BasePath)
+	checkpointIDs, err := checkpoint.ListCheckpoints(h.cfg.CheckpointSpec.BasePath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": err.Error(),
@@ -135,7 +135,7 @@ func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request)
 
 	var checkpoints []CheckpointInfo
 	for _, id := range checkpointIDs {
-		meta, err := checkpoint.LoadCheckpointMetadata(filepath.Join(h.cfg.CheckpointCfg.BasePath, id))
+		meta, err := checkpoint.ReadCheckpointManifest(filepath.Join(h.cfg.CheckpointSpec.BasePath, id))
 		if err != nil {
 			continue
 		}
@@ -146,7 +146,6 @@ func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request)
 			ContainerID:  meta.K8s.ContainerID,
 			PodName:      meta.K8s.PodName,
 			PodNamespace: meta.K8s.PodNamespace,
-			Image:        meta.K8s.Image,
 		})
 	}
 

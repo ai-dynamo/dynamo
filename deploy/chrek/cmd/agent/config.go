@@ -25,8 +25,8 @@ const (
 
 // FullConfig is the root configuration structure loaded from the ConfigMap.
 type FullConfig struct {
-	Agent      AgentConfig       `yaml:"agent"`
-	Checkpoint checkpoint.Config `yaml:"checkpoint"`
+	Agent      AgentConfig               `yaml:"agent"`
+	Checkpoint checkpoint.CheckpointSpec `yaml:"checkpoint"`
 }
 
 // AgentConfig holds the runtime configuration for the checkpoint agent daemon.

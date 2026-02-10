@@ -99,8 +99,5 @@ func ApplyDeletedFiles(checkpointPath, targetRoot string, log *logrus.Entry) err
 func CheckpointFilesExist(checkpointPath string) bool {
 	// Check for CRIU image files (core-*.img is always present)
 	matches, err := filepath.Glob(filepath.Join(checkpointPath, "core-*.img"))
-	if err != nil || len(matches) == 0 {
-		return false
-	}
-	return true
+	return err == nil && len(matches) > 0
 }

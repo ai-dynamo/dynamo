@@ -32,19 +32,19 @@ type SignalFile struct {
 	Error          string    `json:"error,omitempty"`
 }
 
-// Config holds watcher configuration
-type Config struct {
+// WatcherConfig holds watcher configuration.
+type WatcherConfig struct {
 	NodeName            string
 	ListenAddr          string // HTTP server address for health checks (e.g., ":8080")
 	RestrictedNamespace string // Optional: restrict watching to this namespace (empty = cluster-wide)
 
 	// Checkpoint configuration (from ConfigMap)
-	CheckpointConfig *checkpoint.Config
+	CheckpointSpec *checkpoint.CheckpointSpec
 }
 
 // Watcher watches for pods with checkpoint labels and triggers checkpoints
 type Watcher struct {
-	config          Config
+	config          WatcherConfig
 	clientset       kubernetes.Interface
 	discoveryClient *checkpoint.DiscoveryClient
 	checkpointer    *checkpoint.Checkpointer
@@ -58,7 +58,7 @@ type Watcher struct {
 }
 
 // NewWatcher creates a new pod watcher
-func NewWatcher(cfg Config, discoveryClient *checkpoint.DiscoveryClient, checkpointer *checkpoint.Checkpointer) (*Watcher, error) {
+func NewWatcher(cfg WatcherConfig, discoveryClient *checkpoint.DiscoveryClient, checkpointer *checkpoint.Checkpointer) (*Watcher, error) {
 	// Create in-cluster Kubernetes client
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -83,8 +83,8 @@ func NewWatcher(cfg Config, discoveryClient *checkpoint.DiscoveryClient, checkpo
 
 // Start begins watching for pods and starts the health check server
 func (w *Watcher) Start(ctx context.Context) error {
-	if w.config.CheckpointConfig == nil {
-		return fmt.Errorf("checkpoint config is required")
+	if w.config.CheckpointSpec == nil {
+		return fmt.Errorf("checkpoint spec is required")
 	}
 
 	w.log.WithFields(logrus.Fields{
@@ -313,8 +313,8 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 		"signal_file_path": signalFilePath,
 	}).Info("Found container, starting checkpoint")
 
-	// Resolve container to get PID for signal file writing
-	containerInfo, err := w.discoveryClient.ResolveContainer(ctx, containerID)
+	// Resolve container to get PID for signal file writing.
+	containerPID, _, err := w.discoveryClient.ResolveContainer(ctx, containerID)
 	if err != nil {
 		log.WithError(err).Error("Failed to resolve container")
 		w.checkpointedMu.Lock()
@@ -323,9 +323,9 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 		return
 	}
 
-	// Validate CheckpointConfig is set
-	if w.config.CheckpointConfig == nil {
-		log.Error("CheckpointConfig is nil - cannot perform checkpoint")
+	// Validate CheckpointSpec is set
+	if w.config.CheckpointSpec == nil {
+		log.Error("CheckpointSpec is nil - cannot perform checkpoint")
 		w.checkpointedMu.Lock()
 		delete(w.checkpointed, podKey)
 		w.checkpointedMu.Unlock()
@@ -333,24 +333,24 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 	}
 
 	// Perform checkpoint
-	params := checkpoint.CheckpointParams{
+	params := checkpoint.CheckpointRequest{
 		ContainerID:   containerID,
 		ContainerName: containerName,
 		CheckpointID:  checkpointID,
-		CheckpointDir: w.config.CheckpointConfig.BasePath,
+		CheckpointDir: w.config.CheckpointSpec.BasePath,
 		NodeName:      w.config.NodeName,
 		PodName:       pod.Name,
 		PodNamespace:  pod.Namespace,
 	}
 
-	result, err := w.checkpointer.Checkpoint(ctx, params, w.config.CheckpointConfig)
+	result, err := w.checkpointer.Checkpoint(ctx, params, w.config.CheckpointSpec)
 	if err != nil {
 		log.WithError(err).Error("Checkpoint failed")
 		// Write failure marker to PVC so restore pods know checkpoint failed
-		checkpointDir := filepath.Join(w.config.CheckpointConfig.BasePath, checkpointID)
+		checkpointDir := filepath.Join(w.config.CheckpointSpec.BasePath, checkpointID)
 		w.writeCheckpointDoneMarker(checkpointDir, checkpointID, false, err.Error(), log)
 		if signalFilePath != "" {
-			w.writeSignalFileToPod(int(containerInfo.PID), signalFilePath, checkpointID, "", false, err.Error())
+			w.writeSignalFileToPod(containerPID, signalFilePath, checkpointID, "", false, err.Error())
 		}
 		// Clear the in_progress status so checkpoint can be retried
 		w.checkpointedMu.Lock()
@@ -366,7 +366,7 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 
 	// Write signal file to pod's hostPath for checkpoint job pod to exit
 	if signalFilePath != "" {
-		w.writeSignalFileToPod(int(containerInfo.PID), signalFilePath, checkpointID, result.CheckpointDir, true, "")
+		w.writeSignalFileToPod(containerPID, signalFilePath, checkpointID, result.CheckpointDir, true, "")
 	}
 
 	// Mark as completed so we don't checkpoint again

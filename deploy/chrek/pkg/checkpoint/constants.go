@@ -27,8 +27,8 @@ const (
 	// Also hard-coded in vLLM for early-exit when checkpoint already exists.
 	CheckpointDoneFilename = "checkpoint.done"
 
-	// CheckpointDataFilename is the name of the metadata file in checkpoint directories.
-	CheckpointDataFilename = "metadata.yaml"
+	// CheckpointManifestFilename is the name of the manifest file in checkpoint directories.
+	CheckpointManifestFilename = "manifest.yaml"
 
 	// DescriptorsFilename is the name of the file descriptors file.
 	DescriptorsFilename = "descriptors.yaml"

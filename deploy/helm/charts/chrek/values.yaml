@@ -159,17 +159,6 @@ config:
       allowUprobes: true             # Required for CUDA
       skipInFlight: true             # Skip in-flight TCP connections
 
-    # Skip mount prefixes - directories whose mounts should be skipped during checkpoint.
-    # Useful for cross-node restore when certain mounts (e.g., NVIDIA runtime mounts)
-    # don't exist on the target node. All mount points under these prefixes are enumerated
-    # at checkpoint time and passed to CRIU's --skip-mnt option.
-    # Example: ["/run/nvidia/driver", "/proc/driver/nvidia"] skips all mounts like:
-    #   - /run/nvidia/driver/lib/firmware/nvidia/580.82.07/gsp_tu10x.bin
-    #   - /proc/driver/nvidia/params
-    skipMountPrefixes:
-      - "/run/nvidia/driver"
-      - "/proc/driver/nvidia"
-
     rootfsExclusions:
       # System directories excluded from rootfs diff capture
       # These are injected by NVIDIA GPU Operator and cause conflicts during restore
@@ -187,4 +176,4 @@ config:
 
   # NOTE: Restore configuration is NOT in this ConfigMap.
   # Placeholder containers do not mount it. Restore defaults are hardcoded in Go.
-  # CRIU options for restore come from the saved CheckpointData (metadata.yaml).
+  # CRIU options for restore come from the saved checkpoint manifest (manifest.yaml).

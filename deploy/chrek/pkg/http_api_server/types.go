@@ -29,7 +29,6 @@ type CheckpointInfo struct {
 	ContainerID  string    `json:"container_id"`
 	PodName      string    `json:"pod_name"`
 	PodNamespace string    `json:"pod_namespace"`
-	Image        string    `json:"image"`
 }
 
 // ListCheckpointsResponse is the response for list checkpoints.

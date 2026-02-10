@@ -55,9 +55,9 @@ func main() {
 	switch cfg.Agent.GetSignalSource() {
 	case SignalFromHTTP:
 		serverCfg := httpApiServer.ServerConfig{
-			ListenAddr:    cfg.Agent.ListenAddr,
-			NodeName:      cfg.Agent.NodeName,
-			CheckpointCfg: &cfg.Checkpoint,
+			ListenAddr:     cfg.Agent.ListenAddr,
+			NodeName:       cfg.Agent.NodeName,
+			CheckpointSpec: &cfg.Checkpoint,
 		}
 		srv := httpApiServer.NewServer(serverCfg, checkpointer)
 
@@ -76,11 +76,11 @@ func main() {
 		}
 
 	case SignalFromWatcher:
-		watcherConfig := watcher.Config{
+		watcherConfig := watcher.WatcherConfig{
 			NodeName:            cfg.Agent.NodeName,
 			ListenAddr:          cfg.Agent.ListenAddr,
 			RestrictedNamespace: cfg.Agent.RestrictedNamespace,
-			CheckpointConfig:    &cfg.Checkpoint,
+			CheckpointSpec:      &cfg.Checkpoint,
 		}
 
 		podWatcher, err := watcher.NewWatcher(watcherConfig, discoveryClient, checkpointer)

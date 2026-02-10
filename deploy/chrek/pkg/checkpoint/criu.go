@@ -3,17 +3,20 @@ package checkpoint
 
 import (
 	"fmt"
+	"time"
 
+	criu "github.com/checkpoint-restore/go-criu/v7"
 	criurpc "github.com/checkpoint-restore/go-criu/v7/rpc"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 )
 
-// CRIUConfig holds CRIU-specific configuration options.
+// CRIUSettings holds CRIU-specific configuration options.
 // Options are categorized by how they are passed to CRIU:
 //   - RPC options: Passed via go-criu CriuOpts protobuf
-//   - Config file options: Written to criu.conf (NOT available via RPC)
-type CRIUConfig struct {
+//   - CRIU conf file options: Written to criu.conf (NOT available via RPC)
+type CRIUSettings struct {
 	// === RPC Options (passed via go-criu CriuOpts) ===
 
 	// GhostLimit is the maximum ghost file size in bytes.
@@ -64,18 +67,7 @@ type CRIUConfig struct {
 	// ManageCgroupsMode controls cgroup handling: "ignore" lets K8s manage cgroups.
 	ManageCgroupsMode string `yaml:"manageCgroupsMode"`
 
-	// SkipMounts is a list of mount paths to skip during checkpoint.
-	// These are passed to CRIU's --skip-mnt option. This allows cross-node restore
-	// when certain mounts (e.g., nvidia runtime mounts) don't exist on the target node.
-	// Typically populated dynamically from SkipMountPrefixes in Config.
-	SkipMounts []string `yaml:"skipMounts,omitempty"`
-
-	// ExternalMounts are additional external mount mappings (e.g., "mnt[path]:path").
-	// Populated dynamically at checkpoint time from container introspection.
-	// Serialized to metadata.yaml so restore can use the exact same mappings.
-	ExternalMounts []string `yaml:"externalMounts,omitempty"`
-
-	// === Config File Options (NOT available via RPC - written to criu.conf) ===
+	// === CRIU Conf File Options (NOT available via RPC - written to criu.conf) ===
 
 	// LibDir is the path to CRIU plugin directory (e.g., /usr/local/lib/criu).
 	// Required for CUDA checkpoint/restore.
@@ -90,7 +82,7 @@ type CRIUConfig struct {
 
 // GenerateCRIUConfContent generates the criu.conf file content for options
 // that cannot be passed via RPC.
-func (c *CRIUConfig) GenerateCRIUConfContent() string {
+func (c *CRIUSettings) GenerateCRIUConfContent() string {
 	var content string
 
 	if c.LibDir != "" {
@@ -106,165 +98,161 @@ func (c *CRIUConfig) GenerateCRIUConfContent() string {
 	return content
 }
 
-// CRIUDumpParams holds per-checkpoint dynamic parameters for CRIU dump.
-// These are values that change per checkpoint operation, not configuration.
-type CRIUDumpParams struct {
-	PID        int
-	ImageDirFD int32
-	RootFS     string
+// ExternalMountManifestEntry is a serializable CRIU ext-mount entry in checkpoint manifests.
+type ExternalMountManifestEntry struct {
+	Key string `yaml:"key"`
+	Val string `yaml:"val"`
 }
 
-// BuildCRIUOpts creates CRIU options from config and per-checkpoint parameters.
-// This sets up the base options; external mounts and namespaces are added separately.
-func BuildCRIUOpts(cfg *CRIUConfig, params CRIUDumpParams) *criurpc.CriuOpts {
+// CRIUDumpManifest stores the resolved dump-time CRIU mount plan used for restore.
+type CRIUDumpManifest struct {
+	CRIU     CRIUSettings                 `yaml:"criu"`
+	ExtMnt   []ExternalMountManifestEntry `yaml:"extMnt,omitempty"`
+	External []string                     `yaml:"external,omitempty"`
+	SkipMnt  []string                     `yaml:"skipMnt,omitempty"`
+}
+
+// NewCRIUDumpManifest serializes resolved dump options for restore.
+func NewCRIUDumpManifest(criuOpts *criurpc.CriuOpts, settings CRIUSettings) CRIUDumpManifest {
+	manifest := CRIUDumpManifest{CRIU: settings}
+	if criuOpts == nil {
+		return manifest
+	}
+
+	for _, mount := range criuOpts.ExtMnt {
+		if mount == nil || mount.GetKey() == "" {
+			continue
+		}
+		manifest.ExtMnt = append(manifest.ExtMnt, ExternalMountManifestEntry{
+			Key: mount.GetKey(),
+			Val: mount.GetVal(),
+		})
+	}
+	manifest.External = append([]string(nil), criuOpts.External...)
+	manifest.SkipMnt = append([]string(nil), criuOpts.SkipMnt...)
+	return manifest
+}
+
+// BuildCRIUDumpOptions creates CRIU options directly from spec settings and runtime state.
+func BuildCRIUDumpOptions(
+	settings *CRIUSettings,
+	pid int,
+	imageDirFD int32,
+	rootFS string,
+	mountInfo []MountInfo,
+	ociSpec *specs.Spec,
+	namespaces map[NamespaceType]*NamespaceInfo,
+) (*criurpc.CriuOpts, error) {
+	mountPolicy := BuildMountPolicy(mountInfo, ociSpec, rootFS)
+
+	extMnt := buildExternalMountMaps(mountPolicy.Externalized)
+	skipMnt := mountPolicy.Skipped
+	external := buildExternalNamespaces(namespaces)
+	logrus.WithFields(logrus.Fields{
+		"externalized_count": len(mountPolicy.Externalized),
+		"skipped_count":      len(mountPolicy.Skipped),
+	}).Debug("Resolved mount policy for CRIU dump")
+
 	criuOpts := &criurpc.CriuOpts{
-		Pid:         proto.Int32(int32(params.PID)),
-		ImagesDirFd: proto.Int32(params.ImageDirFD),
-		Root:        proto.String(params.RootFS),
+		Pid:         proto.Int32(int32(pid)),
+		ImagesDirFd: proto.Int32(imageDirFD),
+		Root:        proto.String(rootFS),
 		LogFile:     proto.String(DumpLogFilename),
 	}
+	criuOpts.ExtMnt = extMnt
+	criuOpts.External = external
+	criuOpts.SkipMnt = skipMnt
 
-	if cfg == nil {
-		return criuOpts
+	if settings == nil {
+		return criuOpts, nil
 	}
 
-	// RPC options from config
-	criuOpts.LogLevel = proto.Int32(cfg.LogLevel)
-	criuOpts.LeaveRunning = proto.Bool(cfg.LeaveRunning)
-	criuOpts.ShellJob = proto.Bool(cfg.ShellJob)
-	criuOpts.TcpClose = proto.Bool(cfg.TcpClose)
-	criuOpts.FileLocks = proto.Bool(cfg.FileLocks)
-	criuOpts.OrphanPtsMaster = proto.Bool(cfg.OrphanPtsMaster)
-	criuOpts.ExtUnixSk = proto.Bool(cfg.ExtUnixSk)
-	criuOpts.LinkRemap = proto.Bool(cfg.LinkRemap)
-	criuOpts.ExtMasters = proto.Bool(cfg.ExtMasters)
-	criuOpts.AutoDedup = proto.Bool(cfg.AutoDedup)
-	criuOpts.LazyPages = proto.Bool(cfg.LazyPages)
+	// RPC options from spec.
+	criuOpts.LogLevel = proto.Int32(settings.LogLevel)
+	criuOpts.LeaveRunning = proto.Bool(settings.LeaveRunning)
+	criuOpts.ShellJob = proto.Bool(settings.ShellJob)
+	criuOpts.TcpClose = proto.Bool(settings.TcpClose)
+	criuOpts.FileLocks = proto.Bool(settings.FileLocks)
+	criuOpts.OrphanPtsMaster = proto.Bool(settings.OrphanPtsMaster)
+	criuOpts.ExtUnixSk = proto.Bool(settings.ExtUnixSk)
+	criuOpts.LinkRemap = proto.Bool(settings.LinkRemap)
+	criuOpts.ExtMasters = proto.Bool(settings.ExtMasters)
+	criuOpts.AutoDedup = proto.Bool(settings.AutoDedup)
+	criuOpts.LazyPages = proto.Bool(settings.LazyPages)
 
 	// Cgroup management mode
 	criuOpts.ManageCgroups = proto.Bool(true)
-	var cgMode criurpc.CriuCgMode
-	switch cfg.ManageCgroupsMode {
+	cgMode := criurpc.CriuCgMode_IGNORE
+	switch settings.ManageCgroupsMode {
 	case "soft":
 		cgMode = criurpc.CriuCgMode_SOFT
 	case "full":
 		cgMode = criurpc.CriuCgMode_FULL
 	case "strict":
 		cgMode = criurpc.CriuCgMode_STRICT
-	case "ignore", "":
-		cgMode = criurpc.CriuCgMode_IGNORE
-	default:
-		cgMode = criurpc.CriuCgMode_IGNORE
 	}
 	criuOpts.ManageCgroupsMode = &cgMode
 
 	// Optional numeric options
-	if cfg.GhostLimit > 0 {
-		criuOpts.GhostLimit = proto.Uint32(cfg.GhostLimit)
+	if settings.GhostLimit > 0 {
+		criuOpts.GhostLimit = proto.Uint32(settings.GhostLimit)
 	}
-	if cfg.Timeout > 0 {
-		criuOpts.Timeout = proto.Uint32(cfg.Timeout)
+	if settings.Timeout > 0 {
+		criuOpts.Timeout = proto.Uint32(settings.Timeout)
 	}
 
-	return criuOpts
+	return criuOpts, nil
 }
 
-// AddExternalMounts adds mount points as external mounts to CRIU options.
-// CRIU requires all mounts to be marked as external for successful restore.
-func AddExternalMounts(criuOpts *criurpc.CriuOpts, mounts []AllMountInfo) {
-	addedMounts := make(map[string]bool)
-
-	for _, m := range mounts {
-		if addedMounts[m.MountPoint] {
-			continue
-		}
-		criuOpts.ExtMnt = append(criuOpts.ExtMnt, &criurpc.ExtMountMap{
-			Key: proto.String(m.MountPoint),
-			Val: proto.String(m.MountPoint),
-		})
-		addedMounts[m.MountPoint] = true
-	}
-}
-
-// AddExternalPaths adds additional paths (masked/readonly) as external mounts.
-// These may not appear in mountinfo but CRIU still needs them marked as external.
-func AddExternalPaths(criuOpts *criurpc.CriuOpts, paths []string) {
-	// Build set of existing mount points
-	existing := make(map[string]bool)
-	for _, m := range criuOpts.ExtMnt {
-		existing[m.GetKey()] = true
-	}
-
+// buildExternalMountMaps serializes externalized mount paths into CRIU map entries.
+func buildExternalMountMaps(paths []string) []*criurpc.ExtMountMap {
+	extMnt := make([]*criurpc.ExtMountMap, 0, len(paths))
+	existing := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
-		if existing[path] {
+		if path == "" {
 			continue
 		}
-		criuOpts.ExtMnt = append(criuOpts.ExtMnt, &criurpc.ExtMountMap{
+		if _, ok := existing[path]; ok {
+			continue
+		}
+		extMnt = append(extMnt, &criurpc.ExtMountMap{
 			Key: proto.String(path),
 			Val: proto.String(path),
 		})
-		existing[path] = true
-	}
-}
-
-// ConfigureExternalMounts adds all required external mounts to CRIU options.
-// This includes mounts from /proc/pid/mountinfo plus masked/readonly paths from OCI spec.
-func ConfigureExternalMounts(criuOpts *criurpc.CriuOpts, pid int, containerInfo *ContainerInfo) error {
-	// Get all mounts from mountinfo - CRIU needs every mount marked as external
-	allMounts, err := GetAllMountsFromMountinfo(pid)
-	if err != nil {
-		return fmt.Errorf("failed to get all mounts from mountinfo: %w", err)
+		existing[path] = struct{}{}
 	}
 
-	// Add mounts from mountinfo
-	AddExternalMounts(criuOpts, allMounts)
-
-	// Add masked and readonly paths from OCI spec
-	AddExternalPaths(criuOpts, containerInfo.GetMaskedPaths())
-	AddExternalPaths(criuOpts, containerInfo.GetReadonlyPaths())
-
-	return nil
+	return extMnt
 }
 
-// ConfigureExternalNamespaces adds external namespaces to CRIU options.
-// Returns the network namespace inode if found, for logging purposes.
-func ConfigureExternalNamespaces(criuOpts *criurpc.CriuOpts, namespaces map[NamespaceType]*NamespaceInfo, externalMounts []string) uint64 {
-	var netNsInode uint64
+// buildExternalNamespaces builds external namespace/mount references.
+func buildExternalNamespaces(namespaces map[NamespaceType]*NamespaceInfo) []string {
+	external := make([]string, 0, 1)
 
 	// Mark network namespace as external for socket binding preservation
 	if netNs, ok := namespaces[NamespaceNet]; ok {
-		criuOpts.External = append(criuOpts.External, fmt.Sprintf("%s[%d]:%s", NamespaceNet, netNs.Inode, "extNetNs"))
-		netNsInode = netNs.Inode
-		logrus.WithField("inode", netNsInode).Debug("Marked network namespace as external")
+		external = append(external, fmt.Sprintf("%s[%d]:%s", NamespaceNet, netNs.Inode, "extNetNs"))
+		logrus.WithField("inode", netNs.Inode).Debug("Marked network namespace as external")
 	}
 
-	// Add additional external mounts (e.g., for NVIDIA firmware files)
-	criuOpts.External = append(criuOpts.External, externalMounts...)
-
-	return netNsInode
+	return external
 }
 
-// ConfigureSkipMounts enumerates mounts under the given prefixes and adds them to CRIU's
-// skip mount list. This allows cross-node restore by skipping mounts that may not exist
-// on the target node (e.g., NVIDIA runtime mounts like /run/nvidia/driver/...).
-// Returns the list of mounts that will be skipped, for logging purposes.
-func ConfigureSkipMounts(criuOpts *criurpc.CriuOpts, pid int, prefixes []string) ([]string, error) {
-	if len(prefixes) == 0 {
-		return nil, nil
+// ExecuteCRIUDump runs the CRIU dump and logs timing plus dump-log location on failure.
+func ExecuteCRIUDump(criuOpts *criurpc.CriuOpts, checkpointDir string, log *logrus.Entry) (time.Duration, error) {
+	criuDumpStart := time.Now()
+	criuClient := criu.MakeCriu()
+	if err := criuClient.Dump(criuOpts, nil); err != nil {
+		dumpDuration := time.Since(criuDumpStart)
+		log.WithFields(logrus.Fields{
+			"duration":       dumpDuration,
+			"checkpoint_dir": checkpointDir,
+			"dump_log_path":  fmt.Sprintf("%s/%s", checkpointDir, DumpLogFilename),
+		}).Error("CRIU dump failed")
+		return 0, fmt.Errorf("CRIU dump failed: %w", err)
 	}
 
-	skipMounts, err := GetMountsUnderPrefixes(pid, prefixes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to enumerate skip mounts from prefixes: %w", err)
-	}
-
-	if len(skipMounts) > 0 {
-		criuOpts.SkipMnt = skipMounts
-		logrus.WithFields(logrus.Fields{
-			"prefixes": prefixes,
-			"count":    len(skipMounts),
-		}).Debug("Configured mounts to skip for cross-node restore")
-	}
-
-	return skipMounts, nil
+	criuDumpDuration := time.Since(criuDumpStart)
+	log.WithField("duration", criuDumpDuration).Info("CRIU dump completed")
+	return criuDumpDuration, nil
 }

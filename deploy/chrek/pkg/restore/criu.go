@@ -12,9 +12,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
 )
 
-// CRIURestoreConfig holds configuration for CRIU restore operations.
-// Most fields come from the saved CheckpointData.CRIU config.
-type CRIURestoreConfig struct {
+// CRIURestorePlan holds configuration for CRIU restore operations.
+// Most fields come from the saved CheckpointManifest.CRIUDump.CRIU settings.
+type CRIURestorePlan struct {
 	// File descriptors
 	ImageDirFD int32
 	WorkDirFD  int32
@@ -24,16 +24,17 @@ type CRIURestoreConfig struct {
 	RootPath string
 	LogFile  string
 
-	// Options from CheckpointData.CRIU
+	// Options from CheckpointManifest.CRIUDump.CRIU.
 	LogLevel          int32
 	Timeout           uint32 // CRIU timeout in seconds (0 = no timeout, required for CUDA)
 	ShellJob          bool   // Allow session leaders (containers are often session leaders)
 	TcpClose          bool   // Close TCP connections (pod IPs change on restore)
 	FileLocks         bool   // Allow file locks
 	ExtUnixSk         bool   // Allow external Unix sockets
+	LinkRemap         bool   // Handle deleted-but-open files via CRIU link remap
 	ManageCgroupsMode string // Cgroup handling mode: "ignore" lets K8s manage cgroups
 
-	// External mount mappings (from CheckpointData.CRIU.ExternalMounts)
+	// External mount mappings (from CheckpointManifest.CRIUDump.ExtMnt).
 	ExtMountMaps []*criurpc.ExtMountMap
 }
 
@@ -78,19 +79,19 @@ func OpenWorkDir(workDir string, log *logrus.Entry) (*os.File, int32) {
 	return workDirFile, int32(workDirFile.Fd())
 }
 
-// BuildRestoreCRIUOpts creates CRIU options for restore from a config struct.
+// BuildCRIURestoreOptions creates CRIU options for restore from a runtime plan.
 //
-// Options from CheckpointData.CRIU (saved at checkpoint time):
-//   - ShellJob, TcpClose, FileLocks, ExtUnixSk, ManageCgroupsMode
+// Options from CheckpointManifest.CRIUDump.CRIU (saved at checkpoint time):
+//   - ShellJob, TcpClose, FileLocks, ExtUnixSk, LinkRemap, ManageCgroupsMode
 //
 // Hardcoded restore-specific options:
 //   - RstSibling: restore in detached mode
 //   - MntnsCompatMode: cross-container restore
 //   - EvasiveDevices, ForceIrmap: device/inode handling
-func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
-	// Map cgroup management mode from config
+func BuildCRIURestoreOptions(plan CRIURestorePlan) *criurpc.CriuOpts {
+	// Map cgroup management mode from plan.
 	var cgMode criurpc.CriuCgMode
-	switch cfg.ManageCgroupsMode {
+	switch plan.ManageCgroupsMode {
 	case "soft":
 		cgMode = criurpc.CriuCgMode_SOFT
 	case "full":
@@ -104,12 +105,12 @@ func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
 	}
 
 	criuOpts := &criurpc.CriuOpts{
-		ImagesDirFd: proto.Int32(cfg.ImageDirFD),
-		LogLevel:    proto.Int32(cfg.LogLevel),
-		LogFile:     proto.String(cfg.LogFile),
+		ImagesDirFd: proto.Int32(plan.ImageDirFD),
+		LogLevel:    proto.Int32(plan.LogLevel),
+		LogFile:     proto.String(plan.LogFile),
 
 		// Root filesystem - use current container's root
-		Root: proto.String(cfg.RootPath),
+		Root: proto.String(plan.RootPath),
 
 		// Restore in detached mode - process runs in background (restore-specific)
 		RstSibling: proto.Bool(true),
@@ -122,13 +123,14 @@ func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
 		// We explicitly set to false to use mount-v2 (requires kernel 5.15+)
 		MntnsCompatMode: proto.Bool(false),
 
-		// Options from saved CheckpointData.CRIU
-		ShellJob:  proto.Bool(cfg.ShellJob),
-		TcpClose:  proto.Bool(cfg.TcpClose),
-		FileLocks: proto.Bool(cfg.FileLocks),
-		ExtUnixSk: proto.Bool(cfg.ExtUnixSk),
+		// Options from saved CheckpointManifest.CRIUDump.CRIU.
+		ShellJob:  proto.Bool(plan.ShellJob),
+		TcpClose:  proto.Bool(plan.TcpClose),
+		FileLocks: proto.Bool(plan.FileLocks),
+		ExtUnixSk: proto.Bool(plan.ExtUnixSk),
+		LinkRemap: proto.Bool(plan.LinkRemap),
 
-		// Cgroup management from saved config
+		// Cgroup management from saved settings.
 		ManageCgroups:     proto.Bool(true),
 		ManageCgroupsMode: &cgMode,
 
@@ -137,27 +139,27 @@ func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
 		ForceIrmap:     proto.Bool(true),
 
 		// External mount mappings
-		ExtMnt: cfg.ExtMountMaps,
+		ExtMnt: plan.ExtMountMaps,
 	}
 
 	// Add network namespace inheritance if provided
-	if cfg.NetNsFD >= 0 {
+	if plan.NetNsFD >= 0 {
 		criuOpts.InheritFd = []*criurpc.InheritFd{
 			{
 				Key: proto.String("extNetNs"),
-				Fd:  proto.Int32(cfg.NetNsFD),
+				Fd:  proto.Int32(plan.NetNsFD),
 			},
 		}
 	}
 
 	// Add work directory if specified
-	if cfg.WorkDirFD >= 0 {
-		criuOpts.WorkDirFd = proto.Int32(cfg.WorkDirFD)
+	if plan.WorkDirFD >= 0 {
+		criuOpts.WorkDirFd = proto.Int32(plan.WorkDirFD)
 	}
 
 	// Add timeout if specified (required for CUDA restores)
-	if cfg.Timeout > 0 {
-		criuOpts.Timeout = proto.Uint32(cfg.Timeout)
+	if plan.Timeout > 0 {
+		criuOpts.Timeout = proto.Uint32(plan.Timeout)
 	}
 
 	return criuOpts

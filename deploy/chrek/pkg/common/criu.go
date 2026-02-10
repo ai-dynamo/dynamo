@@ -30,41 +30,6 @@ func OpenPathForCRIU(path string) (*os.File, int32, error) {
 	return dir, int32(dir.Fd()), nil
 }
 
-// DefaultMaskedPaths returns the standard OCI masked paths.
-// These paths are typically masked (made inaccessible) in containers.
-// Used as fallback when checkpoint metadata doesn't include OCI-derived paths.
-func DefaultMaskedPaths() []string {
-	return []string{
-		"/proc/bus",
-		"/proc/fs",
-		"/proc/irq",
-		"/proc/sys",
-		"/proc/sysrq-trigger",
-		"/proc/acpi",
-		"/proc/kcore",
-		"/proc/keys",
-		"/proc/latency_stats",
-		"/proc/timer_list",
-		"/proc/scsi",
-		"/proc/interrupts",
-		"/proc/asound",
-		"/sys/firmware",
-		"/sys/devices/virtual/powercap",
-	}
-}
-
-// DefaultReadonlyPaths returns the standard OCI readonly paths.
-// These paths are typically mounted read-only in containers.
-func DefaultReadonlyPaths() []string {
-	return []string{
-		"/proc/bus",
-		"/proc/fs",
-		"/proc/irq",
-		"/proc/sys",
-		"/proc/sysrq-trigger",
-	}
-}
-
 // CRIUMountPoint represents a parsed mount point from /proc/pid/mountinfo.
 type CRIUMountPoint struct {
 	MountID   string // Mount ID
