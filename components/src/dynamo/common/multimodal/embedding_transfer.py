@@ -1,7 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import logging
 import math
 import os
+import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
@@ -29,89 +33,11 @@ def torch_dtype_from_string(dtype_str: str) -> torch.dtype:
         >>> dtype = EncodeHelper.get_torch_dtype_from_string("torch.bfloat16")
         >>> # Result: torch.bfloat16
     """
-    dtype_map = {
-        # Floating point types
-        "torch.float64": torch.float64,
-        "torch.float32": torch.float32,
-        "torch.float16": torch.float16,
-        "torch.bfloat16": torch.bfloat16,
-        # FP8 types
-        "torch.float8_e4m3fn": torch.float8_e4m3fn,
-        "torch.float8_e4m3fnuz": torch.float8_e4m3fnuz,
-        "torch.float8_e5m2": torch.float8_e5m2,
-        "torch.float8_e5m2fnuz": torch.float8_e5m2fnuz,
-        "torch.float8_e8m0fnu": torch.float8_e8m0fnu,
-        # Signed integer types
-        "torch.int64": torch.int64,
-        "torch.int32": torch.int32,
-        "torch.int16": torch.int16,
-        "torch.int8": torch.int8,
-        # Unsigned integer types
-        "torch.uint64": torch.uint64,
-        "torch.uint32": torch.uint32,
-        "torch.uint16": torch.uint16,
-        "torch.uint8": torch.uint8,
-        # Complex types
-        "torch.complex128": torch.complex128,
-        "torch.complex64": torch.complex64,
-        # Quantized types
-        "torch.qint8": torch.qint8,
-        "torch.quint8": torch.quint8,
-        "torch.qint32": torch.qint32,
-        "torch.quint4x2": torch.quint4x2,
-        # Boolean type
-        "torch.bool": torch.bool,
-    }
-    return dtype_map.get(dtype_str, torch.float32)
+    return getattr(torch, dtype_str.removeprefix("torch."), torch.float32)
 
 
 def torch_dtype_to_string(dtype: torch.dtype) -> str:
-    """Convert torch.dtype object to string representation.
-
-    Args:
-        dtype: torch.dtype object to convert
-
-    Returns:
-        String representation of the torch dtype (e.g., "torch.float32")
-
-    Example:
-        >>> dtype_str = EncodeHelper.get_torch_dtype_string(torch.bfloat16)
-        >>> # Result: "torch.bfloat16"
-    """
-    dtype_map = {
-        # Floating point types
-        torch.float64: "torch.float64",
-        torch.float32: "torch.float32",
-        torch.float16: "torch.float16",
-        torch.bfloat16: "torch.bfloat16",
-        # FP8 types
-        torch.float8_e4m3fn: "torch.float8_e4m3fn",
-        torch.float8_e4m3fnuz: "torch.float8_e4m3fnuz",
-        torch.float8_e5m2: "torch.float8_e5m2",
-        torch.float8_e5m2fnuz: "torch.float8_e5m2fnuz",
-        torch.float8_e8m0fnu: "torch.float8_e8m0fnu",
-        # Signed integer types
-        torch.int64: "torch.int64",
-        torch.int32: "torch.int32",
-        torch.int16: "torch.int16",
-        torch.int8: "torch.int8",
-        # Unsigned integer types
-        torch.uint64: "torch.uint64",
-        torch.uint32: "torch.uint32",
-        torch.uint16: "torch.uint16",
-        torch.uint8: "torch.uint8",
-        # Complex types
-        torch.complex128: "torch.complex128",
-        torch.complex64: "torch.complex64",
-        # Quantized types
-        torch.qint8: "torch.qint8",
-        torch.quint8: "torch.quint8",
-        torch.qint32: "torch.qint32",
-        torch.quint4x2: "torch.quint4x2",
-        # Boolean type
-        torch.bool: "torch.bool",
-    }
-    return dtype_map.get(dtype, "torch.float32")
+    return str(dtype).removeprefix("torch.")
 
 
 # Opaque object to the caller, different implementation may carry
@@ -206,18 +132,25 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         embedding_key = f"{self.sender_id}_{self.embedding_counter}"
         self.embedding_counter += 1
         tensor_path = f"/tmp/encoder_cache.{embedding_key}.safetensors"
+        fd, tensor_path = tempfile.mkstemp(
+            prefix=f"encoder_cache.{embedding_key}.", suffix=".safetensors"
+        )
+        os.close(fd)
         tensors = {"ec_cache": embeddings.cpu()}
         safetensors_torch.save_file(
             tensors,
             tensor_path,
         )
-        return TransferRequest(
-            embeddings_shape=list(embeddings.shape),
-            embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
-            serialized_request=tensor_path,
-        ), asyncio.sleep(
-            0
-        )  # Return a future that is already completed for interface consistency
+        fut = asyncio.get_event_loop().create_future()
+        fut.set_result(None)
+        return (
+            TransferRequest(
+                embeddings_shape=list(embeddings.shape),
+                embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
+                serialized_request=tensor_path,
+            ),
+            fut,
+        )
 
 
 class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
@@ -490,7 +423,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             )
             encodings_tensor = torch.zeros(*embeddings_shape, dtype=embeddings_dtype)
             descriptor = nixl_connect.Descriptor(encodings_tensor)
-            dynamic_descriptor = False
+            dynamic_descriptor = True
         else:
             descriptor = self.warmedup_descriptors.get()
             # Slide view of pre-allocated tensor
@@ -500,7 +433,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
                 .view(dtype=embeddings_dtype)
                 .view(embeddings_shape)
             )
-            dynamic_descriptor = True
+            dynamic_descriptor = False
 
         # Create read operation to read from EncodeHandler
         read_op = await self.connector.begin_read(readable_metadata, descriptor)

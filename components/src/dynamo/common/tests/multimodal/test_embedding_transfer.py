@@ -22,9 +22,9 @@ from dynamo.common.multimodal.embedding_transfer import (
 logger = logging.getLogger(__name__)
 
 
-async def benchmark(
-    sender, receiver, tensors=[torch.randn(256, 8 * 1024) for _ in range(30)]
-):
+async def benchmark(sender, receiver, tensors=None):
+    if tensors is None:
+        tensors = [torch.randn(256, 8 * 1024) for _ in range(30)]
     send_start = time.perf_counter()
     sender_tasks = [
         asyncio.create_task(sender.send_embeddings(tensor)) for tensor in tensors
@@ -49,9 +49,9 @@ async def benchmark(
         await request[1]
 
 
-async def correctness(
-    sender, receiver, tensors=[torch.randn(256, 8 * 1024) for _ in range(3)]
-):
+async def correctness(sender, receiver, tensors=None):
+    if tensors is None:
+        tensors = [torch.randn(256, 8 * 1024) for _ in range(3)]
     sender_tasks = [
         asyncio.create_task(sender.send_embeddings(tensor)) for tensor in tensors
     ]
@@ -104,7 +104,6 @@ class TestNixlPersistentEmbeddingTransfer:
         await correctness(sender, receiver)
 
     async def test_benchmark(self):
-        """Test get_or_compute caches the computed result."""
         sender = NixlPersistentEmbeddingSender()
         receiver = NixlPersistentEmbeddingReceiver()
         await benchmark(sender, receiver)
