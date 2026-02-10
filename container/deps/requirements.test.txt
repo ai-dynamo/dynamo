@@ -17,11 +17,11 @@ datasets==4.4.1
 kr8s==0.20.13
 kubernetes==32.0.1
 kubernetes_asyncio==32.0.0
-matplotlib==3.10.8
+matplotlib==3.10.7
 # For NATS object store verification in router tests
 nats-py==2.12.0
 pmdarima==2.1.1
-prometheus-api-client==0.7.0
+prometheus-api-client==0.6.0
 psutil<=7.0.0  # System package, may vary by platform (was >=5.0.0)
 pydantic==2.11.7
 pyright==1.1.407
