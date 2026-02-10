@@ -486,20 +486,12 @@ impl OpenAIPreprocessor {
                                     tracing::warn!(
                                         "backend_instance_id provided but no token_data; tokenizing prompt"
                                     );
-                                    let encode_start = Instant::now();
-                                    let encoding = self.tokenizer.encode(&prompt)?;
-                                    if let Some(t) = tracker {
-                                        t.record_tokenizer_latency(encode_start.elapsed());
-                                    }
+                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
                                     (encoding.token_ids().to_vec(), false)
                                 }
                             } else {
                                 // No backend_instance_id provided, continue the normal flow.
-                                let encode_start = Instant::now();
-                                let encoding = self.tokenizer.encode(&prompt)?;
-                                if let Some(t) = tracker {
-                                    t.record_tokenizer_latency(encode_start.elapsed());
-                                }
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -516,11 +508,7 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encode_start = Instant::now();
-                                let encoding = self.tokenizer.encode(&texts[0])?;
-                                if let Some(t) = tracker {
-                                    t.record_tokenizer_latency(encode_start.elapsed());
-                                }
+                                let encoding = self.encode_with_timing(&texts[0], tracker)?;
                                 builder.token_ids(encoding.token_ids().to_vec());
                             } else {
                                 bail!(
@@ -534,6 +522,19 @@ impl OpenAIPreprocessor {
             }
         }
         Ok(annotations)
+    }
+
+    fn encode_with_timing(
+        &self,
+        prompt: &str,
+        tracker: Option<&RequestTracker>,
+    ) -> anyhow::Result<Encoding> {
+        let encode_start = Instant::now();
+        let encoding = self.tokenizer.encode(prompt)?;
+        if let Some(t) = tracker {
+            t.record_tokenizer_latency(encode_start.elapsed());
+        }
+        Ok(encoding)
     }
 
     /// Preprocess an embedding request, handling both text and token ID inputs.
