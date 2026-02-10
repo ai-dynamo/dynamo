@@ -218,10 +218,10 @@ impl ConcurrentRadixTree {
         // This lets us replace O(W) update_scores work at every level with an
         // O(1) length check. Per-worker iteration only happens at dropout
         // boundaries, where the count decreases.
-        for idx in 1..sequence.len() {
+        for (idx, item) in sequence.iter().enumerate().skip(1) {
             let next_block = {
                 let guard = current.read().unwrap();
-                guard.children.get(&sequence[idx]).cloned()
+                guard.children.get(item).cloned()
             };
 
             let Some(block) = next_block else {

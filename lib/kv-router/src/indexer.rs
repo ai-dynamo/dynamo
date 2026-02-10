@@ -451,16 +451,12 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let backend = Arc::clone(&backend);
 
             let handle = std::thread::spawn(move || {
-                loop {
-                    if let Ok(Some(event)) = event_receiver.recv() {
-                        if let Err(e) = backend.apply_event(event) {
-                            tracing::warn!("Failed to apply event: {:?}", e);
-                        }
-                    } else {
-                        // Channel closed or received None (shutdown signal)
-                        break;
+                while let Ok(Some(event)) = event_receiver.recv() {
+                    if let Err(e) = backend.apply_event(event) {
+                        tracing::warn!("Failed to apply event: {:?}", e);
                     }
                 }
+                tracing::debug!("Worker thread shutting down");
             });
             thread_handles.push(handle);
         }

@@ -259,11 +259,13 @@ impl PositionalIndexer {
             let local_hash = block_data.tokens_hash;
             let seq_hash = block_data.block_hash;
 
-            index.entry((position, local_hash)).and_modify(|entry| entry.insert(seq_hash, worker)).or_insert_with(|| SeqEntry::new(seq_hash, worker));
+            index
+                .entry((position, local_hash))
+                .and_modify(|entry| entry.insert(seq_hash, worker))
+                .or_insert_with(|| SeqEntry::new(seq_hash, worker));
 
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
-            worker_map
-                .insert(seq_hash, (position, local_hash));
+            worker_map.insert(seq_hash, (position, local_hash));
         }
 
         Ok(())
@@ -321,6 +323,7 @@ impl PositionalIndexer {
     }
 
     /// Remove a worker and all their blocks completely from the index.
+    #[allow(dead_code)]
     fn remove_worker_blocks(&self, worker_id: WorkerId) {
         Self::remove_or_clear_worker_blocks_impl(
             &self.index,
@@ -441,7 +444,12 @@ impl PositionalIndexer {
         // if the query diverged from the stored sequence at an earlier position.
         Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
         let seq_hash = seq_hashes[position];
-        Some(entry.get(seq_hash).map(|workers| workers.len()).unwrap_or(0))
+        Some(
+            entry
+                .get(seq_hash)
+                .map(|workers| workers.len())
+                .unwrap_or(0),
+        )
     }
 
     /// Scan positions sequentially, updating active set and recording drain scores.
@@ -562,7 +570,14 @@ impl PositionalIndexer {
             let next_pos = (current_pos + self.jump_size).min(len - 1);
 
             // Check workers at jump destination
-            let num_workers_at_next = self.count_workers_at(next_pos, local_hashes[next_pos], &mut seq_hashes, local_hashes).unwrap_or(0);
+            let num_workers_at_next = self
+                .count_workers_at(
+                    next_pos,
+                    local_hashes[next_pos],
+                    &mut seq_hashes,
+                    local_hashes,
+                )
+                .unwrap_or(0);
 
             if num_workers_at_next == active.len() {
                 current_pos = next_pos;
