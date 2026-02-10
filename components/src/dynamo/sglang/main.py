@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import os
 import signal
 import sys
 from collections import defaultdict
-from typing import Any, Callable, DefaultDict
+from typing import Any, Awaitable, Callable, DefaultDict
 
 import sglang as sgl
 import uvloop
@@ -46,6 +47,8 @@ from dynamo.sglang.request_handlers import (
 )
 
 configure_dynamo_logging()
+
+RUN_DEFERRED_HANDLERS: Callable[[], Awaitable[None]] | None = None
 
 
 async def _handle_non_leader_node(
@@ -93,7 +96,7 @@ def install_graceful_shutdown(
     *,
     signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),
     chain_old_os_handlers: bool = False,
-) -> tuple[asyncio.Event, dict[int, list[tuple[SignalCallback, tuple[Any, ...]]]]]:
+) -> tuple[asyncio.Event, Callable[[], Awaitable[None]]]:
     """
     Set up graceful shutdown + callback chaining.
 
@@ -105,7 +108,7 @@ def install_graceful_shutdown(
       - Sets and returns an asyncio.Event you can await to know shutdown was requested
 
     Returns:
-      (shutdown_event, deferred_handlers)
+      (shutdown_event, run_deferred_handlers)
     """
     shutdown_event = asyncio.Event()
 
@@ -116,45 +119,43 @@ def install_graceful_shutdown(
     old_os_handlers: dict[int, Any] = {}
 
     shutdown_started = False
+    shutdown_signum: int | None = None
+    deferred_handlers_ran = False
+
+    async def run_deferred_handlers() -> None:
+        nonlocal deferred_handlers_ran
+        if not shutdown_started or deferred_handlers_ran:
+            return
+        deferred_handlers_ran = True
+
+        signums = (
+            [shutdown_signum]
+            if shutdown_signum is not None
+            else list(deferred_handlers.keys())
+        )
+        for sig in signums:
+            for cb, args in list(deferred_handlers.get(sig, [])):
+                try:
+                    res = cb(*args)
+                    if inspect.isawaitable(res):
+                        await res
+                except Exception:
+                    logging.exception("Deferred signal callback failed: %r", cb)
 
     async def _shutdown_sequence(signum: int, frame: Any | None) -> None:
-        nonlocal shutdown_started
+        nonlocal shutdown_started, shutdown_signum
         if shutdown_started:
             return
+        shutdown_signum = signum
         shutdown_started = True
 
         logging.info("Received signal %s, starting graceful shutdown", signum)
         shutdown_event.set()
 
-        # Run deferred callbacks in the loop context
-        for cb, args in list(deferred_handlers.get(signum, [])):
-            try:
-                res = cb(*args)
-                if asyncio.iscoroutine(res):
-                    await res
-            except Exception:
-                logging.exception("Deferred signal callback failed: %r", cb)
-
-        # Call runtime.shutdown() (sync or async)
         try:
-            res = runtime.shutdown()
-            if asyncio.iscoroutine(res):
-                await res
+            runtime.shutdown()
         except Exception:
             logging.exception("runtime.shutdown() failed")
-
-        # Optional: chain old OS handler
-        if chain_old_os_handlers:
-            old = old_os_handlers.get(signum)
-            if old and old not in (
-                signal.SIG_DFL,
-                signal.SIG_IGN,
-                signal.default_int_handler,
-            ):
-                try:
-                    old(signum, frame)
-                except Exception:
-                    logging.exception("Chained old OS handler failed")
 
     def _schedule_shutdown(signum: int, frame: Any | None) -> None:
         def _kick() -> None:
@@ -186,7 +187,7 @@ def install_graceful_shutdown(
 
     loop.add_signal_handler = watching_add_signal_handler  # type: ignore[assignment]
 
-    return shutdown_event, deferred_handlers
+    return shutdown_event, run_deferred_handlers
 
 
 async def worker():
@@ -219,7 +220,8 @@ async def worker():
     )
 
     # Set up signal handlers using signal module to allow chaining
-    shutdown_event, _ = install_graceful_shutdown(loop, runtime)
+    global RUN_DEFERRED_HANDLERS
+    shutdown_event, RUN_DEFERRED_HANDLERS = install_graceful_shutdown(loop, runtime)
     logging.info("Signal handlers set up for graceful shutdown (with chaining)")
 
     if config.dynamo_args.image_diffusion_worker:
@@ -327,9 +329,12 @@ async def init(
         try:
             await metrics_task
         except asyncio.CancelledError:
-            logging.info("Metrics task succesfully cancelled")
+            logging.info("Metrics task successfully cancelled")
             pass
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_prefill(
@@ -410,6 +415,9 @@ async def init_prefill(
             logging.info("Metrics task successfully cancelled")
             pass
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_diffusion(
@@ -499,6 +507,9 @@ async def init_diffusion(
             logging.info("Metrics task successfully cancelled")
             pass
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_embedding(
@@ -565,6 +576,9 @@ async def init_embedding(
             logging.info("Metrics task successfully cancelled")
             pass
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
@@ -646,6 +660,9 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_multimodal_processor(
@@ -697,6 +714,9 @@ async def init_multimodal_processor(
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_multimodal_encode_worker(
@@ -739,6 +759,9 @@ async def init_multimodal_encode_worker(
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_multimodal_worker(
@@ -808,6 +831,9 @@ async def init_multimodal_worker(
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_multimodal_prefill_worker(
@@ -843,6 +869,9 @@ async def init_multimodal_prefill_worker(
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
