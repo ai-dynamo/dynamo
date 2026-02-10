@@ -35,9 +35,9 @@ vllm:
   base_image: nvcr.io/nvidia/cuda-dl-base
   runtime_image: nvcr.io/nvidia/cuda
   runtime_image_tag: ${CUDA_VERSION}.0-runtime-ubuntu24.04
-  vllm_ref: v0.14.1
-  flashinf_ref: v0.5.3
-  lmcache_ref: 0.3.12
+  vllm_ref: v0.15.1
+  flashinf_ref: v0.6.1
+  lmcache_ref: 0.3.13
   max_jobs: "10"
   enable_media_nixl: "true"
   enable_media_ffmpeg: "true"
