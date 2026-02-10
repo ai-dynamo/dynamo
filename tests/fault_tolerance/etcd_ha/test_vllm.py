@@ -21,6 +21,10 @@ from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.fault_tolerance,
+    pytest.mark.vllm,
+]
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend and ETCD HA support"""
@@ -112,7 +116,6 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -184,7 +187,6 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
                         etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
@@ -262,7 +264,6 @@ def test_etcd_ha_failover_vllm_disaggregated(
                             etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
@@ -318,7 +319,6 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
                     )
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly

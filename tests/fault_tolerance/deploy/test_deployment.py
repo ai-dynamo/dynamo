@@ -433,6 +433,7 @@ def results_summary():
         logging.error(f"Failed to parse combined results: {e}")
 
 
+@pytest.mark(Scenario.backend)
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
 @pytest.mark.post_merge
