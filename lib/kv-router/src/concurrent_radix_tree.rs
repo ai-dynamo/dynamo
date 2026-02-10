@@ -200,9 +200,7 @@ impl ConcurrentRadixTree {
             let lookup = self.lookup.read();
             for worker in scores.scores.keys() {
                 if let Some(inner_lock) = lookup.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, inner_lock.read().len());
+                    scores.tree_sizes.insert(*worker, inner_lock.read().len());
                 }
             }
             return scores;
@@ -293,9 +291,7 @@ impl ConcurrentRadixTree {
             let lookup = self.lookup.read();
             for worker in scores.scores.keys() {
                 if let Some(inner_lock) = lookup.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, inner_lock.read().len());
+                    scores.tree_sizes.insert(*worker, inner_lock.read().len());
                 }
             }
         }
@@ -1021,7 +1017,9 @@ mod tests {
 
         // worker_2 was never removed, should have full depth
         assert_eq!(
-            scores.scores.get(&WorkerWithDpRank::from_worker_id(worker_2)),
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_2)),
             Some(&3),
             "worker_2 should score 3 (fully present)"
         );
