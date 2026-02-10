@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Copied from trtllm video diffusion PR
 
+
 def frames_to_numpy(images: list) -> np.ndarray:
     """Convert a list of PIL Images to a numpy array suitable for video encoding.
 
