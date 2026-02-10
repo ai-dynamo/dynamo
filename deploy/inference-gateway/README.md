@@ -228,7 +228,7 @@ Common Vars for Routing Configuration:
   - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
   - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
   - Set `DYN_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing
-  - See the [KV cache routing design](../../docs/router/kv_cache_routing.md) for details.
+  - See the [KV cache routing design](../../docs/design_docs/router_design.md) for details.
 
 
 Stand-Alone installation only:
@@ -367,8 +367,8 @@ Sample inference output:
 }
 ```
 
-***If you have ore than one HttpRoute running on the cluster***
-Add the host to your HttpRoute.yaml and add the header `curl -H "Host: llama3-70b-agg.example.com" ... ` to every request.
+***If you have more than one HttpRoute running on the cluster***
+Add the host to your HttpRoute.yaml and add the header `curl -H "Host: llama3-70b-agg.example.com" ...` to every request.
 ```bash
 spec:
   hostnames:

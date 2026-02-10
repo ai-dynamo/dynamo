@@ -331,7 +331,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 /// A direct routing wrapper for `RouterMode::Direct`.
 ///
 /// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
-/// then routes directly to the specified worker. Used when an external orchestrator
+/// then routes directly to the specified worker. Used when an external router
 /// (e.g., EPP) handles worker selection.
 ///
 /// Unlike `KvPushRouter`, this does not require a `KvRouter` and does not perform
@@ -362,7 +362,7 @@ impl DirectRoutingRouter {
         worker_id.ok_or_else(|| {
             anyhow::anyhow!(
                 "Worker ID required (--direct-route) but none found in request. \
-                 Expected decode_worker_id or backend_instance_id to be set by external orchestrator (e.g., EPP)."
+                 Expected decode_worker_id or backend_instance_id to be set by external router (e.g., EPP)."
             )
         })
     }

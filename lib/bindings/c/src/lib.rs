@@ -370,11 +370,6 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
 // Default timeout for bookkeeping operations
 const BOOKKEEPING_TIMEOUT_SEC: u64 = 5;
 /// Complete routing result for a chat completion request (C-compatible)
-///
-/// This is the result of `route_chat_request` which combines
-/// tokenization and worker selection in a single call.
-///
-/// Caller must free `token_ids` using `free_routing_result`.
 #[repr(C)]
 pub struct CRoutingResult {
     /// Whether disaggregated mode is active
@@ -417,16 +412,17 @@ pub struct RouterHandles {
 
 impl RouterHandles {
     /// Query optimal prefill worker for a request.
-    /// Returns (worker_id, dp_rank) on success.
+    /// Returns worker_id on success.
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
         update_states: bool,
         lora_name: Option<String>,
-    ) -> Result<(u64, u32), QueryRouterResult> {
+    ) -> Result<u64, QueryRouterResult> {
         self.prefill_router
             .query_prefill_worker(tokens, update_states, lora_name)
             .await
+            .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
                 QueryRouterResult::ErrQueryFailed
@@ -440,8 +436,6 @@ impl RouterHandles {
     /// Note: The C bindings are query-only and must not mutate router state during worker
     /// selection. State updates require a `context_id` (request id) and are managed via the
     /// explicit bookkeeping APIs (`add_request`, `mark_prefill_complete`, `free_request`).
-    /// This function always queries with `update_states=false` to avoid panicking across the
-    /// FFI boundary (KvRouter::find_best_match requires context_id when update_states=true).
     /// Returns (worker, overlap_blocks) on success.
     async fn query_decode_worker(
         &self,
@@ -449,7 +443,7 @@ impl RouterHandles {
         is_disaggregated: bool,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
         // For decode phase in disaggregated mode, use overlap_score_weight=0
-        // This matches prefill_router.rs line 622-625
+        // This matches prefill_router.rs
         let config_override = if is_disaggregated {
             Some(RouterConfigOverride {
                 overlap_score_weight: Some(0.0),
@@ -488,8 +482,6 @@ pub enum QueryRouterResult {
 /// This function waits for at least one decode worker to be discovered before returning.
 /// It auto-detects disaggregated mode by checking if prefill workers are present.
 /// The KV cache block size is automatically fetched from the model card via discovery.
-///
-/// Timeout is controlled by `DYN_DISCOVERY_TIMEOUT_SEC` env var (default: 30 minutes).
 ///
 /// # Arguments
 /// - `namespace`: Namespace for the model
@@ -981,7 +973,7 @@ pub unsafe extern "C" fn route_request(
         // Query prefill worker if disaggregated
         // Note: update_states=false because add_request() is called separately for bookkeeping
         let prefill_worker_id = if is_disaggregated {
-            handles.query_prefill_worker(tokens, false, None).await?.0
+            handles.query_prefill_worker(tokens, false, None).await?
         } else {
             0
         };

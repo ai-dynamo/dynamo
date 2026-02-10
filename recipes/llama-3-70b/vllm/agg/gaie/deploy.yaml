@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:fix-context-id
+          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
       eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:
@@ -44,7 +44,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/dynamo:decomp-1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -83,7 +83,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:decomp-1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
