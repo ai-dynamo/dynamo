@@ -475,6 +475,7 @@ pub enum QueryRouterResult {
     ErrInitFailed = 3,
     ErrQueryFailed = 4,
     ErrDisaggEnforced = 5,
+    ErrTimeout = 6,
 }
 
 /// Create router handles for query-only routing
@@ -610,6 +611,8 @@ pub unsafe extern "C" fn create_routers(
 
         // Create PrefillRouter based on one-time discovery of prefill workers
         // Auto-detects disaggregated mode by checking if prefill workers are present
+        // The prefill workers have to be created before the epp is created.
+        // Given that we wait first for the decode worker to show up it is reasonable to assume the prefill will be up as well.
         let prefill_router = match find_prefill_endpoint(&drt, &namespace_str).await {
             Some(prefill_endpoint) => {
                 tracing::info!("Prefill worker found, running in disaggregated mode");
@@ -702,7 +705,6 @@ pub unsafe extern "C" fn add_request(
     };
 
     let decode_router = handles.decode_router.clone();
-    let request_id_owned = request_id_str.clone();
 
     let result = handles.runtime.secondary().block_on(async {
         let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
@@ -721,7 +723,7 @@ pub unsafe extern "C" fn add_request(
 
             decode_router
                 .add_request(
-                    request_id_owned.clone(),
+                    request_id_str.clone(),
                     &tokens,
                     overlap_blocks,
                     None,
@@ -731,7 +733,7 @@ pub unsafe extern "C" fn add_request(
                 .await;
 
             tracing::debug!(
-                request_id = %request_id_owned,
+                request_id = %request_id_str,
                 worker_id = worker_id,
                 dp_rank = dp_rank,
                 overlap_blocks = overlap_blocks,
@@ -750,8 +752,7 @@ pub unsafe extern "C" fn add_request(
                 timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
                 "add_request timed out"
             );
-            // Return OK to avoid blocking the caller - the operation may still complete
-            QueryRouterResult::Ok
+            QueryRouterResult::ErrTimeout
         }
     }
 }
@@ -779,24 +780,20 @@ pub unsafe extern "C" fn mark_prefill_complete(
     };
 
     let decode_router = handles.decode_router.clone();
-    let request_id_owned = request_id_str.clone();
 
     let result = handles.runtime.secondary().block_on(async {
         let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
 
         tokio::time::timeout(timeout_duration, async {
-            if let Err(e) = decode_router
-                .mark_prefill_completed(&request_id_owned)
-                .await
-            {
+            if let Err(e) = decode_router.mark_prefill_completed(&request_id_str).await {
                 tracing::warn!(
-                    request_id = %request_id_owned,
+                    request_id = %request_id_str,
                     error = %e,
                     "Failed to mark prefill complete"
                 );
             } else {
                 tracing::debug!(
-                    request_id = %request_id_owned,
+                    request_id = %request_id_str,
                     "mark_prefill_complete completed"
                 );
             }
@@ -812,7 +809,7 @@ pub unsafe extern "C" fn mark_prefill_complete(
                 timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
                 "mark_prefill_complete timed out"
             );
-            QueryRouterResult::Ok
+            QueryRouterResult::ErrTimeout
         }
     }
 }
@@ -840,21 +837,20 @@ pub unsafe extern "C" fn free_request(
     };
 
     let decode_router = handles.decode_router.clone();
-    let request_id_owned = request_id_str.clone();
 
     let result = handles.runtime.secondary().block_on(async {
         let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
 
         tokio::time::timeout(timeout_duration, async {
-            if let Err(e) = decode_router.free(&request_id_owned).await {
+            if let Err(e) = decode_router.free(&request_id_str).await {
                 tracing::warn!(
-                    request_id = %request_id_owned,
+                    request_id = %request_id_str,
                     error = %e,
                     "Failed to free request"
                 );
             } else {
                 tracing::debug!(
-                    request_id = %request_id_owned,
+                    request_id = %request_id_str,
                     "free_request completed"
                 );
             }
@@ -870,7 +866,7 @@ pub unsafe extern "C" fn free_request(
                 timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
                 "free_request timed out"
             );
-            QueryRouterResult::Ok
+            QueryRouterResult::ErrTimeout
         }
     }
 }
@@ -895,15 +891,14 @@ pub unsafe extern "C" fn destroy(handle: RouterHandlesPtr) {
 /// 2. Tokenizes the formatted prompt
 /// 3. Queries the prefill router (if disaggregated mode)
 /// 4. Queries the decode router
-/// 5. Returns all worker IDs and token_ids
+/// 5. Returns worker IDs and token_ids
 ///
 /// After this call, EPP should:
 /// - Call `add_request()` to register the request for bookkeeping
 /// - Set worker ID headers and forward to backend
+/// - Call `mark_prefill_complete()` on first token
+/// - Call `free_request()` when the stream ends
 /// - Call `free_routing_result()` to free the result
-///
-/// Note: `add_request()` could be called internally by this function
-/// if a `request_id` parameter were added. Currently kept separate for flexibility.
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
@@ -968,19 +963,15 @@ pub unsafe extern "C" fn route_request(
     let token_count = tokens.len();
     let is_disaggregated = handles.prefill_router.is_activated();
 
-    // Query workers using internal methods
+    // Query workers
     let result = handles.runtime.secondary().block_on(async {
-        // Query prefill worker if disaggregated
-        // Note: update_states=false because add_request() is called separately for bookkeeping
         let prefill_worker_id = if is_disaggregated {
             handles.query_prefill_worker(tokens, false, None).await?
         } else {
             0
         };
 
-        // Query decode worker
-        // Note: update_states=false because add_request() is called separately for bookkeeping
-        let (decode_worker, overlap_blocks) = handles
+        let (decode_worker, _overlap_blocks) = handles
             .query_decode_worker(tokens, is_disaggregated)
             .await?;
 
@@ -993,12 +984,12 @@ pub unsafe extern "C" fn route_request(
             "Routed chat request"
         );
 
-        Ok((prefill_worker_id, decode_worker, overlap_blocks))
+        Ok((prefill_worker_id, decode_worker))
     });
 
     match result {
-        Ok((prefill_worker_id, decode_worker, _overlap_blocks)) => {
-            // Allocate and copy token IDs for caller
+        Ok((prefill_worker_id, decode_worker)) => {
+            // Allocate and copy token IDs for caller (needed for add_request bookkeeping)
             let token_vec: Vec<u32> = tokens.to_vec();
             let mut tokens_boxed = token_vec.into_boxed_slice();
             let token_ptr = tokens_boxed.as_mut_ptr();

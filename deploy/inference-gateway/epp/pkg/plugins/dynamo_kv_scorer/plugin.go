@@ -35,6 +35,7 @@ enum {
     QUERY_ROUTER_ERR_INIT_FAILED = 3,
     QUERY_ROUTER_ERR_QUERY_FAILED = 4,
     QUERY_ROUTER_ERR_DISAGG_ENFORCED = 5,
+    QUERY_ROUTER_ERR_TIMEOUT = 6,
 };
 
 // opaque handle forward-decl for Router bindings
@@ -103,9 +104,6 @@ const (
 	WorkerIDHeader        = "x-worker-instance-id"
 	PrefillWorkerIDHeader = "x-prefill-instance-id"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
-	// EnableLocalUpdatesHeader controls router bookkeeping in the Dynamo frontend.
-	// Set to "false" for GAIE Stage 2 so the EPP handles bookkeeping via C FFI.
-	EnableLocalUpdatesHeader = "x-enable-local-updates"
 
 	// stateKey is the key used to store routing state in PluginState
 	stateKey = "dynamo-routing-state"
@@ -123,9 +121,8 @@ type params struct{}
 type DynamoRoutingState struct {
 	WorkerID        string
 	PrefillWorkerID string
-	// TokenData holds the token IDs from the router.
-	// Currently unused but stored for future implementation where tokens
-	// may be passed to the worker via request body instead of headers.
+	// TokenData holds the token IDs from the router, needed for add_request bookkeeping.
+	// These tokens are used to compute overlap blocks and track active blocks accurately.
 	TokenData []int64
 }
 
@@ -291,10 +288,6 @@ func (k *KVAwareScorer) Score(
 		}
 		req.Headers[WorkerIDHeader] = workerID
 
-		// Disable local updates in the Dynamo frontend router.
-		// EPP handles bookkeeping via C FFI (add_request, mark_prefill_complete, free_request).
-		req.Headers[EnableLocalUpdatesHeader] = "false"
-
 		// Set routing mode and prefill worker ID based on disaggregated vs aggregated
 		if prefillWorkerID != "" && prefillWorkerID != workerID {
 			// Disaggregated mode: separate prefill and decode workers
@@ -306,15 +299,13 @@ func (k *KVAwareScorer) Score(
 		}
 
 		// Store routing state for PreRequest to register with router bookkeeping.
-		// This is the correct place to store state - PreRequest is called AFTER
-		// scheduling is finalized, ensuring we only register committed requests.
+		// PreRequest is called AFTER scheduling is finalized, ensuring we only
+		// register committed requests (avoiding phantom bookkeeping entries).
 		if req.RequestId != "" {
 			routingState := &DynamoRoutingState{
 				WorkerID:        workerID,
 				PrefillWorkerID: prefillWorkerID,
-				// TokenData is stored for future use. Currently not passed to workers
-				// via headers (too large). May be passed via request body in future.
-				TokenData: tokenData,
+				TokenData:       tokenData,
 			}
 			k.pluginState.Write(req.RequestId, plugins.StateKey(stateKey), routingState)
 		}
@@ -328,8 +319,8 @@ func (k *KVAwareScorer) Score(
 }
 
 // PreRequest is called after scheduling is finalized and before the request is sent to the worker.
-// This is the place to register the request with the Dynamo router's bookkeeping,
-// as we know the request WILL be dispatched (avoiding phantom bookkeeping entries).
+// This registers the request with the Dynamo router's bookkeeping (add_request), passing the
+// token data obtained during Score(). This ensures only committed requests are tracked.
 func (k *KVAwareScorer) PreRequest(
 	ctx context.Context,
 	request *schedtypes.LLMRequest,
@@ -355,8 +346,16 @@ func (k *KVAwareScorer) PreRequest(
 		return
 	}
 
+	// Parse worker ID
+	var workerIDUint uint64
+	if _, parseErr := fmt.Sscanf(state.WorkerID, "%d", &workerIDUint); parseErr != nil {
+		logger.V(logutil.DEFAULT).Error(parseErr, "PreRequest: invalid worker ID",
+			"requestID", request.RequestId, "workerID", state.WorkerID)
+		return
+	}
+
 	// Register request with router bookkeeping now that scheduling is committed
-	if addErr := k.callAddRequest(ctx, request.RequestId, state.TokenData, state.WorkerID, state.PrefillWorkerID); addErr != nil {
+	if addErr := CallAddRequest(request.RequestId, state.TokenData, workerIDUint, 0); addErr != nil {
 		logger.V(logutil.DEFAULT).Error(addErr, "PreRequest: failed to add request to router bookkeeping",
 			"requestID", request.RequestId)
 		return
@@ -472,35 +471,30 @@ func (k *KVAwareScorer) callDynamoRouter(
 	cRequestJSON := C.CString(string(requestJSON))
 	defer C.free(unsafe.Pointer(cRequestJSON))
 
-	// Output result
 	var result C.CRoutingResult
-
-	// Call the router
 	rc := C.route_request(router, cRequestJSON, &result)
 	if rc != C.QUERY_ROUTER_OK {
 		return "", "", nil, fmt.Errorf("route_request failed with code %d", rc)
 	}
 
-	// Copy tokens into Go memory
+	// Copy token IDs into Go memory before freeing the Rust-allocated result.
+	// These tokens are needed for add_request bookkeeping (overlap + active block tracking).
 	count := int(result.token_count)
 	var tokens64 []int64
-	// TODO: Re-enable when tokens are enabled for request body passthrough
-	// if count > 0 && result.token_ids != nil {
-	// 	src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
-	// 	tokens64 = make([]int64, count)
-	// 	for i := 0; i < count; i++ {
-	// 		tokens64[i] = int64(src[i])
-	// 	}
-	// }
+	if count > 0 && result.token_ids != nil {
+		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
+		tokens64 = make([]int64, count)
+		for i := 0; i < count; i++ {
+			tokens64[i] = int64(src[i])
+		}
+	}
 
-	// Copy scalar result fields before freeing the struct. The Rust destructor is
-	// allowed to mutate the struct, and relying on fields remaining valid after
-	// passing a mutable pointer is fragile.
+	// Copy scalar result fields before freeing the struct
 	isDisaggregated := result.is_disaggregated
 	decodeWorkerID := uint64(result.decode_worker_id)
 	prefillWorkerIDVal := uint64(result.prefill_worker_id)
 
-	// Free the routing result
+	// Free the Rust-allocated routing result (including token_ids)
 	C.free_routing_result(&result)
 
 	workerIDStr := fmt.Sprintf("%d", decodeWorkerID)
@@ -563,17 +557,8 @@ func buildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 
 // --------------------------- router bookkeeping ---------------------------
 
-// callAddRequest registers a request with the router's bookkeeping.
-// This should be called after worker selection to track active requests.
-func (k *KVAwareScorer) callAddRequest(
-	ctx context.Context,
-	requestID string,
-	tokenData []int64,
-	workerID string,
-	prefillWorkerID string,
-) error {
-	logger := log.FromContext(ctx)
-
+// CallAddRequest registers a request with the router's bookkeeping.
+func CallAddRequest(requestID string, tokenData []int64, workerID uint64, dpRank uint32) error {
 	if !routerInitialized {
 		return fmt.Errorf("dynamo router not initialized")
 	}
@@ -584,12 +569,6 @@ func (k *KVAwareScorer) callAddRequest(
 
 	if router == nil {
 		return fmt.Errorf("dynamo router handles not created")
-	}
-
-	// Parse worker ID (use decode worker for bookkeeping in disagg mode)
-	var workerIDUint uint64
-	if _, err := fmt.Sscanf(workerID, "%d", &workerIDUint); err != nil {
-		return fmt.Errorf("invalid worker ID: %s", workerID)
 	}
 
 	// Convert token data from int64 to uint32
@@ -611,16 +590,13 @@ func (k *KVAwareScorer) callAddRequest(
 		cRequestID,
 		cTokens,
 		C.size_t(len(tokens)),
-		C.uint64_t(workerIDUint),
-		C.uint32_t(0), // dp_rank = 0 for now
+		C.uint64_t(workerID),
+		C.uint32_t(dpRank),
 	)
 
 	if rc != C.QUERY_ROUTER_OK {
 		return fmt.Errorf("add_request failed with code %d", rc)
 	}
-
-	logger.V(logutil.VERBOSE).Info("Added request to router bookkeeping",
-		"requestID", requestID, "workerID", workerID, "tokenCount", len(tokens))
 	return nil
 }
 
