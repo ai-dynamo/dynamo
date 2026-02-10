@@ -10,6 +10,10 @@ on:
         description: 'Framework name (vllm, sglang, trtllm)'
         required: true
         type: string
+      target:
+        description: 'Target stage for Docker rendering'
+        required: true
+        type: string
       platforms:
         description: 'Platforms to build (JSON array, e.g., ["amd64", "arm64"])'
         required: true
@@ -106,6 +110,7 @@ jobs:
     with:
       framework: ${{ inputs.framework }}
       platform: ${{ matrix.platform }}
+      target: ${{ inputs.target }}
       cuda_version: ${{ matrix.cuda_version }}
       extra_tags: ${{ inputs.extra_tags }}
       no_cache: ${{ inputs.no_cache }}
