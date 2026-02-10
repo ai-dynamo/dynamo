@@ -174,18 +174,21 @@ def get_qwen_image_features(
     """
     Extract image features by calling the vision encoder's forward() method.
 
-    Uses forward() (i.e. calling the module directly) rather than
-    get_image_features() so that the full output is returned — including
-    deepstack features for Qwen3-VL.  forward() works for both:
-      - Qwen2.5-VL (AutoModel): returns (n, hidden_size)
-      - Qwen3-VL (Qwen3VLMoeVisionModel): returns (n, hidden_size * (1 + num_deepstack))
+    Handles the HuggingFace dataclass return type:
+      - Qwen3-VL: returns BaseModelOutputWithDeepstackFeatures with
+        last_hidden_state (n, 2048) + 3 deepstack feature tensors (n, 2048 each).
+        These are concatenated to produce (n, 8192) for SGLang's
+        separate_deepstack_embeds to split at the decoder layers.
+      - Qwen2.5-VL: returns output with last_hidden_state (n, hidden_size),
+        no deepstack features.
 
     Args:
         vision_encoder: The vision encoder model
         image_embeds: Dictionary containing pixel values and grid information
 
     Returns:
-        Processed image features tensor
+        Single concatenated tensor: (n, hidden_size * (1 + num_deepstack))
+        for deepstack models, or (n, hidden_size) otherwise.
 
     Raises:
         ValueError: If grid_thw is not provided
@@ -193,7 +196,17 @@ def get_qwen_image_features(
     pixel_values, grid_thw = _get_qwen_visual_inputs(
         vision_encoder, image_embeds, model_label="Qwen"
     )
-    return vision_encoder(pixel_values, grid_thw=grid_thw)  # type: ignore
+    output = vision_encoder(pixel_values, grid_thw=grid_thw)
+
+    # HuggingFace returns a dataclass with separate fields;
+    # SGLang expects a single concatenated tensor.
+    if hasattr(output, "deepstack_features") and output.deepstack_features:
+        return torch.cat([output.last_hidden_state] + output.deepstack_features, dim=-1)
+
+    # Non-deepstack models (Qwen2.5-VL) or raw tensor return
+    if hasattr(output, "last_hidden_state"):
+        return output.last_hidden_state
+    return output
 
 
 def encode_image_embeddings(
