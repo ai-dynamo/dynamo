@@ -86,22 +86,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
-    @staticmethod
-    def _should_return_routed_experts(request: Dict[str, Any]) -> bool:
-        """Determine whether routed expert capture is requested."""
-        nvext = request.get("nvext")
-        if isinstance(nvext, dict):
-            extra_fields = nvext.get("extra_fields")
-            if isinstance(extra_fields, list) and "routed_experts" in extra_fields:
-                return True
-
-        extra_args = request.get("extra_args")
-        if isinstance(extra_args, dict):
-            if bool(extra_args.get("return_routed_experts", False)):
-                return True
-
-        return bool(request.get("return_routed_experts", False))
-
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -121,7 +105,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        return_routed_experts = self._should_return_routed_experts(request)
+        return_routed_experts = self.config.server_args.enable_return_routed_experts
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -255,6 +239,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out["token_ids"] = output_ids
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
+                    # Convert tensor to list for JSON serialization over RPC.
+                    if hasattr(routed_experts, "tolist"):
+                        routed_experts = routed_experts.tolist()
                     # Internal transport field consumed by frontend nvext mapping.
                     out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
@@ -329,6 +316,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 }
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
+                    # Convert tensor to list for JSON serialization over RPC.
+                    if hasattr(routed_experts, "tolist"):
+                        routed_experts = routed_experts.tolist()
                     response["nvext"] = {"routed_experts": routed_experts}
                 if not context.is_stopped():
                     yield response

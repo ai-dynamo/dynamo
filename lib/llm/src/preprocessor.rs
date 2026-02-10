@@ -220,15 +220,6 @@ impl OpenAIPreprocessor {
         let annotations = self
             .gather_tokens(request, &mut builder, formatted_prompt)
             .with_context(|| "Failed to gather tokens")?;
-        let return_routed_experts = request
-            .nvext()
-            .and_then(|nv| nv.extra_fields.as_ref())
-            .is_some_and(|fields| fields.iter().any(|f| f == "routed_experts"));
-        if return_routed_experts {
-            builder.extra_args(Some(serde_json::json!({
-                "return_routed_experts": true
-            })));
-        }
         self.gather_multi_modal_data(request, &mut builder)
             .await
             .with_context(|| "Failed to gather multimodal data")?;
@@ -334,7 +325,7 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest + NvExtProvider>(
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -410,20 +401,9 @@ impl OpenAIPreprocessor {
             // Preserve original messages in extra_args for multimodal workers that need them
             // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
             let messages_json = serde_json::to_value(request.messages())?;
-            let return_routed_experts = request
-                .nvext()
-                .and_then(|nv| nv.extra_fields.as_ref())
-                .is_some_and(|fields| fields.iter().any(|f| f == "routed_experts"));
-            let extra_args = if return_routed_experts {
-                serde_json::json!({
-                    "messages": messages_json,
-                    "return_routed_experts": true
-                })
-            } else {
-                serde_json::json!({
-                    "messages": messages_json
-                })
-            };
+            let extra_args = serde_json::json!({
+                "messages": messages_json
+            });
             builder.extra_args(Some(extra_args));
         }
 
