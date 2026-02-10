@@ -11,8 +11,8 @@ use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
-use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
+use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
@@ -385,9 +385,7 @@ async fn select_engine(
         }
         EngineType::Dynamic => {
             //  Convert Python chat engine factory to Rust callback
-            let chat_engine_factory = args
-                .chat_engine_factory
-                .map(py_engine_factory_to_callback);
+            let chat_engine_factory = args.chat_engine_factory.map(py_engine_factory_to_callback);
             RsEngineConfig::Dynamic {
                 model: Box::new(local_model),
                 chat_engine_factory,
