@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
@@ -125,6 +125,9 @@ class SglangMultimodalRequest(BaseModel):
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
+    # HF processor output (JSON-serialized, tensors as lists) carried from
+    # encode worker → PD/prefill worker for format="processor_output" mm_items.
+    processor_output: Optional[Dict[str, Any]] = None
 
 
 class DisaggSglangMultimodalRequest(BaseModel):

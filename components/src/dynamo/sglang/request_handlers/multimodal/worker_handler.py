@@ -117,25 +117,31 @@ class EmbeddingsProcessor:
         """
         Create multimodal item for SGLang generation.
 
-        Uses format="precomputed_embedding" since Dynamo's Encoder has already
-        run the vision encoder. SGLang expects 2D embeddings (num_patches, hidden_dim).
+        Uses format="processor_output" with precomputed_embeddings so that
+        SGLang bypasses its model-specific get_image_feature() entirely.
+        This is required for Qwen3-VL (whose get_image_feature has no
+        precomputed embedding bypass) and works for all other models too.
         """
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
 
-        # SGLang expects 2D tensor for precomputed_embedding format
-        # Encoder outputs 3D (1, num_patches, hidden_dim) for internal consistency
-        # Squeeze batch dimension at SGLang boundary
+        # Squeeze batch dim: encoder outputs (1, n, d), SGLang expects (n, d)
         if precomputed.dim() == 3 and precomputed.shape[0] == 1:
             precomputed = precomputed.squeeze(0)
 
-        grid_thw_tensor = torch.tensor(request.image_grid_thw)
+        # Start from the HF processor output dict carried on the request.
+        # Convert list fields back to tensors as needed by SGLang.
+        processor_output = request.processor_output or {}
+        mm_item: dict = dict(processor_output)
+        if "image_grid_thw" in mm_item and not isinstance(
+            mm_item["image_grid_thw"], torch.Tensor
+        ):
+            mm_item["image_grid_thw"] = torch.tensor(mm_item["image_grid_thw"])
 
-        mm_item = {
-            "format": "precomputed_embedding",
-            "feature": precomputed,
-            "image_grid_thw": grid_thw_tensor,
-            "modality": "IMAGE",
-        }
+        mm_item["format"] = "processor_output"
+        mm_item["precomputed_embeddings"] = precomputed
+        mm_item["modality"] = "IMAGE"
+        # pixel_values not needed — precomputed_embeddings bypasses the encoder
+        mm_item.pop("pixel_values", None)
 
         return mm_item
 

@@ -5,7 +5,7 @@ import logging
 from typing import AsyncIterator
 
 from sglang.srt.parser.conversation import chat_templates
-from transformers import AutoImageProcessor, AutoTokenizer
+from transformers import AutoProcessor
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component, Context
@@ -53,34 +53,26 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
 
-        self.image_processor = AutoImageProcessor.from_pretrained(
+        # AutoProcessor bundles image_processor + tokenizer
+        self.processor = AutoProcessor.from_pretrained(
             self.model, trust_remote_code=True
         )
         self.vision_model = load_vision_model(self.model)
 
-        # Load tokenizer to convert image token string to integer ID
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model, trust_remote_code=True
-        )
-
-        # Get image token string and handle it properly
+        # Resolve image token ID for manual token expansion
         image_token_str = (
             chat_templates[getattr(config.server_args, "chat_template")]
             .copy()
             .image_token
         )
 
-        # For Qwen VL models (Qwen2.5-VL, Qwen3-VL, etc.), the image token is a composite
-        # of multiple special tokens: <|vision_start|><|image_pad|><|vision_end|>
+        # For Qwen VL models, the image token is a composite of special tokens:
+        # <|vision_start|><|image_pad|><|vision_end|>
+        tokenizer = self.processor.tokenizer
         if image_token_str == "<|vision_start|><|image_pad|><|vision_end|>":
-            # Extract the image_pad token ID which is used for token expansion
-            image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-
-            # Use the image_pad token as the main image token for expansion
-            self.image_token_id = image_pad_id
+            self.image_token_id = tokenizer.convert_tokens_to_ids("<|image_pad|>")
         else:
-            # Fallback for other models (e.g., LLaVA-style)
-            self.image_token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
+            self.image_token_id = tokenizer.convert_tokens_to_ids(image_token_str)
 
         self.min_workers = 1
 
@@ -119,37 +111,39 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 request.multimodal_input.image_url
             )
 
-            image_embeds = self.image_processor(images=image, return_tensors="pt")
+            # Process image through the HF image processor
+            image_data = self.processor.image_processor(
+                images=image, return_tensors="pt"
+            )
             precomputed_embeddings = encode_image_embeddings(
                 model_name=self.served_model_name,
-                image_embeds=image_embeds,
+                image_embeds=image_data,
                 vision_encoder=self.vision_model,
                 projector=None,
             )
 
+            # Build JSON-serializable processor output for downstream.
+            # This dict becomes the base of the mm_item with
+            # format="processor_output" — SGLang uses image_grid_thw for
+            # mRoPE and skips the vision encoder when precomputed_embeddings
+            # is present.
             image_grid_thw = (
-                image_embeds["image_grid_thw"].tolist()
-                if "image_grid_thw" in image_embeds
+                image_data["image_grid_thw"].tolist()
+                if "image_grid_thw" in image_data
                 else None
             )
-
-            # Store the image data info in the request for downstream
+            request.processor_output = {"image_grid_thw": image_grid_thw}
             request.image_grid_thw = image_grid_thw
             request.embeddings_shape = tuple(precomputed_embeddings.shape)
 
-            # Replace the single image token with multiple image tokens based on embedding shape
+            # Expand the single <|image_pad|> token to match the number of
+            # image patches produced by the vision encoder.
             image_token_id_index = request.request.token_ids.index(self.image_token_id)
-
-            num_image_tokens = precomputed_embeddings.shape[
-                1
-            ]  # Number of image patches
-            # Replace single image token with multiple image tokens
+            num_image_tokens = precomputed_embeddings.shape[1]
             request.request.token_ids = (
                 request.request.token_ids[:image_token_id_index]
                 + [self.image_token_id] * num_image_tokens
-                + request.request.token_ids[
-                    image_token_id_index + 1 :
-                ]  # Skip the original token
+                + request.request.token_ids[image_token_id_index + 1 :]
             )
 
             # Create descriptor for the multimodal data
