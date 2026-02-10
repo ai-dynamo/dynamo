@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod pools;
 pub mod pubsub;
 pub mod registry;
+pub mod sequence;
 pub mod tinylfu;
 
 #[cfg(any(test, feature = "testing"))]
@@ -31,6 +32,10 @@ pub use blocks::{
 };
 pub use manager::BlockManager;
 pub use registry::BlockRegistry;
+pub use sequence::{
+    zip_assigned, zip_assigned_pending, BlockAssignments, BlockSequence, BlockSequenceError,
+    LogicalBlockAssignmentError, LogicalBlockAssignments,
+};
 
 pub type BlockId = usize;
 pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
