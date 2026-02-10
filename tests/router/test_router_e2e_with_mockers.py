@@ -323,7 +323,7 @@ class DisaggMockerProcess:
             self._bootstrap_ports = []
 
 
-@pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
+@pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
@@ -388,7 +388,7 @@ def test_mocker_kv_router(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
 )  # Use NATS Core (local indexer)
-@pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up
+@pytest.mark.timeout(180)  # bumped for xdist contention (was 60s; ~19.86s serial avg)
 def test_mocker_two_kv_router(
     request,
     runtime_services_dynamic_ports,
@@ -492,7 +492,7 @@ def test_mocker_kv_router_overload_503(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.timeout(22)  # ~3x average (~7.10s), rounded up
+@pytest.mark.timeout(90)  # bumped for xdist contention (was 22s; ~7.10s serial avg)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
@@ -559,7 +559,7 @@ def test_kv_push_router_bindings(
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
-@pytest.mark.timeout(90)  # TODO: figure out a timeout
+@pytest.mark.timeout(180)  # bumped for xdist contention (was 90s; up to 33s under load)
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
@@ -631,7 +631,7 @@ def test_indexers_sync(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
+@pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
 )  # Use NATS Core (local indexer)
@@ -674,7 +674,7 @@ def test_query_instance_id_returns_worker_and_tokens(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.timeout(29)  # ~3x average (~9.55s), rounded up
+@pytest.mark.timeout(90)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize(
     "durable_kv_events,use_kv_events",
@@ -754,7 +754,7 @@ def test_router_decisions(
 @pytest.mark.parametrize(
     "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
 )
-@pytest.mark.timeout(59)  # ~3x average (~19.51s), rounded up
+@pytest.mark.timeout(180)  # bumped for xdist contention (was 59s; ~19.51s serial avg)
 def test_router_decisions_disagg(
     request,
     runtime_services_dynamic_ports,
@@ -874,7 +874,7 @@ def test_router_decisions_disagg(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
 )  # Use NATS Core (local indexer)
-@pytest.mark.timeout(39)  # ~3x average (~12.84s), rounded up
+@pytest.mark.timeout(120)  # bumped for xdist contention (was 39s; ~12.84s serial avg)
 def test_busy_threshold_endpoint(
     request,
     runtime_services_dynamic_ports,
