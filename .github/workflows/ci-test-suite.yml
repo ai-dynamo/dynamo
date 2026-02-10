@@ -819,7 +819,7 @@ jobs:
   ############################## FAULT TOLERANCE TESTS ##############################
   fault-tolerance-tests:
     name: ${{ matrix.framework.name }}-ft-k8s
-    needs: [build-amd64]
+    needs: [build-amd64, build-cuda13-amd64]
     if: always()
     runs-on: prod-builder-amd-v1
     timeout-minutes: 60
@@ -846,7 +846,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +x
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework.name }} (amd64)"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework.name }} ${{ matrix.framework.name == 'trtllm' && 'CUDA13 ' || '' }}(amd64)"
           JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
