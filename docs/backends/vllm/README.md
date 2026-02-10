@@ -74,7 +74,8 @@ docker compose -f deploy/docker-compose.yml up -d
 We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd like to build your own container from source:
 
 ```bash
-./container/build.sh --framework VLLM
+python container/render.py --framework=vllm --target=runtime --short-output
+docker build -t dynamo:vllm-latest -f container/rendered.Dockerfile .
 ```
 
 ### Run container
@@ -183,13 +184,7 @@ See the high-level notes in [Router Design](../../design_docs/router_design.md#d
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
-
-```bash
-python3 -m dynamo.vllm ... --migration-limit=3
-```
-
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
+Dynamo supports [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for configuration details.
 
 ## Request Cancellation
 

@@ -33,12 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -550,7 +550,8 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 	if component.DynamoNamespace == nil {
 		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
 	}
-	componentName = GetDynamoComponentName(dynamoDeployment, componentName)
+	// DNS-safe service resource name: "{dgd-name}-{lowercase(componentName)}"
+	kubeServiceName := GetDynamoComponentName(dynamoDeployment, componentName)
 
 	var servicePort corev1.ServicePort
 	switch component.ComponentType {
@@ -593,14 +594,17 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      componentName,
+			Name:      kubeServiceName,
 			Namespace: dynamoDeployment.Namespace,
 			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
-				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace,
+				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,    // e.g "worker"
+				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace, // result of ComputeDynamoNamespace(k8sNamespace, dgdName)
+				// The original user provided component name (the service map key, e.g. "VllmDecodeWorker" in the DGD).
+				// Needed to disambiguate amongst distinct components with the same component type within a DGD (e.g prefill/decode workers).
+				commonconsts.KubeLabelDynamoComponent: componentName,
 			},
 			Ports: []corev1.ServicePort{servicePort},
 		},

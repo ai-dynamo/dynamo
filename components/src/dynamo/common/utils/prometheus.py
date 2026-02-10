@@ -17,8 +17,9 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
 from dynamo._core import Endpoint
+from dynamo.prometheus_names import kvstats, labels, model_info, name_prefix
 
-# Import CollectorRegistry only for type hints to avoid importing prometheus_client at module load time.
+# Import CollectorRegistry and Gauge only for type hints to avoid importing prometheus_client at module load time.
 # prometheus_client must be imported AFTER set_prometheus_multiproc_dir() is called.
 # See main.py worker() function for detailed explanation.
 if TYPE_CHECKING:
@@ -66,12 +67,13 @@ def register_engine_metrics_callback(
 
     def get_expfmt() -> str:
         """Callback to return engine Prometheus metrics in exposition format"""
-        return get_prometheus_expfmt(
+        result = get_prometheus_expfmt(
             registry,
             metric_prefix_filters=metric_prefix_filters,
             exclude_prefixes=exclude_prefixes,
             add_prefix=add_prefix,
         )
+        return result
 
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
 
@@ -237,3 +239,65 @@ def get_prometheus_expfmt(
     except Exception as e:
         logging.error(f"Error getting metrics: {e}")
         return ""
+
+
+class LLMBackendMetrics:
+    """Prometheus metrics for LLM backends with `dynamo_component_` prefix.
+
+    Usage:
+        metrics = LLMBackendMetrics(registry, model_name="Qwen/Qwen3-0.6B", component_name="backend")
+        metrics.set_total_blocks("0", 1000)
+        metrics.set_gpu_cache_usage("0", 0.75)
+        metrics.set_model_load_time(5.2)
+    """
+
+    def __init__(self, registry=None, model_name: str = "", component_name: str = ""):
+        """Create all Dynamo component gauges."""
+        from prometheus_client import Gauge
+
+        self.total_blocks = Gauge(
+            f"{name_prefix.COMPONENT}_{kvstats.TOTAL_BLOCKS}",
+            "Total number of KV cache blocks available on the worker.",
+            labelnames=[labels.MODEL, labels.COMPONENT, labels.DP_RANK],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.gpu_cache_usage_percent = Gauge(
+            f"{name_prefix.COMPONENT}_{kvstats.GPU_CACHE_USAGE_PERCENT}",
+            "GPU cache usage as a percentage (0.0-1.0).",
+            labelnames=[labels.MODEL, labels.COMPONENT, labels.DP_RANK],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.model_load_time = Gauge(
+            f"{name_prefix.COMPONENT}_{model_info.LOAD_TIME_SECONDS}",
+            "Model load time in seconds.",
+            labelnames=[labels.MODEL, labels.COMPONENT],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.model_name = model_name
+        self.component_name = component_name
+
+    def set_total_blocks(self, dp_rank: str, value: int) -> None:
+        self.total_blocks.labels(
+            **{
+                labels.MODEL: self.model_name,
+                labels.COMPONENT: self.component_name,
+                labels.DP_RANK: dp_rank,
+            }
+        ).set(value)
+
+    def set_gpu_cache_usage(self, dp_rank: str, value: float) -> None:
+        self.gpu_cache_usage_percent.labels(
+            **{
+                labels.MODEL: self.model_name,
+                labels.COMPONENT: self.component_name,
+                labels.DP_RANK: dp_rank,
+            }
+        ).set(value)
+
+    def set_model_load_time(self, value: float) -> None:
+        self.model_load_time.labels(
+            **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
+        ).set(value)

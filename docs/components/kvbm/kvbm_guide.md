@@ -16,6 +16,7 @@ limitations under the License.
 -->
 
 # KVBM Guide
+The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer for frameworks like vLLM and TensorRT-LLM.
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
@@ -210,6 +211,30 @@ cd $DYNAMO_HOME/examples/backends/vllm
 ```
 
 ### Disaggregated Serving with TRT-LLM
+
+> [!NOTE]
+> The latest TensorRT-LLM release (1.3.0rc1) is currently experiencing a request hang when running disaggregated serving with KVBM.
+> Please include the TensorRT-LLM commit id `18e611da773026a55d187870ebcfa95ff00c8482` when building the Dynamo TensorRT-LLM runtime image to test the KVBM + disaggregated serving feature.
+
+```bash
+# Build the Dynamo TensorRT-LLM container using commit ID 18e611da773026a55d187870ebcfa95ff00c8482. Note: This build can take a long time.
+./container/build.sh --framework trtllm --tensorrtllm-commit 18e611da773026a55d187870ebcfa95ff00c8482 --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git
+
+# Launch the container
+./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
+```
+> [!NOTE]
+> Important: After logging into the Dynamo TensorRT-LLM runtime container, copy the Triton kernels into the container’s virtual environment as a separate Python module.
+
+```bash
+# Clone the TensorRT-LLM repo and copy the triton_kernels folder into the container as a Python module.
+git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/TensorRT-LLM && \
+cd /tmp/TensorRT-LLM && \
+git checkout 18e611da773026a55d187870ebcfa95ff00c8482 && \
+cp -r triton_kernels /opt/dynamo/venv/lib/python3.12/site-packages/ && \
+cd /workspace && \
+rm -rf /tmp/TensorRT-LLM
+```
 
 ```bash
 # Launch prefill worker with KVBM
@@ -412,8 +437,8 @@ uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 
 ## See Also
 
-- [KVBM Overview](README.md)
-- [KVBM Design](../../design_docs/kvbm_design.md)
+- [KVBM Overview](README.md) for a quick overview of KV Caching, KVBM and its architecture
+- [KVBM Design](../../design_docs/kvbm_design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache_integration.md)
 - [FlexKV Integration](../../integrations/flexkv_integration.md)
 - [SGLang HiCache](../../integrations/sglang_hicache.md)

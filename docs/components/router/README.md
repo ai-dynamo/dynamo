@@ -101,3 +101,10 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 - **[Router Guide](router_guide.md)**: Deep dive into KV cache routing, configuration, disaggregated serving, and tuning
 - **[Router Examples](router_examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Design](../../design_docs/router_design.md)**: Architecture details, algorithms, and event transport modes
+
+```{toctree}
+:hidden:
+
+router_guide
+router_examples
+```

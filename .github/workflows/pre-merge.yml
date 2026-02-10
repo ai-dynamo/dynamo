@@ -68,8 +68,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      # removing kvbm from here - it will fail to test with nixl dep enabled
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
     steps:
@@ -106,7 +105,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       run: |
         cargo-deny --version || cargo install cargo-deny@0.19.0
-        cargo-deny -L error --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+        cargo-deny -L error --all-features check licenses bans --config ${{ github.workspace }}/deny.toml
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
@@ -125,7 +124,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
     steps:
