@@ -250,7 +250,8 @@ class BasePlanner:
         dryrun: bool = False,
         shared_state: Optional[PlannerSharedState] = None,
         prometheus_metrics: Optional[PlannerPrometheusMetrics] = None,
-        prometheus_api_client: Optional[PrometheusAPIClient] = None,
+        prometheus_traffic_client: Optional[PrometheusAPIClient] = None,
+        prometheus_engine_client: Optional[DirectRouterMetricsClient] = None,
         connector=None,
         start_prometheus_server: bool = True,
     ):
@@ -281,9 +282,12 @@ class BasePlanner:
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
-            self.prometheus_api_client = prometheus_api_client or PrometheusAPIClient(
-                args.metric_pulling_prometheus_endpoint,
-                args.namespace,
+            self.prometheus_traffic_client = (
+                prometheus_traffic_client
+                or PrometheusAPIClient(
+                    args.metric_pulling_prometheus_endpoint,
+                    args.namespace,
+                )
             )
 
         predictor_cls = LOAD_PREDICTORS[args.load_predictor]
@@ -400,25 +404,28 @@ class BasePlanner:
             self.no_correction = args.no_correction
 
         if self.enable_loadbased:
-            # Auto-discover frontend metrics URL in Kubernetes mode
-            if not args.loadbased_router_metrics_url and isinstance(
-                getattr(self, "connector", None), KubernetesConnector
-            ):
-                args.loadbased_router_metrics_url = (
-                    self.connector.get_frontend_metrics_url()
-                )
-                if not args.loadbased_router_metrics_url:
-                    raise ValueError(
-                        "Could not auto-discover frontend metrics URL from DGD. "
-                        "No service with componentType 'frontend' found. "
-                        "Please provide --loadbased-router-metrics-url explicitly."
+            if prometheus_engine_client is not None:
+                self.prometheus_engine_client = prometheus_engine_client
+            else:
+                # Auto-discover frontend metrics URL in Kubernetes mode
+                if not args.loadbased_router_metrics_url and isinstance(
+                    getattr(self, "connector", None), KubernetesConnector
+                ):
+                    args.loadbased_router_metrics_url = (
+                        self.connector.get_frontend_metrics_url()
                     )
-                else:
-                    logger.info(f"Auto-discovered frontend metrics URL: {args.loadbased_router_metrics_url}")
+                    if not args.loadbased_router_metrics_url:
+                        raise ValueError(
+                            "Could not auto-discover frontend metrics URL from DGD. "
+                            "No service with componentType 'frontend' found. "
+                            "Please provide --loadbased-router-metrics-url explicitly."
+                        )
+                    else:
+                        logger.info(f"Auto-discovered frontend metrics URL: {args.loadbased_router_metrics_url}")
 
-            self.router_metrics_client = DirectRouterMetricsClient(
-                args.loadbased_router_metrics_url, args.namespace
-            )
+                self.prometheus_engine_client = DirectRouterMetricsClient(
+                    args.loadbased_router_metrics_url, args.namespace
+                )
             self.cached_load_metrics = CachedLoadMetrics()
 
             from dynamo.planner.utils.load_based_regression import (
@@ -577,37 +584,37 @@ class BasePlanner:
 
         # Prometheus returns seconds, convert to milliseconds
         self.last_metrics.ttft = (
-            self.prometheus_api_client.get_avg_time_to_first_token(
+            self.prometheus_traffic_client.get_avg_time_to_first_token(
                 f"{self.args.adjustment_interval}s",
                 self.model_name,
             )
             * 1000
         )
         self.last_metrics.itl = (
-            self.prometheus_api_client.get_avg_inter_token_latency(
+            self.prometheus_traffic_client.get_avg_inter_token_latency(
                 f"{self.args.adjustment_interval}s",
                 self.model_name,
             )
             * 1000
         )
-        self.last_metrics.num_req = self.prometheus_api_client.get_avg_request_count(
+        self.last_metrics.num_req = self.prometheus_traffic_client.get_avg_request_count(
             f"{self.args.adjustment_interval}s",
             self.model_name,
         )
         self.last_metrics.request_duration = (
-            self.prometheus_api_client.get_avg_request_duration(
+            self.prometheus_traffic_client.get_avg_request_duration(
                 f"{self.args.adjustment_interval}s",
                 self.model_name,
             )
         )
         self.last_metrics.isl = (
-            self.prometheus_api_client.get_avg_input_sequence_tokens(
+            self.prometheus_traffic_client.get_avg_input_sequence_tokens(
                 f"{self.args.adjustment_interval}s",
                 self.model_name,
             )
         )
         self.last_metrics.osl = (
-            self.prometheus_api_client.get_avg_output_sequence_tokens(
+            self.prometheus_traffic_client.get_avg_output_sequence_tokens(
                 f"{self.args.adjustment_interval}s",
                 self.model_name,
             )
@@ -749,7 +756,7 @@ class BasePlanner:
     async def observe_engine_load_stats(self) -> None:
         """Query DirectRouterMetricsClient for per-worker metrics, update regression."""
         worker_type = self.component_type.value  # "prefill" or "decode"
-        result = self.router_metrics_client.get_recent_and_averaged_metrics(
+        result = self.prometheus_engine_client.get_recent_and_averaged_metrics(
             worker_type
         )
         if result is None:
@@ -921,7 +928,7 @@ class BasePlanner:
         if self.enable_loadbased:
             loops.append(self._loadbased_loop(require_prefill, require_decode))
             loops.append(
-                self.router_metrics_client.run_sampling_loop(
+                self.prometheus_engine_client.run_sampling_loop(
                     self.args.loadbased_metric_samples,
                     self.args.loadbased_adjustment_interval,
                 )

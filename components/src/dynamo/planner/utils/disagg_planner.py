@@ -46,20 +46,15 @@ class DisaggPlanner:
             args,
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
-            prometheus_api_client=getattr(
-                self.prefill_planner, "prometheus_api_client", None
+            prometheus_traffic_client=getattr(
+                self.prefill_planner, "prometheus_traffic_client", None
+            ),
+            prometheus_engine_client=getattr(
+                self.prefill_planner, "prometheus_engine_client", None
             ),
             connector=getattr(self.prefill_planner, "connector", None),
             start_prometheus_server=False,
         )
-
-        # In disagg mode, both planners share the same router metrics client
-        if self.enable_loadbased and hasattr(
-            self.prefill_planner, "router_metrics_client"
-        ):
-            self.decode_planner.router_metrics_client = (
-                self.prefill_planner.router_metrics_client
-            )
 
     async def _async_init(self):
         # Prefill/Decode share the same connector instance in disagg mode.
@@ -104,7 +99,7 @@ class DisaggPlanner:
         if self.enable_loadbased:
             loops.append(self._loadbased_loop())
             loops.append(
-                self.prefill_planner.router_metrics_client.run_sampling_loop(
+                self.prefill_planner.prometheus_engine_client.run_sampling_loop(
                     self.args.loadbased_metric_samples,
                     self.args.loadbased_adjustment_interval,
                 )

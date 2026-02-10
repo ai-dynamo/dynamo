@@ -129,7 +129,7 @@ class PlannerHarness:
             "isl_predictor",
             "osl_predictor",
             "connector",
-            "prometheus_api_client",
+            "prometheus_traffic_client",
             "args",
         }
         prefill_attrs = {
@@ -162,7 +162,7 @@ class PlannerHarness:
             "isl_predictor",
             "osl_predictor",
             "connector",
-            "prometheus_api_client",
+            "prometheus_traffic_client",
             "args",
             "get_workers_info",
         }
@@ -245,7 +245,7 @@ def planner():
         planner.connector = Mock()
 
         # Mock prometheus client
-        planner.prometheus_api_client = Mock()
+        planner.prometheus_traffic_client = Mock()
 
         # Set up some baseline correction factors
         planner.p_correction_factor = 1.0

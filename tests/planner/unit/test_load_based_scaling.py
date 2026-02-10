@@ -601,15 +601,15 @@ class TestWorkerCountReconciliation:
                 "last_isl": 3000.0,
             },
         }
-        planner.router_metrics_client = Mock()
-        planner.router_metrics_client.get_recent_and_averaged_metrics.return_value = (
+        planner.prometheus_engine_client = Mock()
+        planner.prometheus_engine_client.get_recent_and_averaged_metrics.return_value = (
             prefill_metrics,
             _avg(prefill_metrics),
         )
 
         await planner.observe_engine_load_stats()
 
-        planner.router_metrics_client.get_recent_and_averaged_metrics.assert_called_once_with("prefill")
+        planner.prometheus_engine_client.get_recent_and_averaged_metrics.assert_called_once_with("prefill")
         assert len(planner.cached_load_metrics.recent) == 1
         assert "w1" in planner.cached_load_metrics.recent
 
@@ -625,15 +625,15 @@ class TestWorkerCountReconciliation:
         decode_metrics = {
             "w2": {"active_decode_blocks": 50.0, "last_itl": 0.04},
         }
-        planner.router_metrics_client = Mock()
-        planner.router_metrics_client.get_recent_and_averaged_metrics.return_value = (
+        planner.prometheus_engine_client = Mock()
+        planner.prometheus_engine_client.get_recent_and_averaged_metrics.return_value = (
             decode_metrics,
             _avg(decode_metrics),
         )
 
         await planner.observe_engine_load_stats()
 
-        planner.router_metrics_client.get_recent_and_averaged_metrics.assert_called_once_with("decode")
+        planner.prometheus_engine_client.get_recent_and_averaged_metrics.assert_called_once_with("decode")
         assert len(planner.cached_load_metrics.recent) == 1
         assert "w2" in planner.cached_load_metrics.recent
 

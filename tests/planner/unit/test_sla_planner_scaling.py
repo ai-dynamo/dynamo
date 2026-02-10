@@ -78,8 +78,8 @@ def _build_planners(args, prometheus_client):
     shared_state = PlannerSharedState()
     prefill_planner = PrefillPlanner(None, args, shared_state=shared_state)
     decode_planner = DecodePlanner(None, args, shared_state=shared_state)
-    prefill_planner.prometheus_api_client = prometheus_client
-    decode_planner.prometheus_api_client = prometheus_client
+    prefill_planner.prometheus_traffic_client = prometheus_client
+    decode_planner.prometheus_traffic_client = prometheus_client
     prefill_planner.model_name = "test-model"
     decode_planner.model_name = "test-model"
 
