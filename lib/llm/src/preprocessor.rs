@@ -28,7 +28,6 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
@@ -141,7 +140,6 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
-    #[cfg(feature = "media-nixl")]
     media_loader: Option<MediaLoader>,
 }
 
@@ -177,7 +175,6 @@ impl OpenAIPreprocessor {
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
 
-        #[cfg(feature = "media-nixl")]
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
@@ -191,7 +188,6 @@ impl OpenAIPreprocessor {
             lora_name,
             runtime_config,
             tool_call_parser,
-            #[cfg(feature = "media-nixl")]
             media_loader,
         }))
     }
@@ -336,7 +332,6 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
-        #[cfg(feature = "media-nixl")]
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
 
@@ -366,7 +361,6 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
-                #[cfg(feature = "media-nixl")]
                 if self.media_loader.is_some() {
                     fetch_tasks.push((type_str, content_part.clone()));
                     continue;
@@ -381,7 +375,6 @@ impl OpenAIPreprocessor {
         }
 
         // Execute all fetch tasks
-        #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();

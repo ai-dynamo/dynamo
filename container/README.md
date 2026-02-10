@@ -272,8 +272,6 @@ The build process automatically:
 
 For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
 
-**Note:** `--framework none` defaults `ENABLE_MEDIA_NIXL=false`.
-
 #### Frontend Image Contents
 
 The frontend image includes:
