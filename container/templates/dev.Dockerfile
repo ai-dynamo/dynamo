@@ -10,6 +10,9 @@
 #   makes rebuilds expensive when iterating on later dev layers.
 # - Keeping tooling installation in `dynamo_tools` lets Docker cache the tools layer independently; `dev` can then
 #   pull those binaries/configs in via COPY.
+
+ARG DEVICE
+
 FROM runtime AS dynamo_tools
 
 ARG ARCH

@@ -20,6 +20,7 @@
 # - Ready-to-run inference server environment
 # - Base for custom application containers
 #
+ARG DEVICE
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
