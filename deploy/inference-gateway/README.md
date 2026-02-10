@@ -223,12 +223,14 @@ You can configure the plugin by setting environment variables in the EPP compone
 Common Vars for Routing Configuration:
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
 - Set `DYN_ENFORCE_DISAGG=true` if you want to enforce every request being served in the disaggregated manner. By default it is false meaning if the the prefill worker is not available the request will be served in the aggregated manner.
-- By default the Dynamo plugin uses KV routing. You can expose `DYN_USE_KV_ROUTING=false` in your [values.yaml](standalone/helm/dynamo-gaie/values.yaml) if you prefer to route in the round-robin fashion.
-- Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
+- Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-- Set `DYN_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing
+- Set `DYN_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing (default: true)
+- `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
+- `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
+- `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
+- `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
 - See the [KV cache routing design](../../docs/design_docs/router_design.md) for details.
-
 
 Stand-Alone installation only:
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.

@@ -478,6 +478,63 @@ pub enum QueryRouterResult {
     ErrTimeout = 6,
 }
 
+/// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.
+///
+/// Supported env vars (all optional — unset or empty values are ignored):
+/// - `DYN_OVERLAP_SCORE_WEIGHT` — Weight for overlap score in worker selection (default: 1.0)
+/// - `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
+/// - `DYN_USE_KV_EVENTS` — Use KV events for cache tracking (default: true)
+/// - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
+/// - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
+/// - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
+fn kv_router_config_from_env() -> KvRouterConfig {
+    let mut cfg = KvRouterConfig::default();
+
+    fn env_f64(key: &str) -> Option<f64> {
+        std::env::var(key).ok().and_then(|v| v.parse().ok())
+    }
+    fn env_bool(key: &str) -> Option<bool> {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| match v.to_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            })
+    }
+
+    if let Some(v) = env_f64("DYN_OVERLAP_SCORE_WEIGHT") {
+        cfg.overlap_score_weight = v;
+    }
+    if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
+        cfg.router_temperature = v;
+    }
+    if let Some(v) = env_bool("DYN_USE_KV_EVENTS") {
+        cfg.use_kv_events = v;
+    }
+    if let Some(v) = env_bool("DYN_ROUTER_REPLICA_SYNC") {
+        cfg.router_replica_sync = v;
+    }
+    if let Some(v) = env_bool("DYN_ROUTER_TRACK_ACTIVE_BLOCKS") {
+        cfg.router_track_active_blocks = v;
+    }
+    if let Some(v) = env_bool("DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
+        cfg.router_track_output_blocks = v;
+    }
+
+    tracing::info!(
+        overlap_score_weight = cfg.overlap_score_weight,
+        router_temperature = cfg.router_temperature,
+        use_kv_events = cfg.use_kv_events,
+        router_replica_sync = cfg.router_replica_sync,
+        router_track_active_blocks = cfg.router_track_active_blocks,
+        router_track_output_blocks = cfg.router_track_output_blocks,
+        "KvRouterConfig initialized (DYN_* env overrides applied)"
+    );
+
+    cfg
+}
+
 /// Create router handles for query-only routing
 ///
 /// This function waits for at least one decode worker to be discovered before returning.
@@ -553,7 +610,7 @@ pub unsafe extern "C" fn create_routers(
             instance_count
         );
 
-        let kv_router_config = KvRouterConfig::default();
+        let kv_router_config = kv_router_config_from_env();
 
         // Get component and endpoint
         let component_handle = match drt.namespace(&namespace_str) {
