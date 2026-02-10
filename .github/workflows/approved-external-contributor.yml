@@ -28,13 +28,13 @@ jobs:
           else
             echo "is_fork=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Comment /ok to test for approved contributor
+      - name: Validate approved contributor
+        id: author_check
         if: steps.fork_check.outputs.is_fork == 'true'
         uses: actions/github-script@v7
         env:
           APPROVED_EXTERNAL_CONTRIBUTORS: ${{ secrets.APPROVED_EXTERNAL_CONTRIBUTORS }}
         with:
-          github-token: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           script: |
             const approvedRaw = process.env.APPROVED_EXTERNAL_CONTRIBUTORS || "[]";
             let approved = [];
@@ -58,20 +58,22 @@ jobs:
 
             if (!approved.includes(author)) {
               core.info(`Author ${author} is not in APPROVED_EXTERNAL_CONTRIBUTORS.`);
+              core.setOutput("is_approved", "false");
               return;
             }
 
+            core.setOutput("is_approved", "true");
+      - name: Comment /ok to test
+        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
+          script: |
             const sha = context.payload.pull_request?.head?.sha || context.sha;
             const body = `/ok to test ${sha}`;
 
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;
-            const { data: comments } = await github.rest.issues.listComments({
-              owner,
-              repo,
-              issue_number,
-              per_page: 100,
-            });
 
             await github.rest.issues.createComment({
               owner,
