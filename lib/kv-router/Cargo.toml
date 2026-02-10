@@ -36,6 +36,7 @@ xxhash-rust = { workspace = true }
 
 # dependencies
 flume = "0.12.0"
+parking_lot = { workspace = true }
 
 # bench (optional)
 clap = { version = "4.5", features = ["derive"], optional = true }
@@ -54,6 +55,11 @@ futures = "0.3"
 
 [[bench]]
 name = "radix_tree_microbench"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "concurrent_microbench"
 harness = false
 required-features = ["bench"]
 
