@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi import GuidedDecodingParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
@@ -839,6 +841,43 @@ class HandlerBase:
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+
+        # Convert guided_decoding dict to GuidedDecodingParams before dataclasses.replace
+        # The Rust frontend passes guided_decoding as a raw dict in sampling_options.
+        # We must convert it to GuidedDecodingParams here, before dataclasses.replace,
+        # otherwise __post_init__ will call _validate() on the dict which causes an error.
+        if "guided_decoding" in overrides and isinstance(
+            overrides["guided_decoding"], dict
+        ):
+            gd = overrides.pop("guided_decoding")
+            json_schema = gd.get("json")
+            regex_pattern = gd.get("regex")
+            choice_list = gd.get("choice")
+            grammar = gd.get("grammar")
+
+            if json_schema is not None:
+                schema_str = (
+                    json.dumps(json_schema)
+                    if isinstance(json_schema, dict)
+                    else json_schema
+                )
+                overrides["guided_decoding"] = GuidedDecodingParams(json=schema_str)
+                logging.info("Guided decoding enabled with JSON schema")
+            elif regex_pattern is not None:
+                overrides["guided_decoding"] = GuidedDecodingParams(regex=regex_pattern)
+                logging.info("Guided decoding enabled with regex pattern")
+            elif choice_list is not None:
+                overrides["guided_decoding"] = GuidedDecodingParams(choice=choice_list)
+                logging.info(f"Guided decoding enabled with {len(choice_list)} choices")
+            elif grammar is not None:
+                overrides["guided_decoding"] = GuidedDecodingParams(grammar=grammar)
+                logging.info("Guided decoding enabled with grammar")
+            else:
+                logging.warning(
+                    "guided_decoding specified but no recognized parameter found "
+                    "(expected one of: json, regex, choice, grammar). "
+                    f"Keys provided: {list(gd.keys())}"
+                )
 
         # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
         # 1. it catches unsupported fields / attributes.
