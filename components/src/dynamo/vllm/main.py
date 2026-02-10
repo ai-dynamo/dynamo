@@ -54,7 +54,7 @@ from dynamo.vllm.multimodal_handlers import (
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
-from .args import Config, overwrite_args, parse_args
+from .args import Config, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
@@ -125,7 +125,6 @@ async def await_checkpoint_and_was_restored(signal_file: str) -> bool:
 async def worker():
     config = parse_args()
 
-    overwrite_args(config)
     dump_config(config.dump_config_to, config)
 
     # Name the model. Use either the full path (vllm and sglang do the same),
@@ -543,8 +542,8 @@ async def register_vllm_model(
 
     # Add tool/reasoning parsers for decode models
     if model_type != ModelType.Prefill:
-        runtime_config.tool_call_parser = config.tool_call_parser
-        runtime_config.reasoning_parser = config.reasoning_parser
+        runtime_config.tool_call_parser = config.dyn_tool_call_parser
+        runtime_config.reasoning_parser = config.dyn_reasoning_parser
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
@@ -823,13 +822,13 @@ async def init(
         return
 
     # Parse endpoint types from --dyn-endpoint-types flag
-    model_type = parse_endpoint_types(config.dyn_endpoint_types)
-    logger.info(f"Registering model with endpoint types: {config.dyn_endpoint_types}")
+    model_type = parse_endpoint_types(config.endpoint_types)
+    logger.info(f"Registering model with endpoint types: {config.endpoint_types}")
 
     model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
 
     # Warn if custom template provided but chat endpoint not enabled
-    if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+    if config.custom_jinja_template and "chat" not in config.endpoint_types:
         logger.warning(
             "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
