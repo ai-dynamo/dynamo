@@ -38,7 +38,7 @@
 {% if framework == "vllm" %}
     {% include "templates/vllm_framework.Dockerfile" %}
     {% if target != "framework" %}
-        {% include "templates/vllm_framework.Dockerfile" %}
+        {% include "templates/vllm_runtime.Dockerfile" %}
     {% endif %}
 {% else %}
 # --- No VLLM stages included
@@ -48,7 +48,7 @@
 {% if framework == "trtllm" %}
     {% include "templates/trtllm_framework.Dockerfile" %}
     {% if target != "framework" %}
-        {% include "templates/trtllm_framework.Dockerfile" %}
+        {% include "templates/trtllm_runtime.Dockerfile" %}
     {% endif %}
 {% else %}
 # --- No TRTLLM stages included
