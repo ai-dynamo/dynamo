@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -205,6 +206,7 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	now := metav1.Now()
 	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhasePending
 	rollingUpdateStatus.StartTime = &now
+	rollingUpdateStatus.UpdatedServices = nil
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
 		"Starting rolling update from worker hash %s to %s", oldWorkerHash, newWorkerHash)
@@ -247,9 +249,39 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		"oldWorkerHash", oldWorkerHash,
 		"newWorkerHash", newWorkerHash)
 
+	// Compute per-service completion
+	var updatedServices []string
+	for serviceName, spec := range dgd.Spec.Services {
+		if spec == nil || !dynamo.IsWorkerComponent(spec.ComponentType) {
+			continue
+		}
+
+		desired := int32(1)
+		if spec.Replicas != nil {
+			desired = *spec.Replicas
+		}
+
+		newSvc := newInfo.services[serviceName]
+		oldSvc := oldInfo.services[serviceName]
+
+		newReady := newSvc != nil && newSvc.readyReplicas >= desired
+		oldGone := oldSvc == nil || oldSvc.readyReplicas == 0
+
+		if newReady && oldGone {
+			updatedServices = append(updatedServices, serviceName)
+		}
+	}
+	sort.Strings(updatedServices)
+	rollingUpdateStatus.UpdatedServices = updatedServices
+
 	// Check if rolling update is complete: all new workers ready and all old workers scaled down
 	if newInfo.TotalReadyWorkers() >= desiredReplicas && oldInfo.TotalReadyWorkers() == 0 {
 		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
+	}
+
+	// Persist updated services list mid-rollout
+	if err := r.Status().Update(ctx, dgd); err != nil {
+		return fmt.Errorf("failed to update rolling update status with updated services: %w", err)
 	}
 
 	return nil
@@ -281,6 +313,16 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseCompleted
 	now := metav1.Now()
 	rollingUpdateStatus.EndTime = &now
+
+	// Mark all worker services as updated
+	var allWorkerServices []string
+	for serviceName, spec := range dgd.Spec.Services {
+		if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) {
+			allWorkerServices = append(allWorkerServices, serviceName)
+		}
+	}
+	sort.Strings(allWorkerServices)
+	rollingUpdateStatus.UpdatedServices = allWorkerServices
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
 		"Rolling update completed, worker hash %s", newWorkerHash)

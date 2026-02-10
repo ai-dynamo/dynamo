@@ -11408,6 +11408,13 @@ spec:
                       description: StartTime is when the rolling update began.
                       format: date-time
                       type: string
+                    updatedServices:
+                      description: |-
+                        UpdatedServices is the list of services that have completed the rolling update.
+                        A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.
+                      items:
+                        type: string
+                      type: array
                   type: object
                 services:
                   additionalProperties:

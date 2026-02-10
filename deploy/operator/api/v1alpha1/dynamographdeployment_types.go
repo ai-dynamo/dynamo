@@ -181,6 +181,12 @@ type RollingUpdateStatus struct {
 	// EndTime is when the rolling update completed (successfully or failed).
 	// +optional
 	EndTime *metav1.Time `json:"endTime,omitempty"`
+
+	// UpdatedServices is the list of services that have completed the rolling update.
+	// A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.
+	// Only services of componentType Worker (or Prefill/Decode) are considered.
+	// +optional
+	UpdatedServices []string `json:"updatedServices,omitempty"`
 }
 
 // ServiceReplicaStatus contains replica information for a single service.
