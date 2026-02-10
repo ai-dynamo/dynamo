@@ -381,7 +381,7 @@ spec:
 If you need to uninstall run:
 
 ```bash
-kubectl delete dynamoGraphDeployment vllm-agg
+kubectl delete dynamoGraphDeployment vllm-agg -n my-model
 helm uninstall dynamo-gaie -n my-model
 
 # To uninstall GAIE

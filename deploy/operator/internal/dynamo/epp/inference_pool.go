@@ -58,7 +58,7 @@ func GenerateInferencePool(
 			},
 			Selector: gaiev1.LabelSelector{
 				MatchLabels: map[gaiev1.LabelKey]gaiev1.LabelValue{
-					consts.KubeLabelDynamoComponentType: consts.ComponentTypeFrontend,
+					consts.KubeLabelDynamoComponentType: consts.ComponentTypeWorker,
 					consts.KubeLabelDynamoNamespace:     gaiev1.LabelValue(dynamoNamespace),
 				},
 			},

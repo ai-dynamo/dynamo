@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg
+spec:
+  services:
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: docker.io/lambda108/dynamo:new-bindings
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --store-kv
+            - mem
+        # Frontend sidecar: receives requests from kGateway on port 8000
+        # and routes them to the vLLM worker in the same pod
+        containers:
+          - name: frontend
+            image: docker.io/lambda108/dynamo:new-bindings
+            command:
+              - python3
+            args:
+              - -m
+              - dynamo.frontend
+              - --router-mode
+              - direct
+              - --store-kv
+              - mem
+            ports:
+              - containerPort: 8000
+                name: http
+                protocol: TCP
+            env:
+              - name: DYNAMO_PORT
+                value: "8000"
+              - name: DYN_HTTP_PORT
+                value: "8000"
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
