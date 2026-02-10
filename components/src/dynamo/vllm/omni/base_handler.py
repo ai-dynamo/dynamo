@@ -10,6 +10,7 @@ from typing import Any, AsyncGenerator, Dict
 
 from vllm import SamplingParams
 from vllm_omni.entrypoints import AsyncOmni
+from vllm_omni.inputs.data import OmniTextPrompt, OmniTokensPrompt
 
 try:
     from vllm_omni.diffusion.data import DiffusionParallelConfig
@@ -97,6 +98,7 @@ class BaseOmniHandler(BaseWorkerHandler):
             "diffusion_cache_config",
             "enable_cache_dit_summary",
             "enable_cpu_offload",
+            "enforce_eager",
         ]
         for param in diffusion_params:
             if hasattr(config, param):
@@ -137,8 +139,12 @@ class BaseOmniHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Omni Request ID: {request_id}")
 
-        async for chunk in self._generate_openai_mode(request, context, request_id):
-            yield chunk
+        if self.use_vllm_tokenizer:
+            async for chunk in self._generate_openai_mode(request, context, request_id):
+                yield chunk
+        else:
+            async for chunk in self._generate_token_mode(request, context, request_id):
+                yield chunk
 
     async def _generate_openai_mode(
         self, request, context, request_id
@@ -151,6 +157,95 @@ class BaseOmniHandler(BaseWorkerHandler):
         raise NotImplementedError(
             f"{self.__class__.__name__} must implement _generate_openai_mode"
         )
+
+    async def _generate_token_mode(self, request, context, request_id):
+        """Return token-ids as output. Text input -> Token-ids output."""
+        token_ids = request.get("token_ids")
+        prompt = OmniTokensPrompt(token_ids=token_ids)
+        num_output_tokens_so_far = 0
+        try:
+            async for stage_output in self.engine_client.generate(
+                prompt=prompt,
+                request_id=request_id,
+            ):
+                vllm_output = stage_output.request_output
+
+                if not vllm_output.outputs:
+                    logger.warning(f"Request {request_id} returned no outputs")
+                    yield {
+                        "finish_reason": "error: No outputs from vLLM engine",
+                        "token_ids": [],
+                    }
+                    break
+
+                output = vllm_output.outputs[0]
+                next_total_toks = len(output.token_ids)
+
+                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                if output.finish_reason:
+                    out["finish_reason"] = self._normalize_finish_reason(
+                        output.finish_reason
+                    )
+                    out["completion_usage"] = self._build_completion_usage(vllm_output)
+                    logger.debug(
+                        f"Completed generation for request {request_id}: "
+                        f"{next_total_toks} output tokens, finish_reason={output.finish_reason}"
+                    )
+
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+
+                yield out
+                num_output_tokens_so_far = next_total_toks
+
+        except GeneratorExit:
+            logger.info(f"Request {request_id} aborted due to shutdown")
+            raise
+        except Exception as e:
+            logger.error(f"Error during generation for request {request_id}: {e}")
+            yield {
+                "finish_reason": f"error: {str(e)}",
+                "token_ids": [],
+            }
+
+    def _format_text_chunk(
+        self,
+        request_output,
+        request_id: str,
+        previous_text: str,
+    ) -> Dict[str, Any] | None:
+        """Format text output as OpenAI chat completion chunk."""
+        if not request_output.outputs:
+            return self._error_chunk(request_id, "No outputs from engine")
+
+        output = request_output.outputs[0]
+
+        delta_text = output.text[len(previous_text):]
+
+        chunk = {
+            "id": request_id,
+            "created": int(time.time()),
+            "object": "chat.completion.chunk",
+            "model": self.config.served_model_name or self.config.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": delta_text,
+                    },
+                    "finish_reason": self._normalize_finish_reason(output.finish_reason)
+                    if output.finish_reason
+                    else None,
+                }
+            ],
+        }
+
+        if output.finish_reason:
+            chunk["usage"] = self._build_completion_usage(request_output)
+
+        return chunk
 
     def _extract_text_prompt(self, request: Dict[str, Any]) -> str | None:
         """Extract text prompt from OpenAI messages format.
