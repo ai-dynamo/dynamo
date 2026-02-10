@@ -26,6 +26,8 @@ CODEOWNERS @ai-dynamo/Devops
 
 # Planner
 /components/src/dynamo/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/components/src/dynamo/global_router/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/examples/hierarchical_planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /benchmarks/profiler/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /tests/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 

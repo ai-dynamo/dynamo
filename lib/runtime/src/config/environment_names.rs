@@ -14,11 +14,13 @@
 //! - **Runtime**: Tokio runtime configuration and system server settings
 //! - **NATS**: NATS client connection and authentication
 //! - **ETCD**: ETCD client connection and authentication
+//! - **Event Plane**: Event transport selection (NATS)
 //! - **KVBM**: Key-Value Block Manager configuration
 //! - **LLM**: Language model inference configuration
 //! - **Model**: Model loading and caching
 //! - **Worker**: Worker lifecycle and shutdown
 //! - **Testing**: Test-specific configuration
+//! - **Mocker**: Mocker (mock scheduler/KV manager) configuration
 
 /// Logging and tracing environment variables
 pub mod logging {
@@ -36,6 +38,9 @@ pub mod logging {
 
     /// Use local timezone for logging timestamps (default is UTC)
     pub const DYN_LOG_USE_LOCAL_TZ: &str = "DYN_LOG_USE_LOCAL_TZ";
+
+    /// Enable span event logging (create/close events)
+    pub const DYN_LOGGING_SPAN_EVENTS: &str = "DYN_LOGGING_SPAN_EVENTS";
 
     /// OTLP (OpenTelemetry Protocol) tracing configuration
     pub mod otlp {
@@ -297,7 +302,40 @@ pub mod model {
 
         /// Hugging Face home directory
         pub const HF_HOME: &str = "HF_HOME";
+
+        /// Offline mode - skip API calls when model is cached
+        /// Set to "1" or "true" to enable
+        pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
+}
+
+/// Event Plane transport environment variables
+pub mod event_plane {
+    /// Event transport selection: "zmq" or "nats". Default: "nats"
+    pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
+
+    /// Event plane codec selection: "json" or "msgpack".
+    pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+}
+
+/// ZMQ Broker environment variables
+pub mod zmq_broker {
+    /// Explicit ZMQ broker URL (takes precedence over discovery)
+    /// Format: "xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"
+    /// Example: "xsub=tcp://broker:5555 , xpub=tcp://broker:5556"
+    pub const DYN_ZMQ_BROKER_URL: &str = "DYN_ZMQ_BROKER_URL";
+
+    /// Enable ZMQ broker discovery mode
+    pub const DYN_ZMQ_BROKER_ENABLED: &str = "DYN_ZMQ_BROKER_ENABLED";
+
+    /// XSUB bind address (broker binary only)
+    pub const ZMQ_BROKER_XSUB_BIND: &str = "ZMQ_BROKER_XSUB_BIND";
+
+    /// XPUB bind address (broker binary only)
+    pub const ZMQ_BROKER_XPUB_BIND: &str = "ZMQ_BROKER_XPUB_BIND";
+
+    /// Namespace for broker discovery registration
+    pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
 }
 
 /// CUDA and GPU environment variables
@@ -317,6 +355,18 @@ pub mod build {
     /// which requires a string literal at compile time.
     /// Build scripts (build.rs) also cannot import this constant.
     pub const OUT_DIR: &str = "OUT_DIR";
+}
+
+/// Mocker (mock scheduler/KV manager) environment variables
+pub mod mocker {
+    /// Enable structured KV cache allocation/eviction trace logs (set to "1" or "true" to enable)
+    pub const DYN_MOCKER_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
+
+    /// Use the original direct() code path in the mocker request dispatch.
+    ///
+    /// This path is race-prone during startup; prefer leaving it unset unless you are
+    /// explicitly trying to reproduce the original behavior.
+    pub const DYN_MOCKER_SYNC_DIRECT: &str = "DYN_MOCKER_SYNC_DIRECT";
 }
 
 /// Testing environment variables
@@ -347,6 +397,7 @@ mod tests {
             logging::DYN_LOGGING_JSONL,
             logging::DYN_SDK_DISABLE_ANSI_LOGGING,
             logging::DYN_LOG_USE_LOCAL_TZ,
+            logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
@@ -402,10 +453,23 @@ mod tests {
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            model::huggingface::HF_HUB_OFFLINE,
+            // Event Plane
+            event_plane::DYN_EVENT_PLANE,
+            event_plane::DYN_EVENT_PLANE_CODEC,
+            // ZMQ Broker
+            zmq_broker::DYN_ZMQ_BROKER_URL,
+            zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+            zmq_broker::ZMQ_BROKER_XSUB_BIND,
+            zmq_broker::ZMQ_BROKER_XPUB_BIND,
+            zmq_broker::ZMQ_BROKER_NAMESPACE,
             // CUDA
             cuda::DYNAMO_FATBIN_PATH,
             // Build
             build::OUT_DIR,
+            // Mocker
+            mocker::DYN_MOCKER_KV_CACHE_TRACE,
+            mocker::DYN_MOCKER_SYNC_DIRECT,
             // Testing
             testing::DYN_QUEUED_UP_PROCESSING,
             testing::DYN_SOAK_RUN_DURATION,

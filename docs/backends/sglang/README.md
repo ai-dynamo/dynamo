@@ -36,10 +36,10 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|--------|-------|
 | [**Disaggregated Serving**](../../design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| [**KV-Aware Routing**](../../router/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../planner/sla_planner.md) | ✅ |  |
-| [**Multimodal Support**](../../multimodal/sglang.md) | ✅ |  |
-| [**KVBM**](../../kvbm/kvbm_architecture.md) | ❌ | Planned |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../components/planner/planner_guide.md) | ✅ |  |
+| [**Multimodal Support**](../../features/multimodal/multimodal_sglang.md) | ✅ |  |
+| [**KVBM**](../../components/kvbm/README.md) | ❌ | Planned |
 
 
 ## Dynamo SGLang Integration
@@ -55,7 +55,6 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 | Argument | Description | Default | SGLang Equivalent |
 |----------|-------------|---------|-------------------|
 | `--endpoint` | Dynamo endpoint in `dyn://namespace.component.endpoint` format | Auto-generated based on mode | N/A |
-| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../fault_tolerance/request_migration.md). | `0` (disabled) | N/A |
 | `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
 | `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
 | `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
@@ -163,13 +162,18 @@ docker run \
 
 Below we provide a guide that lets you run all of our common deployment patterns on a single node.
 
-### Start NATS and ETCD in the background
+### Start Infrastructure Services (Local Development Only)
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 > [!TIP]
 > Each example corresponds to a simple bash script that runs the OpenAI compatible server, processor, and optional router (written in Rust) and LLM engine (written in Python) in a single terminal. You can easily take each command and run them in separate terminals.

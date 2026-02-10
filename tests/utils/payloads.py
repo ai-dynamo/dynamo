@@ -573,8 +573,9 @@ class MetricsPayload(BasePayload):
         # Examples:
         #   - dynamo_component_requests_total{model="Qwen/Qwen3-0.6B"} 6
         #   - dynamo_component_uptime_seconds 150.390999059
+        # Note: Supports scientific notation (e.g., 8.34e-05)
         def metric_pattern(name):
-            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.]+)"
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
 
         metrics_to_check = [
             MetricCheck(
@@ -582,9 +583,9 @@ class MetricsPayload(BasePayload):
                 name=f"{prefix}_*",
                 pattern=lambda name: rf"^{prefix}_\w+",
                 validator=lambda value: len(set(value))
-                >= 11,  # 80% of typical ~17 metrics (excluding _bucket) as of 2025-12-02
-                error_msg=lambda name, value: f"Expected at least 11 unique {prefix}_* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 11)",
+                >= 7,  # 80% of typical ~13 metrics (excluding _bucket and removed kvstats metrics)
+                error_msg=lambda name, value: f"Expected at least 7 unique {prefix}_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 7)",
                 multiline=True,
             ),
             MetricCheck(
@@ -604,10 +605,23 @@ class MetricsPayload(BasePayload):
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}",
                 pattern=metric_pattern,
-                validator=lambda value: int(float(value))
-                >= 0,  # Allow 0 for SGLang (hardcoded issue in components/src/dynamo/sglang/publisher.py:70)
+                validator=lambda value: float(value) >= 0,
                 error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.kvstats.GPU_CACHE_USAGE_PERCENT}",
+                pattern=metric_pattern,
+                validator=lambda value: 0.0 <= float(value) <= 1.0,
+                error_msg=lambda name, value: f"{name} should be between 0.0 and 1.0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.model_info.LOAD_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) > 0,
+                error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {float(value):.2f}s",
             ),
         ]
 
@@ -642,8 +656,8 @@ class MetricsPayload(BasePayload):
             metrics_to_check.append(
                 MetricCheck(
                     # Check: Minimum count of unique sglang:* metrics
-                    name="sglang_*",
-                    pattern=lambda name: r"^sglang_\w+",
+                    name="sglang:*",
+                    pattern=lambda name: r"^sglang:\w+",
                     validator=lambda value: len(set(value))
                     >= 20,  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
                     error_msg=lambda name, value: f"Expected at least 20 unique sglang:* metrics, but found only {len(set(value))}",

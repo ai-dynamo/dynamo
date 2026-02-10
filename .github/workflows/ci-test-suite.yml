@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Reusable CI Test Suite Workflow
@@ -69,18 +69,17 @@ defaults:
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
   IMAGE_PREFIX: ${{ inputs.image_prefix }}
-
 ############################## BUILD JOBS ##############################
 
 jobs:
   build-amd64:
     name: Build ${{ matrix.framework }} (amd64)
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-builder-amd-v1
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, trtllm, sglang]
+        framework: [vllm, sglang]
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -94,13 +93,6 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Pull existing images for cache
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "Attempting to pull existing images for layer caching..."
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" || echo "Runtime image not found in cache"
-          echo "Cache pull completed"
       - name: Build Runtime Image
         id: build_runtime
         uses: ./.github/actions/docker-build
@@ -111,7 +103,6 @@ jobs:
           base_image_tag: ''
           runtime_image_tag: ''
           cuda_version: ''
-          torch_backend: ''
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -131,12 +122,10 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
-    runs-on: cpu-arm-r8g-4xlarge
+    runs-on: prod-builder-arm-v1
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -146,17 +135,10 @@ jobs:
             base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
             runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
             cuda_version: '12.9'
-            torch_backend: 'cu129'
-          - framework: trtllm
-            base_image_tag: '25.06-py3'
-            runtime_image_tag: ''
-            cuda_version: '12.9'
-            torch_backend: 'cu129'
           - framework: sglang
             base_image_tag: ''
             runtime_image_tag: ''
             cuda_version: ''
-            torch_backend: ''
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -170,13 +152,6 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Pull existing images for cache
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "Attempting to pull existing images for layer caching..."
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64" || echo "Runtime image not found in cache"
-          echo "Cache pull completed"
       - name: Build Runtime Image
         id: build_runtime
         uses: ./.github/actions/docker-build
@@ -187,7 +162,6 @@ jobs:
           base_image_tag: ${{ matrix.base_image_tag }}
           runtime_image_tag: ${{ matrix.runtime_image_tag }}
           cuda_version: ${{ matrix.cuda_version }}
-          torch_backend: ${{ matrix.torch_backend }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -207,15 +181,118 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+
+  # CUDA 13 builds (vllm and sglang only, both architectures)
+  build-cuda13-amd64:
+    name: Build ${{ matrix.framework }} CUDA13 (amd64)
+    runs-on: prod-builder-amd-v1
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build CUDA 13 Runtime Image
+        id: build_runtime
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/amd64
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: ${{ matrix.framework == 'trtllm' && '13.1' || '13.0' }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
+      - name: Tag and Push CUDA 13 Runtime Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-amd64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-amd64-run-${{ github.run_id }}
+            ${{ matrix.framework == 'trtllm' && format('{0}:{1}-{2}-amd64', env.REGISTRY_IMAGE, env.IMAGE_PREFIX, matrix.framework) || '' }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+
+  build-cuda13-arm64:
+    name: Build ${{ matrix.framework }} CUDA13 (arm64)
+    runs-on: prod-builder-arm-v1
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build CUDA 13 Runtime Image
+        id: build_runtime
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/arm64
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: ${{ matrix.framework == 'trtllm' && '13.1' || '13.0' }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
+      - name: Tag and Push CUDA 13 Runtime Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64-run-${{ github.run_id }}
+            ${{ matrix.framework == 'trtllm' && format('{0}:{1}-{2}-arm64', env.REGISTRY_IMAGE, env.IMAGE_PREFIX, matrix.framework) || '' }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
 ############################## TEST JOBS ##############################
 
   unit-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
-    needs: [build-amd64, build-arm64]
-    if: always()
+    needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
+    if: always() && inputs.skip_tests != true
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
@@ -224,9 +301,9 @@ jobs:
         framework: [vllm, trtllm, sglang]
         arch:
           - arch: amd64
-            runner: gpu-l40-amd64
+            runner: prod-builder-amd-gpu-v1
           - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+            runner: prod-builder-arm-v1
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -243,7 +320,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -347,7 +424,7 @@ jobs:
 
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
-    needs: [build-amd64, build-arm64]
+    needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
     if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
@@ -357,10 +434,10 @@ jobs:
         framework: [vllm, trtllm, sglang]
         arch:
           - arch: amd64
-            runner: gpu-l40-amd64
+            runner: prod-builder-amd-gpu-v1
             timeout: 90
           - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+            runner: prod-builder-arm-v1
             timeout: 90
     steps:
       - uses: actions/checkout@v4
@@ -378,7 +455,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -481,7 +558,7 @@ jobs:
 
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
-    needs: [build-amd64, build-arm64]
+    needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
     if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
@@ -491,11 +568,11 @@ jobs:
         framework: [vllm, trtllm, sglang]
         arch:
           - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 120
+            runner: prod-builder-amd-gpu-v1
+            timeout: 180
           - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 120
+            runner: prod-builder-arm-v1
+            timeout: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -514,7 +591,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -617,7 +694,7 @@ jobs:
 
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
-    needs: [build-amd64, build-arm64]
+    needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
     if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
@@ -627,10 +704,10 @@ jobs:
         framework: [vllm, trtllm, sglang]
         arch:
           - arch: amd64
-            runner: gpu-l40-amd64
+            runner: prod-builder-amd-gpu-v1
             timeout: 150
           - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+            runner: prod-builder-arm-v1
             timeout: 150
     steps:
       - uses: actions/checkout@v4
@@ -650,7 +727,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -756,7 +833,7 @@ jobs:
     name: ${{ matrix.framework.name }}-ft-k8s
     needs: [build-amd64]
     if: always()
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-builder-amd-v1
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -869,7 +946,7 @@ jobs:
           export IMAGE="${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${FRAMEWORK}-amd64"
           echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
           echo "Using namespace: $NAMESPACE"
-          echo "Using image: $IMAGE"
+          echo "Using image tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${FRAMEWORK}-amd64"
           # Install python3-venv package if not already installed
           sudo apt-get update && sudo apt-get install -y python3-venv
           # Set up Python virtual environment and install test dependencies
@@ -938,7 +1015,7 @@ jobs:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    needs: [build-amd64, build-arm64, build-cuda13-amd64, build-cuda13-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -994,7 +1071,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-builder-amd-v1
     if: always() && inputs.enable_slack_notification && !github.event.repository.fork
     needs: results-summary
     permissions:

@@ -17,12 +17,12 @@ Usage (both patterns supported):
     # Pattern 1: Import module
     from dynamo import prometheus_names
     print(prometheus_names.frontend_service.REQUESTS_TOTAL)  # "requests_total"
-    print(prometheus_names.kvstats.ACTIVE_BLOCKS)  # "kvstats_active_blocks"
+    print(prometheus_names.work_handler.ERRORS_TOTAL)  # "errors_total"
 
     # Pattern 2: Import specific classes
-    from dynamo.prometheus_names import frontend_service, kvstats
+    from dynamo.prometheus_names import frontend_service, work_handler
     print(frontend_service.REQUESTS_TOTAL)  # "requests_total"
-    print(kvstats.ACTIVE_BLOCKS)  # "kvstats_active_blocks"
+    print(work_handler.ERRORS_TOTAL)  # "errors_total"
 """
 
 from __future__ import annotations
@@ -80,6 +80,22 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Active decode blocks (KV cache blocks) per worker
+    # Gauge metric tracking current KV cache block utilization for each worker
+    WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"
+    # Active prefill tokens per worker
+    # Gauge metric tracking current queued prefill tokens for each worker
+    WORKER_ACTIVE_PREFILL_TOKENS = "worker_active_prefill_tokens"
+    # Last observed time to first token per worker (in seconds)
+    # Gauge metric tracking the most recent TTFT for each worker
+    WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS = "worker_last_time_to_first_token_seconds"
+    # Last observed input sequence tokens per worker
+    # Gauge metric tracking the input token count from the same request as WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
+    # Updated atomically with TTFT to correlate latency with input size
+    WORKER_LAST_INPUT_SEQUENCE_TOKENS = "worker_last_input_sequence_tokens"
+    # Last observed inter-token latency per worker (in seconds)
+    # Gauge metric tracking the most recent ITL for each worker
+    WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
 
@@ -103,6 +119,20 @@ class kvbm:
     HOST_CACHE_HIT_RATE = "host_cache_hit_rate"
     # Disk cache hit rate (0.0-1.0) from the sliding window
     DISK_CACHE_HIT_RATE = "disk_cache_hit_rate"
+    # Object storage cache hit rate (0.0-1.0) from the sliding window
+    OBJECT_CACHE_HIT_RATE = "object_cache_hit_rate"
+    # Number of blocks offloaded from device to object storage
+    OFFLOAD_BLOCKS_D2O = "offload_blocks_d2o"
+    # Number of blocks onboarded from object storage to device
+    ONBOARD_BLOCKS_O2D = "onboard_blocks_o2d"
+    # Bytes transferred to object storage (offload)
+    OFFLOAD_BYTES_OBJECT = "offload_bytes_object"
+    # Bytes transferred from object storage (onboard)
+    ONBOARD_BYTES_OBJECT = "onboard_bytes_object"
+    # Number of failed object storage read operations (blocks)
+    OBJECT_READ_FAILURES = "object_read_failures"
+    # Number of failed object storage write operations (blocks)
+    OBJECT_WRITE_FAILURES = "object_write_failures"
 
 
 class kvrouter:
@@ -111,18 +141,10 @@ class kvrouter:
 
 
 class kvstats:
-    """KvStats metrics from LLM workers"""
-
-    # Prefix for all KvStats metrics
-    PREFIX = ""
-    # Number of active KV cache blocks currently in use
-    ACTIVE_BLOCKS = "kvstats_active_blocks"
-    # Total number of KV cache blocks available
-    TOTAL_BLOCKS = "kvstats_total_blocks"
+    # Total number of KV cache blocks available on the worker
+    TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
-    GPU_CACHE_USAGE_PERCENT = "kvstats_gpu_cache_usage_percent"
-    # GPU prefix cache hit rate as a percentage (0.0-1.0)
-    GPU_PREFIX_CACHE_HIT_RATE = "kvstats_gpu_prefix_cache_hit_rate"
+    GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
 
 
 class labels:
@@ -134,6 +156,19 @@ class labels:
     NAMESPACE = "dynamo_namespace"
     # Label for endpoint identification
     ENDPOINT = "dynamo_endpoint"
+    # Label for worker data-parallel rank.
+    # Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
+    # It is used by worker/load-style metrics that need to disambiguate per-worker series.
+    DP_RANK = "dp_rank"
+    # Label for model name
+    MODEL = "model"
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    WORKER_TYPE = "worker_type"
+
+
+class model_info:
+    # Model load time in seconds
+    LOAD_TIME_SECONDS = "model_load_time_seconds"
 
 
 class name_prefix:

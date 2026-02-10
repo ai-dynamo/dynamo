@@ -114,16 +114,28 @@ class EmbeddingsProcessor:
     def create_multimodal_item(
         embeddings: torch.Tensor, request: SglangMultimodalRequest
     ) -> dict:
-        """Create multimodal item for SGLang generation"""
+        """
+        Create multimodal item for SGLang generation.
 
-        precomputed_embeddings = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
+        Uses format="precomputed_embedding" since Dynamo's Encoder has already
+        run the vision encoder. SGLang expects 2D embeddings (num_patches, hidden_dim).
+        """
+        precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
+
+        # SGLang expects 2D tensor for precomputed_embedding format
+        # Encoder outputs 3D (1, num_patches, hidden_dim) for internal consistency
+        # Squeeze batch dimension at SGLang boundary
+        if precomputed.dim() == 3 and precomputed.shape[0] == 1:
+            precomputed = precomputed.squeeze(0)
+
         grid_thw_tensor = torch.tensor(request.image_grid_thw)
 
-        mm_item = dict(
-            modality="IMAGE",
-            image_grid_thw=grid_thw_tensor,
-            precomputed_embeddings=precomputed_embeddings,
-        )
+        mm_item = {
+            "format": "precomputed_embedding",
+            "feature": precomputed,
+            "image_grid_thw": grid_thw_tensor,
+            "modality": "IMAGE",
+        }
 
         return mm_item
 
@@ -133,30 +145,26 @@ class StreamProcessor:
 
     @staticmethod
     async def process_sglang_stream(stream_source) -> AsyncIterator[str]:
-        """Process SGLang stream output following backend pattern"""
-        num_output_tokens_so_far = 0
+        """Process SGLang stream output.
 
+        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
+        containing only new tokens since the last output. We pass these through directly.
+        """
         try:
             async for res in stream_source:
                 try:
-                    next_total_toks = len(res["output_ids"])
-
-                    # Return incremental tokens
+                    # With stream_output=True, output_ids contains only new tokens (disjoint)
                     output = {
-                        "token_ids": res["output_ids"][num_output_tokens_so_far:],
+                        "token_ids": res["output_ids"],
                         "text": res.get("text", ""),
                         "finished": False,
                     }
-                    num_output_tokens_so_far = next_total_toks
 
                     # Check for finish reason
                     finish_reason = res.get("meta_info", {}).get("finish_reason")
                     if finish_reason:
                         output.update(
                             {
-                                "token_ids": res["output_ids"][
-                                    num_output_tokens_so_far:
-                                ],
                                 "finish_reason": finish_reason.get("type", "stop"),
                                 "finished": True,
                             }
@@ -241,7 +249,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         config: Config,
         prefill_client: Client = None,
     ):
-        super().__init__(component, engine, config, None, prefill_client)
+        super().__init__(component, engine, config, None)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
@@ -404,9 +412,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         return bootstrap_info
 
     def cleanup(self):
+        super().cleanup()
         self.engine.shutdown()
         logger.info("Multimodal worker engine shutdown")
-        super().cleanup()
 
 
 class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
@@ -519,6 +527,6 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
             pass
 
     def cleanup(self):
+        super().cleanup()
         self.engine.shutdown()
         logger.info("Multimodal prefill engine shutdown")
-        super().cleanup()

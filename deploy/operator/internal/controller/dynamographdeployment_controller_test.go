@@ -21,11 +21,11 @@ import (
 	"context"
 	"testing"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/onsi/gomega"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -405,7 +405,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   ReadyState,
+				State:   DGDStateReady,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -467,7 +467,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -542,7 +542,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   ReadyState,
+				State:   DGDStateReady,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -614,7 +614,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -678,7 +678,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			}
 
-			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil)
+			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
@@ -1035,6 +1035,49 @@ func Test_computeRestartStatus(t *testing.T) {
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name: "parallel restart - new request with ready resources should NOT complete immediately (race condition fix)",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				// No existing restart status - brand new restart request
+			},
+			existingResources: []client.Object{
+				// DCD is READY - simulating state BEFORE restart annotation is applied
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting, // NOT Completed!
+				InProgress: []string{"frontend"},
 			},
 		},
 		{
@@ -1402,7 +1445,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   ReadyState,
+				State:   DGDStateReady,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1462,7 +1505,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1592,7 +1635,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   ReadyState,
+				State:   DGDStateReady,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1738,7 +1781,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1849,7 +1892,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{

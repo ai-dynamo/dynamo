@@ -24,6 +24,7 @@ use crate::{
     },
 };
 
+use anyhow::Context as _;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -69,6 +70,7 @@ pub async fn prepare_engine(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
+                local_model.migration_limit(),
                 None,
                 metrics,
             ));
@@ -179,6 +181,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -191,9 +194,11 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let PromptFormatter::OAI(formatter) =
+        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())
+            .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,
         client,
@@ -205,6 +210,7 @@ where
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        migration_limit,
         metrics,
     )
     .await
@@ -222,6 +228,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -237,7 +244,7 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, metrics).into_operator();
+    let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {
@@ -268,6 +275,9 @@ where
 
     let service_backend = match router_mode {
         RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+            // Non-KV routing: use PushRouter directly.
+            // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
+            // available in KV routing mode where the router has actual bookkeeping.
             ServiceBackend::from_engine(Arc::new(router))
         }
         RouterMode::KV => {

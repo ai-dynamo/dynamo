@@ -26,7 +26,7 @@ across backends.
 
 */
 
-use dynamo_async_openai::types::{ChatChoiceStream, FinishReason};
+use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -34,6 +34,13 @@ use futures::{Stream, StreamExt, stream};
 use std::pin::Pin;
 
 const DATA_ROOT_PATH: &str = "tests/data/";
+
+fn get_text(content: &ChatCompletionMessageContent) -> &str {
+    match content {
+        ChatCompletionMessageContent::Text(text) => text.as_str(),
+        ChatCompletionMessageContent::Parts(_) => "",
+    }
+}
 
 /// Test data structure containing expected results and stream data
 struct TestData {
@@ -230,7 +237,7 @@ fn aggregate_content_from_chunks(
 
                 // Collect normal content
                 if let Some(ref content) = choice.delta.content {
-                    normal_content.push_str(content);
+                    normal_content.push_str(get_text(content));
                 }
 
                 // Collect tool calls

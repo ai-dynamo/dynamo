@@ -26,10 +26,10 @@ import (
 	"testing"
 	"time"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -777,6 +777,123 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 		default:
 			t.Errorf("unexpected component type: %s", d.Spec.ComponentType)
 		}
+	}
+}
+
+// TestGenerateComponentContext tests the generateComponentContext function
+// to ensure it correctly computes the DynamoNamespace from authoritative sources
+// (k8s namespace + DGD name), ignoring any deprecated dynamoNamespace field.
+func TestGenerateComponentContext(t *testing.T) {
+	tests := []struct {
+		name                       string
+		component                  *v1alpha1.DynamoComponentDeploymentSharedSpec
+		parentGraphDeploymentName  string
+		namespace                  string
+		numberOfNodes              int32
+		discoveryBackend           string
+		expectedDynamoNamespace    string
+		expectedComponentType      string
+		expectedParentDGDName      string
+		expectedParentDGDNamespace string
+	}{
+		{
+			name: "namespace-scoped operator: computes correct dynamo namespace",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypePlanner,
+				// Deprecated field set to incorrect value - should be ignored
+				DynamoNamespace: ptr.To("old-incorrect-value"),
+			},
+			parentGraphDeploymentName:  "my-deployment",
+			namespace:                  "my-namespace",
+			numberOfNodes:              1,
+			discoveryBackend:           "kubernetes",
+			expectedDynamoNamespace:    "my-namespace-my-deployment",
+			expectedComponentType:      commonconsts.ComponentTypePlanner,
+			expectedParentDGDName:      "my-deployment",
+			expectedParentDGDNamespace: "my-namespace",
+		},
+		{
+			name: "deprecated dynamoNamespace field is ignored",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				// This is the bug case: profiler sets dynamoNamespace to just DGD name
+				DynamoNamespace: ptr.To("vllm-disagg"),
+			},
+			parentGraphDeploymentName:  "vllm-disagg",
+			namespace:                  "djangoz",
+			numberOfNodes:              1,
+			discoveryBackend:           "kubernetes",
+			expectedDynamoNamespace:    "djangoz-vllm-disagg", // Should be k8s-namespace + DGD name
+			expectedComponentType:      commonconsts.ComponentTypeFrontend,
+			expectedParentDGDName:      "vllm-disagg",
+			expectedParentDGDNamespace: "djangoz",
+		},
+		{
+			name: "GlobalDynamoNamespace takes precedence",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:         commonconsts.ComponentTypeWorker,
+				GlobalDynamoNamespace: true,
+				// Even with deprecated field set, GlobalDynamoNamespace should win
+				DynamoNamespace: ptr.To("should-be-ignored"),
+			},
+			parentGraphDeploymentName:  "shared-frontend",
+			namespace:                  "production",
+			numberOfNodes:              2,
+			discoveryBackend:           "etcd",
+			expectedDynamoNamespace:    commonconsts.GlobalDynamoNamespace, // "dynamo"
+			expectedComponentType:      commonconsts.ComponentTypeWorker,
+			expectedParentDGDName:      "shared-frontend",
+			expectedParentDGDNamespace: "production",
+		},
+		{
+			name: "nil dynamoNamespace field still computes correctly",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:   commonconsts.ComponentTypePlanner,
+				DynamoNamespace: nil, // Not set at all
+			},
+			parentGraphDeploymentName:  "test-dgd",
+			namespace:                  "default",
+			numberOfNodes:              1,
+			discoveryBackend:           "kubernetes",
+			expectedDynamoNamespace:    "default-test-dgd",
+			expectedComponentType:      commonconsts.ComponentTypePlanner,
+			expectedParentDGDName:      "test-dgd",
+			expectedParentDGDNamespace: "default",
+		},
+		{
+			name: "different namespace and DGD name combinations",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+			},
+			parentGraphDeploymentName:  "llama-70b-prod",
+			namespace:                  "ml-inference",
+			numberOfNodes:              4,
+			discoveryBackend:           "nats",
+			expectedDynamoNamespace:    "ml-inference-llama-70b-prod",
+			expectedComponentType:      commonconsts.ComponentTypeFrontend,
+			expectedParentDGDName:      "llama-70b-prod",
+			expectedParentDGDNamespace: "ml-inference",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := generateComponentContext(
+				tt.component,
+				tt.parentGraphDeploymentName,
+				tt.namespace,
+				tt.numberOfNodes,
+				tt.discoveryBackend,
+			)
+
+			assert.Equal(t, tt.expectedDynamoNamespace, ctx.DynamoNamespace,
+				"DynamoNamespace should be computed from k8s namespace + DGD name")
+			assert.Equal(t, tt.expectedComponentType, ctx.ComponentType)
+			assert.Equal(t, tt.expectedParentDGDName, ctx.ParentGraphDeploymentName)
+			assert.Equal(t, tt.expectedParentDGDNamespace, ctx.ParentGraphDeploymentNamespace)
+			assert.Equal(t, tt.numberOfNodes, ctx.numberOfNodes)
+			assert.Equal(t, tt.discoveryBackend, ctx.DiscoveryBackend)
+		})
 	}
 }
 
@@ -3548,7 +3665,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3600,7 +3717,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -3763,6 +3880,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -3920,6 +4038,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -4006,6 +4125,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -4683,7 +4803,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				NatsAddress: "nats-address",
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -4792,6 +4912,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if (err != nil) != tt.wantErr {
@@ -4867,6 +4988,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -4989,6 +5111,7 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -5084,6 +5207,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				tt.controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 			if !assert.NoError(t, err) {
 				return
@@ -5139,7 +5263,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
-							{Name: commonconsts.DynamoNamespaceEnvVar, Value: ""},
+							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
@@ -5243,6 +5367,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -5339,6 +5464,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -5574,6 +5700,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -5785,6 +5912,7 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -5970,6 +6098,7 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -6464,7 +6593,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				NatsAddress: "nats-address",
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}

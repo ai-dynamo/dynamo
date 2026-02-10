@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoCheckpoint
+metadata:
+  name: vllm-llama3-8b-tp1
+spec:
+  # Identity - determines the checkpoint hash
+  identity:
+    model: "meta-llama/Meta-Llama-3-8B-Instruct"
+    backendFramework: "vllm"
+    dynamoVersion: "0.6.0"
+    tensorParallelSize: 1
+    pipelineParallelSize: 1
+    dtype: "bfloat16"
+    maxModelLen: 8192
+    extraParameters:
+      enableChunkedPrefill: "true"
+
+  # Job configuration for checkpoint creation
+  job:
+    activeDeadlineSeconds: 3600
+    backoffLimit: 3
+    ttlSecondsAfterFinished: 300
+    podTemplateSpec:
+      spec:
+        containers:
+          - name: checkpoint-worker
+            image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm:latest
+            command: ["python", "-m", "vllm.entrypoints.openai.api_server"]
+            args:
+              - "--model"
+              - "meta-llama/Meta-Llama-3-8B-Instruct"
+              - "--tensor-parallel-size"
+              - "1"
+              - "--dtype"
+              - "bfloat16"
+              - "--max-model-len"
+              - "8192"
+            env:
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: token
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+        restartPolicy: Never
+

@@ -37,11 +37,11 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 |---------|------|-------|
 | [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
-| [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ |  |
-| [**LMCache**](./LMCache_Integration.md) | ✅ |  |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/components/planner/planner_guide.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/components/planner/README.md) | 🚧 | WIP |
+| [**KVBM**](../../../docs/components/kvbm/README.md) | ✅ |  |
+| [**LMCache**](../../integrations/lmcache_integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
@@ -56,13 +56,18 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
-### Start NATS and ETCD in the background
+### Start Infrastructure Services (Local Development Only)
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Pull or build container
 
@@ -139,7 +144,9 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
 This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
 
-**Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
+**Guide:** [Speculative Decoding Quickstart](../../features/speculative_decoding/speculative_decoding_vllm.md)
+
+> **See also:** [Speculative Decoding Feature Overview](../../features/speculative_decoding/README.md) for cross-backend documentation.
 
 ### Kubernetes Deployment
 
@@ -172,17 +179,11 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [KV Cache Routing](../../../docs/router/kv_cache_routing.md) on deterministic event IDs.
+See the high-level notes in [Router Design](../../design_docs/router_design.md#deterministic-event-ids) on deterministic event IDs.
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
-
-```bash
-python3 -m dynamo.vllm ... --migration-limit=3
-```
-
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
+Dynamo supports [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. When enabled, requests can be automatically migrated to healthy workers if a worker fails mid-generation. See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for configuration details.
 
 ## Request Cancellation
 
