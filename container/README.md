@@ -6,7 +6,7 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
 
 ### Core Components
 
-- **`build.sh`** - A Docker image builder that creates containers for different AI inference frameworks (vLLM, TensorRT-LLM, SGLang). It handles framework-specific dependencies, multi-stage builds, and development vs production configurations.
+- **`build.sh`** - A Docker image builder that creates containers for different AI inference frameworks (SGLang, TensorRT-LLM, vLLM). It handles framework-specific dependencies, multi-stage builds, and development vs production configurations.
 
 - **`run.sh`** - A container runtime manager that launches Docker containers with proper GPU access, volume mounts, and environment configurations. It supports different development workflows from root-based legacy setups to user-based development environments.
 
@@ -74,7 +74,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 
 ### Why Containerization?
 
-Each inference framework (vLLM, TensorRT-LLM, SGLang) has specific CUDA versions, Python dependencies, and system libraries. Containers provide consistent environments, framework isolation, and proper GPU configurations across development and production.
+Each inference framework (SGLang, TensorRT-LLM, vLLM) has specific CUDA versions, Python dependencies, and system libraries. Containers provide consistent environments, framework isolation, and proper GPU configurations across development and production.
 
 The scripts in this directory abstract away the complexity of Docker commands while providing fine-grained control over build and runtime configurations.
 
@@ -91,7 +91,7 @@ The `build.sh` and `run.sh` scripts are convenience wrappers that simplify commo
 
 ## Development Targets Feature Matrix
 
-**Note**: In Dynamo, "targets" and "Docker stages" are synonymous. Each target corresponds to a stage in the multi-stage Docker build. Similarly, "frameworks" and "engines" are synonymous (vLLM, TensorRT-LLM, SGLang).
+**Note**: In Dynamo, "targets" and "Docker stages" are synonymous. Each target corresponds to a stage in the multi-stage Docker build. Similarly, "frameworks" and "engines" are synonymous (SGLang, TensorRT-LLM, vLLM).
 
 | Feature | **runtime + `run.sh`** | **local-dev (`run.sh` or Dev Container)** | **dev + `run.sh`** (legacy) |
 |---------|----------------------|-------------------------------------------|--------------------------|
@@ -138,13 +138,13 @@ Use VS Code/Cursor Dev Container Extension with devcontainer.json configuration.
 The `build.sh` script is responsible for building Docker images for different AI inference frameworks. It supports multiple frameworks and configurations:
 
 **Purpose:**
-- Builds Docker images for NVIDIA Dynamo with support for vLLM, TensorRT-LLM, SGLang, or standalone configurations
+- Builds Docker images for NVIDIA Dynamo with support for SGLang, TensorRT-LLM, vLLM, or standalone configurations
 - Handles framework-specific dependencies and optimizations
 - Manages build contexts, caching, and multi-stage builds
 - Configures development vs production targets
 
 **Key Features:**
-- **Framework Support**: vLLM (default when --framework not specified), TensorRT-LLM, SGLang, or NONE
+- **Framework Support**: SGLang, TensorRT-LLM, vLLM (default when --framework not specified), or NONE
 - **Multi-stage Builds**: Build process with base images
 - **Development Targets**: Supports `dev`, `runtime`, and `local-dev` targets via `build.sh`.
 - **Build Caching**: Docker layer caching and sccache support
@@ -223,7 +223,7 @@ Note: `uv` commands set `UV_CACHE_DIR` per `RUN` so `uv` always uses the same pa
 
 **How `dev` / `local-dev` builds work:**
 - `dev` and `local-dev` targets are defined in `container/dev/Dockerfile.dev`.
-- The framework Dockerfiles (`Dockerfile.vllm`, `Dockerfile.trtllm`, `Dockerfile.sglang`, `Dockerfile`) define shared stages used by `Dockerfile.dev` (e.g. `runtime`, `dynamo_base`, `wheel_builder`).
+- The framework Dockerfiles (`Dockerfile.sglang`, `Dockerfile.trtllm`, `Dockerfile.vllm`, `Dockerfile`) define shared stages used by `Dockerfile.dev` (e.g. `runtime`, `dynamo_base`, `wheel_builder`).
 - To build a single coherent Dockerfile, `build.sh` generates a temporary Dockerfile that is a literal concatenation of:
   - the selected framework Dockerfile, then
   - `container/dev/Dockerfile.dev`

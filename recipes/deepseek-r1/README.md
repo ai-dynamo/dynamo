@@ -35,13 +35,13 @@ kubectl create secret generic hf-token-secret \
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f model-cache/model-download-sglang.yaml -n ${NAMESPACE}
 
-# For vLLM/TRT-LLM deployments:
+# For TRT-LLM/vLLM deployments:
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 
 # Wait for download (this is a large model - may take 1+ hours)
 # For SGLang: kubectl wait --for=condition=Complete job/model-download-sglang ...
-# For vLLM/TRT-LLM: kubectl wait --for=condition=Complete job/model-download ...
+# For TRT-LLM/vLLM: kubectl wait --for=condition=Complete job/model-download ...
 kubectl wait --for=condition=Complete job/model-download-sglang -n ${NAMESPACE} --timeout=7200s
 
 # Deploy (choose one configuration)

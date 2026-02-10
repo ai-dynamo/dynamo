@@ -36,7 +36,7 @@ High-throughput, low-latency inference framework designed for serving generative
 
 Large language models exceed single-GPU capacity. Tensor parallelism spreads layers across GPUs but creates coordination challenges. Dynamo closes this orchestration gap.
 
-Dynamo is inference engine agnostic (supports TRT-LLM, vLLM, SGLang) and provides:
+Dynamo is inference engine agnostic (supports SGLang, TRT-LLM, vLLM) and provides:
 
 - **Disaggregated Prefill & Decode** – Maximizes GPU throughput with latency/throughput trade-offs
 - **Dynamic GPU Scheduling** – Optimizes performance based on fluctuating demand

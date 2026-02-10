@@ -53,7 +53,7 @@ Each complete recipe follows this standard structure:
 ├── model-cache/
 │   ├── model-cache.yaml          # PersistentVolumeClaim for model storage
 │   └── model-download.yaml       # Job to download model from HuggingFace
-└── <framework>/                  # vllm, sglang, or trtllm
+└── <framework>/                  # sglang, trtllm, or vllm
     └── <deployment-mode>/        # agg, disagg, disagg-single-node, etc.
         ├── deploy.yaml           # Complete DynamoGraphDeployment manifest
         └── perf.yaml (optional)  # AIPerf benchmark job

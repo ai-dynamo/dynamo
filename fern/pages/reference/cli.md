@@ -296,7 +296,7 @@ The default delay is 10ms, which produces approximately 100 tokens per second.
 
 ### Other engines, multi-node, production
 
-`vllm`, `sglang` and `trtllm` production grade engines are available in `examples/backends`. They run as Python components, using the Rust bindings. See the main README.
+`sglang`, `trtllm` and `vllm` production grade engines are available in `examples/backends`. They run as Python components, using the Rust bindings. See the main README.
 
 `dynamo-run` is an exploration, development and prototyping tool, as well as an example of using the Rust API. Multi-node and production setups should be using the main engine components.
 

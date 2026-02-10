@@ -30,7 +30,7 @@ Templates for creating consistent Dynamo documentation.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Backends (vLLM, SGLang, TRT-LLM)
+### Backends (SGLang, TRT-LLM, vLLM)
 
 ```
 ┌─────────────────────────────────────────────────────┐

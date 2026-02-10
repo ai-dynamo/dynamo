@@ -193,7 +193,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B") |  | Required: \{\} <br /> |
-| `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm) |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `backendFramework` _string_ | BackendFramework is the runtime framework (sglang, trtllm, vllm) |  | Enum: [sglang trtllm vllm] <br />Required: \{\} <br /> |
 | `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version (optional)<br />If not specified, version is not included in identity hash<br />This ensures checkpoint compatibility across Dynamo releases |  | Optional: \{\} <br /> |
 | `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
 | `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
@@ -366,7 +366,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm") |  | Enum: [sglang vllm trtllm] <br /> |
+| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "trtllm", "vllm") |  | Enum: [sglang trtllm vllm] <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
 | `serviceName` _string_ | The name of the component |  |  |
@@ -460,7 +460,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs.<br />The controller automatically sets this value in profilingConfig.config.deployment.model. |  | Required: \{\} <br /> |
-| `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [sglang trtllm vllm] <br />Required: \{\} <br /> |
 | `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. | false |  |
 | `enableGpuDiscovery` _boolean_ | EnableGpuDiscovery controls whether the profiler should automatically discover GPU<br />resources from the Kubernetes cluster nodes. When enabled, the profiler will override<br />any manually specified hardware configuration (minNumGpusPerEngine, maxNumGpusPerEngine,<br />numGpusPerNode) with values detected from the cluster.<br />Requires cluster-wide node access permissions - only available with cluster-scoped operators. | false | Optional: \{\} <br /> |
 | `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Required: \{\} <br /> |
@@ -584,7 +584,7 @@ _Appears in:_
 | `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | MaxItems: 100 <br />Optional: \{\} <br /> |
 | `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
-| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
+| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "trtllm", "vllm"). |  | Enum: [sglang trtllm vllm] <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 
 
@@ -1134,7 +1134,7 @@ The Dynamo operator automatically applies default values to various fields when 
 
 - **Autoscaling**: When enabled without explicit metrics, defaults to CPU-based autoscaling with 80% target utilization.
 
-- **Backend-Specific Behavior**: For multinode deployments, probes are automatically modified or removed for worker nodes depending on the backend framework (VLLM, SGLang, or TensorRT-LLM).
+- **Backend-Specific Behavior**: For multinode deployments, probes are automatically modified or removed for worker nodes depending on the backend framework (SGLang, TensorRT-LLM, or vLLM).
 
 ## Pod Specification Defaults
 

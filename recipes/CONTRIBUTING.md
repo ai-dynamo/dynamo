@@ -16,7 +16,7 @@ When adding new model recipes, ensure they follow the standard structure:
 ## Validation
 The `run.sh` script expects this exact directory structure and will validate that the directories and files exist before deployment:
 - Model directory exists in `recipes/<model>/`
-- Framework is one of the supported frameworks (vllm, sglang, trtllm)
+- Framework is one of the supported frameworks (sglang, trtllm, vllm)
 - Framework directory exists in `recipes/<model>/<framework>/`
 - Deployment directory exists in `recipes/<model>/<framework>/<deployment>/`
 - Required files (`deploy.yaml`) exist in the deployment directory

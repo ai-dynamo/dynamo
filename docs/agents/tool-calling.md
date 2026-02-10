@@ -13,7 +13,7 @@ To enable this feature, you should set the following flag while launching the ba
 - `--dyn-tool-call-parser` : select the parser from the available parsers list using the below command
 
 ```bash
-# <backend> can be vllm, sglang, trtllm, etc. based on your installation
+# <backend> can be sglang, trtllm, vllm, etc. based on your installation
 python -m dynamo.<backend> --help"
 ```
 

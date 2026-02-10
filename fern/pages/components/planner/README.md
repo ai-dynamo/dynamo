@@ -75,7 +75,7 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
-| `--backend` | `vllm` | Backend framework (`vllm`, `sglang`, `trtllm`) |
+| `--backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
 | `--environment` | `kubernetes` | Deployment environment |
 | `--adjustment-interval` | `180` | Seconds between scaling decisions |
 | `--ttft` | `500.0` | Target Time To First Token (ms) |

@@ -18,7 +18,7 @@ limitations under the License.
 
 # High Level Architecture
 
-Dynamo is NVIDIA's high-throughput, low-latency inference framework that's designed to serve generative AI and reasoning models in multi-node distributed environments. It's inference engine agnostic, supporting TRT-LLM, vLLM, SGLang and others, while capturing essential LLM capabilities:
+Dynamo is NVIDIA's high-throughput, low-latency inference framework that's designed to serve generative AI and reasoning models in multi-node distributed environments. It's inference engine agnostic, supporting SGLang, TRT-LLM, vLLM and others, while capturing essential LLM capabilities:
 
 - **Disaggregated prefill & decode inference**: Maximizes GPU throughput and helps you balance throughput and latency
 - **Dynamic GPU scheduling**: Optimizes performance based on real-time demand
