@@ -194,8 +194,8 @@ class DisaggPlanner:
                 await self.decode_planner.observe_engine_load_stats()
 
                 # Reconcile DGD worker counts with router Prometheus counts
-                p_prom_count = len(self.prefill_planner.cached_per_worker_metrics)
-                d_prom_count = len(self.decode_planner.cached_per_worker_metrics)
+                p_prom_count = len(self.prefill_planner.cached_load_metrics.recent)
+                d_prom_count = len(self.decode_planner.cached_load_metrics.recent)
                 if p_prom_count != num_p or d_prom_count != num_d:
                     logger.warning(
                         f"Worker count mismatch: DGD reports P={num_p}, D={num_d}; "

@@ -61,7 +61,7 @@ class PrefillPlanner(BasePlanner):
             )
             return num_workers + 1
 
-        # Scale down: use averaged active_prefill_tokens (cluster-wide average)
+        # Scale down: ALL workers below boundary (use recent metrics)
         if num_workers > 1:
             sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
             boundary = (

@@ -243,7 +243,7 @@ class DirectRouterMetricsClient:
 
     Runs a continuous background sampling loop that collects metrics at
     evenly-spaced intervals (interval / num_samples). At decision time,
-    the load-based loop reads the averaged buffer via get_averaged_metrics().
+    the load-based loop reads the buffer via get_recent_and_averaged_metrics().
     """
 
     def __init__(self, router_metrics_url: str, dynamo_namespace: str):
