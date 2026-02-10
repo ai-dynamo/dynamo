@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/criulog"
 	criu "github.com/checkpoint-restore/go-criu/v7"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -15,8 +15,34 @@ import (
 
 // Restore performs the CRIU restore operation using go-criu.
 // Returns the PID of the restored process.
+// Supports both self-restore and external restore via nsenter.
 func Restore(ctx context.Context, opts *RestoreOptions, log *logrus.Entry) (int, error) {
-	log.WithField("checkpoint", opts.CheckpointPath).Info("Starting CRIU restore")
+	// Determine restore mode
+	restoreMode := "self-restore"
+	if opts.ExternalRestore {
+		restoreMode = "external-restore-via-nsenter"
+	}
+
+	log.WithFields(logrus.Fields{
+		"checkpoint":   opts.CheckpointPath,
+		"target_pid":   opts.TargetPID,
+		"restore_mode": restoreMode,
+	}).Info("Starting CRIU restore")
+
+	// For external restore, use nsenter + criu-helper
+	// The checkpoint already has the criu.conf that CRIU needs
+	if opts.ExternalRestore {
+		log.WithField("target_pid", opts.TargetPID).Info("Using nsenter + criu-helper for external restore")
+		restoredPID, err := restoreViaExec(ctx, opts, log)
+		if err != nil {
+			return 0, err
+		}
+		// Restored PID determined successfully
+		return restoredPID, nil
+	}
+
+	// For self-restore, continue with go-criu library (original code path)
+	log.Info("Using go-criu library for self-restore")
 
 	// 1. Open checkpoint directory
 	imageDir, imageDirFD, err := OpenImageDir(opts.CheckpointPath)
@@ -99,7 +125,7 @@ skip-in-flight
 	criuExecStart := time.Now()
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.WithField("duration", time.Since(criuExecStart)).Error("CRIU c.Restore failed")
-		logCRIUErrors(opts.CheckpointPath, opts.LogFile, log)
+		criulog.LogErrors(filepath.Join(opts.CheckpointPath, opts.LogFile), log)
 		return 0, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 
@@ -123,34 +149,6 @@ skip-in-flight
 	}
 
 	return 0, fmt.Errorf("could not determine restored process PID")
-}
-
-// logCRIUErrors reads CRIU log file and logs errors.
-func logCRIUErrors(checkpointPath, logFile string, log *logrus.Entry) {
-	logPath := filepath.Join(checkpointPath, logFile)
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		log.WithError(err).Warn("Could not read CRIU log file")
-		return
-	}
-
-	log.Error("=== CRIU RESTORE LOG START ===")
-	for _, line := range strings.Split(string(data), "\n") {
-		if line != "" {
-			log.Error(line)
-		}
-	}
-	log.Error("=== CRIU RESTORE LOG END ===")
-
-	// Copy log to shared directory if CRIU_LOG_DIR is set
-	if logDir := os.Getenv("CRIU_LOG_DIR"); logDir != "" {
-		if err := os.MkdirAll(logDir, 0755); err == nil {
-			destPath := filepath.Join(logDir, fmt.Sprintf("restore-%d.log", time.Now().Unix()))
-			if err := os.WriteFile(destPath, data, 0644); err == nil {
-				log.WithField("path", destPath).Info("CRIU log copied to shared directory")
-			}
-		}
-	}
 }
 
 // Run is the main entry point for the restore entrypoint.

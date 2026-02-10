@@ -54,9 +54,10 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 ##@ Build
 
 .PHONY: build
-build: fmt vet ## Build chrek-agent and restore-entrypoint binaries.
+build: fmt vet ## Build chrek-agent, restore-entrypoint, and criu-helper binaries.
 	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/chrek-agent ./cmd/agent
 	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/restore-entrypoint ./cmd/restore-entrypoint
+	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/criu-helper ./cmd/criu-helper
 
 .PHONY: build-agent
 build-agent: fmt vet ## Build chrek-agent binary only.
@@ -65,6 +66,10 @@ build-agent: fmt vet ## Build chrek-agent binary only.
 .PHONY: build-restore
 build-restore: fmt vet ## Build restore-entrypoint binary only.
 	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/restore-entrypoint ./cmd/restore-entrypoint
+
+.PHONY: build-criu-helper
+build-criu-helper: fmt vet ## Build criu-helper binary only.
+	CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/criu-helper ./cmd/criu-helper
 
 .PHONY: run
 run: build ## Run chrek-agent from your host.

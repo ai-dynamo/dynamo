@@ -143,4 +143,3 @@ func buildMountMetadata(mount MountMapping, k8sVolumes map[string]*checkpointk8s
 
 	return mountMeta
 }
-

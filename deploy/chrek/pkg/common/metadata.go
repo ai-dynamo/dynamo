@@ -34,10 +34,10 @@ type CheckpointMetadata struct {
 	PID int `json:"pid"`
 
 	// Filesystem information
-	RootfsDiffPath  string `json:"rootfs_diff_path,omitempty"`   // Path to rootfs-diff.tar
-	UpperDir        string `json:"upper_dir,omitempty"`          // Original overlay upperdir
-	HasRootfsDiff   bool   `json:"has_rootfs_diff"`              // Whether rootfs diff was captured
-	HasDeletedFiles bool   `json:"has_deleted_files"`            // Whether deleted files were tracked
+	RootfsDiffPath  string `json:"rootfs_diff_path,omitempty"` // Path to rootfs-diff.tar
+	UpperDir        string `json:"upper_dir,omitempty"`        // Original overlay upperdir
+	HasRootfsDiff   bool   `json:"has_rootfs_diff"`            // Whether rootfs diff was captured
+	HasDeletedFiles bool   `json:"has_deleted_files"`          // Whether deleted files were tracked
 
 	// Mount mappings from original container
 	Mounts []MountMetadata `json:"mounts"`
@@ -71,15 +71,15 @@ type CRIUOptionsMetadata struct {
 
 // MountMetadata stores information about a mount for remapping during restore
 type MountMetadata struct {
-	ContainerPath string   `json:"container_path"`           // Path inside container (e.g., /usr/share/nginx/html)
-	HostPath      string   `json:"host_path"`                // Original host path from mountinfo
-	OCISource     string   `json:"oci_source,omitempty"`     // Source path from OCI spec (may differ from HostPath)
-	OCIType       string   `json:"oci_type,omitempty"`       // Mount type from OCI spec (bind, tmpfs, etc.)
-	OCIOptions    []string `json:"oci_options,omitempty"`    // Mount options from OCI spec
-	VolumeType    string   `json:"volume_type"`              // emptyDir, pvc, configMap, secret, hostPath (best-effort)
-	VolumeName    string   `json:"volume_name"`              // Kubernetes volume name (best-effort from path parsing)
-	FSType        string   `json:"fs_type"`                  // Filesystem type from mountinfo
-	ReadOnly      bool     `json:"read_only"`                // Whether mount is read-only
+	ContainerPath string   `json:"container_path"`        // Path inside container (e.g., /usr/share/nginx/html)
+	HostPath      string   `json:"host_path"`             // Original host path from mountinfo
+	OCISource     string   `json:"oci_source,omitempty"`  // Source path from OCI spec (may differ from HostPath)
+	OCIType       string   `json:"oci_type,omitempty"`    // Mount type from OCI spec (bind, tmpfs, etc.)
+	OCIOptions    []string `json:"oci_options,omitempty"` // Mount options from OCI spec
+	VolumeType    string   `json:"volume_type"`           // emptyDir, pvc, configMap, secret, hostPath (best-effort)
+	VolumeName    string   `json:"volume_name"`           // Kubernetes volume name (best-effort from path parsing)
+	FSType        string   `json:"fs_type"`               // Filesystem type from mountinfo
+	ReadOnly      bool     `json:"read_only"`             // Whether mount is read-only
 }
 
 // NamespaceMetadata stores namespace information

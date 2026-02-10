@@ -20,22 +20,22 @@ type MountMapping struct {
 
 // System mount types that should be filtered out
 var systemMountTypes = map[string]bool{
-	"proc":        true,
-	"sysfs":       true,
-	"devpts":      true,
-	"mqueue":      true,
-	"tmpfs":       true, // Note: some tmpfs mounts may need special handling
-	"cgroup":      true,
-	"cgroup2":     true,
-	"securityfs":  true,
-	"debugfs":     true,
-	"tracefs":     true,
-	"fusectl":     true,
-	"configfs":    true,
-	"devtmpfs":    true,
-	"hugetlbfs":   true,
-	"pstore":      true,
-	"bpf":         true,
+	"proc":       true,
+	"sysfs":      true,
+	"devpts":     true,
+	"mqueue":     true,
+	"tmpfs":      true, // Note: some tmpfs mounts may need special handling
+	"cgroup":     true,
+	"cgroup2":    true,
+	"securityfs": true,
+	"debugfs":    true,
+	"tracefs":    true,
+	"fusectl":    true,
+	"configfs":   true,
+	"devtmpfs":   true,
+	"hugetlbfs":  true,
+	"pstore":     true,
+	"bpf":        true,
 }
 
 // System mount paths that should always be filtered

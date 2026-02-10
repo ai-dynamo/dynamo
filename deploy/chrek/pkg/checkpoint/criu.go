@@ -39,29 +39,28 @@ func OpenImageDir(checkpointDir string) (*os.File, int32, error) {
 //   - FileLocks: applications use file locks
 //   - OrphanPtsMaster: containers with TTYs
 //   - ExtUnixSk: containers have external Unix sockets
-//   - ManageCgroups (IGNORE): let K8s manage cgroups
+//   - ManageCgroups (SOFT): dump cgroup dirs to enable --cgroup-root on restore
 //   - LinkRemap: handle deleted-but-open files (safe for all workloads)
 //   - ExtMasters: external bind mount masters (safe for all workloads)
 func BuildCRIUOpts(cfg CRIUConfig) *criurpc.CriuOpts {
-	cgMode := criurpc.CriuCgMode_IGNORE
+	cgMode := criurpc.CriuCgMode_SOFT
 	criuOpts := &criurpc.CriuOpts{
 		Pid:               proto.Int32(int32(cfg.PID)),
 		ImagesDirFd:       proto.Int32(cfg.ImageDirFD),
 		LogLevel:          proto.Int32(4),
 		LogFile:           proto.String("dump.log"),
 		Root:              proto.String(cfg.RootFS),
-		ManageCgroups:     proto.Bool(true),
 		ManageCgroupsMode: &cgMode,
-		// Always-on for K8s environments
+		// Checkpoint-specific flags
 		LeaveRunning:    proto.Bool(true),
-		ShellJob:        proto.Bool(true),
-		TcpClose:        proto.Bool(true),
-		FileLocks:       proto.Bool(true),
 		OrphanPtsMaster: proto.Bool(true),
-		ExtUnixSk:       proto.Bool(true),
 		LinkRemap:       proto.Bool(true),
 		ExtMasters:      proto.Bool(true),
+		SkipMnt:         []string{"./checkpoint-signal"},
 	}
+
+	// Set common K8s flags (shared with restore)
+	common.SetCommonK8sFlags(criuOpts)
 
 	// Optional: ghost limit from env (0 = use CRIU default)
 	if cfg.GhostLimit > 0 {

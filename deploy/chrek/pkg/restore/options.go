@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
 	criurpc "github.com/checkpoint-restore/go-criu/v7/rpc"
 	"github.com/sirupsen/logrus"
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
 )
 
 // Config holds the configuration for the restore entrypoint.
@@ -126,6 +126,21 @@ type RestoreOptions struct {
 
 	// Timeout is the CRIU timeout in seconds (required for CUDA restores)
 	Timeout uint32
+
+	// ExternalRestore indicates if restore should be done via nsenter from outside
+	ExternalRestore bool
+
+	// TargetPID is the PID to nsenter into (only used when External=true)
+	TargetPID int
+
+	// TcpEstablished enables restoring established TCP connections
+	TcpEstablished bool
+
+	// TcpClose closes TCP connections instead of restoring them
+	TcpClose bool
+
+	// ShellJob enables shell job restoration
+	ShellJob bool
 }
 
 // DefaultRestoreOptions returns RestoreOptions with sensible defaults.
@@ -167,8 +182,7 @@ func LoadRestoreOptions(checkpointPath string, logLevel int32) (*RestoreOptions,
 
 // ShouldRestore checks if a restore should be performed.
 // Returns the checkpoint path and true if restore should proceed.
-// IMPORTANT: We check for checkpoint.done marker (not just metadata.json or inventory.img) because
-// checkpoint.done is written LAST in the checkpoint process, after rootfs-diff.tar completes.
+// Checks for checkpoint.done marker since it's written last after rootfs-diff.tar.
 // Order: metadata.json -> CRIU dump (*.img files) -> rootfs-diff.tar -> checkpoint.done
 func ShouldRestore(cfg *Config, log *logrus.Entry) (string, bool) {
 	// Method 0: Embedded checkpoint in image (highest priority)

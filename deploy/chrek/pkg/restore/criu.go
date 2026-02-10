@@ -72,41 +72,26 @@ func OpenWorkDir(workDir string, log *logrus.Entry) (*os.File, int32) {
 //   - TcpClose: pod IPs change on restore/migration
 //   - FileLocks: applications use file locks
 //   - ExtUnixSk: containers have external Unix sockets
-//   - ManageCgroups (IGNORE): let K8s manage cgroups
+//   - ManageCgroups (SOFT): move restored process into target cgroup
 func BuildRestoreCRIUOpts(cfg CRIURestoreConfig) *criurpc.CriuOpts {
-	cgMode := criurpc.CriuCgMode_IGNORE
+	cgMode := criurpc.CriuCgMode_SOFT
 
 	criuOpts := &criurpc.CriuOpts{
-		ImagesDirFd: proto.Int32(cfg.ImageDirFD),
-		LogLevel:    proto.Int32(cfg.LogLevel),
-		LogFile:     proto.String(cfg.LogFile),
-
-		// Root filesystem - use current container's root
-		Root: proto.String(cfg.RootPath),
-
-		// Restore in detached mode - process runs in background
-		RstSibling: proto.Bool(true),
-
-		// Mount namespace compatibility mode for cross-container restore
-		MntnsCompatMode: proto.Bool(true),
-
-		// Always-on for K8s environments
-		ShellJob:  proto.Bool(true),
-		TcpClose:  proto.Bool(true),
-		FileLocks: proto.Bool(true),
-		ExtUnixSk: proto.Bool(true),
-
-		// Cgroup management - ignore to avoid conflicts
-		ManageCgroups:     proto.Bool(true),
+		ImagesDirFd:     proto.Int32(cfg.ImageDirFD),
+		LogLevel:        proto.Int32(cfg.LogLevel),
+		LogFile:         proto.String(cfg.LogFile),
+		Root:            proto.String(cfg.RootPath),
 		ManageCgroupsMode: &cgMode,
-
-		// Device and inode handling
-		EvasiveDevices: proto.Bool(true),
-		ForceIrmap:     proto.Bool(true),
-
-		// External mount mappings
-		ExtMnt: cfg.ExtMountMaps,
+		// Restore-specific flags
+		RstSibling:      proto.Bool(true),
+		MntnsCompatMode: proto.Bool(true),
+		EvasiveDevices:  proto.Bool(true),
+		ForceIrmap:      proto.Bool(true),
+		ExtMnt:          cfg.ExtMountMaps,
 	}
+
+	// Set common K8s flags (shared with checkpoint)
+	common.SetCommonK8sFlags(criuOpts)
 
 	// Add network namespace inheritance if provided
 	if cfg.NetNsFD >= 0 {
