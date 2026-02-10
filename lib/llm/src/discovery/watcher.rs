@@ -58,6 +58,7 @@ pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
+    migration_limit: u32,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     engine_factory: Option<EngineFactoryCallback>,
@@ -70,6 +71,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Completions,
     ModelType::Embedding,
     ModelType::TensorBased,
+    ModelType::Images,
     ModelType::Prefill,
 ];
 
@@ -78,6 +80,7 @@ impl ModelWatcher {
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
+        migration_limit: u32,
         engine_factory: Option<EngineFactoryCallback>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
@@ -85,6 +88,7 @@ impl ModelWatcher {
             manager: model_manager,
             drt: runtime,
             router_config,
+            migration_limit,
             notify_on_model: Notify::new(),
             model_update_tx: None,
             engine_factory,
@@ -281,12 +285,14 @@ impl ModelWatcher {
         let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
         let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
         let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
+        let images_model_remove_err = self.manager.remove_images_model(&model_name);
         let prefill_model_remove_err = self.manager.remove_prefill_model(&model_name);
 
         let mut chat_model_removed = false;
         let mut completions_model_removed = false;
         let mut embeddings_model_removed = false;
         let mut tensor_model_removed = false;
+        let mut images_model_removed = false;
         let mut prefill_model_removed = false;
 
         if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
@@ -302,6 +308,9 @@ impl ModelWatcher {
         if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
             tensor_model_removed = true;
         }
+        if images_model_remove_err.is_ok() && self.manager.list_images_models().is_empty() {
+            images_model_removed = true;
+        }
         if prefill_model_remove_err.is_ok() && self.manager.list_prefill_models().is_empty() {
             prefill_model_removed = true;
         }
@@ -310,15 +319,17 @@ impl ModelWatcher {
             && !completions_model_removed
             && !embeddings_model_removed
             && !tensor_model_removed
+            && !images_model_removed
             && !prefill_model_removed
         {
             tracing::debug!(
-                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, tensor_model_removed: {}, prefill_model_removed: {}",
+                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, tensor_model_removed: {}, images_model_removed: {}, prefill_model_removed: {}",
                 model_name,
                 chat_model_removed,
                 completions_model_removed,
                 embeddings_model_removed,
                 tensor_model_removed,
+                images_model_removed,
                 prefill_model_removed
             );
         } else {
@@ -327,6 +338,7 @@ impl ModelWatcher {
                     || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding)
                     || (tensor_model_removed && *model_type == ModelType::TensorBased)
+                    || (images_model_removed && *model_type == ModelType::Images)
                     || (prefill_model_removed && *model_type == ModelType::Prefill))
                     && let Some(tx) = &self.model_update_tx
                 {
@@ -494,6 +506,7 @@ impl ModelWatcher {
                         tokenizer_hf.clone(),
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
+                        self.migration_limit,
                         self.metrics.clone(),
                     )
                     .await
@@ -529,6 +542,7 @@ impl ModelWatcher {
                     tokenizer_hf,
                     prefill_chooser,
                     self.router_config.enforce_disagg,
+                    self.migration_limit,
                     self.metrics.clone(),
                 )
                 .await
@@ -609,7 +623,7 @@ impl ModelWatcher {
             self.manager
                 .add_embeddings_model(card.name(), checksum, embedding_engine)?;
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
-            // Case 5: Tensor + Tensor (non-LLM)
+            // Case 6: Tensor + TensorBased (non-LLM)
             // No KV cache concepts - not an LLM model
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
@@ -622,18 +636,31 @@ impl ModelWatcher {
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
-            // Case: Text + Images (diffusion models)
-            // Takes text prompts as input, generates images
-            let push_router = PushRouter::<
+            // Case: Text + Images (e.g. vLLM-Omni, diffusion models)
+            // Takes text prompts as input, generates images. Images models also support
+            // chat completions (see model_type.rs as_endpoint_types).
+            let images_router = PushRouter::<
                 NvCreateImageRequest,
                 Annotated<NvImagesResponse>,
+            >::from_client_with_threshold(
+                client.clone(), self.router_config.router_mode, None, None
+            )
+            .await?;
+            self.manager
+                .add_images_model(card.name(), checksum, Arc::new(images_router))?;
+
+            let chat_router = PushRouter::<
+                NvCreateChatCompletionRequest,
+                Annotated<NvCreateChatCompletionStreamResponse>,
             >::from_client_with_threshold(
                 client, self.router_config.router_mode, None, None
             )
             .await?;
-            let engine = Arc::new(push_router);
-            self.manager
-                .add_images_model(card.name(), checksum, engine)?;
+            self.manager.add_chat_completions_model(
+                card.name(),
+                checksum,
+                Arc::new(chat_router),
+            )?;
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens

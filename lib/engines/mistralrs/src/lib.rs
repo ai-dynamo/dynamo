@@ -405,7 +405,7 @@ impl
                                 delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta{
                                     //role: c.choices[0].delta.role,
                                     role: Some(dynamo_async_openai::types::Role::Assistant),
-                                    content: Some(from_assistant),
+                                    content: Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(from_assistant)),
                                     tool_calls: None,
                                     refusal: None,
                                     function_call: None,

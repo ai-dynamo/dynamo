@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Dynamo Run
-
 `dynamo-run` is a Rust binary that lets you easily run a model, explore the Dynamo components, and demonstrates the Rust API. It supports the `mistral.rs` engines, as well as testing engines `echo` and `mocker`.
 
 It is primarily for development and rapid prototyping. For production use we recommend the Python wrapped components, see the main project README.
