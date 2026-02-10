@@ -336,6 +336,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             .as_ref()
             .and_then(|params| params.get("token_ids"))
             .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
+        let routed_experts = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("routed_experts"))
+            .cloned();
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
@@ -347,12 +352,17 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             None
         };
 
-        // Inject nvext if we have worker_id, token_ids, or timing
-        if worker_id_info.is_some() || token_ids.is_some() || timing_info.is_some() {
+        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
+        if worker_id_info.is_some()
+            || token_ids.is_some()
+            || timing_info.is_some()
+            || routed_experts.is_some()
+        {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
                 timing: timing_info,
                 token_ids: token_ids.clone(),
+                routed_experts,
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {

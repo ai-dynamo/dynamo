@@ -104,6 +104,10 @@ pub struct NvExtResponse {
     /// Contains the tokenized prompt for reuse in Stage 2
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_ids: Option<Vec<u32>>,
+
+    /// Routed expert capture payload (SGLang-specific)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routed_experts: Option<serde_json::Value>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -152,7 +156,8 @@ pub struct NvExt {
 
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
-    /// Supported fields: "worker_id", "timing", which has a 1:1 mapping with the NvExtResponse names
+    /// Supported fields include "worker_id", "timing", "routed_experts",
+    /// which map to fields in NvExtResponse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
