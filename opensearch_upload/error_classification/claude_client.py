@@ -12,7 +12,7 @@ from anthropic import Anthropic
 import requests
 
 from .config import Config
-from .prompts import get_system_prompt, build_user_prompt
+from .prompts import get_system_prompt, build_user_prompt, SYSTEM_PROMPT_FULL_LOG_ANALYSIS
 
 
 @dataclass
@@ -341,3 +341,241 @@ class ClaudeClient:
                 continue
 
         return results
+
+    def analyze_full_job_log(
+        self,
+        job_log: str,
+        job_name: str,
+        job_id: str,
+        use_cache: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Analyze complete job log and find/classify all errors.
+
+        Args:
+            job_log: Complete raw log from GitHub Actions job
+            job_name: Name of the job
+            job_id: GitHub job ID
+            use_cache: Whether to use prompt caching
+
+        Returns:
+            {
+                "errors_found": [
+                    {
+                        "step": "step name",
+                        "primary_category": "...",
+                        "confidence_score": 0.85,
+                        "root_cause_summary": "...",
+                        "log_excerpt": "relevant log section"
+                    },
+                    ...
+                ],
+                "total_errors": N
+            }
+        """
+        # Route to appropriate API implementation
+        if self.config.api_format == "openai":
+            return self._analyze_full_log_openai_format(job_log, job_name, job_id)
+
+        # Rate limit
+        self.rate_limiter.wait_if_needed()
+
+        # Truncate log if too large (keep last portion - most relevant for failures)
+        max_log_length = 400000  # ~100K tokens, leave room for system prompt
+        if len(job_log) > max_log_length:
+            # Keep last portion of log (failures typically at end)
+            truncated_length = len(job_log) - max_log_length
+            job_log = f"[... truncated first {truncated_length} chars ...]\n\n" + job_log[-max_log_length:]
+
+        # Build prompt with full log
+        user_prompt = self._build_full_log_prompt(job_log, job_name, job_id)
+
+        # Call Claude API
+        try:
+            if use_cache:
+                response = self.client.messages.create(
+                    model=self.config.anthropic_model,
+                    max_tokens=4096,  # Allow longer response for multiple errors
+                    system=[{
+                        "type": "text",
+                        "text": SYSTEM_PROMPT_FULL_LOG_ANALYSIS,
+                        "cache_control": {"type": "ephemeral"}
+                    }],
+                    messages=[{
+                        "role": "user",
+                        "content": user_prompt
+                    }]
+                )
+            else:
+                response = self.client.messages.create(
+                    model=self.config.anthropic_model,
+                    max_tokens=4096,
+                    system=SYSTEM_PROMPT_FULL_LOG_ANALYSIS,
+                    messages=[{
+                        "role": "user",
+                        "content": user_prompt
+                    }]
+                )
+
+            # Extract token usage
+            usage = response.usage
+            prompt_tokens = getattr(usage, 'input_tokens', 0)
+            completion_tokens = getattr(usage, 'output_tokens', 0)
+            cached_tokens = 0
+            if use_cache and hasattr(usage, 'cache_read_input_tokens'):
+                cached_tokens = getattr(usage, 'cache_read_input_tokens', 0)
+
+            # Parse JSON response
+            response_text = response.content[0].text.strip()
+            result = self._parse_full_log_response(response_text)
+
+            # Add token usage to result
+            result['prompt_tokens'] = prompt_tokens
+            result['completion_tokens'] = completion_tokens
+            result['cached_tokens'] = cached_tokens
+            result['model_version'] = self.config.anthropic_model
+
+            return result
+
+        except anthropic.APIError as e:
+            print(f"✗ Claude API error: {e}")
+            raise
+
+        except Exception as e:
+            print(f"✗ Unexpected error during full log analysis: {e}")
+            raise
+
+    def _build_full_log_prompt(self, job_log: str, job_name: str, job_id: str) -> str:
+        """Build prompt with complete job log."""
+        prompt = f"""Here is the complete log from a failed GitHub Actions job.
+Please analyze it and identify ALL errors/failures.
+
+Job Name: {job_name}
+Job ID: {job_id}
+Status: failure
+
+Full Log:
+```
+{job_log}
+```
+
+Please:
+1. Identify all errors/failures in this log
+2. For each error, determine which step it occurred in
+3. Classify each error into one of the 10 categories
+4. Provide a root cause summary for each
+5. Include a relevant log excerpt showing the error
+
+Return JSON format as specified in the system prompt."""
+
+        return prompt
+
+    def _parse_full_log_response(self, response_text: str) -> Dict[str, Any]:
+        """Parse JSON response from full log analysis."""
+        try:
+            # Try to find JSON in response
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}')
+
+            if start_idx == -1 or end_idx == -1:
+                raise ValueError("No JSON found in response")
+
+            json_str = response_text[start_idx:end_idx + 1]
+            data = json.loads(json_str)
+
+            # Validate required fields
+            if "errors_found" not in data:
+                raise ValueError("Missing required field: errors_found")
+
+            if not isinstance(data["errors_found"], list):
+                raise ValueError("errors_found must be an array")
+
+            # Validate each error entry
+            for i, error in enumerate(data["errors_found"]):
+                required_fields = ["step", "primary_category", "confidence_score", "root_cause_summary"]
+                for field in required_fields:
+                    if field not in error:
+                        raise ValueError(f"Error {i}: Missing required field: {field}")
+
+                # Normalize confidence to 0-1 range
+                confidence = float(error["confidence_score"])
+                if confidence < 0:
+                    confidence = 0.0
+                elif confidence > 1:
+                    confidence = 1.0
+                error["confidence_score"] = confidence
+
+            # Set total_errors if not present
+            if "total_errors" not in data:
+                data["total_errors"] = len(data["errors_found"])
+
+            return data
+
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in response: {e}")
+
+        except Exception as e:
+            raise ValueError(f"Error parsing response: {e}")
+
+    def _analyze_full_log_openai_format(
+        self,
+        job_log: str,
+        job_name: str,
+        job_id: str
+    ) -> Dict[str, Any]:
+        """
+        Analyze full log using OpenAI-compatible API (e.g., NVIDIA).
+
+        Args:
+            job_log: Complete raw log from GitHub Actions job
+            job_name: Name of the job
+            job_id: GitHub job ID
+
+        Returns:
+            Parsed result dict
+        """
+        # Truncate log if too large
+        max_log_length = 400000
+        if len(job_log) > max_log_length:
+            truncated_length = len(job_log) - max_log_length
+            job_log = f"[... truncated first {truncated_length} chars ...]\n\n" + job_log[-max_log_length:]
+
+        # Build prompt
+        user_prompt = self._build_full_log_prompt(job_log, job_name, job_id)
+
+        # Make API call with OpenAI format
+        url = f"{self.api_base_url}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.config.anthropic_api_key}"
+        }
+
+        payload = {
+            "model": self.config.anthropic_model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT_FULL_LOG_ANALYSIS},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4096
+        }
+
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response.raise_for_status()
+
+        data = response.json()
+
+        # Parse OpenAI format response
+        content = data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+
+        # Parse JSON from response
+        result = self._parse_full_log_response(content)
+
+        # Add token usage
+        result['prompt_tokens'] = usage.get("prompt_tokens", 0)
+        result['completion_tokens'] = usage.get("completion_tokens", 0)
+        result['cached_tokens'] = usage.get("cached_tokens", 0)
+        result['model_version'] = data.get("model", self.config.anthropic_model)
+
+        return result

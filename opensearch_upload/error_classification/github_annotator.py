@@ -5,6 +5,7 @@ Creates GitHub check run annotations to provide immediate developer feedback
 in the PR UI.
 """
 import os
+import json
 import requests
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -397,6 +398,187 @@ class GitHubAnnotator:
             error_contexts[classification.error_id] = error_context
 
         return self.create_check_run_with_annotations([classification], error_contexts)
+
+    def create_pr_comment(
+        self,
+        classifications: List[Any],
+        error_contexts: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Create a PR comment with markdown summary of all errors.
+
+        Args:
+            classifications: List of ErrorClassification objects
+            error_contexts: Optional dict mapping error_id to ErrorContext
+
+        Returns:
+            True if successful
+        """
+        if not classifications:
+            print("⚠️  No classifications to comment on")
+            return False
+
+        # Get PR number
+        pr_number = self._get_pr_number()
+        if not pr_number:
+            print("⚠️  Not a PR context, skipping PR comment")
+            return False
+
+        # Build markdown summary
+        markdown = self._build_summary_markdown(classifications, error_contexts or {})
+
+        # Post comment via GitHub API
+        try:
+            url = f"https://api.github.com/repos/{self.repo}/issues/{pr_number}/comments"
+            response = requests.post(
+                url,
+                headers=self.headers,
+                json={"body": markdown}
+            )
+
+            if response.status_code == 201:
+                print(f"✅ Created PR comment on PR #{pr_number}")
+                return True
+            else:
+                print(f"⚠️  Failed to create PR comment: HTTP {response.status_code}")
+                print(f"    Response: {response.text[:200]}")
+                return False
+
+        except Exception as e:
+            print(f"⚠️  Error creating PR comment: {e}")
+            return False
+
+    def _get_pr_number(self) -> Optional[int]:
+        """Extract PR number from environment."""
+        # Try GITHUB_REF (refs/pull/123/merge)
+        pr_ref = os.getenv("GITHUB_REF")
+        if pr_ref and "pull" in pr_ref:
+            parts = pr_ref.split("/")
+            if len(parts) >= 3 and parts[1] == "pull":
+                try:
+                    return int(parts[2])
+                except (ValueError, IndexError):
+                    pass
+
+        # Try GITHUB_EVENT_PATH
+        event_path = os.getenv("GITHUB_EVENT_PATH")
+        if event_path and os.path.exists(event_path):
+            try:
+                with open(event_path) as f:
+                    event = json.load(f)
+                    pr_number = event.get("pull_request", {}).get("number")
+                    if pr_number:
+                        return int(pr_number)
+            except Exception:
+                pass
+
+        return None
+
+    def _build_summary_markdown(
+        self,
+        classifications: List[Any],
+        error_contexts: Dict[str, Any]
+    ) -> str:
+        """Build markdown summary table."""
+        # Group by severity
+        critical, important, informational = self._group_by_severity(classifications)
+
+        # Count unique jobs
+        unique_jobs = len(set(c.job_name for c in classifications if c.job_name))
+
+        # Build markdown
+        md = "## 🤖 AI Error Classification Summary\n\n"
+        md += f"Found **{len(classifications)} unique error(s)** across **{unique_jobs} job(s)** in this workflow\n\n"
+
+        # Critical errors table
+        if critical:
+            md += "### 🔴 Critical (Immediate attention needed)\n\n"
+            md += "| Job | Step | Error Type | Confidence | Summary |\n"
+            md += "|-----|------|------------|------------|---------|"
+            for c in critical:
+                job_name = self._truncate(c.job_name or "unknown", 30)
+                step_name = self._truncate(c.step_name or "unknown", 25)
+                error_type = c.primary_category.replace("_", " ").title()
+                confidence = f"{int(c.confidence_score * 100)}%"
+                summary = self._truncate(c.root_cause_summary or "", 60)
+
+                md += f"\n| {job_name} | {step_name} | {error_type} | {confidence} | {summary} |"
+            md += "\n\n"
+
+        # Important errors table
+        if important:
+            md += "### 🟠 Important (Should be fixed)\n\n"
+            md += "| Job | Step | Error Type | Confidence | Summary |\n"
+            md += "|-----|------|------------|------------|---------|"
+            for c in important:
+                job_name = self._truncate(c.job_name or "unknown", 30)
+                step_name = self._truncate(c.step_name or "unknown", 25)
+                error_type = c.primary_category.replace("_", " ").title()
+                confidence = f"{int(c.confidence_score * 100)}%"
+                summary = self._truncate(c.root_cause_summary or "", 60)
+
+                md += f"\n| {job_name} | {step_name} | {error_type} | {confidence} | {summary} |"
+            md += "\n\n"
+
+        # Informational errors table
+        if informational:
+            md += "### 🔵 Informational\n\n"
+            md += "| Job | Step | Error Type | Confidence | Summary |\n"
+            md += "|-----|------|------------|------------|---------|"
+            for c in informational:
+                job_name = self._truncate(c.job_name or "unknown", 30)
+                step_name = self._truncate(c.step_name or "unknown", 25)
+                error_type = c.primary_category.replace("_", " ").title()
+                confidence = f"{int(c.confidence_score * 100)}%"
+                summary = self._truncate(c.root_cause_summary or "", 60)
+
+                md += f"\n| {job_name} | {step_name} | {error_type} | {confidence} | {summary} |"
+            md += "\n\n"
+
+        # Statistics details
+        md += "<details><summary>📊 Classification Statistics</summary>\n\n"
+        md += f"**Total Errors:** {len(classifications)}\n\n"
+
+        # Average confidence
+        avg_confidence = sum(c.confidence_score for c in classifications) / len(classifications)
+        md += f"**Average Confidence:** {avg_confidence:.1%}\n\n"
+
+        # Breakdown by type
+        category_counts = {}
+        for c in classifications:
+            cat = c.primary_category
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+
+        md += "**Breakdown by Type:**\n"
+        for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
+            icon = self.get_category_icon(cat)
+            cat_name = cat.replace("_", " ").title()
+            md += f"- {icon} {cat_name}: {count}\n"
+
+        md += "\n</details>\n\n"
+        md += "---\n"
+        md += "*Generated by [AI Error Classification System](https://github.com/)*\n"
+
+        return md
+
+    def _group_by_severity(self, classifications: List[Any]) -> tuple:
+        """Group classifications by severity."""
+        critical = [c for c in classifications if c.primary_category in [
+            "infrastructure_error", "compilation_error", "dependency_error"
+        ]]
+        important = [c for c in classifications if c.primary_category in [
+            "configuration_error", "resource_exhaustion", "timeout", "network_error"
+        ]]
+        informational = [c for c in classifications if c.primary_category in [
+            "runtime_error", "assertion_failure", "flaky_test"
+        ]]
+        return critical, important, informational
+
+    def _truncate(self, text: str, max_length: int) -> str:
+        """Truncate text to max length with ellipsis."""
+        if len(text) <= max_length:
+            return text
+        return text[:max_length - 3] + "..."
 
 
 def create_annotations_for_classifications(

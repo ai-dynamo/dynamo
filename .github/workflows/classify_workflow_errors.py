@@ -15,6 +15,8 @@ Usage:
 import os
 import sys
 import requests
+import concurrent.futures
+from functools import partial
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
@@ -321,14 +323,23 @@ def extract_errors_from_workflow() -> List[ErrorContext]:
                 **job_context,
                 "step_id": str(step_number),
                 "step_name": step_name,
+                "full_step_log": step_log,  # Store full log for potential second pass
             }
 
             # Extract errors from this step's logs
             step_errors = extractor.extract_from_github_job_logs(step_log, step_context)
 
+            # Only take the FIRST error from each failed step to avoid over-classification
+            # Each failed step should produce at most 1 error for classification
             if step_errors:
-                errors.extend(step_errors)
-                step_error_count += len(step_errors)
+                # Store full log in metadata for potential re-analysis
+                step_errors[0].metadata = step_errors[0].metadata or {}
+                step_errors[0].metadata['full_step_log'] = step_log
+
+                errors.append(step_errors[0])  # Only take first error
+                step_error_count += 1
+                if len(step_errors) > 1:
+                    print(f"     ℹ️  Step '{step_name}' had {len(step_errors)} error patterns, using first one only")
 
         if step_error_count > 0:
             print(f"  ✅ Extracted {step_error_count} error(s) from {job_name}")
@@ -352,6 +363,141 @@ def extract_errors_from_workflow() -> List[ErrorContext]:
             print(f"  ℹ️  Created generic error for {job_name}")
 
     return errors
+
+
+def validate_classifications(classifications: List[Any], errors: List[ErrorContext]) -> List[str]:
+    """
+    Validate classifications for consistency and quality.
+
+    Returns list of validation issues found.
+    """
+    issues = []
+
+    # Build error hash to classification mapping
+    from opensearch_upload.error_classification.deduplicator import ErrorDeduplicator
+    dedup = ErrorDeduplicator(None, None)
+
+    hash_to_classifications = {}
+    for i, (classification, error) in enumerate(zip(classifications, errors)):
+        error_hash = dedup.compute_error_hash(error.error_text)
+
+        if error_hash not in hash_to_classifications:
+            hash_to_classifications[error_hash] = []
+
+        hash_to_classifications[error_hash].append({
+            'index': i + 1,
+            'job': error.job_name,
+            'category': classification.primary_category,
+            'confidence': classification.confidence_score,
+            'error_text': error.error_text[:100]
+        })
+
+    # Check for duplicate errors with different classifications
+    for error_hash, group in hash_to_classifications.items():
+        if len(group) > 1:
+            # Multiple errors with same hash
+            categories = set(item['category'] for item in group)
+
+            if len(categories) > 1:
+                # Same error, different classifications - VALIDATION FAILURE
+                jobs = ", ".join([item['job'] for item in group])
+                cats = ", ".join([f"{item['category']}({item['confidence']:.0%})" for item in group])
+
+                issues.append(
+                    f"Duplicate errors classified differently:\n"
+                    f"      Jobs: {jobs}\n"
+                    f"      Classifications: {cats}\n"
+                    f"      Error: {group[0]['error_text']}..."
+                )
+            else:
+                # Same error, same classification - GOOD
+                print(f"  ✅ Deduplication validated: {len(group)} jobs with identical error -> {group[0]['category']}")
+
+    # Enhanced Confidence Validation
+    confidences = [c.confidence_score for c in classifications]
+    avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+
+    print(f"  📊 Confidence distribution:")
+    print(f"     Average: {avg_confidence:.1%}")
+    print(f"     Min: {min(confidences):.1%}, Max: {max(confidences):.1%}")
+
+    # Check 1: Very low confidence classifications
+    low_confidence = [
+        (i + 1, c.primary_category, c.confidence_score, errors[i].job_name)
+        for i, c in enumerate(classifications)
+        if c.confidence_score < 0.6
+    ]
+
+    if low_confidence:
+        for idx, cat, conf, job in low_confidence:
+            issues.append(
+                f"⚠️  Low confidence (#{idx}): {job} -> {cat} ({conf:.0%})"
+            )
+
+    # Check 2: Average confidence too low (suggests systematic issue)
+    if avg_confidence < 0.65:
+        issues.append(
+            f"⚠️  Average confidence very low ({avg_confidence:.1%}) - may indicate extraction issues"
+        )
+
+    # Check 3: High variance in confidence for duplicate errors
+    for error_hash, group in hash_to_classifications.items():
+        if len(group) > 1:
+            confidences_in_group = [item['confidence'] for item in group]
+            confidence_variance = max(confidences_in_group) - min(confidences_in_group)
+
+            if confidence_variance > 0.15:  # More than 15% difference
+                issues.append(
+                    f"⚠️  High confidence variance for duplicate errors:\n"
+                    f"      Jobs: {', '.join([item['job'] for item in group])}\n"
+                    f"      Confidences: {', '.join([f'{c:.0%}' for c in confidences_in_group])}"
+                )
+
+    # Pattern validation: Check if error text matches category expectations
+    pattern_mismatches = []
+    for i, (classification, error) in enumerate(zip(classifications, errors)):
+        error_text = error.error_text.lower()
+        category = classification.primary_category
+
+        # Define expected patterns for each category
+        expected_patterns = {
+            'infrastructure_error': ['importerror', 'modulenotfounderror', 'error collecting', 'cannot import'],
+            'timeout': ['timeout', 'timed out', 'exceeded time limit', 'deadline exceeded'],
+            'network_error': ['connection', 'network', 'dns', 'refused', 'unreachable'],
+            'dependency_error': ['could not find', 'no matching distribution', 'version conflict'],
+            'assertion_failure': ['assertionerror', 'assert ', 'expected', 'actual'],
+        }
+
+        # Check if category matches patterns
+        if category in expected_patterns:
+            patterns = expected_patterns[category]
+            if not any(pattern in error_text for pattern in patterns):
+                # Category doesn't match error text patterns
+                pattern_mismatches.append(
+                    f"Pattern mismatch (#{i + 1}): {error.job_name} classified as {category} "
+                    f"but error text doesn't match expected patterns"
+                )
+
+    # Only report pattern mismatches if confidence is also low
+    for i, (classification, error) in enumerate(zip(classifications, errors)):
+        if classification.confidence_score < 0.7:
+            error_text = error.error_text.lower()
+            category = classification.primary_category
+
+            expected_patterns = {
+                'infrastructure_error': ['importerror', 'modulenotfounderror', 'error collecting'],
+                'timeout': ['timeout', 'timed out', 'exceeded'],
+                'network_error': ['connection', 'network', 'dns'],
+            }
+
+            if category in expected_patterns:
+                if not any(pattern in error_text for pattern in expected_patterns[category]):
+                    issues.append(
+                        f"Low confidence + pattern mismatch (#{i + 1}): "
+                        f"{error.job_name} -> {category} ({classification.confidence_score:.0%})"
+                    )
+
+    return issues
 
 
 def classify_and_annotate_workflow_errors():
@@ -390,57 +536,155 @@ def classify_and_annotate_workflow_errors():
         classifier = ErrorClassifier(config, opensearch_client)
         annotator = GitHubAnnotator(AnnotationConfig.from_env())
 
-        # Extract errors from all failed jobs
+        # Fetch all jobs from workflow
         print("\n" + "=" * 70)
-        errors = extract_errors_from_workflow()
-
-        if not errors:
-            print("\n✅ No errors found in workflow")
-            print("=" * 70)
-            return
-
-        print(f"\n📊 Found {len(errors)} total errors across all jobs")
+        print("📡 Fetching workflow jobs...")
         print("=" * 70)
 
-        # Classify all errors
-        print(f"\n🤖 Classifying errors with Claude...")
-        classifications = []
-        error_contexts = {}
+        jobs = fetch_workflow_jobs()
 
-        for i, error in enumerate(errors, 1):
-            job_name = error.job_name or "Unknown"
-            print(f"\n  [{i}/{len(errors)}] Classifying error from: {job_name}")
-            print(f"  Source: {error.source_type}")
+        if not jobs:
+            print("\n⚠️  No jobs found in workflow")
+            return
+
+        # Filter to FAILED jobs only (don't analyze passing jobs)
+        failed_jobs = [
+            job for job in jobs
+            if job.get("conclusion") == "failure"
+        ]
+
+        if not failed_jobs:
+            print("\n✅ No failed jobs in workflow")
+            return
+
+        print(f"\n🔍 Found {len(failed_jobs)} failed job(s) to analyze:")
+        for job in failed_jobs:
+            print(f"   - {job.get('name')}")
+
+        # Get GitHub context for workflow
+        github_token = os.getenv("GITHUB_TOKEN")
+        repo = os.getenv("GITHUB_REPOSITORY")
+
+        workflow_context = {
+            "workflow_id": os.getenv("GITHUB_RUN_ID"),
+            "workflow_name": os.getenv("GITHUB_WORKFLOW"),
+            "repo": repo,
+            "branch": os.getenv("GITHUB_REF_NAME"),
+            "commit_sha": os.getenv("GITHUB_SHA"),
+            "user_alias": os.getenv("GITHUB_ACTOR"),
+        }
+
+        # Process failed jobs in parallel
+        print("\n" + "=" * 70)
+        print("🤖 Analyzing full logs with Claude (parallel processing)...")
+        print("=" * 70)
+
+        def analyze_single_job(job, classifier, github_token, repo, workflow_context):
+            """Analyze one job's full log."""
+            job_id = str(job["id"])
+            job_name = job["name"]
+
+            print(f"\n  🤖 Analyzing: {job_name}")
 
             try:
-                # Classify
-                classification = classifier.classify_error(
-                    error,
-                    use_cache=True,
-                    classification_method="workflow_summary"
+                # Fetch complete job log
+                log_content = fetch_job_logs(job, github_token, repo)
+                if not log_content:
+                    print(f"    ⚠️  Could not fetch logs for {job_name}")
+                    return []
+
+                # Analyze full log and get all errors
+                classifications = classifier.classify_job_from_full_log(
+                    job_log=log_content,
+                    job_name=job_name,
+                    job_id=job_id,
+                    workflow_context=workflow_context,
+                    use_cache=True
                 )
 
-                classifications.append(classification)
-                error_contexts[classification.error_id] = error
+                print(f"    ✅ Found {len(classifications)} error(s) in {job_name}")
 
-                print(f"  ✅ Category: {classification.primary_category}")
-                print(f"     Confidence: {classification.confidence_score:.2%}")
-                print(f"     Summary: {classification.root_cause_summary[:100]}...")
+                # Print summary
+                for c in classifications:
+                    print(f"       - {c.primary_category} ({c.confidence_score:.0%}): {c.step_name}")
 
-                # Upload to OpenSearch
-                if opensearch_client and config.error_classification_index:
-                    doc = classification.to_opensearch_doc()
-                    opensearch_client.index(
-                        index=config.error_classification_index,
-                        id=doc.get("_id"),
-                        body=doc,
-                    )
+                return classifications
 
             except Exception as e:
-                print(f"  ❌ Failed to classify: {e}")
+                print(f"    ❌ Failed to analyze {job_name}: {e}")
                 import traceback
                 traceback.print_exc()
-                continue
+                return []
+
+        # Process up to 5 jobs in parallel
+        max_parallel = int(os.getenv("MAX_PARALLEL_JOBS", "5"))
+        all_classifications = []
+        error_contexts = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            analyze_fn = partial(
+                analyze_single_job,
+                classifier=classifier,
+                github_token=github_token,
+                repo=repo,
+                workflow_context=workflow_context
+            )
+
+            # Submit all jobs
+            futures = [executor.submit(analyze_fn, job) for job in failed_jobs]
+
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    job_classifications = future.result()
+                    all_classifications.extend(job_classifications)
+
+                    # Upload to OpenSearch
+                    if opensearch_client and config.error_classification_index:
+                        for classification in job_classifications:
+                            doc = classification.to_opensearch_doc()
+                            opensearch_client.index(
+                                index=config.error_classification_index,
+                                id=doc.get("_id"),
+                                body=doc,
+                            )
+
+                except Exception as e:
+                    print(f"    ⚠️  Job analysis failed: {e}")
+
+        classifications = all_classifications
+        print(f"\n📊 Total: {len(classifications)} error(s) across {len(failed_jobs)} failed job(s)")
+        print("=" * 70)
+
+        # Validate classifications (skip detailed validation for full log analysis)
+        if classifications:
+            print("\n" + "=" * 70)
+            print("🔍 Validating classifications...")
+            print("=" * 70)
+
+            # Basic validation
+            confidences = [c.confidence_score for c in classifications]
+            avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+
+            print(f"  📊 Confidence statistics:")
+            print(f"     Average: {avg_confidence:.1%}")
+            print(f"     Min: {min(confidences):.1%}, Max: {max(confidences):.1%}")
+
+            low_confidence = [c for c in classifications if c.confidence_score < 0.6]
+            if low_confidence:
+                print(f"  ⚠️  {len(low_confidence)} classification(s) with low confidence (<60%)")
+            else:
+                print("  ✅ All classifications have reasonable confidence")
+
+            # Category distribution
+            category_counts = {}
+            for c in classifications:
+                cat = c.primary_category
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+
+            print(f"  📊 Category distribution:")
+            for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
+                print(f"     - {cat}: {count}")
 
         # Create GitHub annotations for all classifications
         if classifications:
@@ -466,11 +710,40 @@ def classify_and_annotate_workflow_errors():
                 import traceback
                 traceback.print_exc()
 
+        # Create PR comment with summary
+        if classifications:
+            # Check if PR comments are enabled
+            enable_pr_comments = os.getenv("ENABLE_PR_COMMENTS", "true").lower() == "true"
+
+            if enable_pr_comments:
+                print("\n" + "=" * 70)
+                print("💬 Creating PR comment summary...")
+                print("=" * 70)
+
+                try:
+                    success = annotator.create_pr_comment(
+                        classifications,
+                        error_contexts
+                    )
+
+                    if success:
+                        print("✅ PR comment created successfully")
+                    else:
+                        print("ℹ️  PR comment not created (not a PR context or failed)")
+
+                except Exception as e:
+                    print(f"⚠️  Failed to create PR comment: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print("\nℹ️  PR comments disabled (ENABLE_PR_COMMENTS=false)")
+
         # Summary
         print("\n" + "=" * 70)
         print("SUMMARY")
         print("=" * 70)
-        print(f"✅ Classified {len(classifications)}/{len(errors)} errors")
+        print(f"✅ Analyzed {len(failed_jobs)} failed job(s)")
+        print(f"✅ Found {len(classifications)} total error(s)")
 
         if classifications:
             # Count by category
@@ -483,11 +756,24 @@ def classify_and_annotate_workflow_errors():
             for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
                 print(f"   - {cat}: {count}")
 
+            # Token usage summary
+            total_prompt_tokens = sum(c.prompt_tokens for c in classifications)
+            total_completion_tokens = sum(c.completion_tokens for c in classifications)
+            total_cached_tokens = sum(c.cached_tokens for c in classifications)
+
+            print(f"\n💰 Token usage:")
+            print(f"   - Prompt tokens: {total_prompt_tokens:,}")
+            print(f"   - Completion tokens: {total_completion_tokens:,}")
+            print(f"   - Cached tokens: {total_cached_tokens:,}")
+
         if opensearch_client:
             print(f"\n💾 Results uploaded to OpenSearch")
 
         if annotator.is_available():
             print(f"📝 GitHub annotations: {'enabled' if annotator.config.enabled else 'disabled'}")
+
+        enable_pr_comments = os.getenv("ENABLE_PR_COMMENTS", "true").lower() == "true"
+        print(f"💬 PR comments: {'enabled' if enable_pr_comments else 'disabled'}")
 
         print("=" * 70)
 

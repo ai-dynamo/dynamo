@@ -413,6 +413,53 @@ class ErrorExtractor:
         errors = []
         context = context or {}
 
+        lines = log_content.split('\n')
+
+        # PRIORITY 1: Check for pytest collection errors first
+        # These are critical infrastructure errors that should be caught immediately
+        pytest_error_start = -1
+        for i, line in enumerate(lines):
+            if 'ERROR collecting' in line or 'ImportError while importing test module' in line:
+                pytest_error_start = i
+                break
+
+        if pytest_error_start >= 0:
+            # Found pytest collection error - extract the full error block
+            error_lines = []
+
+            # Get the ERROR collecting line
+            error_lines.append(lines[pytest_error_start])
+
+            # Find the full traceback (look for lines starting with E or traceback markers)
+            i = pytest_error_start + 1
+            while i < len(lines) and i < pytest_error_start + 50:
+                line = lines[i]
+                # Include traceback lines (E prefix, file paths, etc.)
+                if (line.strip().startswith('E ') or
+                    line.strip().startswith('Traceback') or
+                    '/__init__.py:' in line or
+                    '/test_' in line or
+                    'ModuleNotFoundError:' in line or
+                    'ImportError:' in line or
+                    line.strip().startswith('>')):
+                    error_lines.append(line)
+                # Stop at warnings summary or next section
+                elif 'warnings summary' in line.lower() or '=====' in line:
+                    break
+                i += 1
+
+            # Create error from pytest collection failure
+            error_text = '\n'.join(error_lines)
+            if error_text:
+                errors.append(self._create_github_log_error(
+                    error_text,
+                    context.get('step_name'),
+                    context
+                ))
+                # Return immediately - this is the primary error
+                return errors
+
+        # PRIORITY 2: If no pytest error, use generic pattern matching
         # Pattern to detect failed steps and extract error messages
         # GitHub Actions logs have timestamps like: 2025-01-15T10:30:45.123Z
         step_pattern = r'##\[group\](.+?)$'
@@ -425,7 +472,6 @@ class ErrorExtractor:
             r'exit code (\d+)',
         ]
 
-        lines = log_content.split('\n')
         current_step = None
         error_buffer = []
         in_error_context = False
