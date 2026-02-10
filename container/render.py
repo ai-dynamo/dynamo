@@ -65,9 +65,13 @@ def validate_args(args):
     if args.framework in valid_inputs:
         if args.target in valid_inputs[args.framework]:
             return
-        raise ValueError(f"Invalid input combination: [framework={args.framework},target={args.target}]")
+        raise ValueError(
+            f"Invalid input combination: [framework={args.framework},target={args.target}]"
+        )
 
-    raise ValueError(f"Invalid input combination: [framework={args.framework},target={args.target}]")
+    raise ValueError(
+        f"Invalid input combination: [framework={args.framework},target={args.target}]"
+    )
     return
 
 
@@ -87,7 +91,7 @@ def render(args, context, script_dir):
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
 
-    if args.short_output:
+    if args.output_short_filename:
         filename = "rendered.Dockerfile"
     else:
         filename = f"{args.framework}-{args.target}-cuda{args.cuda_version}-{args.platform}-rendered.Dockerfile"
