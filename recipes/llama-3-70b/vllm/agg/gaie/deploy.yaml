@@ -56,6 +56,8 @@ spec:
       envs:
         - name: HF_HOME
           value: /opt/models
+        - name: DYN_LOG
+          value: "debug,dynamo_llm::kv_router=trace"
       replicas: 1
     VllmPrefillWorker:
       componentType: worker

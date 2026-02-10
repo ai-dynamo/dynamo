@@ -271,6 +271,16 @@ func (k *KVAwareScorer) Score(
 ) map[schedtypes.Pod]float64 {
 	logger := log.FromContext(ctx)
 
+	for i, p := range pods {
+		pod := p.GetPod()
+		metrics := p.GetMetrics()
+		logger.V(logutil.DEFAULT).Info("Score: pod info",
+			"index", i,
+			"pod", pod,
+			"metrics", metrics,
+		)
+	}
+
 	workerID, prefillWorkerID, tokenData, err := k.callDynamoRouter(ctx, req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "Dynamo call failed; proceeding without worker id")

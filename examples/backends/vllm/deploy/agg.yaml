@@ -13,7 +13,16 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:new-bindings
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --router-mode
+            - direct
+            - --store-kv
+            - mem
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -23,7 +32,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:new-bindings
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -32,3 +41,5 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --store-kv
+            - mem
