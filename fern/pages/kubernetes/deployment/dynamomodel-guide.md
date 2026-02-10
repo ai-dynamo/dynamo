@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Managing Models with DynamoModel
-
 ## Overview
 
 `DynamoModel` is a Kubernetes Custom Resource that represents a machine learning model deployed on Dynamo. It enables you to:

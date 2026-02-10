@@ -5,249 +5,189 @@
 
 # Dynamo Architecture Flow
 
-This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [examples/backends/vllm](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm). Color-coded flows indicate different types of operations:
+This diagram shows the NVIDIA Dynamo disaggregated inference system. Color-coded flows indicate different types of operations.
 
 ## 🔵 Main Request Flow (Blue)
 The primary user journey through the system:
 
-1. **Discovery (S1)**: Client discovers the service endpoint
-2. **Request (S2)**: HTTP client sends API request to Frontend (OpenAI-compatible server on port 8000)
-3. **Validate (S3)**: Frontend forwards request to Processor for validation and routing
-4. **Route (S3)**: Processor routes the validated request to appropriate Decode Worker
+1. **Request (S1)**: HTTP client sends API request to Frontend (OpenAI-compatible server on port 8000)
+2. **Preprocess (S2)**: Frontend preprocesses the request (applies chat template, tokenizes) and validates it
+3. **Route to Prefill (S3)**: PrefillRouter selects a prefill worker using KV-aware routing or load balancing
 
-## 🟠 Decision and Allocation Flow (Orange)
-The system's intelligent routing and resource allocation:
+## 🟢 Prefill Flow (Green)
+The prefill processing pipeline:
 
-4. **Query (S4)**: Decode Worker queries for prefix cache hits to optimize processing
-5. **Disagg Decision (S5)**: Based on prefill length and queue size, the system decides whether it needs remote prefill
-5a. **Allocate (S5a)**: Decode Worker pre-allocates KV cache blocks in its local GPU memory
-6. **Queue (S6)**: If remote prefill is required, the system puts the RemotePrefillRequest with block IDs into the PrefillQueue
+4. **Prefill (S4)**: Prefill worker executes the prefill computation on the input tokens and generates KV cache
+5. **Return Metadata (S5)**: Prefill worker returns `disaggregated_params` containing backend-specific transfer metadata
 
-## 🟢 Prefill Worker Flow (Green)
-The dedicated prefill processing pipeline:
+## 🟠 Decode Routing Flow (Orange)
+Router orchestration to decode phase:
 
-7. **NATS Pull (S7)**: PrefillQueue uses a NATS consumer group to distribute work to available PrefillWorkers
-8. **Load Metadata (S8)**: PrefillWorker loads NIXL metadata from ETCD to establish GPU communication
-9. **Prefill (S9)**: Worker executes the prefill computation on the input tokens
-10. **NIXL Transfer (S10)**: Direct GPU-to-GPU transfer writes the prefilled KV cache to the Decode Worker's pre-allocated blocks
+6. **Route to Decode (S6)**: PrefillRouter injects prefill result into decode request and routes to decode worker
+7. **KV Transfer (S7)**: Decode worker coordinates with prefill worker for direct GPU-to-GPU KV cache transfer via NIXL
 
 ## 🟣 Completion Flow (Purple)
 The response generation and delivery:
 
-11. **Notify (S11)**: PrefillWorker sends completion notification to Decode Worker
-12. **Decode (S12)**: Decode Worker decodes from its local KV cache containing prefilled data
-13. **Response (S13)**: The system sends the generated response to the Processor for post-processing, then through the Frontend to the Client
+8. **Decode (S8)**: Decode worker generates tokens using the transferred KV cache
+9. **Response (S9)**: Generated tokens stream back through Frontend for post-processing (detokenization) and delivery to Client
 
 ## 🔗 Infrastructure Connections (Dotted lines)
 Coordination and messaging support:
 
-### ETCD Connections (Gray, dotted)
-- **Frontend, Processor, Planner**: Service discovery and registration
-- **Decode Worker, PrefillWorker**: NIXL metadata storage for GPU communication setup
+### Service Discovery
+- **On Kubernetes** (default): Uses native K8s resources (DynamoWorkerMetadata CRD, EndpointSlices). No etcd required.
+- **On bare metal**: Uses etcd or filesystem for service discovery and endpoint registration.
 
-### NATS Connections (Teal, dotted)
-- **PrefillQueue**: JetStream consumer group for reliable work distribution
-- **Processor**: Load balancing across workers
+### Request Plane
+- **TCP** (default): Direct TCP connections between Frontend and Workers for request/response transport.
+- **HTTP/NATS**: Alternative transports configurable via `DYN_REQUEST_PLANE`.
+
+### NATS Connections (Optional, for KV routing)
+- **KV Events**: Cache state events for KV-aware routing (can be disabled with `--no-kv-events`)
 
 ### Planning Connections (Gold, dotted)
 - **Frontend → Planner**: Metrics collection for auto-scaling decisions
-- **Planner → Workers**: Resource scaling commands for both Decode Worker and PrefillWorker
+- **Planner → Workers**: Resource scaling commands for workers
 
 ## Technical Implementation Details
 
+### PrefillRouter Orchestration:
+- The `PrefillRouter` sits between the Frontend and workers, orchestrating disaggregated serving
+- Selects prefill workers using KV-aware routing (cache overlap scores + load) or simple load balancing
+- Injects transfer metadata into decode requests for KV cache coordination
+
 ### NIXL (NVIDIA Interchange Library):
-- Enables high-speed GPU-to-GPU data transfers using NVLink/PCIe
-- Decode Worker publishes GPU metadata to ETCD for coordination
-- PrefillWorker loads metadata to establish direct communication channels
-- Block-based transfers (64–128 tokens per block) for efficient batching
+- Enables high-speed GPU-to-GPU data transfers using NVLink, InfiniBand/UCX, or PCIe
+- Transfer metadata exchanged via `disaggregated_params` in prefill response
+- Backend-specific coordination: SGLang uses bootstrap connections, vLLM uses block IDs, TRTLLM uses opaque state
 
 ### Disaggregated KV Cache:
-- Each Decode Worker maintains local KV cache in its GPU memory
-- No shared storage bottlenecks—all transfers are direct worker-to-worker
-- Pre-allocated blocks ensure deterministic memory layout and performance
+- Each worker maintains local KV cache in its GPU memory
+- No shared storage bottlenecks—transfers are direct worker-to-worker via NIXL
+- Non-blocking transfers allow GPU forward passes to continue during KV transfer
 
 ```mermaid
 %%{init: {'theme':'dark', 'themeVariables': {'primaryColor': '#f4f4f4', 'primaryTextColor': '#333333', 'primaryBorderColor': '#888888', 'lineColor': '#4A90E2', 'sectionBkgColor': '#f9f9f9', 'altSectionBkgColor': '#eeeeee', 'tertiaryColor': '#f0f0f0', 'background': '#ffffff', 'mainBkg': '#f8f8f8', 'secondaryColor': '#f4f4f4', 'nodeTextColor': '#333333'}, 'flowchart': {'htmlLabels': true, 'curve': 'basis'}, 'fontFamily': 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif', 'fontSize': '18px'}%%
 graph TD
     %% Top Layer - Client & Frontend
     Client["<b>HTTP Client</b>"]
-    S1[["<b>1 DISCOVERY</b>"]]
     Frontend["<b>Frontend</b><br/><i>OpenAI Compatible Server<br/>Port 8000</i>"]
-    S2[["<b>2 REQUEST</b>"]]
+    S1[["<b>1 REQUEST</b>"]]
+    S2[["<b>2 PREPROCESS</b>"]]
 
-    %% Processing Layer
-    Processor["<b>Processor</b><br/><i>Request Handler & Router</i>"]
-    S3[["<b>3 VALIDATE</b>"]]
+    %% Router Layer
+    PrefillRouter["<b>PrefillRouter</b><br/><i>Orchestrates Disaggregated Serving</i>"]
+    S3[["<b>3 ROUTE TO PREFILL</b>"]]
 
-    %% Infrastructure - Positioned strategically to minimize crossings
+    %% Infrastructure
     subgraph INF["<b>Infrastructure Layer</b>"]
-        ETCD[("<b>ETCD</b><br/><i>Service Discovery &<br/>NIXL Metadata</i>")]
-        NATS[("<b>NATS</b><br/><i>Message Broker</i>")]
-        Planner["<b>Planner</b><br/><i>Resource Management<br/>Auto-scaling</i>"]
+        Discovery[("<b>Discovery</b><br/><i>Service Registry<br/>(ETCD or K8s)</i>")]
+        NATS[("<b>NATS</b><br/><i>KV Events<br/>(Optional)</i>")]
+        Planner["<b>Planner</b><br/><i>Auto-scaling</i>"]
     end
 
-    %% Worker Layer - Main processing
+    %% Worker Layer
     subgraph WL["<b>Worker Layer</b>"]
-        %% VllmWorker section
-        VllmWorker["<b>Decode Worker</b><br/><i>Handles Decoding & Disagg Decisions</i>"]
-        S4[["<b>4 QUERY</b>"]]
-        S5[["<b>5 DISAGG DECISION</b>"]]
-        S5a[["<b>5a ALLOCATE</b>"]]
-        S12[["<b>12 DECODE</b>"]]
-        S6[["<b>6 QUEUE</b>"]]
-        S13[["<b>13 RESPONSE</b>"]]
+        %% Prefill Worker
+        PrefillWorker["<b>Prefill Worker</b><br/><i>Computes KV Cache</i>"]
+        S4[["<b>4 PREFILL</b>"]]
+        S5[["<b>5 RETURN METADATA</b>"]]
 
-        %% Storage positioned near workers
-        LocalKVCache[("<b>Local KV Cache</b><br/><i>Pre-allocated Blocks</i>")]
+        %% Decode Worker
+        DecodeWorker["<b>Decode Worker</b><br/><i>Token Generation</i>"]
+        S6[["<b>6 ROUTE TO DECODE</b>"]]
+        S7[["<b>7 KV TRANSFER</b>"]]
+        S8[["<b>8 DECODE</b>"]]
+        S9[["<b>9 RESPONSE</b>"]]
 
-        %% Prefill System - Right side to minimize crossings
-        subgraph PS["<b>Prefill System</b>"]
-            PrefillQueue["<b>Prefill Queue</b><br/><i>NATS JetStream<br/>Consumer Group</i>"]
-            PrefillWorker["<b>Prefill Worker</b><br/><i>Dedicated Prefill Processing<br/>(Multiple Instances)</i>"]
-            S7[["<b>7 NATS PULL</b>"]]
-            S8[["<b>8 LOAD METADATA</b>"]]
-            S9[["<b>9 PREFILL</b>"]]
-            S10[["<b>10 NIXL TRANSFER</b>"]]
-            S11[["<b>11 NOTIFY</b>"]]
-        end
+        %% KV Cache
+        PrefillKVCache[("<b>Prefill KV Cache</b><br/><i>GPU VRAM</i>")]
+        DecodeKVCache[("<b>Decode KV Cache</b><br/><i>GPU VRAM</i>")]
     end
 
-    %% Main Request Flow (Blue) - Clean vertical flow
-    Client -.-> S1
+    %% Main Request Flow (Blue)
+    Client --> S1
     S1 -->|HTTP API Call| Frontend
-    Frontend -.-> S2
-    S2 -->|Process & Validate| Processor
-    Processor -.-> S3
-    S3 -->|Route to Worker| VllmWorker
+    Frontend --> S2
+    S2 -->|Tokenize & Validate| PrefillRouter
+    PrefillRouter --> S3
+    S3 -->|Select Prefill Worker| PrefillWorker
 
-    %% VllmWorker Internal Flow (Orange)
-    VllmWorker -.-> S4
-    S4 -->|Query Prefix Cache Hit| S5
-    S5 -->|Prefill Length & Queue Check| S5a
-    S5a -->|Continue to Decode| S12
+    %% Prefill Flow (Green)
+    PrefillWorker --> S4
+    S4 -->|Compute KV Cache| PrefillKVCache
+    PrefillWorker --> S5
+    S5 -->|disaggregated_params| PrefillRouter
 
-    %% Allocation & Queuing (Orange) - Minimize crossings
-    S5a -->|Allocate KV Cache Blocks| LocalKVCache
-    VllmWorker --> S6
-    S6 -->|Put RemotePrefillRequest| PrefillQueue
+    %% Decode Routing Flow (Orange)
+    PrefillRouter --> S6
+    S6 -->|Inject Transfer Metadata| DecodeWorker
+    DecodeWorker --> S7
+    S7 -->|NIXL GPU-to-GPU| PrefillKVCache
+    PrefillKVCache -.->|Direct Transfer| DecodeKVCache
 
-    %% Prefill Worker Flow (Green) - Self-contained within PS
-    PrefillQueue -.-> S7
-    S7 -->|Consumer Group Pull| PrefillWorker
-    PrefillWorker -.-> S8
-    PrefillWorker -.-> S9
-    S9 -->|Execute Prefill| S10
-    S10 -->|Direct GPU Transfer| LocalKVCache
-    PrefillWorker --> S11
+    %% Completion Flow (Purple)
+    DecodeWorker --> S8
+    S8 -->|Generate Tokens| DecodeKVCache
+    DecodeWorker --> S9
+    S9 -->|Stream Tokens| Frontend
+    Frontend -->|HTTP Response| Client
 
-    %% Return Flow (Purple) - Clean return path
-    S11 -->|Completion Notification| S12
-    S12 -->|Decode from KV Cache| S13
-    S13 -->|Post-process Response| Processor
-    Processor -->|HTTP Response| Frontend
-    Frontend -->|Final Response| Client
+    %% Infrastructure Connections
+    Frontend -.->|Service Discovery| Discovery
+    PrefillRouter -.->|Worker Discovery| Discovery
+    PrefillWorker -.->|Register| Discovery
+    DecodeWorker -.->|Register| Discovery
+    Planner -.->|Service Discovery| Discovery
 
-    %% Infrastructure Connections - Organized to avoid crossings
-    %% ETCD Connections - Grouped by proximity
-    Frontend -.->|Service Discovery| ETCD
-    Processor -.->|Service Discovery| ETCD
-    VllmWorker -.->|NIXL Metadata| ETCD
-    PrefillWorker -.->|NIXL Metadata| ETCD
-    S8 -.->|Load NIXL Metadata| ETCD
-    Planner -.->|Service Discovery| ETCD
+    %% NATS for KV events (optional)
+    PrefillWorker -.->|KV Events| NATS
+    DecodeWorker -.->|KV Events| NATS
 
-    %% NATS Connections - Direct to queue system
-    PrefillQueue -.->|JetStream| NATS
-    Processor -.->|Load Balancing| NATS
-
-    %% Planning Connections - Strategic positioning
+    %% Planning Connections
     Frontend -.->|Metrics| Planner
-    Planner -.->|Auto-scaling| VllmWorker
     Planner -.->|Auto-scaling| PrefillWorker
+    Planner -.->|Auto-scaling| DecodeWorker
 
-    %% Styling - Each component with unique colors
+    %% Styling
     classDef client fill:#e8f5e8,stroke:#2E7D32,stroke-width:3px
     classDef frontend fill:#fff3e0,stroke:#F57C00,stroke-width:3px
-    classDef processor fill:#f3e5f5,stroke:#7B1FA2,stroke-width:3px
+    classDef router fill:#f3e5f5,stroke:#7B1FA2,stroke-width:3px
     classDef worker fill:#e3f2fd,stroke:#1565C0,stroke-width:3px
-    classDef prefillQueue fill:#fff8e1,stroke:#E65100,stroke-width:3px
-    classDef prefillWorker fill:#fce4ec,stroke:#C2185B,stroke-width:3px
-    classDef prefillBox fill:#eceff1,stroke:#455A64,stroke-width:3px
+    classDef prefillWorker fill:#e8f5e9,stroke:#388E3C,stroke-width:3px
     classDef planner fill:#f1f8e9,stroke:#558B2F,stroke-width:3px
     classDef storage fill:#e0f2f1,stroke:#00695C,stroke-width:3px
-    classDef etcd fill:#fff9c4,stroke:#F9A825,stroke-width:3px
+    classDef discovery fill:#fff9c4,stroke:#F9A825,stroke-width:3px
     classDef nats fill:#ede7f6,stroke:#5E35B1,stroke-width:3px
     classDef infraLayer fill:#fff9c4,stroke:#FFC107,stroke-width:3px
     classDef workerLayer fill:#e3f2fd,stroke:#2196F3,stroke-width:3px
 
-
     class Client client
     class Frontend frontend
-    class Processor processor
-    class VllmWorker worker
-    class PrefillQueue prefillQueue
+    class PrefillRouter router
+    class DecodeWorker worker
     class PrefillWorker prefillWorker
     class Planner planner
-    class LocalKVCache storage
-    class ETCD etcd
+    class PrefillKVCache,DecodeKVCache storage
+    class Discovery discovery
     class NATS nats
-    class PS prefillBox
     class INF infraLayer
     class WL workerLayer
 
+    %% Flow Colors
+    %% Main Request Flow - Blue
+    linkStyle 0,1,2,3,4,5 stroke:#1565C0,stroke-width:4px
 
+    %% Prefill Flow - Green
+    linkStyle 6,7,8,9 stroke:#2E7D32,stroke-width:4px
 
-    %% Flow Colors - Different line styles to reduce visual clutter
-    %% Main Request Flow - Blue (solid)
-    linkStyle 0 stroke:#1565C0,stroke-width:3px,stroke-dasharray: 3 3
-    linkStyle 1 stroke:#1565C0,stroke-width:4px
-    linkStyle 2 stroke:#1565C0,stroke-width:3px,stroke-dasharray: 3 3
-    linkStyle 3 stroke:#1565C0,stroke-width:4px
-    linkStyle 4 stroke:#1565C0,stroke-width:3px,stroke-dasharray: 3 3
-    linkStyle 5 stroke:#1565C0,stroke-width:4px
+    %% Decode Routing Flow - Orange
+    linkStyle 10,11,12,13,14 stroke:#E65100,stroke-width:4px
 
-    %% Decision & Allocation Flow - Orange (mixed)
-    linkStyle 6 stroke:#E65100,stroke-width:3px,stroke-dasharray: 3 3
-    linkStyle 7 stroke:#E65100,stroke-width:4px
-    linkStyle 8 stroke:#E65100,stroke-width:4px
-    linkStyle 9 stroke:#E65100,stroke-width:3px,stroke-dasharray: 3 3
+    %% Completion Flow - Purple
+    linkStyle 15,16,17,18,19 stroke:#6A1B9A,stroke-width:4px
 
-    %% KV Cache & Queue - Orange (solid)
-    linkStyle 10 stroke:#E65100,stroke-width:4px
-    linkStyle 11 stroke:#E65100,stroke-width:4px
-    linkStyle 12 stroke:#E65100,stroke-width:4px
-
-    %% Prefill Worker Flow - Green (mixed)
-    linkStyle 13 stroke:#2E7D32,stroke-width:3px,stroke-dasharray: 3 3
-    linkStyle 14 stroke:#2E7D32,stroke-width:4px
-    linkStyle 15 stroke:#2E7D32,stroke-width:3px,stroke-dasharray: 3 3
-    linkStyle 16 stroke:#2E7D32,stroke-width:3px,stroke-dasharray: 3 3
-    linkStyle 17 stroke:#2E7D32,stroke-width:4px
-    linkStyle 18 stroke:#2E7D32,stroke-width:4px
-    linkStyle 19 stroke:#2E7D32,stroke-width:4px
-
-    %% Completion Flow - Purple (mixed)
-    linkStyle 20 stroke:#6A1B9A,stroke-width:4px
-    linkStyle 21 stroke:#6A1B9A,stroke-width:3px,stroke-dasharray: 3 3
-    linkStyle 22 stroke:#6A1B9A,stroke-width:4px
-    linkStyle 23 stroke:#6A1B9A,stroke-width:4px
-    linkStyle 24 stroke:#6A1B9A,stroke-width:4px
-
-    %% Infrastructure Flows - Lighter and dotted to reduce visual noise
-    %% ETCD Connections - Gray (dotted, thinner)
-    linkStyle 25 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
-    linkStyle 26 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
-    linkStyle 27 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
-    linkStyle 28 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
-    linkStyle 29 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
-    linkStyle 30 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
-
-    %% NATS Connections - Teal (dotted, thinner)
-    linkStyle 31 stroke:#26A69A,stroke-width:2px,stroke-dasharray: 8 8
-    linkStyle 32 stroke:#26A69A,stroke-width:2px,stroke-dasharray: 8 8
-
-    %% Planning Connections - Gold (dotted, thinner)
-    linkStyle 33 stroke:#FFA726,stroke-width:2px,stroke-dasharray: 8 8
-    linkStyle 34 stroke:#FFA726,stroke-width:2px,stroke-dasharray: 8 8
-    linkStyle 35 stroke:#FFA726,stroke-width:2px,stroke-dasharray: 8 8
+    %% Infrastructure - Gray dotted
+    linkStyle 20,21,22,23,24,25,26,27,28,29 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
 ```

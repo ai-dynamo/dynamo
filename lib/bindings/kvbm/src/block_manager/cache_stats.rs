@@ -17,17 +17,17 @@ const DEFAULT_LOG_INTERVAL_SECS: u64 = 5;
 /// Cache statistics entry for a single request
 #[derive(Clone, Copy, Debug)]
 struct CacheStatsEntry {
-    host_blocks: u64,      // Blocks found in host cache
-    disk_blocks: u64,      // Blocks found in disk cache
-    total_blocks: u64,     // Total blocks queried from host/disk
+    host_blocks: u64,  // Blocks found in host cache
+    disk_blocks: u64,  // Blocks found in disk cache
+    total_blocks: u64, // Total blocks queried from host/disk
 }
 
 /// Aggregated cache statistics for the current sliding window
 #[derive(Default)]
 struct AggregatedStats {
-    total_blocks_queried: u64,  // Total blocks queried from host/disk (same for both tiers)
-    host_blocks_hit: u64,        // Blocks found in host cache
-    disk_blocks_hit: u64,        // Blocks found in disk cache
+    total_blocks_queried: u64, // Total blocks queried from host/disk (same for both tiers)
+    host_blocks_hit: u64,      // Blocks found in host cache
+    disk_blocks_hit: u64,      // Blocks found in disk cache
 }
 
 /// Cache statistics tracker with sliding window

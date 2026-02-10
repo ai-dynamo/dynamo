@@ -1876,9 +1876,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 	tests := []struct {
 		name                     string
 		componentReconcileResult ComponentReconcileResult
-		wantConditionStatus      metav1.ConditionStatus
-		wantConditionReason      string
-		wantConditionMessage     string
+		wantConditions           []metav1.Condition
 		wantServiceReplicaStatus *v1alpha1.ServiceReplicaStatus
 		wantObservedGeneration   int64
 	}{
@@ -1898,9 +1896,20 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 					AvailableReplicas: ptr.To(int32(0)),
 				},
 			},
-			wantConditionStatus:  metav1.ConditionFalse,
-			wantConditionReason:  "DeploymentNotReady",
-			wantConditionMessage: "Deployment is not ready",
+			wantConditions: []metav1.Condition{
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "DeploymentNotReady",
+					Message: "Deployment is not ready",
+				},
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+					Status:  metav1.ConditionFalse,
+					Reason:  "ComponentNotReady",
+					Message: "DynamoComponent is not ready",
+				},
+			},
 			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
@@ -1926,9 +1935,20 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 					AvailableReplicas: ptr.To(int32(2)),
 				},
 			},
-			wantConditionStatus:  metav1.ConditionTrue,
-			wantConditionReason:  "DeploymentReady",
-			wantConditionMessage: "Deployment is ready",
+			wantConditions: []metav1.Condition{
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+					Status:  metav1.ConditionTrue,
+					Reason:  "DeploymentReady",
+					Message: "Deployment is ready",
+				},
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  "ComponentReady",
+					Message: "DynamoComponent is ready",
+				},
+			},
 			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
@@ -1953,9 +1973,20 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 					ReadyReplicas:   ptr.To(int32(2)),
 				},
 			},
-			wantConditionStatus:  metav1.ConditionFalse,
-			wantConditionReason:  "SomeLeaderWorkerSetsNotReady",
-			wantConditionMessage: "Some LeaderWorkerSets are not ready",
+			wantConditions: []metav1.Condition{
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "SomeLeaderWorkerSetsNotReady",
+					Message: "Some LeaderWorkerSets are not ready",
+				},
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+					Status:  metav1.ConditionFalse,
+					Reason:  "ComponentNotReady",
+					Message: "DynamoComponent is not ready",
+				},
+			},
 			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
@@ -1979,9 +2010,20 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 					ReadyReplicas:   ptr.To(int32(3)),
 				},
 			},
-			wantConditionStatus:  metav1.ConditionTrue,
-			wantConditionReason:  "AllLeaderWorkerSetsReady",
-			wantConditionMessage: "All LeaderWorkerSets are ready",
+			wantConditions: []metav1.Condition{
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+					Status:  metav1.ConditionTrue,
+					Reason:  "AllLeaderWorkerSetsReady",
+					Message: "All LeaderWorkerSets are ready",
+				},
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  "ComponentReady",
+					Message: "DynamoComponent is ready",
+				},
+			},
 			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
@@ -2049,14 +2091,17 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			err = fakeKubeClient.Get(ctx, req.NamespacedName, updatedDCD)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			// Assert the status condition
-			g.Expect(updatedDCD.Status.Conditions).To(gomega.HaveLen(1))
-			condition := updatedDCD.Status.Conditions[0]
-			g.Expect(condition.Type).To(gomega.Equal(v1alpha1.DynamoGraphDeploymentConditionTypeAvailable))
-			g.Expect(condition.Status).To(gomega.Equal(tt.wantConditionStatus))
-			g.Expect(condition.Reason).To(gomega.Equal(tt.wantConditionReason))
-			g.Expect(condition.Message).To(gomega.Equal(tt.wantConditionMessage))
+			// Assert the status conditions
+			g.Expect(updatedDCD.Status.Conditions).To(gomega.HaveLen(len(tt.wantConditions)))
 
+			// Clear LastTransitionTime from actual conditions for comparison
+			actualConditions := make([]metav1.Condition, len(updatedDCD.Status.Conditions))
+			for i, cond := range updatedDCD.Status.Conditions {
+				cond.LastTransitionTime = metav1.Time{}
+				actualConditions[i] = cond
+			}
+
+			g.Expect(actualConditions).To(gomega.ConsistOf(tt.wantConditions))
 			// Assert the service replica status
 			g.Expect(updatedDCD.Status.Service).To(gomega.Equal(tt.wantServiceReplicaStatus))
 
