@@ -164,9 +164,6 @@ def build_sampling_params(
                     )
                 else:
                     sampling_params.logprobs = parsed_logprobs
-                    # Enable detokenize when logprobs requested so vLLM populates decoded_token
-                    # in the logprobs response (needed for top_logprobs token text)
-                    sampling_params.detokenize = True
             except (ValueError, TypeError):
                 logger.warning(
                     f"Invalid logprobs value: {logprobs_value} (must be integer), ignoring"

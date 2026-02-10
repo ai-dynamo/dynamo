@@ -66,6 +66,8 @@ struct DecoderUnfoldState {
     validate_engine_decode: bool,
     /// Set to true when a local stop condition is detected, causing the stream to end
     finished: bool,
+    /// Tokenizer for detokenizing top_logprobs tokens
+    tokenizer: Option<Tokenizer>,
 }
 
 impl Backend {
@@ -116,6 +118,7 @@ impl Backend {
             decoder,
             validate_engine_decode: self.validate_engine_decode,
             finished: false,
+            tokenizer: self.tokenizer.clone(),
         })
     }
 }
@@ -262,6 +265,24 @@ impl
                     }
                     data.text = text;
                     data.tokens = Some(tokens);
+
+                    // Detokenize top_logprobs tokens if needed
+                    if let Some(ref mut top_logprobs) = data.top_logprobs {
+                        if let Some(ref tokenizer) = state.tokenizer {
+                            for position_logprobs in top_logprobs.iter_mut() {
+                                for logprob in position_logprobs.iter_mut() {
+                                    if logprob.token.is_none() {
+                                        // Decode single token_id to get token text
+                                        if let Ok(text) =
+                                            tokenizer.decode(&[logprob.token_id], false)
+                                        {
+                                            logprob.token = Some(text);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     output.data = Some(data);
 

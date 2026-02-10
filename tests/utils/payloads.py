@@ -187,6 +187,8 @@ class ChatPayloadWithLogprobs(ChatPayload):
                 # Validate structure of logprobs
                 for item in content_logprobs:
                     assert "token" in item, "Missing 'token' in logprobs content"
+                    assert item["token"] is not None, "logprobs 'token' should not be None (frontend should detokenize logprob tokens)"
+                    assert isinstance(item["token"], str) and len(item["token"]) > 0, "logprobs 'token' should be a non-empty string"
                     assert "logprob" in item, "Missing 'logprob' in logprobs content"
                     assert (
                         "top_logprobs" in item
@@ -199,6 +201,24 @@ class ChatPayloadWithLogprobs(ChatPayload):
                     assert (
                         logprob_val <= 0
                     ), f"logprob should be <= 0, got {logprob_val}"
+
+                    # Validate top_logprobs structure and that token text is populated
+                    # This tests that the frontend populates token text in logprobs for the client
+                    top_logprobs_list = item["top_logprobs"]
+                    assert isinstance(
+                        top_logprobs_list, list
+                    ), "top_logprobs should be a list"
+                    assert len(top_logprobs_list) > 0, "top_logprobs should not be empty"
+                    for top_lp in top_logprobs_list:
+                        assert (
+                            top_lp["token"] is not None
+                        ), "top_logprobs 'token' should not be None (frontend should detokenize logprob tokens)"
+                        assert isinstance(top_lp["token"], str) and len(top_lp["token"]) > 0, \
+                            "top_logprobs 'token' should be a non-empty string"
+                        top_logprob_val = top_lp["logprob"]
+                        assert not math.isnan(top_logprob_val), "top_logprobs logprob is NaN"
+                        assert not math.isinf(top_logprob_val), "top_logprobs logprob is infinite"
+                        assert top_logprob_val <= 0, f"top_logprobs logprob should be <= 0, got {top_logprob_val}"
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
