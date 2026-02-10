@@ -270,7 +270,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDynamoGraphDeployment.Name
 
-		// Propagate metrics annotation from parent deployment if present
+		// Propagate annotations from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
 			if deployment.Spec.Annotations == nil {
 				deployment.Spec.Annotations = make(map[string]string)
@@ -280,6 +280,10 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
+			}
+			// Propagate operator origin version for version-gated behavior in backends
+			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = val
 			}
 		}
 
@@ -1205,6 +1209,14 @@ func GenerateGrovePodCliqueSet(
 				component.Annotations = make(map[string]string)
 			}
 			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoveryBackend
+		}
+
+		// Propagate operator origin version for version-gated behavior in backends
+		if val, exists := dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			component.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = val
 		}
 
 		// Get checkpoint info for this service if available
