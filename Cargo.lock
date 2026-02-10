@@ -3342,6 +3342,7 @@ dependencies = [
  "derive_builder",
  "dynamo-tokens",
  "futures",
+ "indexmap 2.12.1",
  "lru 0.16.3",
  "parking_lot",
  "prometheus",
