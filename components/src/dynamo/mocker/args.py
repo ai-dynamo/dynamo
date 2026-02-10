@@ -8,7 +8,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from dynamo.common.utils.namespace import get_namespace
+from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
 from .utils.planner_profiler_perf_data_converter import (
@@ -17,7 +17,7 @@ from .utils.planner_profiler_perf_data_converter import (
     is_profile_results_dir,
 )
 
-DYN_NAMESPACE = get_namespace()
+DYN_NAMESPACE = get_worker_namespace()
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 

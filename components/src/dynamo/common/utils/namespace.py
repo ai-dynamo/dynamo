@@ -4,7 +4,7 @@
 import os
 
 
-def get_namespace(default="dynamo"):
+def get_worker_namespace(default="dynamo"):
     """Get the Dynamo namespace for a worker.
 
     If DYN_NAMESPACE_WORKER_SUFFIX is set, the namespace becomes
