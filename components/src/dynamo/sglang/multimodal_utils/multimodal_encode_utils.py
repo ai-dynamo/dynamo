@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -69,15 +70,42 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
         The loaded vision model on GPU with float16 precision
     """
     if is_qwen3_vl_model(model_id):
-        from transformers import Qwen3VLMoeVisionModel
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import load_file
+        from transformers import Qwen3VLMoeConfig, Qwen3VLMoeVisionModel
 
         logger.info(f"Loading Qwen3-VL vision encoder for {model_id}")
-        return Qwen3VLMoeVisionModel.from_pretrained(
-            model_id,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
+
+        # Build an empty vision model from the config.
+        config = Qwen3VLMoeConfig.from_pretrained(model_id)
+        vision_model = Qwen3VLMoeVisionModel(config.vision_config)
+
+        # Find which safetensors shards contain vision weights.
+        index_path = hf_hub_download(model_id, "model.safetensors.index.json")
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+
+        vision_shards: set[str] = set()
+        for key, shard in weight_map.items():
+            if key.startswith("model.visual."):
+                vision_shards.add(shard)
+
+        # Load only those shards and strip the "model.visual." prefix.
+        visual_state_dict: dict[str, torch.Tensor] = {}
+        prefix = "model.visual."
+        for shard_name in sorted(vision_shards):
+            shard_path = hf_hub_download(model_id, shard_name)
+            shard_weights = load_file(shard_path)
+            for key, value in shard_weights.items():
+                if key.startswith(prefix):
+                    visual_state_dict[key[len(prefix) :]] = value
+
+        vision_model.load_state_dict(visual_state_dict, strict=True)
+        logger.info(
+            f"Loaded {len(visual_state_dict)} vision weights from "
+            f"{len(vision_shards)} shard(s)"
         )
+        return vision_model.to(dtype=torch.float16, device="cuda").eval()
 
     logger.info(f"Loading full model for {model_id}")
     return AutoModel.from_pretrained(
