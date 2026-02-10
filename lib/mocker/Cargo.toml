@@ -34,6 +34,7 @@ uuid = { workspace = true }
 ndarray = "0.16"
 ndarray-npy = "0.9"
 ndarray-interp = "0.5"
+tokio-timerfd = "0.2"
 
 [dev-dependencies]
 rstest = "0.18.2"
