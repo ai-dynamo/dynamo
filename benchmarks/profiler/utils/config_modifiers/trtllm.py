@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import json
 import logging
 import re
@@ -58,6 +59,9 @@ class TrtllmConfigModifier(BaseConfigModifier):
         target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
+        # Deep copy to avoid mutating the original config dict
+        # (MoE handling below modifies args which may share references with input)
+        config = copy.deepcopy(config)
         cfg = Config.model_validate(config)
 
         if is_moe_model:
@@ -301,6 +305,14 @@ class TrtllmConfigModifier(BaseConfigModifier):
         # 4. Disable attention DP (TEP uses TP for attention)
         override_dict["enable_attention_dp"] = False
 
+        # 5. Remove WIDEEP backend if present -- WIDEEP requires attention DP
+        #    which is incompatible with TEP. Let TRT-LLM use its default backend.
+        moe_config = override_dict.get("moe_config")
+        if isinstance(moe_config, dict) and moe_config.get("backend") == "WIDEEP":
+            del moe_config["backend"]
+            if not moe_config:
+                del override_dict["moe_config"]
+
         # Serialize JSON and append to args
         override_str = json.dumps(override_dict)
         args = append_argument(args, ["--override-engine-args", override_str])
@@ -350,22 +362,28 @@ class TrtllmConfigModifier(BaseConfigModifier):
         # 4. Enable attention DP (replicates KV heads, partitions requests)
         override_dict["enable_attention_dp"] = True
 
-        # 5. Use WIDEEP MoE backend for DEP (only for multi-GPU, WIDEEP requires parallel_size > 1)
+        # 5. Set WIDEEP MoE backend for DEP.
+        #    WIDEEP is the only MoE backend compatible with DEP (attention DP enabled)
+        #    on Blackwell (SM100), since the default CutlassFusedMoE/DeepGEMM is
+        #    SM90-only. WIDEEP's DeepGemmMoEOp workspace scales with max_num_tokens
+        #    × dep_size (tokens are allgathered before grouped GEMM); set_prefill_config
+        #    automatically corrects for this by dividing per-rank tokens by dep_size.
+        #    Note: set_config_tep_size strips WIDEEP since TEP is incompatible with it.
         if dep_size > 1:
             if "moe_config" not in override_dict:
                 override_dict["moe_config"] = {}
             override_dict["moe_config"]["backend"] = "WIDEEP"
 
-            # Add required environment variables for WIDEEP to worker container
+            # Add required environment variables for WIDEEP
             container = worker_service.extraPodSpec.mainContainer
             if container.env is None:
                 container.env = []
-            wideep_envs = [
+            dep_envs = [
                 {"name": "TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER", "value": "1"},
                 {"name": "TRTLLM_ENABLE_PDL", "value": "1"},
             ]
             existing_env_names = {e.get("name") if isinstance(e, dict) else e.name for e in container.env}
-            for env in wideep_envs:
+            for env in dep_envs:
                 if env["name"] not in existing_env_names:
                     container.env.append(env)
 
@@ -469,6 +487,22 @@ class TrtllmConfigModifier(BaseConfigModifier):
             if max_batch_size_int > 1
             else max_num_tokens_int
         )
+
+        # WIDEEP allgather correction: DeepGemmMoEOp's workspace is sized by
+        # m_max = per_rank_max_num_tokens × dep_size (all DP ranks' tokens are
+        # allgathered before the grouped GEMM). Without this correction the
+        # effective token count becomes PREFILL_MAX_NUM_TOKENS × dep_size,
+        # causing OOM.  Divide by dep_size so the post-allgather m_max stays
+        # at PREFILL_MAX_NUM_TOKENS.
+        moe_backend = override_dict.get("moe_config", {}).get("backend", "")
+        if moe_backend == "WIDEEP":
+            dep_size = max_batch_size_int  # DEP: batch_size = attn_dp = dep
+            per_rank_max_num_tokens = max(1, per_rank_max_num_tokens // dep_size)
+            logger.info(
+                f"WIDEEP allgather correction: max_num_tokens per rank "
+                f"reduced to {per_rank_max_num_tokens} (effective m_max "
+                f"after allgather: {per_rank_max_num_tokens * dep_size})"
+            )
 
         override_dict["max_batch_size"] = max_batch_size_int
         override_dict["max_num_tokens"] = per_rank_max_num_tokens
