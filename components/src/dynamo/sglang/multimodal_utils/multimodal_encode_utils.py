@@ -198,15 +198,31 @@ def get_qwen_image_features(
     )
     output = vision_encoder(pixel_values, grid_thw=grid_thw)
 
+    # DEBUG: what does HF return?
+    logger.warning(
+        f"[DEBUG-1] vision_encoder output: type={type(output).__name__}, "
+        f"has_deepstack={hasattr(output, 'deepstack_features')}, "
+        f"deepstack_value={getattr(output, 'deepstack_features', 'N/A')!r:.200}, "
+        f"has_last_hidden_state={hasattr(output, 'last_hidden_state')}, "
+        f"last_hidden_state_shape="
+        f"{output.last_hidden_state.shape if hasattr(output, 'last_hidden_state') and output.last_hidden_state is not None else 'N/A'}"
+    )
+
     # HuggingFace returns a dataclass with separate fields;
     # SGLang expects a single concatenated tensor.
     if hasattr(output, "deepstack_features") and output.deepstack_features:
-        return torch.cat([output.last_hidden_state] + output.deepstack_features, dim=-1)
+        result = torch.cat(
+            [output.last_hidden_state] + output.deepstack_features, dim=-1
+        )
+    elif hasattr(output, "last_hidden_state"):
+        result = output.last_hidden_state
+    else:
+        result = output
 
-    # Non-deepstack models (Qwen2.5-VL) or raw tensor return
-    if hasattr(output, "last_hidden_state"):
-        return output.last_hidden_state
-    return output
+    logger.warning(
+        f"[DEBUG-2] get_qwen_image_features result: shape={result.shape}, dtype={result.dtype}"
+    )
+    return result
 
 
 def encode_image_embeddings(
@@ -244,4 +260,7 @@ def encode_image_embeddings(
             embeddings = embeddings[0]
         embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
+        logger.warning(
+            f"[DEBUG-3] encode_image_embeddings final: shape={embeddings.shape}"
+        )
         return embeddings
