@@ -1,6 +1,13 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+# Example 1: without multimodal embedding cache
+#   examples/backends/vllm/launch/disagg_multimodal_e_pd.sh &> logs/e_pd_mm_cache_disabled.txt &
+#
+# Example 2: with multimodal embedding cache (4 GB)
+#   examples/backends/vllm/launch/disagg_multimodal_e_pd.sh --multimodal-embedding-cache-capacity-gb 4 &> logs/e_pd_mm_cache_enabled.txt &
+
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 

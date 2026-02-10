@@ -302,12 +302,12 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     prompt_tokens = len(response.prompt_token_ids)
                     cached = response.num_cached_tokens or 0
                     hit_rate = cached / prompt_tokens if prompt_tokens else 0
-                    logger.info(
-                        f"[{request.request_id}] KV prefix cache: "
-                        f"cached_tokens={cached}/{prompt_tokens} "
-                        f"hit_rate={hit_rate:.2%} "
-                        f"output_tokens={num_output_tokens_so_far}"
-                    )
+                logger.info(
+                    f"[{request.request_id}] KV prefix cache: "
+                    f"cached_tokens={cached}/{prompt_tokens} "
+                    f"hit_rate={hit_rate:.2%} "
+                    f"output_tokens={num_output_tokens_so_far}"
+                )
 
     # ── Disaggregated generation (prefill here, decode remote) ───────
 
