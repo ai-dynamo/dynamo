@@ -96,6 +96,9 @@ class Config:
     # Whether to enable NATS for KV events (derived from kv_events_config in overwrite_args)
     use_kv_events: bool = False
 
+    # ModelExpress P2P options
+    modelexpress_server: Optional[str] = None
+
     def has_connector(self, connector_name: str) -> bool:
         """
         Check if a specific connector is enabled.
@@ -308,6 +311,14 @@ def parse_args() -> Config:
         choices=[1, 2, 3],
         help="Sleep mode level (1=offload to CPU, 2=discard weights, 3=discard all). Default: 1",
     )
+    parser.add_argument(
+        "--modelexpress-server",
+        type=str,
+        default=None,
+        help="ModelExpress P2P server URL (e.g., http://mx-server:8080). "
+        "Required when using --load-format=mx-source or --load-format=mx-target. "
+        "Can also be set via MODEL_EXPRESS_URL env variable.",
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -456,6 +467,17 @@ def parse_args() -> Config:
     config.use_vllm_tokenizer = args.use_vllm_tokenizer or args.omni
     config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config
+
+    # Set ModelExpress server URL for P2P weight transfer
+    if engine_args.load_format in ("mx-source", "mx-target"):
+        config.modelexpress_server = args.modelexpress_server or os.environ.get(
+            "MODEL_EXPRESS_URL"
+        )
+        if not config.modelexpress_server:
+            raise ValueError(
+                f"Specifying --modelexpress-server or MODEL_EXPRESS_URL env var is required "
+                f"when using --load-format={engine_args.load_format}"
+            )
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
