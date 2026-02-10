@@ -322,23 +322,30 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
                     if "Maximum concurrency for" in line:
-                        line = line.strip().split("Maximum concurrency for ")[1]
-                        token_count = int(
-                            line.split(" tokens per request: ")[0].replace(",", "")
-                        )
-                        concurrency = float(line.split(" tokens per request: ")[1][:-1])
+                        try:
+                            line = line.strip().split("Maximum concurrency for ")[1]
+                            token_count = int(
+                                line.split(" tokens per request: ")[0].replace(",", "")
+                            )
+                            concurrency = float(
+                                line.split(" tokens per request: ")[1][:-1]
+                            )
 
-                        # Log shows per-rank KV cache; multiply by attention_dp_size for total
-                        kv_cache_per_rank = int(token_count * concurrency)
-                        total_kv_cache = kv_cache_per_rank * attention_dp_size
-                        logger.info(
-                            f"Found KV cache: {kv_cache_per_rank} per rank x {attention_dp_size} = {total_kv_cache} total"
-                        )
-                        return total_kv_cache
+                            # Log shows per-rank KV cache; multiply by attention_dp_size for total
+                            kv_cache_per_rank = int(token_count * concurrency)
+                            total_kv_cache = kv_cache_per_rank * attention_dp_size
+                            logger.info(
+                                f"Found KV cache: {kv_cache_per_rank} per rank x {attention_dp_size} = {total_kv_cache} total"
+                            )
+                            return total_kv_cache
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to parse KV cache size from line: {line}. Error: {e}"
+                            )
+        except FileNotFoundError:
+            logger.warning(f"Log file not found: {dynamo_log_fn}")
         except Exception as e:
-            logger.warning(
-                f"Failed to parse KV cache size from line: {line}. Error: {e}"
-            )
+            logger.warning(f"Failed to read log file {dynamo_log_fn}: {e}")
         return 0
 
     @classmethod

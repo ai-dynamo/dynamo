@@ -6,11 +6,14 @@
 //! This module provides [`RequestTracker`] for tracking timing and routing information
 //! that can be returned to clients via the `nvext` response field.
 
-use std::sync::{
-    Arc, OnceLock,
-    atomic::{AtomicU32, AtomicU64, Ordering},
-};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU32, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -127,6 +130,9 @@ pub struct RequestTracker {
     /// This prevents race conditions in the bootstrap optimization path where prefill
     /// runs in background and needs to complete record_worker before phase changes.
     phase_semaphore: Arc<Semaphore>,
+
+    /// How long it took to tokenize the input
+    tokenizer_latency: OnceLock<Duration>,
 }
 
 impl RequestTracker {
@@ -154,6 +160,7 @@ impl RequestTracker {
             decode_worker_type: OnceLock::new(),
             phase: Mutex::new(RequestPhase::Aggregated),
             phase_semaphore: Arc::new(Semaphore::new(1)),
+            tokenizer_latency: OnceLock::new(),
         }
     }
 
@@ -386,6 +393,14 @@ impl RequestTracker {
                 self.record_decode_worker_full(instance_id, dp_rank, worker_type);
             }
         }
+    }
+
+    pub fn record_tokenizer_latency(&self, l: Duration) {
+        let _ = self.tokenizer_latency.set(l);
+    }
+
+    pub fn tokenizer_latency(&self) -> Option<Duration> {
+        self.tokenizer_latency.get().copied()
     }
 
     /// Get worker ID information if any worker IDs have been recorded.

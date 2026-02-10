@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 from typing import Optional
 
 import uvloop
@@ -16,7 +17,10 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.prometheus import (
+    LLMBackendMetrics,
+    register_engine_metrics_callback,
+)
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     KvEventPublisher,
@@ -57,7 +61,7 @@ from .health_check import (
     VllmOmniHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
 )
-from .publisher import StatLoggerFactory
+from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -267,6 +271,17 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
     registries to ensure all metrics (vllm, lmcache, dynamo_component) are collected.
     """
     if config.engine_args.disable_log_stats is False:
+        # Register the dedicated dynamo_component registry callback
+        # IMPORTANT: We do NOT use MultiProcessCollector for DYNAMO_COMPONENT_REGISTRY
+        # because our gauges use in-memory values which work fine for single-process
+        # and multi-process (each process has its own gauge with dp_rank label).
+        # Using MultiProcessCollector would read from .db files which causes stale
+        # values to accumulate across test runs.
+        register_engine_metrics_callback(
+            endpoint=generate_endpoint,
+            registry=DYNAMO_COMPONENT_REGISTRY,
+        )
+
         if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
             try:
                 # MultiProcessCollector reads metrics from .db files in PROMETHEUS_MULTIPROC_DIR
@@ -276,7 +291,10 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["vllm:", "lmcache:"],
+                    metric_prefix_filters=[
+                        "vllm:",
+                        "lmcache:",
+                    ],
                 )
             except ValueError as e:
                 # Conflict: metrics already in REGISTRY, MultiProcessCollector tries to add same metrics from .db files
@@ -288,17 +306,20 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                 multiprocess.MultiProcessCollector(multiproc_registry)
 
                 # Register both registries to collect all metrics
-                # Global REGISTRY has in-memory metrics (vllm, dynamo_component)
+                # Global REGISTRY has in-memory metrics (vllm)
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["vllm:", "dynamo_component:"],
+                    metric_prefix_filters=["vllm:"],
                 )
                 # Multiproc registry has .db file metrics (lmcache, possibly vllm duplicates)
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=multiproc_registry,
-                    metric_prefix_filters=["vllm:", "lmcache:"],
+                    metric_prefix_filters=[
+                        "vllm:",
+                        "lmcache:",
+                    ],
                 )
         else:
             # No multiprocess mode
@@ -404,6 +425,19 @@ def setup_vllm_engine(config, stat_logger=None):
         f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
     )
 
+    # Construct Prometheus gauges AFTER setup_multiprocess_prometheus() so Gauge objects
+    # see the correct ValueClass (multiprocess vs in-memory).
+    component_gauges = LLMBackendMetrics(
+        registry=DYNAMO_COMPONENT_REGISTRY,
+        model_name=config.served_model_name or "",
+        component_name=config.component or "",
+    )
+
+    # If a StatLoggerFactory was provided, give it the gauges so the loggers
+    # it creates can publish Prometheus metrics.
+    if stat_logger is not None:
+        stat_logger.component_gauges = component_gauges
+
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -448,6 +482,8 @@ def setup_vllm_engine(config, stat_logger=None):
     if stat_logger:
         factory.append(stat_logger)
 
+    # Time engine initialization
+    start_time = time.time()
     engine_client = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
         usage_context=usage_context,
@@ -455,10 +491,20 @@ def setup_vllm_engine(config, stat_logger=None):
         enable_log_requests=engine_args.enable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
+    load_time = time.time() - start_time
+
+    # Record model load time
+    component_gauges.set_model_load_time(load_time)
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
-    return engine_client, vllm_config, default_sampling_params, prometheus_temp_dir
+    return (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        prometheus_temp_dir,
+        component_gauges,
+    )
 
 
 async def register_vllm_model(
@@ -557,6 +603,7 @@ async def init_prefill(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = pre_created_engine
     else:
         (
@@ -564,6 +611,7 @@ async def init_prefill(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
@@ -681,11 +729,7 @@ async def init(
     unload_lora_endpoint = component.endpoint("unload_lora")
     list_loras_endpoint = component.endpoint("list_loras")
 
-    factory = StatLoggerFactory(
-        component,
-        config.engine_args.data_parallel_rank or 0,
-        metrics_labels=[("model", config.served_model_name or config.model)],
-    )
+    model_name = config.served_model_name or config.model
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -694,13 +738,30 @@ async def init(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            component_gauges,
         ) = pre_created_engine
+        # Factory is created after unpack so component_gauges is available
+        factory = StatLoggerFactory(
+            component,
+            component_gauges=component_gauges,
+            dp_rank=config.engine_args.data_parallel_rank or 0,
+            metrics_labels=[("model", model_name)],
+        )
     else:
+        # Factory is created without component_gauges; setup_vllm_engine() will
+        # create the gauges after setup_multiprocess_prometheus() and set them
+        # on the factory before vLLM calls create_stat_logger().
+        factory = StatLoggerFactory(
+            component,
+            dp_rank=config.engine_args.data_parallel_rank or 0,
+            metrics_labels=[("model", model_name)],
+        )
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            component_gauges,
         ) = setup_vllm_engine(config, factory)
 
     # TODO Hack to get data, move this to registering in TBD
@@ -983,6 +1044,7 @@ async def init_vllm_native_encoder(
         vllm_config,
         default_sampling_params,
         prometheus_temp_dir,
+        _component_gauges,
     ) = setup_vllm_engine(config)
 
     # Initialize vLLM Native Encoder Worker Handler
@@ -1134,6 +1196,7 @@ async def init_multimodal_worker(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = pre_created_engine
     else:
         (
@@ -1141,6 +1204,7 @@ async def init_multimodal_worker(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = setup_vllm_engine(config)
 
     # Set up decode worker client for disaggregated mode
@@ -1215,18 +1279,12 @@ async def init_omni(
     component = runtime.namespace(config.namespace).component(config.component)
     generate_endpoint = component.endpoint(config.endpoint)
 
-    # Load default sampling params from model config (same as other workers)
-    default_sampling_params = (
-        config.engine_args.create_model_config().get_diff_sampling_param()
-    )
-    logger.info(f"Loaded default sampling params: {default_sampling_params}")
-
     # Initialize OmniHandler with Omni orchestrator
     handler = OmniHandler(
         runtime=runtime,
         component=component,
         config=config,
-        default_sampling_params=default_sampling_params,
+        default_sampling_params={},
         shutdown_event=shutdown_event,
     )
 
@@ -1241,11 +1299,9 @@ async def init_omni(
         return
 
     # TODO: extend for multi-stage pipelines
-    # Register as Chat endpoint for text-to-text generation
-    # Use Tokens input since we're doing token-based processing
     await register_llm(
-        ModelInput.Tokens,
-        ModelType.Chat,
+        ModelInput.Text,
+        ModelType.Images,
         generate_endpoint,
         config.model,
         config.served_model_name,
@@ -1254,7 +1310,6 @@ async def init_omni(
 
     logger.info("Starting to serve Omni worker endpoint...")
 
-    # Create health check payload (extracts BOS token from AsyncOmni)
     health_check_payload = (
         await VllmOmniHealthCheckPayload.create(handler.engine_client)
     ).to_dict()
