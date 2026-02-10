@@ -10,6 +10,10 @@ on:
         description: 'Framework name (vllm, sglang, trtllm)'
         required: true
         type: string
+      target:
+        description: 'Target stage for Docker rendering'
+        required: true
+        type: string
       platform:
         description: 'Platform to build (amd64 or arm64)'
         required: true
@@ -105,19 +109,23 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
+        with:
+          python-version: '3.12'
+          pip-install: jinja2 pyyaml
       - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
         id: extra-tags
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
-          PLATFORM: ${{ inputs.platform }}
+          PLATFORM: linux/${{ inputs.platform }}
         run: |
           if [ -n "$EXTRA_TAGS" ]; then
             RESULT=""
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-${PLATFORM}"$'\n'
+                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-${{ inputs.platform }}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
             echo "tags<<EOF" >> $GITHUB_OUTPUT
@@ -134,7 +142,6 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -146,7 +153,6 @@ jobs:
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
@@ -154,28 +160,37 @@ jobs:
           flavor: ${{ inputs.framework }}
           arch: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
-
       - name: Print Build Container inputs
         run: |
           echo "=== Build Container Inputs ==="
           echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
           echo "framework: ${{ inputs.framework }}"
           echo "target: runtime"
-          echo "platform: linux/${{ inputs.platform }}"
+          echo "platform: ${{ inputs.platform }}"
           echo "cuda_version: ${{ inputs.cuda_version }}"
           echo "no_cache: ${{ inputs.no_cache }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ inputs.push_image }}"
           echo "no_load: ${{ inputs.no_load }}"
-
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+          python ./container/render.py \
+              --target=${{ inputs.target }} \
+              --framework=${{ inputs.framework }} \
+              --platform=${{ inputs.platform }} \
+              --cuda-version=${{ inputs.cuda_version }} \
+              --show-result \
+              --short-output
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
           framework: ${{ inputs.framework }}
-          target: runtime
-          platform: linux/${{ inputs.platform }}
+          target: ${{ inputs.target }}
+          platform: ${{ inputs.platform }}
           cuda_version: ${{ inputs.cuda_version }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
