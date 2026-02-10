@@ -10,8 +10,12 @@ from typing import Any, AsyncGenerator, Dict
 
 from vllm import SamplingParams
 from vllm_omni.entrypoints import AsyncOmni
-from vllm_omni.inputs.data import OmniTextPrompt, OmniTokensPrompt
-from vllm_omni.diffusion.data import DiffusionParallelConfig
+from vllm_omni.inputs.data import OmniTokensPrompt
+
+try:
+    from vllm_omni.diffusion.data import DiffusionParallelConfig
+except ImportError:
+    DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
@@ -19,8 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class BaseOmniHandler(BaseWorkerHandler):
-    """Base handler for multi-stage pipelines using vLLM-Omni's AsyncOmni orchestrator.
-    """
+    """Base handler for multi-stage pipelines using vLLM-Omni's AsyncOmni orchestrator."""
 
     def __init__(
         self,
@@ -53,15 +56,15 @@ class BaseOmniHandler(BaseWorkerHandler):
 
         # TODO: Kv publishers not supported yet
         # TODO: Adopt to baseworker initialization pattern
+        self.runtime = runtime
+        self.component = component
         self.default_sampling_params = default_sampling_params
         self.config = config
         self.model_max_len = config.engine_args.max_model_len
         self.shutdown_event = shutdown_event
         self.use_vllm_tokenizer = config.use_vllm_tokenizer
 
-        logger.info(
-            f"{self.__class__.__name__} initialized successfully"
-        )
+        logger.info(f"{self.__class__.__name__} initialized successfully")
 
     def _build_omni_kwargs(self, config) -> Dict[str, Any]:
         """Build keyword arguments for AsyncOmni constructor.
@@ -95,7 +98,6 @@ class BaseOmniHandler(BaseWorkerHandler):
             "diffusion_cache_config",
             "enable_cache_dit_summary",
             "enable_cpu_offload",
-            "enforce_eager",
         ]
         for param in diffusion_params:
             if hasattr(config, param):
@@ -110,19 +112,18 @@ class BaseOmniHandler(BaseWorkerHandler):
                     omni_kwargs[kwarg_name] = value
 
         # Build DiffusionParallelConfig if parallel params are present
-        if hasattr(config, "ulysses_degree"):
-            try:
-                parallel_config = DiffusionParallelConfig(
-                    ulysses_degree=getattr(config, "ulysses_degree", 1),
-                    ring_degree=getattr(config, "ring_degree", 1),
-                    cfg_parallel_size=getattr(config, "cfg_parallel_size", 1),
-                )
-                omni_kwargs["parallel_config"] = parallel_config
-            except ImportError:
-                logger.warning(
-                    "DiffusionParallelConfig not available; "
-                    "skipping parallel config for AsyncOmni"
-                )
+        if DiffusionParallelConfig is not None and hasattr(config, "ulysses_degree"):
+            parallel_config = DiffusionParallelConfig(
+                ulysses_degree=getattr(config, "ulysses_degree", 1),
+                ring_degree=getattr(config, "ring_degree", 1),
+                cfg_parallel_size=getattr(config, "cfg_parallel_size", 1),
+            )
+            omni_kwargs["parallel_config"] = parallel_config
+        elif DiffusionParallelConfig is None:
+            logger.warning(
+                "DiffusionParallelConfig not available; "
+                "skipping parallel config for AsyncOmni"
+            )
 
         return omni_kwargs
 
@@ -144,7 +145,9 @@ class BaseOmniHandler(BaseWorkerHandler):
             async for chunk in self._generate_token_mode(request, context, request_id):
                 yield chunk
 
-    async def _generate_openai_mode(self, request, context, request_id) -> AsyncGenerator[Dict, None]:
+    async def _generate_openai_mode(
+        self, request, context, request_id
+    ) -> AsyncGenerator[Dict, None]:
         """Generate OpenAI-compatible streaming chunks.
 
         Subclasses should override this to handle their specific output types.
@@ -219,7 +222,7 @@ class BaseOmniHandler(BaseWorkerHandler):
         output = request_output.outputs[0]
 
         # Calculate delta text (new text since last chunk)
-        delta_text = output.text[len(previous_text):]
+        delta_text = output.text[len(previous_text) :]
 
         chunk = {
             "id": request_id,
@@ -252,10 +255,10 @@ class BaseOmniHandler(BaseWorkerHandler):
         Looks for the last user message and returns its text content.
         """
         messages = request.get("messages", [])
-        for message in messages:
+        for message in reversed(messages):
             if message.get("role") == "user":
                 return message.get("content")
-        return ""
+        return None
 
     def _extract_extra_body(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Extract extra_body parameters from the request.
