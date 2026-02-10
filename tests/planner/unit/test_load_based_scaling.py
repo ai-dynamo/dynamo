@@ -108,7 +108,7 @@ class TestDirectRouterMetricsClient:
             'dynamo_frontend_worker_last_input_sequence_tokens{dynamo_namespace="test-ns",model="TestModel",worker_type="prefill",worker_id="w1"} 3000\n'
             'dynamo_frontend_worker_last_inter_token_latency_seconds{dynamo_namespace="test-ns",model="TestModel",worker_type="decode",worker_id="w2"} 0.04\n'
         )
-        result = client._parse_prometheus_text(text, "TestModel")
+        result = client._parse_prometheus_text(text)
         assert "prefill" in result
         assert "w1" in result["prefill"]
         assert result["prefill"]["w1"]["active_prefill_tokens"] == 1234.0
@@ -119,16 +119,11 @@ class TestDirectRouterMetricsClient:
         assert result["decode"]["w2"]["active_decode_blocks"] == 56.0
         assert abs(result["decode"]["w2"]["last_itl"] - 0.04) < 1e-6
 
-    def test_parse_filters_by_namespace(self):
-        client = DirectRouterMetricsClient("http://localhost:8000/metrics", "my-ns")
-        text = 'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="other-ns",model="M",worker_type="prefill",worker_id="w1"} 100\n'
-        result = client._parse_prometheus_text(text, "M")
-        assert len(result) == 0
-
-    def test_parse_case_insensitive_model(self):
+    def test_parse_ignores_extra_labels(self):
+        """Parser extracts metrics regardless of extra labels like dynamo_namespace/model."""
         client = DirectRouterMetricsClient("http://localhost:8000/metrics", "ns")
-        text = 'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="mymodel",worker_type="prefill",worker_id="w1"} 100\n'
-        result = client._parse_prometheus_text(text, "MyModel")
+        text = 'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="any-ns",model="mymodel",worker_type="prefill",worker_id="w1"} 100\n'
+        result = client._parse_prometheus_text(text)
         assert "prefill" in result
         assert "w1" in result["prefill"]
         assert result["prefill"]["w1"]["active_prefill_tokens"] == 100.0
@@ -181,7 +176,7 @@ class TestDirectRouterMetricsClient:
             'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="M",worker_type="prefill",worker_id="w1"} 100\n'
             'dynamo_frontend_worker_active_prefill_tokens{dynamo_namespace="ns",model="M",worker_type="prefill",worker_id="w2"} 200\n'
         )
-        result = client._parse_prometheus_text(text, "M")
+        result = client._parse_prometheus_text(text)
         assert len(result.get("prefill", {})) == 2
         assert result["prefill"]["w1"]["active_prefill_tokens"] == 100.0
         assert result["prefill"]["w2"]["active_prefill_tokens"] == 200.0
@@ -200,7 +195,7 @@ class TestDirectRouterMetricsClient:
             'dynamo_frontend_worker_last_input_sequence_tokens{worker_id="123",dp_rank="0",worker_type="prefill"} 2000\n'
             'dynamo_frontend_worker_last_inter_token_latency_seconds{worker_id="456",dp_rank="0",worker_type="decode"} 0.03\n'
         )
-        result = client._parse_prometheus_text(text, "any-model")
+        result = client._parse_prometheus_text(text)
 
         # Prefill worker 123 grouped under "prefill"
         assert "prefill" in result

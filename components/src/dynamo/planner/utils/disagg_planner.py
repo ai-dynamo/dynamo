@@ -105,7 +105,6 @@ class DisaggPlanner:
             loops.append(self._loadbased_loop())
             loops.append(
                 self.prefill_planner.router_metrics_client.run_sampling_loop(
-                    self.prefill_planner.model_name,
                     self.args.loadbased_metric_samples,
                     self.args.loadbased_adjustment_interval,
                 )
@@ -174,80 +173,71 @@ class DisaggPlanner:
     async def _loadbased_loop(self) -> None:
         """Load-based scaling loop for disagg mode at shorter interval."""
         while True:
-            current_time = time.time()
+            await asyncio.sleep(self.args.loadbased_adjustment_interval)
+            logger.info("New load-based adjustment interval started!")
 
-            if (
-                current_time - self.shared_state.last_loadbased_adjustment_time
-                >= self.args.loadbased_adjustment_interval
-            ):
-                logger.info("New load-based adjustment interval started!")
+            # Query DGD for fresh worker counts
+            num_p, num_d, _ = await self.prefill_planner.get_workers_info(
+                require_prefill=True, require_decode=True
+            )
+            self.shared_state.num_p_workers = num_p
+            self.shared_state.num_d_workers = num_d
 
-                # Query DGD for fresh worker counts
-                num_p, num_d, _ = await self.prefill_planner.get_workers_info(
-                    require_prefill=True, require_decode=True
+            # Observe per-worker metrics from router
+            await self.prefill_planner.observe_engine_load_stats()
+            await self.decode_planner.observe_engine_load_stats()
+
+            # Reconcile DGD worker counts with router Prometheus counts
+            p_prom_count = len(self.prefill_planner.cached_load_metrics.recent)
+            d_prom_count = len(self.decode_planner.cached_load_metrics.recent)
+            if p_prom_count != num_p or d_prom_count != num_d:
+                logger.warning(
+                    f"Worker count mismatch: DGD reports P={num_p}, D={num_d}; "
+                    f"router metrics reports P={p_prom_count}, D={d_prom_count}. "
+                    "Skipping load-based scaling adjustment."
                 )
-                self.shared_state.num_p_workers = num_p
-                self.shared_state.num_d_workers = num_d
+                continue
 
-                # Observe per-worker metrics from router
-                await self.prefill_planner.observe_engine_load_stats()
-                await self.decode_planner.observe_engine_load_stats()
+            # Scale prefill and decode independently
+            p_desired = self.prefill_planner.loadbased_plan_adjustment()
+            d_desired = self.decode_planner.loadbased_plan_adjustment()
 
-                # Reconcile DGD worker counts with router Prometheus counts
-                p_prom_count = len(self.prefill_planner.cached_load_metrics.recent)
-                d_prom_count = len(self.decode_planner.cached_load_metrics.recent)
-                if p_prom_count != num_p or d_prom_count != num_d:
-                    logger.warning(
-                        f"Worker count mismatch: DGD reports P={num_p}, D={num_d}; "
-                        f"router metrics reports P={p_prom_count}, D={d_prom_count}. "
-                        "Skipping load-based scaling adjustment."
-                    )
-                    await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
-                    continue
+            final_p = p_desired if p_desired is not None else self.shared_state.num_p_workers
+            final_d = d_desired if d_desired is not None else self.shared_state.num_d_workers
 
-                # Scale prefill and decode independently
-                p_desired = self.prefill_planner.loadbased_plan_adjustment()
-                d_desired = self.decode_planner.loadbased_plan_adjustment()
+            if final_p == self.shared_state.num_p_workers and final_d == self.shared_state.num_d_workers:
+                logger.info("Load-based scaling: no scaling needed")
+                continue
 
-                final_p = p_desired if p_desired is not None else self.shared_state.num_p_workers
-                final_d = d_desired if d_desired is not None else self.shared_state.num_d_workers
+            # Enforce lower bounds from throughput-based
+            if self.enable_throughput:
+                final_p = max(final_p, self.shared_state.throughput_lower_bound_p)
+                final_d = max(final_d, self.shared_state.throughput_lower_bound_d)
 
-                if final_p == self.shared_state.num_p_workers and final_d == self.shared_state.num_d_workers:
-                    logger.info("Load-based scaling: no scaling needed, skipping")
-                    continue
+            # Apply GPU budget
+            final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.args)
 
-                # Enforce lower bounds from throughput-based
-                if self.enable_throughput:
-                    final_p = max(final_p, self.shared_state.throughput_lower_bound_p)
-                    final_d = max(final_d, self.shared_state.throughput_lower_bound_d)
+            logger.info(
+                f"Load-based disagg scaling: prefill {self.shared_state.num_p_workers}->{final_p}, "
+                f"decode {self.shared_state.num_d_workers}->{final_d}"
+            )
 
-                # Apply GPU budget
-                final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.args)
+            self.prefill_planner.update_predicted_replicas_metric(final_p)
+            self.decode_planner.update_predicted_replicas_metric(final_d)
 
-                logger.info(
-                    f"Load-based disagg scaling: prefill {self.shared_state.num_p_workers}->{final_p}, "
-                    f"decode {self.shared_state.num_d_workers}->{final_d}"
+            if not self.args.no_operation:
+                target_replicas = [
+                    TargetReplica(
+                        sub_component_type=SubComponentType.PREFILL,
+                        component_name=self.prefill_planner.prefill_component_name,
+                        desired_replicas=final_p,
+                    ),
+                    TargetReplica(
+                        sub_component_type=SubComponentType.DECODE,
+                        component_name=self.prefill_planner.decode_component_name,
+                        desired_replicas=final_d,
+                    ),
+                ]
+                await self.prefill_planner.connector.set_component_replicas(
+                    target_replicas, blocking=True
                 )
-
-                self.prefill_planner.update_predicted_replicas_metric(final_p)
-                self.decode_planner.update_predicted_replicas_metric(final_d)
-
-                if not self.args.no_operation:
-                    target_replicas = [
-                        TargetReplica(
-                            sub_component_type=SubComponentType.PREFILL,
-                            component_name=self.prefill_planner.prefill_component_name,
-                            desired_replicas=final_p,
-                        ),
-                        TargetReplica(
-                            sub_component_type=SubComponentType.DECODE,
-                            component_name=self.prefill_planner.decode_component_name,
-                            desired_replicas=final_d,
-                        ),
-                    ]
-                    await self.prefill_planner.connector.set_component_replicas(
-                        target_replicas, blocking=True
-                    )
-                self.shared_state.last_loadbased_adjustment_time = time.time()
-
-            await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)

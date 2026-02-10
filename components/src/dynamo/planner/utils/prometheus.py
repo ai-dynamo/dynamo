@@ -253,7 +253,7 @@ class DirectRouterMetricsClient:
         self._num_samples: int = 10
 
     def _parse_prometheus_text(
-        self, text: str, model_name: str
+        self, text: str
     ) -> dict[str, dict[str, dict[str, float]]]:
         """Parse Prometheus text exposition format and extract per-worker metrics.
 
@@ -263,7 +263,6 @@ class DirectRouterMetricsClient:
 
         Args:
             text: Raw Prometheus text from /metrics endpoint
-            model_name: Model name for filtering (case-insensitive)
 
         Returns:
             {"prefill": {worker_id: {metric: float, ...}},
@@ -281,17 +280,6 @@ class DirectRouterMetricsClient:
 
             for sample in family.samples:
                 labels = sample.labels
-
-                # Filter by dynamo_namespace and model if present in labels.
-                # Per-worker gauge metrics (from KV router) may not carry these
-                # labels — they only have worker_id/dp_rank/worker_type.
-                ns_label = labels.get("dynamo_namespace")
-                if ns_label is not None and ns_label != self.dynamo_namespace:
-                    continue
-                model_label = labels.get("model")
-                if model_label is not None and model_label.lower() != model_name.lower():
-                    continue
-
                 worker_type = labels.get("worker_type", "unknown")
                 worker_id = labels.get("worker_id", "unknown")
                 value = sample.value
@@ -304,9 +292,7 @@ class DirectRouterMetricsClient:
 
         return result
 
-    async def _fetch_and_parse(
-        self, model_name: str
-    ) -> dict[str, dict[str, dict[str, float]]]:
+    async def _fetch_and_parse(self) -> dict[str, dict[str, dict[str, float]]]:
         """Fetch /metrics from router and parse into per-worker metrics."""
         try:
             async with aiohttp.ClientSession() as session:
@@ -314,13 +300,13 @@ class DirectRouterMetricsClient:
                     self.router_metrics_url, timeout=aiohttp.ClientTimeout(total=2)
                 ) as response:
                     text = await response.text()
-            return self._parse_prometheus_text(text, model_name)
+            return self._parse_prometheus_text(text)
         except Exception as e:
             logger.warning(f"Failed to fetch router metrics: {e}")
             return {}
 
     async def run_sampling_loop(
-        self, model_name: str, num_samples: int, interval: float
+        self, num_samples: int, interval: float
     ) -> None:
         """Background coroutine: continuously sample at evenly-spaced intervals.
 
@@ -331,7 +317,7 @@ class DirectRouterMetricsClient:
         self._num_samples = num_samples
         sample_interval = interval / num_samples
         while True:
-            metrics = await self._fetch_and_parse(model_name)
+            metrics = await self._fetch_and_parse()
             if metrics:
                 self._sample_buffer.append(metrics)
                 if len(self._sample_buffer) > num_samples:

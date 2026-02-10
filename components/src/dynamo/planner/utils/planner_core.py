@@ -835,54 +835,45 @@ class BasePlanner:
     ) -> None:
         """Load-based scaling loop at shorter interval."""
         while True:
-            current_time = time.time()
+            await asyncio.sleep(self.args.loadbased_adjustment_interval)
+            logger.info("New load-based adjustment interval started!")
 
-            if (
-                current_time - self.shared_state.last_loadbased_adjustment_time
-                >= self.args.loadbased_adjustment_interval
-            ):
-                logger.info("New load-based adjustment interval started!")
+            # Query DGD for fresh worker counts
+            num_p, num_d, _ = await self.get_workers_info(
+                require_prefill=require_prefill, require_decode=require_decode
+            )
+            self.shared_state.num_p_workers = num_p
+            self.shared_state.num_d_workers = num_d
 
-                # Query DGD for fresh worker counts
-                num_p, num_d, _ = await self.get_workers_info(
-                    require_prefill=require_prefill, require_decode=require_decode
+            # Observe per-worker metrics from router
+            await self.observe_engine_load_stats()
+
+            # Reconcile DGD worker count with router Prometheus count
+            prom_count = len(self.cached_load_metrics.recent)
+            dgd_count = (
+                num_p if self.component_type == SubComponentType.PREFILL else num_d
+            )
+            if prom_count != dgd_count:
+                logger.warning(
+                    f"Worker count mismatch: DGD reports {dgd_count} workers, "
+                    f"router metrics reports {prom_count} workers. "
+                    "Skipping load-based scaling adjustment."
                 )
-                self.shared_state.num_p_workers = num_p
-                self.shared_state.num_d_workers = num_d
+                continue
 
-                # Observe per-worker metrics from router
-                await self.observe_engine_load_stats()
+            desired_replicas = self.loadbased_plan_adjustment()
 
-                # Reconcile DGD worker count with router Prometheus count
-                prom_count = len(self.cached_load_metrics.recent)
-                dgd_count = (
-                    num_p if self.component_type == SubComponentType.PREFILL else num_d
-                )
-                if prom_count != dgd_count:
-                    logger.warning(
-                        f"Worker count mismatch: DGD reports {dgd_count} workers, "
-                        f"router metrics reports {prom_count} workers. "
-                        "Skipping load-based scaling adjustment."
-                    )
-                    continue
-
-                desired_replicas = self.loadbased_plan_adjustment()
-
-                if desired_replicas is not None:
-                    # Enforce lower bound from throughput-based
-                    if self.enable_throughput:
-                        if self.component_type == SubComponentType.PREFILL:
-                            lower_bound = self.shared_state.throughput_lower_bound_p
-                        else:
-                            lower_bound = self.shared_state.throughput_lower_bound_d
-                        desired_replicas = max(desired_replicas, lower_bound)
-                    desired_replicas = self.apply_component_budget(desired_replicas)
-                    self.update_predicted_replicas_metric(desired_replicas)
-                    await self._apply_scaling_blocking(desired_replicas)
-
-                self.shared_state.last_loadbased_adjustment_time = time.time()
-
-            await asyncio.sleep(self.args.loadbased_adjustment_interval / 10)
+            if desired_replicas is not None:
+                # Enforce lower bound from throughput-based
+                if self.enable_throughput:
+                    if self.component_type == SubComponentType.PREFILL:
+                        lower_bound = self.shared_state.throughput_lower_bound_p
+                    else:
+                        lower_bound = self.shared_state.throughput_lower_bound_d
+                    desired_replicas = max(desired_replicas, lower_bound)
+                desired_replicas = self.apply_component_budget(desired_replicas)
+                self.update_predicted_replicas_metric(desired_replicas)
+                await self._apply_scaling_blocking(desired_replicas)
 
     async def run(self):
         """Main loop for the planner"""
@@ -931,7 +922,6 @@ class BasePlanner:
             loops.append(self._loadbased_loop(require_prefill, require_decode))
             loops.append(
                 self.router_metrics_client.run_sampling_loop(
-                    self.model_name,
                     self.args.loadbased_metric_samples,
                     self.args.loadbased_adjustment_interval,
                 )
