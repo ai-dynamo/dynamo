@@ -20,10 +20,7 @@ import os
 
 from pydantic import BaseModel
 
-from dynamo.global_planner.argparse_config import (
-    create_global_planner_parser,
-    validate_args,
-)
+from dynamo.global_planner.argparse_config import create_global_planner_parser
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -52,9 +49,6 @@ async def main(runtime: DistributedRuntime, args):
         runtime: Dynamo runtime instance
         args: Parsed command-line arguments
     """
-    # Validate arguments
-    validate_args(args)
-
     # Get Dynamo namespace from environment variable
     namespace = os.environ.get("DYN_NAMESPACE")
     if not namespace:

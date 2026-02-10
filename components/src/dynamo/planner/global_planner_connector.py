@@ -108,8 +108,18 @@ class GlobalPlannerConnector(PlannerConnector):
             )
 
         # Get DGD info from environment variables
-        graph_deployment_name = os.environ.get("DYN_PARENT_DGD_K8S_NAME", "unknown")
-        k8s_namespace = os.environ.get("POD_NAMESPACE", "default")
+        graph_deployment_name = os.environ.get("DYN_PARENT_DGD_K8S_NAME")
+        if not graph_deployment_name:
+            raise ValueError(
+                "DYN_PARENT_DGD_K8S_NAME environment variable is required but not set. "
+                "Please set DYN_PARENT_DGD_K8S_NAME to specify the parent DGD name."
+            )
+        k8s_namespace = os.environ.get("POD_NAMESPACE")
+        if not k8s_namespace:
+            raise ValueError(
+                "POD_NAMESPACE environment variable is required but not set. "
+                "Please set POD_NAMESPACE to specify the Kubernetes namespace."
+            )
 
         # Create scale request
         request = ScaleRequest(

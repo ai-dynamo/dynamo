@@ -46,19 +46,3 @@ Examples:
     )
 
     return parser
-
-
-def validate_args(args):
-    """Validate GlobalPlanner arguments.
-
-    Args:
-        args: Parsed arguments from argparse
-
-    Raises:
-        ValueError: If arguments are invalid
-    """
-    # managed_namespaces is optional - if not specified, accept all
-    if args.managed_namespaces and len(args.managed_namespaces) == 0:
-        raise ValueError(
-            "--managed-namespaces must have at least one namespace if specified"
-        )
