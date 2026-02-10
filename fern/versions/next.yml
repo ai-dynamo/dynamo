@@ -78,11 +78,11 @@ navigation:
     contents:
       - page: KV Cache Aware Routing
         path: ../pages/components/router/router-guide.md
-      - page: Disaggregated Serving Guide
+      - page: Disaggregated Serving
         path: ../pages/features/disaggregated-serving/README.md
       - page: KV Cache Offloading
         path: ../pages/components/kvbm/kvbm-guide.md
-      - page: Dynamo Benchmarking Guide
+      - page: Dynamo Benchmarking
         path: ../pages/benchmarks/benchmarking.md
       - section: Multimodality Support
         path: ../pages/features/multimodal/README.md

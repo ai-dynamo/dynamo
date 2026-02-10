@@ -222,8 +222,20 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             .and_then(|choice| choice.message.content)
             .unwrap_or_else(|| {
                 tracing::warn!("No choices in chat completion response, using empty content");
-                String::new()
+                dynamo_async_openai::types::ChatCompletionMessageContent::Text(String::new())
             });
+
+        // Extract text from content (only handle text for responses API)
+        let text_content = match content_text {
+            dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => text,
+            dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => {
+                tracing::warn!(
+                    "Multimodal content in responses API not yet supported, using placeholder"
+                );
+                "[multimodal content]".to_string()
+            }
+        };
+
         let message_id = format!("msg_{}", Uuid::new_v4().simple());
         let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
@@ -232,7 +244,7 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             role: ResponseRole::Assistant,
             status: OutputStatus::Completed,
             content: vec![Content::OutputText(OutputText {
-                text: content_text,
+                text: text_content,
                 annotations: vec![],
             })],
         })];
@@ -363,7 +375,11 @@ mod tests {
             choices: vec![dynamo_async_openai::types::ChatChoice {
                 index: 0,
                 message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                    content: Some("This is a reply".into()),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "This is a reply".to_string(),
+                        ),
+                    ),
                     refusal: None,
                     tool_calls: None,
                     role: dynamo_async_openai::types::Role::Assistant,

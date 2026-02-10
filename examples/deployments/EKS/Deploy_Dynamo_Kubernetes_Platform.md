@@ -17,7 +17,8 @@ export DOCKER_SERVER=<ECR_REGISTRY>
 export DOCKER_USERNAME=AWS
 export DOCKER_PASSWORD="$(aws ecr get-login-password --region <ECR_REGION>)"
 export IMAGE_TAG=0.3.2.1
-./container/build.sh
+python container/render.py --framework=dynamo --target=runtime --short-output
+docker build -t dynamo:latest-vllm -f container/rendered.Dockerfile .
 ```
 
 Push Image

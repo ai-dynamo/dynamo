@@ -26,6 +26,7 @@ from benchmarks.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
     get_prefill_ttft,
 )
+from benchmarks.profiler.utils.config import Config, get_service_name_by_type
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
@@ -63,7 +64,7 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
+from dynamo.planner.defaults import SubComponentType
 
 
 @dataclass
@@ -243,7 +244,8 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling prefill with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, EngineType.PREFILL
+                num_gpus,
+                args.model_info,
             )
 
             for mapping in candidate_mappings:
@@ -296,9 +298,23 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(prefill_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready(
-                        timeout=getattr(args, "deployment_timeout", 1800)
-                    )
+                    try:
+                        await client.wait_for_deployment_ready(
+                            timeout=getattr(args, "deployment_timeout", 1800)
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            f"Deployment for mapping {mapping.label()} with {num_gpus} GPUs "
+                            f"failed to become ready within timeout during prefill profiling, skipping"
+                        )
+                        add_profiling_error(
+                            f"Mapping {mapping.label()} with {num_gpus} GPUs timed out "
+                            f"during prefill profiling"
+                        )
+                        logger.info("Cleaning up timed-out deployment...")
+                        await client.delete_deployment()
+                        deployment_clients.remove(client)
+                        continue
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -350,7 +366,8 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling decode with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, EngineType.DECODE
+                num_gpus,
+                args.model_info,
             )
 
             for mapping in candidate_mappings:
@@ -401,9 +418,23 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(decode_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready(
-                        timeout=getattr(args, "deployment_timeout", 1800)
-                    )
+                    try:
+                        await client.wait_for_deployment_ready(
+                            timeout=getattr(args, "deployment_timeout", 1800)
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            f"Deployment for mapping {mapping.label()} with {num_gpus} GPUs "
+                            f"failed to become ready within timeout during decode profiling, skipping"
+                        )
+                        add_profiling_error(
+                            f"Mapping {mapping.label()} with {num_gpus} GPUs timed out "
+                            f"during decode profiling"
+                        )
+                        logger.info("Cleaning up timed-out deployment...")
+                        await client.delete_deployment()
+                        deployment_clients.remove(client)
+                        continue
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -415,8 +446,13 @@ async def run_profile(args):
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
                     attention_dp_size = mapping.get_attn_dp_size()
+                    # Get the actual decode service name from the config
+                    decode_cfg = Config.model_validate(decode_config)
+                    decode_service_name = get_service_name_by_type(
+                        decode_cfg, args.backend, SubComponentType.DECODE
+                    ).lower()
                     max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                        f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
+                        f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
                         attention_dp_size=attention_dp_size,
                     )
                     max_concurrency = max_kv_tokens // (args.isl + args.osl)
@@ -732,8 +768,13 @@ async def run_profile(args):
             )
 
             attention_dp_size = best_decode_mapping.get_attn_dp_size()
+            # Get the actual decode service name from the config
+            decode_cfg = Config.model_validate(decode_config)
+            decode_service_name = get_service_name_by_type(
+                decode_cfg, args.backend, SubComponentType.DECODE
+            ).lower()
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
+                f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
                 attention_dp_size=attention_dp_size,
             )
 

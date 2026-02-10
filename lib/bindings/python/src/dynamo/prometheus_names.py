@@ -57,6 +57,8 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
+    # Tokenizer latency in milliseconds
+    TOKENIZER_LATENCY_MS = "tokenizer_latency_ms"
     # Total number of output tokens generated (counter that updates in real-time)
     OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
@@ -98,6 +100,8 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
+    # Label name for tokenizer operation
+    OPERATION_LABEL = "operation"
 
 
 class kvbm:
@@ -140,6 +144,13 @@ class kvrouter:
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
 
 
+class kvstats:
+    # Total number of KV cache blocks available on the worker
+    TOTAL_BLOCKS = "total_blocks"
+    # GPU cache usage as a percentage (0.0-1.0)
+    GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
+
+
 class labels:
     """Automatically inserted Prometheus label names used across the metrics system"""
 
@@ -149,6 +160,19 @@ class labels:
     NAMESPACE = "dynamo_namespace"
     # Label for endpoint identification
     ENDPOINT = "dynamo_endpoint"
+    # Label for worker data-parallel rank.
+    # Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
+    # It is used by worker/load-style metrics that need to disambiguate per-worker series.
+    DP_RANK = "dp_rank"
+    # Label for model name
+    MODEL = "model"
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    WORKER_TYPE = "worker_type"
+
+
+class model_info:
+    # Model load time in seconds
+    LOAD_TIME_SECONDS = "model_load_time_seconds"
 
 
 class name_prefix:
