@@ -1,6 +1,6 @@
 # KV Router Index Data Structures
 
-This document explains the two KV cache index implementations: `RadixTree` and `NestedMap`.
+This document explains the KV cache index implementations: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` (NestedMap).
 
 ## Motivation: The Four Block Identifiers
 
@@ -148,46 +148,54 @@ Where W = number of workers.
 
 ---
 
-## NestedMap: Position-First HashMap Index
+## PositionalIndexer (NestedMap): Position-First HashMap Index
 
 ### Structure
 
 ```
-NestedMap
-├── index: HashMap<Position, HashMap<LocalHash, SeqEntry>>
-├── worker_blocks: HashMap<Worker, HashMap<SeqHash, (Position, LocalHash)>>
-└── jump_size: u64
+PositionalIndexer
+├── index: DashMap<(Position, LocalHash), SeqEntry>
+├── worker_blocks: DashMap<Worker, RwLock<HashMap<SeqHash, (Position, LocalHash)>>>
+└── jump_size: usize
 
 SeqEntry (enum for memory optimization)
 ├── Single(SeqHash, HashSet<Worker>)  // Common case: one seq_hash
 └── Multi(HashMap<SeqHash, HashSet<Worker>>)  // Rare: multiple prefixes
 ```
 
+`PositionalIndexer` implements `SyncIndexer` and is thread-safe via `DashMap` (sharded
+concurrent map) and `RwLock`. It is designed to be wrapped in a `ThreadPoolIndexer` which
+routes write events to dedicated OS threads and executes reads inline.
+
+The `index` uses a flat compound key `(position, local_hash)` in a `DashMap`, which
+distributes lock contention across shards while enabling O(1) random-position access for
+the jump optimization. The `worker_blocks` reverse lookup uses `DashMap` for the outer
+per-worker map and `RwLock<HashMap>` for each worker's block set, since writes to a
+given worker are serialized by sticky routing in `ThreadPoolIndexer`.
+
 ### Visual Representation
 
 ```
-index:
-┌─────────┬─────────────────────────────────────────────────┐
-│ pos=0   │ local=0xA → Single(seq=0x1111, {W0,W1})        │
-│         │ local=0xB → Single(seq=0x2222, {W2})           │
-├─────────┼─────────────────────────────────────────────────┤
-│ pos=1   │ local=0xC → Single(seq=0x3333, {W0,W1})        │
-├─────────┼─────────────────────────────────────────────────┤
-│ pos=2   │ local=0xD → Multi{                             │
-│         │               seq=0x4444 → {W0},               │
-│         │               seq=0x5555 → {W1}   ← diverged   │
-│         │             }                                   │
-└─────────┴─────────────────────────────────────────────────┘
+index (DashMap with compound keys):
+┌──────────────────────┬──────────────────────────────────────┐
+│ (pos=0, local=0xA)   │ Single(seq=0x1111, {W0,W1})          │
+│ (pos=0, local=0xB)   │ Single(seq=0x2222, {W2})             │
+│ (pos=1, local=0xC)   │ Single(seq=0x3333, {W0,W1})          │
+│ (pos=2, local=0xD)   │ Multi{                               │
+│                      │    seq=0x4444 → {W0},                │
+│                      │    seq=0x5555 → {W1}   ← diverged    │
+│                      │  }                                   │
+└──────────────────────┴──────────────────────────────────────┘
 
-worker_blocks:
+worker_blocks (DashMap<Worker, RwLock<HashMap>>):
 ┌─────────┬─────────────────────────────────────────────────┐
-│ W0      │ seq=0x1111 → (pos=0, local=0xA)                │
-│         │ seq=0x3333 → (pos=1, local=0xC)                │
-│         │ seq=0x4444 → (pos=2, local=0xD)                │
+│ W0      │ seq=0x1111 → (pos=0, local=0xA)                 │
+│         │ seq=0x3333 → (pos=1, local=0xC)                 │
+│         │ seq=0x4444 → (pos=2, local=0xD)                 │
 ├─────────┼─────────────────────────────────────────────────┤
-│ W1      │ seq=0x1111 → (pos=0, local=0xA)                │
-│         │ seq=0x3333 → (pos=1, local=0xC)                │
-│         │ seq=0x5555 → (pos=2, local=0xD)                │
+│ W1      │ seq=0x1111 → (pos=0, local=0xA)                 │
+│         │ seq=0x3333 → (pos=1, local=0xC)                 │
+│         │ seq=0x5555 → (pos=2, local=0xD)                 │
 └─────────┴─────────────────────────────────────────────────┘
 ```
 
@@ -196,19 +204,19 @@ worker_blocks:
 **store_blocks(worker, parent_hash, blocks)**:
 1. Find starting position: `pos = worker_blocks[worker][parent_hash].position + 1`
 2. For each block at position `i`:
-   - Insert into `index[pos+i][local_hash]` → add worker to SeqEntry
+   - Insert into `index[(pos+i, local_hash)]` → add worker to SeqEntry
    - Insert into `worker_blocks[worker][seq_hash] = (pos+i, local_hash)`
 
 **remove_blocks(worker, block_hashes)**:
 1. For each hash, lookup `(pos, local_hash) = worker_blocks[worker][hash]`
-2. Remove worker from `index[pos][local_hash]`
+2. Remove worker from `index[(pos, local_hash)]`
 3. Remove from `worker_blocks[worker]`
-4. Cleanup empty nested maps
+4. Cleanup empty SeqEntry entries from the DashMap
 
 **find_matches(local_hashes, early_exit)** with Jump Optimization:
 1. Start at position 0, initialize candidates from first block
 2. **Jump**: Skip ahead by `jump_size` positions (e.g., 32)
-3. At each jump point, check if candidates still match
+3. At each jump point, check if candidates still match (count-only, no clone)
 4. If workers dropped, **scan back** to find exact drain points
 5. Continue until sequence exhausted or one worker remains
 
@@ -228,6 +236,14 @@ Query: [b0, b1, b2, ..., b63, b64, ..., b127, ...]
 - Skip seq_hash computation entirely in this case
 - Only compute when disambiguation needed (SeqEntry::Multi)
 
+**dump_events()**:
+1. Iterate `worker_blocks`, collecting all blocks per worker
+2. Sort each worker's blocks by position (parents before children)
+3. Emit one single-block `RouterEvent::Stored` per block, synthesizing
+   `parent_hash` from any seq_hash at the prior position
+4. Events can be replayed into a fresh `PositionalIndexer` to reconstruct
+   the same index state
+
 ### Complexity
 
 | Operation | Time | Space |
@@ -242,13 +258,15 @@ Where J = jump_size, W = number of workers. The jump optimization reduces D iter
 
 ## Comparison
 
-| Aspect | RadixTree | NestedMap |
-|--------|-----------|-----------|
-| **Structure** | Tree with Rc<RefCell<>> nodes | Nested HashMaps |
+| Aspect | RadixTree | PositionalIndexer |
+|--------|-----------|-------------------|
+| **Structure** | Tree with Rc<RefCell<>> nodes | DashMap with compound keys |
+| **Concurrent variant** | ConcurrentRadixTree (Arc<RwLock<>> + DashMap) | Thread-safe by default (DashMap + RwLock) |
 | **find_matches** | O(D×W) tree traversal | O(D/J) with jump optimization |
-| **store_blocks** | O(N) node creation | O(N) HashMap inserts |
-| **remove_blocks** | O(N) with cascading cleanup | O(N) with map cleanup |
-| **Memory** | Higher (Rc overhead per node) | Lower (flat entries) |
+| **store_blocks** | O(N) node creation | O(N) DashMap inserts |
+| **remove_blocks** | O(N) with cascading cleanup | O(N) with entry cleanup |
+| **dump_events** | BFS traversal of tree | Sort by position per worker |
+| **Memory** | Higher (Rc/Arc overhead per node) | Lower (flat entries) |
 | **Cache locality** | Poor (pointer chasing) | Better (position-first) |
 
 ### Benchmark Results (1M blocks, depth 1024, 128 workers)
@@ -264,9 +282,9 @@ Where J = jump_size, W = number of workers. The jump optimization reduces D iter
 
 ---
 
-## Why Position Matters for NestedMap
+## Why Position Matters for PositionalIndexer
 
-Position-first nesting enables the jump optimization:
+The compound key `(position, local_hash)` in the DashMap enables the jump optimization:
 
 ```rust
 // Without position-first: must traverse entire tree
@@ -275,8 +293,8 @@ for pos in 0..depth {
 }
 
 // With position-first: can jump directly to any position
-let workers_at_64 = index[64][local_hashes[64]];  // O(1) lookup
-let workers_at_128 = index[128][local_hashes[128]];  // O(1) lookup
+let workers_at_64 = index.get(&(64, local_hashes[64]));  // O(1) lookup
+let workers_at_128 = index.get(&(128, local_hashes[128]));  // O(1) lookup
 // Skip positions 1-63, 65-127 entirely!
 ```
 
