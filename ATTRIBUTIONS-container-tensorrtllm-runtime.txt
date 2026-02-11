@@ -67861,3 +67861,1194 @@ License: Apache-2.0
  .
  On Debian systems, the complete text of the Apache version 2.0 license
  can be found in "/usr/share/common-licenses/Apache-2.0".
+
+************************************
+
+cuda-core (0.5.1):
+License: Apache-2.0
+
+Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+-----------------
+
+************************************
+
+cuda-toolkit (13.1.1):
+License: Proprietary
+
+NVIDIA Software License Agreement and CUDA Supplement to Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the NVIDIA CUDA Toolkit,
+the NVIDIA CUDA Samples, the NVIDIA Display Driver, NVIDIA Nsight tools (Visual
+Studio Edition), and the associated documentation on CUDA APIs, programming model
+and development tools. If you do not agree with the terms and conditions of the
+license agreement, then do not download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+dynamic-path-manager (1.0.1):
+License: MIT
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-----------------
+
+************************************
+
+filterpy (1.4.5):
+License: MIT
+
+The MIT License (MIT)
+
+Copyright (c) 2015 Roger R. Labbe Jr
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+-----------------
+
+************************************
+
+huggingface_hub (0.36.2):
+License: Apache-2.0
+
+Copyright 2023 The HuggingFace Team. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+-----------------
+
+************************************
+
+llist (0.7.1):
+License: MIT
+
+Copyright (c) 2011-2018 Adam Jakubek, Rafal Galczynski
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+-----------------
+
+************************************
+
+nvidia-cuda-runtime (13.1.80):
+License: Proprietary
+
+NVIDIA Software License Agreement and CUDA Supplement to Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the NVIDIA CUDA Toolkit,
+the NVIDIA CUDA Samples, the NVIDIA Display Driver, NVIDIA Nsight tools (Visual
+Studio Edition), and the associated documentation on CUDA APIs, programming model
+and development tools. If you do not agree with the terms and conditions of the
+license agreement, then do not download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+pytorch-triton (3.5.1+gitbfeb0668.nv25.12):
+License: MIT
+
+MIT License
+
+Copyright (c) 2023 the Triton contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+THE SOFTWARE.
+
+-----------------
+
+************************************
+
+tensorrt_cu13 (10.14.1.48.post1):
+License: Proprietary
+
+NVIDIA Software License Agreement and CUDA Supplement to Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the NVIDIA CUDA Toolkit,
+the NVIDIA CUDA Samples, the NVIDIA Display Driver, NVIDIA Nsight tools (Visual
+Studio Edition), and the associated documentation on CUDA APIs, programming model
+and development tools. If you do not agree with the terms and conditions of the
+license agreement, then do not download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+tensorrt_cu13_bindings (10.14.1.48.post1):
+License: Proprietary
+
+NVIDIA Software License Agreement and CUDA Supplement to Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the NVIDIA CUDA Toolkit,
+the NVIDIA CUDA Samples, the NVIDIA Display Driver, NVIDIA Nsight tools (Visual
+Studio Edition), and the associated documentation on CUDA APIs, programming model
+and development tools. If you do not agree with the terms and conditions of the
+license agreement, then do not download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+tensorrt_cu13_libs (10.14.1.48.post1):
+License: Proprietary
+
+NVIDIA Software License Agreement and CUDA Supplement to Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the NVIDIA CUDA Toolkit,
+the NVIDIA CUDA Samples, the NVIDIA Display Driver, NVIDIA Nsight tools (Visual
+Studio Edition), and the associated documentation on CUDA APIs, programming model
+and development tools. If you do not agree with the terms and conditions of the
+license agreement, then do not download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+torchdata (0.11.0):
+License: BSD-3-Clause
+
+BSD 3-Clause License
+
+Copyright (c) 2021-present, Facebook, Inc.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+-----------------
+
+************************************
+
+torchtitan (0.2.0):
+License: BSD-3-Clause
+
+BSD 3-Clause License
+
+(c) Meta Platforms, Inc. and affiliates.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list
+of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this
+list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may
+be used to endorse or promote products derived from this software without specific
+prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
+-----------------
+
+************************************
+
+cuda-cccl-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-crt-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-cudart-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-cudart-dev-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-culibos-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-culibos-dev-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-cuobjdump-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-cupti-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-cupti-dev-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-driver-dev-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-gdb-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-nvcc-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-nvdisasm-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-nvml-dev-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-nvprune-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-nvrtc-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-nvrtc-dev-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-nvtx-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-profiler-api-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-sanitizer-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+cuda-toolkit-13-1-config-common:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libcublas-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libcufft-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libcufile-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libcurand-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libcusolver-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libcusparse-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libnpp-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libnvfatbin-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libnvjitlink-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libnvjpeg-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libnvptxcompiler-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libnvvm-13-1:
+End User License Agreement
+--------------------------
+
+NVIDIA Software License Agreement and CUDA Supplement to
+Software License Agreement.
+
+The CUDA Toolkit End User License Agreement applies to the
+NVIDIA CUDA Toolkit, the NVIDIA CUDA Samples, the NVIDIA
+Display Driver, NVIDIA Nsight tools (Visual Studio Edition),
+and the associated documentation on CUDA APIs, programming
+model and development tools. If you do not agree with the
+terms and conditions of the license agreement, then do not
+download or use the software.
+
+Last updated: January 12, 2024.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+
+-----------------
+
+************************************
+
+libglib2.0-0t64:
+License: LGPL-2.1 | Apache-2.0 | MIT
+Source: https://wiki.gnome.org/Projects/GLib
+
+-----------------
+
+************************************
+
+libhwloc15:
+License: BSD-3-Clause
+Source: https://www.open-mpi.org/projects/hwloc/
+
+-----------------
+
+************************************
+
+libnuma-dev:
+License: LGPL-2.1
+Source: https://github.com/numactl/numactl
+
+-----------------
+
+************************************
+
+libpmi2-0-dev:
+License: Apache-2.0 | LGPL-2.1 | BSD-2-Clause | GPL-3.0 | MIT
+Source: http://slurm.schedmd.com
+
+-----------------
+
+************************************
+
+libpmi2-0t64:
+License: Apache-2.0 | LGPL-2.1 | BSD-2-Clause | GPL-3.0 | MIT
+Source: http://slurm.schedmd.com
+
+-----------------
+
+************************************
+
+libslurm40t64:
+License: Apache-2.0 | LGPL-2.1 | BSD-2-Clause | GPL-3.0 | MIT
+Source: http://slurm.schedmd.com
+
+-----------------
+
+************************************
+
+nsight-systems-cli-2025.5.2:
+License: NVIDIA Proprietary
+
+-----------------
+
+************************************
+
+vim-common:
+License: BSD-3-Clause | BSD-2-Clause | LGPL-2.1 | Apache-2.0 | MIT | Proprietary
+Source: https://www.vim.org/
+
+-----------------
+
+************************************
+
+vim-tiny:
+License: BSD-3-Clause | BSD-2-Clause | LGPL-2.1 | Apache-2.0 | MIT | Proprietary
+Source: https://www.vim.org/
+
+-----------------
