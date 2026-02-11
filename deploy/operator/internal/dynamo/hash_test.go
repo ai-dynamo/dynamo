@@ -146,7 +146,7 @@ func TestComputeWorkerSpecHash_StableOnExcludedFields(t *testing.T) {
 	}
 }
 
-func TestComputeWorkerSpecHash_EnvOrderIndependent(t *testing.T) {
+func TestComputeWorkerSpecHash_EnvOrderMatters(t *testing.T) {
 	dgd1 := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: commonconsts.ComponentTypeWorker,
@@ -159,7 +159,7 @@ func TestComputeWorkerSpecHash_EnvOrderIndependent(t *testing.T) {
 			Envs:          []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
 		},
 	})
-	assert.Equal(t, ComputeWorkerSpecHash(dgd1), ComputeWorkerSpecHash(dgd2))
+	assert.NotEqual(t, ComputeWorkerSpecHash(dgd1), ComputeWorkerSpecHash(dgd2))
 }
 
 func TestComputeWorkerSpecHash_AllWorkerTypes(t *testing.T) {
@@ -212,9 +212,9 @@ func TestStripNonPodTemplateFields(t *testing.T) {
 	// Included fields are preserved
 	assert.True(t, stripped.GlobalDynamoNamespace)
 	assert.Len(t, stripped.Envs, 2)
-	// Envs are sorted
-	assert.Equal(t, "A", stripped.Envs[0].Name)
-	assert.Equal(t, "Z", stripped.Envs[1].Name)
+	// Envs are not sorted
+	assert.Equal(t, "Z", stripped.Envs[0].Name)
+	assert.Equal(t, "A", stripped.Envs[1].Name)
 
 	// Original spec is not mutated
 	assert.Equal(t, "svc", spec.ServiceName)

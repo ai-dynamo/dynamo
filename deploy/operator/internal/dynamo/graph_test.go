@@ -3699,6 +3699,15 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 }
 
+func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
+	sorted := make([]corev1.EnvVar, len(envs))
+	copy(sorted, envs)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Name < sorted[j].Name
+	})
+	return sorted
+}
+
 func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{

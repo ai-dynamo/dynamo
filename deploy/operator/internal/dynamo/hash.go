@@ -24,7 +24,6 @@ import (
 	"sort"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // ComputeWorkerSpecHash computes a deterministic hash of all worker service specs.
@@ -101,20 +100,5 @@ func stripNonPodTemplateFields(spec *v1alpha1.DynamoComponentDeploymentSharedSpe
 	stripped.ModelRef = nil
 	stripped.EPPConfig = nil
 
-	// Sort environment variables by name for deterministic hashing
-	if len(stripped.Envs) > 0 {
-		stripped.Envs = sortEnvVars(stripped.Envs)
-	}
-
 	return stripped
-}
-
-// sortEnvVars returns a sorted copy of env vars for deterministic hashing
-func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
-	sorted := make([]corev1.EnvVar, len(envs))
-	copy(sorted, envs)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Name < sorted[j].Name
-	})
-	return sorted
 }
