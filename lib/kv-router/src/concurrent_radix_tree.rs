@@ -780,7 +780,7 @@ mod tests {
         trie.apply_event(create_store_event(worker_1, 0, vec![1, 2, 3], None))
             .unwrap();
 
-        assert_eq!(trie.lookup.read().len(), 2);
+        assert_eq!(trie.lookup.len(), 2);
 
         trie.remove_worker(worker_0);
 
