@@ -238,7 +238,7 @@ for concurrency in "${concurrency_array[@]}"; do
     --warmup-request-count $(($concurrency*2)) \
     --num-dataset-entries $(($concurrency*12)) \
     --random-seed 100 \
-    --artifact-dir ${concurrency_dir} \
+    --artifact-dir "${concurrency_dir}" \
     --ui simple \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
