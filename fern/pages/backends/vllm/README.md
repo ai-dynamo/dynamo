@@ -42,7 +42,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Load Based Planner**](../../components/planner/README.md) | 🚧 | WIP |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ |  |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ |  |
-| [**FlexKV**](../../integrations/flexkv_integration.md) | ✅ |  |
+| [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ |  |
 | [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
