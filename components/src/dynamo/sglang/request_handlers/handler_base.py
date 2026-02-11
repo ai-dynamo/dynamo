@@ -97,7 +97,6 @@ class BaseGenerativeHandler(ABC):
         return context.is_cancelled()
 
 
-
 class BaseWorkerHandler(BaseGenerativeHandler):
     """Abstract base class for SGLang LLM worker handlers.
 

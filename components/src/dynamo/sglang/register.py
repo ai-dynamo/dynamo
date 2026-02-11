@@ -314,7 +314,6 @@ async def register_image_diffusion_model(
     logging.info(f"Image diffusion model ready: {model_name}")
 
 
-
 async def register_video_generation_model(
     generator: Any,  # DiffGenerator
     endpoint: Endpoint,

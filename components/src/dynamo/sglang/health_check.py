@@ -146,7 +146,6 @@ class ImageDiffusionHealthCheckPayload(HealthCheckPayload):
         super().__init__()
 
 
-
 class VideoGenerationHealthCheckPayload(HealthCheckPayload):
     """Video generation-specific health check payload for video generation workers.
 

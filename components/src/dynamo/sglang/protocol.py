@@ -154,7 +154,6 @@ class CreateImageRequest(BaseModel):
     user: Optional[str] = None
 
 
-
 class ImageData(BaseModel):
     url: Optional[str] = None  # S3 URL
     b64_json: Optional[str] = None  # Base64 encoded
@@ -166,7 +165,6 @@ class ImagesResponse(BaseModel):
 
     created: int  # Unix timestamp
     data: list[ImageData]
-
 
 
 # ============================================================================

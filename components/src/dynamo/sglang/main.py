@@ -436,7 +436,6 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     print(f"Server args: {server_args}")
     print(f"Dynamo args: {dynamo_args}")
 
-
     # Initialize DiffGenerator (not sgl.Engine)
     from sglang.multimodal_gen import DiffGenerator
 
@@ -618,7 +617,6 @@ async def init_video_generation(runtime: DistributedRuntime, config: Config):
         raise
     finally:
         handler.cleanup()
-
 
 
 async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):

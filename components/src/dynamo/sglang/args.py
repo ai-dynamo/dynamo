@@ -526,7 +526,9 @@ async def parse_args(args: list[str]) -> Config:
     video_generation_worker = getattr(parsed_args, "video_generation_worker", False)
 
     if image_diffusion_worker or video_generation_worker:
-        worker_type = "image diffusion" if image_diffusion_worker else "video generation"
+        worker_type = (
+            "image diffusion" if image_diffusion_worker else "video generation"
+        )
         logging.info(
             f"{worker_type.title()} worker detected with model: {model_path}, creating minimal ServerArgs stub"
         )
