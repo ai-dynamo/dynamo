@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -197,7 +198,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if r.isRollingUpdateInProgress(dynamoDeployment) || r.shouldTriggerRollingUpdate(dynamoDeployment) {
 			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
 				logger.Error(err, "Failed to reconcile rolling update")
-				state = FailedState
+				state = DGDStateFailed
 				reason = Reason("RollingUpdateFailed")
 				message = Message(err.Error())
 				return ctrl.Result{}, err
@@ -241,13 +242,13 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		case v1alpha1.RollingUpdatePhaseCompleted:
 			// Keep the reconcileResult state (should be Ready if resources are ready)
 		case v1alpha1.RollingUpdatePhaseFailed:
-			state = FailedState
+			state = DGDStateFailed
 			reason = "rolling_update_failed"
 			message = "Rolling update failed"
 		case v1alpha1.RollingUpdatePhasePending, v1alpha1.RollingUpdatePhaseInProgress:
 			// Rolling update in progress - resources are being transitioned
-			if state != FailedState {
-				state = PendingState
+			if state != DGDStateFailed {
+				state = DGDStatePending
 				reason = "rolling_update_in_progress"
 				message = "Rolling update in progress"
 			}
@@ -1097,8 +1098,14 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	oldWorkerHashFull := r.getCurrentWorkerHash(dgd)
 
 	// Use first 8 chars of hash for DCD naming (short but unique enough)
-	newWorkerHash := newWorkerHashFull[:8]
-	oldWorkerHash := oldWorkerHashFull[:8]
+	newWorkerHash := newWorkerHashFull
+	if len(newWorkerHashFull) > 8 {
+		newWorkerHash = newWorkerHashFull[:8]
+	}
+	oldWorkerHash := oldWorkerHashFull
+	if len(oldWorkerHashFull) > 8 {
+		oldWorkerHash = oldWorkerHashFull[:8]
+	}
 
 	if oldWorkerHash == newWorkerHash {
 		return dynamo.RollingUpdateContext{

@@ -1348,6 +1348,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
+					ComponentNames:  []string{"test-component-0"},
 					ReadyReplicas:   ptr.To(int32(1)),
 					UpdatedReplicas: 1,
 					Replicas:        1,
@@ -1427,6 +1428,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
+					ComponentNames:  []string{"test-component-0", "test-component-1", "test-component-2"},
 					ReadyReplicas:   ptr.To(int32(2)),
 					UpdatedReplicas: 2,
 					Replicas:        3,
@@ -1506,6 +1508,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
+					ComponentNames:  []string{"test-component-0", "test-component-1", "test-component-2"},
 					ReadyReplicas:   ptr.To(int32(3)),
 					UpdatedReplicas: 3,
 					Replicas:        3,
@@ -1650,6 +1653,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
+					ComponentNames:    []string{"test-component"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					ReadyReplicas:     ptr.To(int32(2)),
@@ -1691,6 +1695,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
+					ComponentNames:    []string{"test-component"},
 					Replicas:          1,
 					UpdatedReplicas:   1,
 					ReadyReplicas:     ptr.To(int32(1)),

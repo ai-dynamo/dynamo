@@ -412,6 +412,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        2,
 						UpdatedReplicas: 2,
 						ReadyReplicas:   ptr.To(int32(2)),
@@ -474,6 +475,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -481,6 +483,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"decode": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-decode",
+						ComponentNames:  []string{"test-dgd-0-decode"},
 						Replicas:        2,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -549,6 +552,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-decode",
+						ComponentNames:    []string{"test-dgd-0-decode"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
@@ -556,6 +560,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"prefill": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-prefill",
+						ComponentNames:    []string{"test-dgd-0-prefill"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
@@ -621,6 +626,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -628,6 +634,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"aggregated": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-aggregated",
+						ComponentNames:    []string{"test-dgd-0-aggregated"},
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						AvailableReplicas: ptr.To(int32(1)),

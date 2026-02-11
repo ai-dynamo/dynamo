@@ -280,10 +280,9 @@ func GenerateDynamoComponentsDeployments(
 ) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 
-	dynamoNamespace := ComputeDynamoNamespace(parentDGD)
-
 	// Generate DCDs for each service
 	for componentName, component := range parentDGD.Spec.Services {
+		dynamoNamespace := parentDGD.GetDynamoNamespaceForService(component)
 		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, defaultIngressSpec, restartState, existingRestartAnnotations, rollingUpdateCtx)
 		if err != nil {
 			return nil, err
@@ -1191,10 +1190,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 }
 
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
-	var dynamoNamespace string
-	if component.DynamoNamespace != nil {
-		dynamoNamespace = *component.DynamoNamespace
-	}
+	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 
 	var workerHashSuffix string
 	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {

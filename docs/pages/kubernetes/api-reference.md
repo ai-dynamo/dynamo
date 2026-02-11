@@ -333,7 +333,7 @@ _Appears in:_
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
 | `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
-| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates whether to use the global "dynamo" namespace.<br />DEPRECATED: This field is deprecated and will be removed in a future release. |  | Optional: \{\} <br /> |
+| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
@@ -373,7 +373,7 @@ _Appears in:_
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
 | `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
-| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates whether to use the global "dynamo" namespace.<br />DEPRECATED: This field is deprecated and will be removed in a future release. |  | Optional: \{\} <br /> |
+| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
@@ -1042,6 +1042,7 @@ _Appears in:_
 | `phase` _[RollingUpdatePhase](#rollingupdatephase)_ | Phase indicates the current phase of the rolling update. |  | Enum: [Pending InProgress Completed Failed ] <br />Optional: \{\} <br /> |
 | `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rolling update began. |  | Optional: \{\} <br /> |
 | `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rolling update completed (successfully or failed). |  | Optional: \{\} <br /> |
+| `updatedServices` _string array_ | UpdatedServices is the list of services that have completed the rolling update.<br />A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.<br />Only services of componentType Worker (or Prefill/Decode) are considered. |  | Optional: \{\} <br /> |
 
 
 #### ScalingAdapter

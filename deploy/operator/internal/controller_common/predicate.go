@@ -87,8 +87,6 @@ type Config struct {
 
 	// Checkpoint configuration for checkpoint/restore functionality
 	Checkpoint CheckpointConfig
-	// TrafficProxy configuration for HAProxy used in rolling updates
-	TrafficProxy TrafficProxyConfig
 }
 
 // RBACConfig holds configuration for RBAC management

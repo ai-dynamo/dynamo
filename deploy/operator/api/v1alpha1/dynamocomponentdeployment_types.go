@@ -20,6 +20,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,9 +71,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +kubebuilder:validation:Optional
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 
-	// GlobalDynamoNamespace indicates whether to use the global "dynamo" namespace.
-	// DEPRECATED: This field is deprecated and will be removed in a future release.
-	// +optional
+	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
@@ -334,10 +334,17 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 
 // GetDynamoNamespace returns the Dynamo namespace for this component.
 func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
-	if s.Spec.DynamoNamespace != nil {
-		return *s.Spec.DynamoNamespace
+	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.Namespace, s.GetParentGraphDeploymentName())
+}
+
+// ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
+// If globalDynamoNamespace is true, returns "dynamo" (global constant).
+// Otherwise, returns {k8sNamespace}-{dgdName}.
+func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
+	if globalDynamoNamespace {
+		return commonconsts.GlobalDynamoNamespace
 	}
-	return ""
+	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
 }
 
 // ModelReference identifies a model served by this component

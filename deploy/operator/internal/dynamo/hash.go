@@ -119,7 +119,3 @@ func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	})
 	return sorted
 }
-
-func ComputeDynamoNamespace(dgd *v1alpha1.DynamoGraphDeployment) string {
-	return dgd.Namespace + "-" + dgd.Name
-}

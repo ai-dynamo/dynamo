@@ -197,7 +197,7 @@ func TestInitializeWorkerHashIfNeeded_AlreadyInitialized(t *testing.T) {
 	assert.Equal(t, existingHash, hash, "Hash should not change when already initialized")
 }
 
-func TestIsUnsupportedRollingUpdatePathway(t *testing.T) {
+func TestSupportsManagedRollingUpdate(t *testing.T) {
 	tests := []struct {
 		name     string
 		services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
@@ -208,7 +208,7 @@ func TestIsUnsupportedRollingUpdatePathway(t *testing.T) {
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			},
-			expected: false,
+			expected: true,
 		},
 		{
 			name: "multinode deployment",
@@ -218,7 +218,7 @@ func TestIsUnsupportedRollingUpdatePathway(t *testing.T) {
 					Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4},
 				},
 			},
-			expected: true,
+			expected: false,
 		},
 	}
 

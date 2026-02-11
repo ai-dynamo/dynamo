@@ -309,11 +309,6 @@ func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 	return false
 }
 
-// GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
-func (s *DynamoGraphDeployment) GetDynamoNamespace() string {
-	return ComputeGenerationDynamoNamespace(s.Namespace, s.Name, s.Generation)
-}
-
 // HasEPPService returns true if any service in the DGD has EPP component type
 func (dgd *DynamoGraphDeployment) HasEPPService() bool {
 	for _, component := range dgd.Spec.Services {
@@ -332,4 +327,8 @@ func (dgd *DynamoGraphDeployment) GetEPPService() (string, *DynamoComponentDeplo
 		}
 	}
 	return "", nil, false
+}
+
+func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
+	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
 }
