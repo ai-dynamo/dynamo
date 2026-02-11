@@ -99,7 +99,9 @@ impl ModelManager {
 
     /// Get an existing Model, if it exists.
     pub fn get_model(&self, model_name: &str) -> Option<Arc<Model>> {
-        self.models.get(model_name).map(|entry| entry.value().clone())
+        self.models
+            .get(model_name)
+            .map(|entry| entry.value().clone())
     }
 
     /// Remove a Model if it has no remaining WorkerSets.
@@ -115,22 +117,13 @@ impl ModelManager {
     }
 
     /// Add a WorkerSet to a Model. Creates the Model if it doesn't exist.
-    pub fn add_worker_set(
-        &self,
-        model_name: &str,
-        namespace: &str,
-        worker_set: WorkerSet,
-    ) {
+    pub fn add_worker_set(&self, model_name: &str, namespace: &str, worker_set: WorkerSet) {
         let model = self.get_or_create_model(model_name);
         model.add_worker_set(namespace.to_string(), Arc::new(worker_set));
     }
 
     /// Remove a WorkerSet from a Model. Removes the Model if it becomes empty.
-    pub fn remove_worker_set(
-        &self,
-        model_name: &str,
-        namespace: &str,
-    ) -> Option<Arc<WorkerSet>> {
+    pub fn remove_worker_set(&self, model_name: &str, namespace: &str) -> Option<Arc<WorkerSet>> {
         let model = self.models.get(model_name)?;
         let removed = model.remove_worker_set(namespace);
         drop(model);
@@ -190,9 +183,7 @@ impl ModelManager {
 
     /// Check if a prefill model is registered
     pub fn has_prefill_model(&self, model: &str) -> bool {
-        self.models
-            .get(model)
-            .is_some_and(|m| m.has_prefill())
+        self.models.get(model).is_some_and(|m| m.has_prefill())
     }
 
     /// Check if any model (decode or prefill) is registered.
@@ -662,10 +653,8 @@ impl ModelManager {
             None => {
                 // New registration: create tx/rx pair, store sender and return receiver
                 let (tx, rx) = oneshot::channel();
-                self.prefill_router_activators.insert(
-                    key,
-                    PrefillActivationState::DecodeWaiting(tx),
-                );
+                self.prefill_router_activators
+                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
                 tracing::debug!(
                     model_name = %model_name,
                     namespace = %namespace,
@@ -717,10 +706,8 @@ impl ModelManager {
                         namespace
                     )
                 })?;
-                self.prefill_router_activators.insert(
-                    key,
-                    PrefillActivationState::PrefillReady(rx),
-                );
+                self.prefill_router_activators
+                    .insert(key, PrefillActivationState::PrefillReady(rx));
                 tracing::info!(
                     model_name = %model_name,
                     namespace = %namespace,
@@ -758,7 +745,11 @@ impl ModelManager {
     }
 
     /// Gets an existing worker monitor for a specific namespace of a model.
-    pub fn get_worker_monitor_for_namespace(&self, model: &str, namespace: &str) -> Option<KvWorkerMonitor> {
+    pub fn get_worker_monitor_for_namespace(
+        &self,
+        model: &str,
+        namespace: &str,
+    ) -> Option<KvWorkerMonitor> {
         let model_entry = self.models.get(model)?;
         model_entry.get_worker_monitor_for_namespace(namespace)
     }
@@ -973,10 +964,22 @@ mod tests {
         mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "checksum_b"));
 
         // Each namespace validates against its own checksum
-        assert_eq!(mm.is_valid_checksum("llama", "ns1", "checksum_a"), Some(true));
-        assert_eq!(mm.is_valid_checksum("llama", "ns1", "checksum_b"), Some(false));
-        assert_eq!(mm.is_valid_checksum("llama", "ns2", "checksum_b"), Some(true));
-        assert_eq!(mm.is_valid_checksum("llama", "ns2", "checksum_a"), Some(false));
+        assert_eq!(
+            mm.is_valid_checksum("llama", "ns1", "checksum_a"),
+            Some(true)
+        );
+        assert_eq!(
+            mm.is_valid_checksum("llama", "ns1", "checksum_b"),
+            Some(false)
+        );
+        assert_eq!(
+            mm.is_valid_checksum("llama", "ns2", "checksum_b"),
+            Some(true)
+        );
+        assert_eq!(
+            mm.is_valid_checksum("llama", "ns2", "checksum_a"),
+            Some(false)
+        );
     }
 
     // -- Model listing and filtering tests --

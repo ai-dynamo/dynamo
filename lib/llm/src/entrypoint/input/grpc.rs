@@ -138,9 +138,7 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj
-            .watch(discovery_stream, namespace_filter)
-            .await;
+        watch_obj.watch(discovery_stream, namespace_filter).await;
     });
 
     Ok(())

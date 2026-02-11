@@ -20,8 +20,7 @@ use crate::types::{
     generic::tensor::TensorStreamingEngine,
     openai::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
-        completions::OpenAICompletionsStreamingEngine,
-        embeddings::OpenAIEmbeddingsStreamingEngine,
+        completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
         images::OpenAIImagesStreamingEngine,
         videos::OpenAIVideosStreamingEngine,
     },
@@ -72,7 +71,9 @@ impl Model {
     }
 
     pub fn get_worker_set(&self, namespace: &str) -> Option<Arc<WorkerSet>> {
-        self.worker_sets.get(namespace).map(|entry| entry.value().clone())
+        self.worker_sets
+            .get(namespace)
+            .map(|entry| entry.value().clone())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -85,37 +86,51 @@ impl Model {
 
     /// Check if this model has any decode engine (chat or completions) across any WorkerSet.
     pub fn has_decode_engine(&self) -> bool {
-        self.worker_sets.iter().any(|entry| entry.value().has_decode_engine())
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_decode_engine())
     }
 
     /// Check if this model tracks prefill (any WorkerSet is a prefill set).
     pub fn has_prefill(&self) -> bool {
-        self.worker_sets.iter().any(|entry| entry.value().is_prefill_set())
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().is_prefill_set())
     }
 
     /// Check if any WorkerSet has a chat engine.
     pub fn has_chat_engine(&self) -> bool {
-        self.worker_sets.iter().any(|entry| entry.value().has_chat_engine())
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_chat_engine())
     }
 
     /// Check if any WorkerSet has a completions engine.
     pub fn has_completions_engine(&self) -> bool {
-        self.worker_sets.iter().any(|entry| entry.value().has_completions_engine())
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_completions_engine())
     }
 
     /// Check if any WorkerSet has an embeddings engine.
     pub fn has_embeddings_engine(&self) -> bool {
-        self.worker_sets.iter().any(|entry| entry.value().has_embeddings_engine())
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_embeddings_engine())
     }
 
     /// Check if any WorkerSet has a tensor engine.
     pub fn has_tensor_engine(&self) -> bool {
-        self.worker_sets.iter().any(|entry| entry.value().has_tensor_engine())
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_tensor_engine())
     }
 
     /// Check if any WorkerSet has an images engine.
     pub fn has_images_engine(&self) -> bool {
-        self.worker_sets.iter().any(|entry| entry.value().has_images_engine())
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_images_engine())
     }
 
     /// Check if any WorkerSet has a videos engine.
@@ -133,7 +148,9 @@ impl Model {
 
     // -- Engine accessors: select a WorkerSet, return its engine --
 
-    pub fn get_chat_engine(&self) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
+    pub fn get_chat_engine(
+        &self,
+    ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone())
             .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
     }
@@ -172,10 +189,8 @@ impl Model {
     pub fn get_chat_engine_with_parsing(
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| {
-            ws.chat_engine.clone().map(|e| (e, ws.parsing_options()))
-        })
-        .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+        self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
+            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -244,17 +259,13 @@ impl Model {
         // TODO: When the single set has 0 workers, this returns None which maps to
         // ModelNotFound (404). Ideally should be 503 "no available workers" — see follow-up.
         if self.worker_sets.len() == 1 {
-            return self
-                .worker_sets
-                .iter()
-                .next()
-                .and_then(|entry| {
-                    let ws = entry.value();
-                    if ws.worker_count() == 0 {
-                        return None;
-                    }
-                    extract(ws)
-                });
+            return self.worker_sets.iter().next().and_then(|entry| {
+                let ws = entry.value();
+                if ws.worker_count() == 0 {
+                    return None;
+                }
+                extract(ws)
+            });
         }
 
         // Collect eligible sets with their worker counts, skipping sets with no workers.
@@ -298,8 +309,8 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::watch;
     use crate::model_card::ModelDeploymentCard;
+    use tokio::sync::watch;
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
         Arc::new(WorkerSet::new(
@@ -387,8 +398,14 @@ mod tests {
         model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc123"));
         model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def456"));
 
-        assert_eq!(model.checksum_for_namespace("ns1"), Some("abc123".to_string()));
-        assert_eq!(model.checksum_for_namespace("ns2"), Some("def456".to_string()));
+        assert_eq!(
+            model.checksum_for_namespace("ns1"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            model.checksum_for_namespace("ns2"),
+            Some("def456".to_string())
+        );
         assert_eq!(model.checksum_for_namespace("ns3"), None);
     }
 

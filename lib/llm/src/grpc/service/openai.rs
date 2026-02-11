@@ -9,10 +9,10 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
+use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
-use crate::protocols::openai::ParsingOptions;
 use crate::types::Annotated;
 
 use super::kserve;
@@ -44,7 +44,13 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 pub async fn completion_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateCompletionRequest,
-) -> Result<(impl Stream<Item = Annotated<NvCreateCompletionResponse>>, ParsingOptions), Status> {
+) -> Result<
+    (
+        impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
+        ParsingOptions,
+    ),
+    Status,
+> {
     // create the context for the request
     // [WIP] from request id.
     let request_id = get_or_create_request_id(request.inner.user.as_deref());

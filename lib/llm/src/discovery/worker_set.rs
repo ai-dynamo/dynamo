@@ -47,9 +47,6 @@ pub struct WorkerSet {
     /// KV router for this set's workers (if KV mode)
     pub(crate) kv_router: Option<Arc<KvRouter>>,
 
-    /// Prefill router for this set's prefill workers (if disaggregated)
-    pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
-
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
@@ -59,11 +56,7 @@ pub struct WorkerSet {
 }
 
 impl WorkerSet {
-    pub fn new(
-        namespace: String,
-        mdcsum: String,
-        card: ModelDeploymentCard,
-    ) -> Self {
+    pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {
             namespace,
             mdcsum,
@@ -75,7 +68,6 @@ impl WorkerSet {
             videos_engine: None,
             tensor_engine: None,
             kv_router: None,
-            prefill_router: None,
             worker_monitor: None,
             instance_count_rx: None,
         }

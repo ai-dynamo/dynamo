@@ -11,8 +11,8 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::{DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
-    namespace::NamespaceFilter,
     model_card::ModelDeploymentCard,
+    namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -88,7 +88,9 @@ pub async fn prepare_engine(
                 local_model.namespace_prefix(),
             );
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(discovery_stream, namespace_filter).await;
+                inner_watch_obj
+                    .watch(discovery_stream, namespace_filter)
+                    .await;
             });
             tracing::info!("Waiting for remote model..");
 
