@@ -9,7 +9,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
+    kv_router::{KvPushRouter, KvRouter, PrefillRouter, push_router::CacheControlResponse},
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
@@ -284,7 +284,21 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser).await?;
+            let cc_client =
+                if chooser.kv_router_config().router_enable_agentic_cache_control {
+                    let component = chooser.client().endpoint.component().clone();
+                    let client = component.endpoint("cache_control").client().await?;
+                    Some(
+                        PushRouter::<serde_json::Value, Annotated<CacheControlResponse>>::from_client(
+                            client,
+                            RouterMode::KV,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+            let kv_push_router = KvPushRouter::new(router, chooser, cc_client);
             ServiceBackend::from_engine(Arc::new(kv_push_router))
         }
     };

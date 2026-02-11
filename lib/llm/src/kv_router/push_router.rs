@@ -74,29 +74,18 @@ struct WorkerSelection {
 }
 
 impl KvPushRouter {
-    pub async fn new(
+    pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
-    ) -> Result<Self> {
-        let cc_client = if chooser.kv_router_config().router_enable_agentic_cache_control {
-            let component = chooser.client().endpoint.component().clone();
-            let cc_endpoint = component.endpoint("cache_control");
-            let client = cc_endpoint.client().await?;
-            let push_router =
-                PushRouter::<serde_json::Value, Annotated<CacheControlResponse>>::from_client(
-                    client,
-                    RouterMode::KV,
-                )
-                .await?;
-            Some(push_router)
-        } else {
-            None
-        };
-        Ok(KvPushRouter {
+        cache_control_client: Option<
+            PushRouter<serde_json::Value, Annotated<CacheControlResponse>>,
+        >,
+    ) -> Self {
+        KvPushRouter {
             inner,
             chooser,
-            cache_control_client: cc_client,
-        })
+            cache_control_client,
+        }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
