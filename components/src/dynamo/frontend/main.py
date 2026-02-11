@@ -87,6 +87,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
     FrontendArgGroup().add_arguments(parser)
 
     args, unknown = parser.parse_known_args()
+
     config = FrontendConfig.from_cli_args(args)
     config.validate()
 
@@ -117,9 +118,9 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
     else:
-        if not unknown:
-            logger.exception("Unknown arguments specified: {unknown}")
-
+        if unknown:
+            logger.exception(f"Unknown arguments specified: {unknown}")
+            sys.exit(1)
     return config, vllm_flags
 
 
@@ -241,6 +242,9 @@ async def async_main():
         kwargs["http_metrics_port"] = config.grpc_metrics_port
 
     if config.chat_processor == "vllm":
+        assert (
+            vllm_flags is not None
+        ), "vllm_flags is required when chat_processor is vllm"
         chat_engine_factory = setup_engine_factory(
             runtime, router_config, config, vllm_flags
         ).chat_engine_factory
