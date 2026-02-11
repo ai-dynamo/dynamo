@@ -27,36 +27,24 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// WorkerPodSpecHashInput contains all fields from worker specs that affect the generated PodSpec.
-// This struct is designed to capture any change that would trigger a rolling update in the
-// underlying Kubernetes resource (Deployment, PodClique, etc.).
-type WorkerPodSpecHashInput struct {
-	// ExtraPodSpec contains the full PodSpec and MainContainer overrides
-	ExtraPodSpec *v1alpha1.ExtraPodSpec `json:"extraPodSpec,omitempty"`
-	// ExtraPodMetadata contains labels and annotations for the pod
-	ExtraPodMetadata *v1alpha1.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
-	// Resources contains resource requests and limits
-	Resources *v1alpha1.Resources `json:"resources,omitempty"`
-	// Envs contains environment variables (sorted for determinism)
-	Envs []corev1.EnvVar `json:"envs,omitempty"`
-	// EnvFromSecret references a secret for environment variables
-	EnvFromSecret *string `json:"envFromSecret,omitempty"`
-	// VolumeMounts contains volume mount configuration
-	VolumeMounts []v1alpha1.VolumeMount `json:"volumeMounts,omitempty"`
-	// SharedMemory contains shared memory configuration
-	SharedMemory *v1alpha1.SharedMemorySpec `json:"sharedMemory,omitempty"`
-	// LivenessProbe contains liveness probe configuration
-	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`
-	// ReadinessProbe contains readiness probe configuration
-	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
-	// Multinode contains multinode deployment configuration
-	Multinode *v1alpha1.MultinodeSpec `json:"multinode,omitempty"`
-}
-
 // ComputeWorkerSpecHash computes a deterministic hash of all worker service specs.
-// The hash includes all fields that would trigger a rolling update in the underlying
-// Kubernetes resource. This ensures that our traffic shifting logic engages whenever
-// the underlying resource would perform a rolling update.
+//
+// The hash uses an exclusion-based approach: the entire DynamoComponentDeploymentSharedSpec
+// is hashed after zeroing out fields that do NOT affect the pod template. This ensures
+// that any new field added to the spec triggers a rolling update by default (safe by
+// default), and only explicitly excluded fields are ignored.
+//
+// Excluded fields (do not affect the pod template):
+//   - ServiceName, ComponentType, SubComponentType: identity fields
+//   - DynamoNamespace: deprecated, not used in pod spec generation
+//   - Replicas: scaling, not pod template
+//   - Autoscaling: deprecated, ignored
+//   - ScalingAdapter: scaling configuration, not pod template
+//   - Ingress: networking resources, not pod template
+//   - ModelRef: headless service creation, not pod template
+//   - EPPConfig: EPP-only, not applicable to workers
+//   - Annotations, Labels: applied to K8s resources, not pod template
+//     (pod-level metadata is in ExtraPodMetadata which IS included)
 //
 // Only worker components (prefill, decode, worker) are included in the hash.
 func ComputeWorkerSpecHash(dgd *v1alpha1.DynamoGraphDeployment) string {
@@ -70,10 +58,10 @@ func ComputeWorkerSpecHash(dgd *v1alpha1.DynamoGraphDeployment) string {
 	sort.Strings(workerNames)
 
 	// Build hash input map (sorted keys for determinism)
-	hashInputs := make(map[string]WorkerPodSpecHashInput)
+	hashInputs := make(map[string]v1alpha1.DynamoComponentDeploymentSharedSpec)
 	for _, name := range workerNames {
 		spec := dgd.Spec.Services[name]
-		hashInputs[name] = extractPodSpecHashInput(spec)
+		hashInputs[name] = stripNonPodTemplateFields(spec)
 	}
 
 	// Serialize to JSON (Go's encoding/json sorts map keys)
@@ -88,26 +76,37 @@ func ComputeWorkerSpecHash(dgd *v1alpha1.DynamoGraphDeployment) string {
 	return hex.EncodeToString(hash[:])[:8]
 }
 
-// extractPodSpecHashInput extracts all PodSpec-affecting fields from a service spec
-func extractPodSpecHashInput(spec *v1alpha1.DynamoComponentDeploymentSharedSpec) WorkerPodSpecHashInput {
-	input := WorkerPodSpecHashInput{
-		ExtraPodSpec:     spec.ExtraPodSpec,
-		ExtraPodMetadata: spec.ExtraPodMetadata,
-		Resources:        spec.Resources,
-		EnvFromSecret:    spec.EnvFromSecret,
-		VolumeMounts:     spec.VolumeMounts,
-		SharedMemory:     spec.SharedMemory,
-		LivenessProbe:    spec.LivenessProbe,
-		ReadinessProbe:   spec.ReadinessProbe,
-		Multinode:        spec.Multinode,
-	}
+// stripNonPodTemplateFields returns a copy of the spec with fields that do NOT affect
+// the pod template zeroed out. The remaining fields are all pod-template-affecting and
+// will be included in the hash.
+//
+// This is an exclusion-based approach: new fields added to DynamoComponentDeploymentSharedSpec
+// are included in the hash by default. Only fields explicitly listed here are excluded.
+func stripNonPodTemplateFields(spec *v1alpha1.DynamoComponentDeploymentSharedSpec) v1alpha1.DynamoComponentDeploymentSharedSpec {
+	// Start with a shallow copy of the full spec
+	stripped := *spec
+
+	// Zero out fields that do NOT affect the pod template.
+	// These are identity, scaling, networking, and metadata fields.
+	stripped.Annotations = nil
+	stripped.Labels = nil
+	stripped.ServiceName = ""
+	stripped.ComponentType = ""
+	stripped.SubComponentType = ""
+	stripped.DynamoNamespace = nil
+	stripped.Replicas = nil
+	stripped.Autoscaling = nil
+	stripped.ScalingAdapter = nil
+	stripped.Ingress = nil
+	stripped.ModelRef = nil
+	stripped.EPPConfig = nil
 
 	// Sort environment variables by name for deterministic hashing
-	if len(spec.Envs) > 0 {
-		input.Envs = sortEnvVars(spec.Envs)
+	if len(stripped.Envs) > 0 {
+		stripped.Envs = sortEnvVars(stripped.Envs)
 	}
 
-	return input
+	return stripped
 }
 
 // sortEnvVars returns a sorted copy of env vars for deterministic hashing
