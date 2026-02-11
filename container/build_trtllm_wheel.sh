@@ -97,7 +97,7 @@ if [ "$ARCH" = "amd64" ]; then
 else
     # NIXL backend is not supported on arm64 for TensorRT-LLM.
     # See here: https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/common/install_nixl.sh
-    make -C docker wheel_build
+    make -C docker wheel_build SHELL=/bin/bash
 fi
 
 # Copy the wheel to the host
