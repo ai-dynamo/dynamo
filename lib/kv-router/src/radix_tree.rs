@@ -217,14 +217,16 @@ impl RadixTree {
         let mut current = first_child;
         let mut matched_depth = 1u32;
 
-        // Traverse remaining levels. Workers at a child node are always a subset
-        // of workers at the parent (along the same path), so:
+        // Traverse remaining levels. In a clean tree, workers at a child node
+        // are always a subset of the parent (along the same path), so:
         //   - workers can only drop out, never join, as we descend
         //   - if child.workers.len() == active_count, the sets are identical
         //
-        // This lets us replace O(W) update_scores work at every level with an
-        // O(1) length check. Per-worker iteration only happens at dropout
-        // boundaries, where the count decreases.
+        // However, because apply_event(Removed) does NOT cascade to descendants,
+        // a child may transiently have MORE workers than its parent (stale
+        // entries from an ancestor remove whose descendant remove events
+        // haven't arrived yet). We detect this via child_count > active_count
+        // and fall back to a full membership check.
         for (idx, item) in sequence.iter().enumerate().skip(1) {
             let next_block = {
                 let current_borrow = current.borrow();
@@ -235,7 +237,6 @@ impl RadixTree {
                 break;
             };
 
-            // Check for worker dropout (O(1) in the common case).
             {
                 let borrow = block.borrow();
                 let child_count = borrow.workers.len();
@@ -250,6 +251,18 @@ impl RadixTree {
                     }
                     active.clone_from(&borrow.workers);
                     active_count = child_count;
+                } else if child_count > active_count {
+                    // Stale entries: child retains workers already removed from
+                    // an ancestor. Fall back to full membership check.
+                    active.retain(|w| {
+                        if borrow.workers.contains(w) {
+                            true
+                        } else {
+                            scores.scores.insert(*w, matched_depth);
+                            false
+                        }
+                    });
+                    active_count = active.len();
                 }
             }
 
@@ -337,8 +350,19 @@ impl RadixTree {
                     None => self.root.clone(),
                 };
 
+                let mut needs_worker_insert = false;
+
+                // In each iteration we lock the parent and insert the worker
+                // deferred from the previous iteration, avoiding a second
+                // borrow on the same block.
                 for block_data in op.blocks {
                     let mut parent_mut = current.borrow_mut();
+
+                    if needs_worker_insert {
+                        parent_mut.workers.insert(worker);
+                    }
+                    needs_worker_insert = true;
+
                     let child = match parent_mut.children.get(&block_data.tokens_hash) {
                         Some(block) => {
                             // Verify our simplifying assumption: block_hash is uniform across workers
@@ -352,7 +376,6 @@ impl RadixTree {
                             block.clone()
                         }
                         None => {
-                            // create new block or reuse existing from worker's lookup
                             let new_block = worker_lookup
                                 .get(&block_data.block_hash)
                                 .cloned()
@@ -362,7 +385,6 @@ impl RadixTree {
                                     )))
                                 });
 
-                            // insert into radix tree
                             parent_mut
                                 .children
                                 .insert(block_data.tokens_hash, new_block.clone());
@@ -371,36 +393,30 @@ impl RadixTree {
                         }
                     };
 
-                    // Update child and check for self referential blocks
-                    {
-                        // Try to borrow the child mutably - if it fails, it's already borrowed
-                        // which means a self referencing block.
-                        let mut child_mut = match child.try_borrow_mut() {
-                            Ok(b) => b,
-                            Err(_) => {
-                                tracing::warn!(
-                                    worker_id = worker.worker_id.to_string(),
-                                    dp_rank = worker.dp_rank,
-                                    id,
-                                    block_hash = ?block_data.block_hash,
-                                    "Detected self referencing block in store event; rejecting sequence"
-                                );
-                                return Err(KvCacheEventError::InvalidBlockSequence);
-                            }
-                        };
-
-                        // add our worker to the block
-                        child_mut.workers.insert(worker);
+                    // Self-reference check: try_borrow_mut will fail if child
+                    // is the same Rc as current (parent_mut holds a mutable borrow).
+                    if child.try_borrow_mut().is_err() {
+                        tracing::warn!(
+                            worker_id = worker.worker_id.to_string(),
+                            dp_rank = worker.dp_rank,
+                            id,
+                            block_hash = ?block_data.block_hash,
+                            "Detected self referencing block in store event; rejecting sequence"
+                        );
+                        return Err(KvCacheEventError::InvalidBlockSequence);
                     }
 
-                    // add the block to the worker's lookup table
                     worker_lookup.insert(block_data.block_hash, child.clone());
 
-                    // drop child so we can shift current to this block
                     drop(parent_mut);
-
                     current = child;
                 }
+
+                // Insert worker into the last child.
+                if needs_worker_insert {
+                    current.borrow_mut().workers.insert(worker);
+                }
+
                 Ok(())
             }
             KvCacheEventData::Removed(remove) => {
