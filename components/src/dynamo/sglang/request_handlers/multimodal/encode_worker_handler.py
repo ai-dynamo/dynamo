@@ -5,7 +5,15 @@ import logging
 from typing import AsyncIterator
 
 import torch
-from sglang.srt.disaggregation.encode_server import MMEncoder
+
+# MMEncoder chain imports CUDA; will fail in CPU-only environments.
+try:
+    from sglang.srt.disaggregation.encode_server import MMEncoder
+except (ImportError, OSError):
+    MMEncoder = None  # type: ignore[assignment]
+    logging.warning(
+        "SGLang's MMEncoder unavailable; multimodal encode worker requires a CUDA environment."
+    )
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 

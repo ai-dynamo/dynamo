@@ -416,8 +416,8 @@ Supported templates: `qwen2-vl`, `llama-3`, `vicuna`, etc.
 
 SGLang multimodal **only supports image-based vision-language models**:
 
-- **Qwen2-VL** / **Qwen2.5-VL** - `Qwen/Qwen2.5-VL-7B-Instruct` (primary support)
-- **Qwen3-VL** - `Qwen/Qwen3-VL-8B-Instruct`
+- **Qwen2-VL** / **Qwen2.5-VL** - `Qwen/Qwen2.5-VL-7B-Instruct`
+- **Qwen3-VL** - `Qwen/Qwen3-VL-30B-A3B-Instruct`
 - Models with `AutoImageProcessor` and vision tower
 - Models compatible with SGLang's image embedding format
 
