@@ -14,6 +14,7 @@ For quick start instructions, see the [Router README](README.md). This document 
 - [Routing Patterns](#routing-patterns)
 - [Custom Routing Example: Minimizing TTFT](#custom-routing-example-minimizing-ttft)
 - [KV Event Publishing for Custom Engines](#kv-event-publishing-for-custom-engines)
+- [Global Router (Hierarchical Routing)](#global-router-hierarchical-routing)
 
 ## Using KvPushRouter Python API
 
@@ -542,6 +543,13 @@ Each event in the payload is a dictionary with `type` field (`BlockStored`, `Blo
 2. **Block size must match** your engine's actual `kv_block_size`
 
 3. **`parent_hash` is required** for all blocks except the first in a sequence - it links blocks to enable prefix matching
+
+## Global Router (Hierarchical Routing)
+
+For deployments with multiple worker pools, the **Global Router** enables hierarchical routing by sitting between the frontend and local routers. It selects the appropriate pool for each request based on configurable policies, supporting disaggregated topologies where pools are tuned for different workload characteristics.
+
+- **Component details**: [`components/src/dynamo/global_router/`](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/global_router/)
+- **Example**: [`examples/hierarchical_planner/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/hierarchical_planner/)
 
 ## See Also
 
