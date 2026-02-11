@@ -362,8 +362,16 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	sort.Strings(updatedServices)
 	rollingUpdateStatus.UpdatedServices = updatedServices
 
-	// Check if rolling update is complete: all new workers ready and all old workers scaled down
-	if newInfo.TotalReadyWorkers() >= desiredReplicas && oldInfo.TotalReadyWorkers() == 0 {
+	// Count total worker services
+	totalWorkerServices := 0
+	for _, spec := range dgd.Spec.Services {
+		if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) {
+			totalWorkerServices++
+		}
+	}
+
+	// Rolling update is complete when every worker service is individually updated
+	if len(updatedServices) == totalWorkerServices && totalWorkerServices > 0 {
 		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
 	}
 

@@ -649,6 +649,92 @@ func TestContinueRollingUpdate_UpdatedServicesPartialCompletion(t *testing.T) {
 
 	// Prefill is updated (new ready >= desired, old gone), decode is not
 	assert.Equal(t, []string{"prefill"}, rollingUpdateStatus.UpdatedServices)
+	// Rolling update should remain in progress since not all services are updated
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseInProgress, rollingUpdateStatus.Phase)
+}
+
+func TestContinueRollingUpdate_AggregateReadyButPerServiceNot(t *testing.T) {
+	oldWorkerHash := "oldhash1"
+	newWorkerHash := "newhash2"
+
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"prefill": {
+			ComponentType: consts.ComponentTypePrefill,
+			Replicas:      ptr.To(int32(2)),
+		},
+		"decode": {
+			ComponentType: consts.ComponentTypeDecode,
+			Replicas:      ptr.To(int32(3)),
+		},
+	})
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash: oldWorkerHash,
+	}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
+	}
+
+	// New DCDs: prefill has excess ready replicas (5), decode has 0
+	// Aggregate: 5 total new ready >= 5 desired, 0 old ready == 0
+	// Per-service: prefill ready (5 >= 2), decode NOT ready (0 < 3)
+	newPrefillDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-prefill-" + newWorkerHash[:8],
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypePrefill,
+				ServiceName:   "prefill",
+				Replicas:      ptr.To(int32(2)),
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+				ReadyReplicas: ptr.To(int32(5)), // Excess ready replicas
+			},
+		},
+	}
+
+	newDecodeDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-decode-" + newWorkerHash[:8],
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeDecode,
+				ServiceName:   "decode",
+				Replicas:      ptr.To(int32(3)),
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+				ReadyReplicas: ptr.To(int32(0)), // No ready replicas
+			},
+		},
+	}
+
+	// No old DCDs — old workers are fully scaled down
+	r := createTestReconcilerWithStatus(dgd, newPrefillDCD, newDecodeDCD)
+	ctx := context.Background()
+
+	rollingUpdateStatus := dgd.Status.RollingUpdate
+	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	require.NoError(t, err)
+
+	// Only prefill is updated; decode has 0 ready replicas
+	assert.Equal(t, []string{"prefill"}, rollingUpdateStatus.UpdatedServices)
+	// Rolling update must NOT complete — decode is not ready
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseInProgress, rollingUpdateStatus.Phase)
 }
 
 func TestStartRollingUpdate_UpdatedServicesInitializedToNil(t *testing.T) {
