@@ -6,20 +6,20 @@
 //! This module provides [`RequestTracker`] for tracking timing and routing information
 //! that can be returned to clients via the `nvext` response field.
 
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use std::{
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicU32, AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
 
+use crate::http::service::metrics::{
+    WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
+    WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
+};
 use crate::protocols::openai::nvext::WorkerIdInfo;
 
 /// Sentinel value indicating no worker ID has been set.
@@ -85,17 +85,28 @@ pub struct RequestTracker {
     /// When prefill started (for disaggregated serving) - set once via OnceLock
     prefill_start_time: OnceLock<Instant>,
 
-    /// When the first token was generated - set once via OnceLock
-    first_token_time: OnceLock<Instant>,
+    /// When the first token was generated. Mutex allows updates from multiple
+    /// router phases (prefill/decode) in disaggregated serving.
+    first_token_time: Mutex<Option<Instant>>,
 
-    /// When the request finished - set once via OnceLock
-    request_finish_time: OnceLock<Instant>,
+    /// When the request finished. Mutex allows the last router phase to
+    /// record the final finish time.
+    request_finish_time: Mutex<Option<Instant>>,
 
     /// KV cache overlap blocks (prefix cache hits) - set once via OnceLock
     kv_overlap_blocks: OnceLock<u32>,
 
     /// Input sequence length in blocks (for hit rate calculation) - set once via OnceLock
     isl_blocks: OnceLock<usize>,
+
+    /// Input sequence length in tokens - set once via OnceLock
+    isl_tokens: OnceLock<usize>,
+
+    /// Number of cached tokens (overlap_blocks * block_size) - set once via OnceLock
+    cached_tokens: OnceLock<usize>,
+
+    /// Output sequence length in tokens - updated atomically as tokens stream back
+    osl_tokens: AtomicU64,
 
     /// Prefill worker ID (for disaggregated serving).
     /// Uses atomic with compare-exchange for set-once semantics.
@@ -148,10 +159,13 @@ impl RequestTracker {
             request_received: now,
             request_received_epoch_ms: epoch_ms,
             prefill_start_time: OnceLock::new(),
-            first_token_time: OnceLock::new(),
-            request_finish_time: OnceLock::new(),
+            first_token_time: Mutex::new(None),
+            request_finish_time: Mutex::new(None),
             kv_overlap_blocks: OnceLock::new(),
             isl_blocks: OnceLock::new(),
+            isl_tokens: OnceLock::new(),
+            cached_tokens: OnceLock::new(),
+            osl_tokens: AtomicU64::new(0),
             prefill_worker_id: AtomicU64::new(NO_WORKER_ID),
             prefill_dp_rank: AtomicU32::new(NO_DP_RANK),
             decode_worker_id: AtomicU64::new(NO_WORKER_ID),
@@ -169,12 +183,12 @@ impl RequestTracker {
         self.prefill_start_time.set(Instant::now()).is_ok()
     }
 
-    pub fn record_first_token(&self) -> bool {
-        self.first_token_time.set(Instant::now()).is_ok()
+    pub fn record_first_token(&self) {
+        *self.first_token_time.lock() = Some(Instant::now());
     }
 
-    pub fn record_finish(&self) -> bool {
-        self.request_finish_time.set(Instant::now()).is_ok()
+    pub fn record_finish(&self) {
+        *self.request_finish_time.lock() = Some(Instant::now());
     }
 
     /// Record KV cache hit information. Returns true if this was the first call.
@@ -182,6 +196,29 @@ impl RequestTracker {
         let overlap_set = self.kv_overlap_blocks.set(overlap_blocks).is_ok();
         let isl_set = self.isl_blocks.set(isl_blocks).is_ok();
         overlap_set && isl_set
+    }
+
+    /// Record input sequence length in tokens and cached token count.
+    pub fn record_isl(&self, isl_tokens: usize, cached_tokens: usize) {
+        let _ = self.isl_tokens.set(isl_tokens);
+        let _ = self.cached_tokens.set(cached_tokens);
+    }
+
+    pub fn isl_tokens(&self) -> Option<usize> {
+        self.isl_tokens.get().copied()
+    }
+
+    pub fn cached_tokens(&self) -> Option<usize> {
+        self.cached_tokens.get().copied()
+    }
+
+    /// Record final output sequence length in tokens. Called once at stream end.
+    pub fn record_osl(&self, osl: usize) {
+        self.osl_tokens.store(osl as u64, Ordering::Relaxed);
+    }
+
+    pub fn osl_tokens(&self) -> u64 {
+        self.osl_tokens.load(Ordering::Relaxed)
     }
 
     /// Time from request received to prefill start (queue/wait time) in milliseconds.
@@ -194,20 +231,37 @@ impl RequestTracker {
     /// Time from prefill start to first token (prefill execution time) in milliseconds.
     pub fn prefill_time_ms(&self) -> Option<f64> {
         let prefill_start = self.prefill_start_time.get()?;
-        let first_token = self.first_token_time.get()?;
+        let first_token = (*self.first_token_time.lock())?;
         Some(first_token.duration_since(*prefill_start).as_secs_f64() * 1000.0)
     }
 
     pub fn ttft_ms(&self) -> Option<f64> {
-        self.first_token_time
-            .get()
-            .map(|t| t.duration_since(self.request_received).as_secs_f64() * 1000.0)
+        let first_token = (*self.first_token_time.lock())?;
+        Some(
+            first_token
+                .duration_since(self.request_received)
+                .as_secs_f64()
+                * 1000.0,
+        )
     }
 
     pub fn total_time_ms(&self) -> Option<f64> {
-        self.request_finish_time
-            .get()
-            .map(|t| t.duration_since(self.request_received).as_secs_f64() * 1000.0)
+        let finish = (*self.request_finish_time.lock())?;
+        Some(finish.duration_since(self.request_received).as_secs_f64() * 1000.0)
+    }
+
+    /// Average inter-token latency in milliseconds.
+    /// Computed as (finish_time - first_token_time) / (osl - 1).
+    /// Returns None if fewer than 2 output tokens or times not recorded.
+    pub fn avg_itl_ms(&self) -> Option<f64> {
+        let first_token = (*self.first_token_time.lock())?;
+        let finish = (*self.request_finish_time.lock())?;
+        let osl = self.osl_tokens.load(Ordering::Relaxed);
+        if osl < 2 {
+            return None;
+        }
+        let decode_duration = finish.duration_since(first_token).as_secs_f64() * 1000.0;
+        Some(decode_duration / (osl - 1) as f64)
     }
 
     pub fn request_received_epoch_ms(&self) -> u64 {
@@ -224,95 +278,11 @@ impl RequestTracker {
         Some(overlap as f64 / isl as f64)
     }
 
-    /// Record the prefill worker ID. Returns true if this was the first call.
-    pub fn record_prefill_worker(&self, id: u64) -> bool {
-        self.prefill_worker_id
-            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
-
-    /// Record the prefill worker ID and DP rank. Returns true if worker_id was recorded for the first time.
-    /// Only sets the dp_rank if the worker_id is newly set to avoid mismatched worker_id/dp_rank pairs.
-    pub fn record_prefill_worker_with_rank(&self, id: u64, dp_rank: u32) -> bool {
-        let is_new = self
-            .prefill_worker_id
-            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        if is_new {
-            self.prefill_dp_rank.store(dp_rank, Ordering::SeqCst);
-        }
-        is_new
-    }
-
-    /// Record the prefill worker ID, DP rank, and worker type.
-    /// The worker_type is stored to avoid MDC lookup when updating Prometheus metrics.
-    /// Returns true if worker_id was recorded for the first time.
-    pub fn record_prefill_worker_full(
-        &self,
-        id: u64,
-        dp_rank: u32,
-        worker_type: &'static str,
-    ) -> bool {
-        let is_new = self
-            .prefill_worker_id
-            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        if is_new {
-            self.prefill_dp_rank.store(dp_rank, Ordering::SeqCst);
-            let _ = self.prefill_worker_type.set(worker_type);
-        }
-        is_new
-    }
-
-    /// Record the decode worker ID. Returns true if this was the first call.
-    pub fn record_decode_worker(&self, id: u64) -> bool {
-        self.decode_worker_id
-            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
-
-    /// Record the decode worker ID and DP rank. Returns true if worker_id was recorded for the first time.
-    /// Only sets the dp_rank if the worker_id is newly set to avoid mismatched worker_id/dp_rank pairs.
-    pub fn record_decode_worker_with_rank(&self, id: u64, dp_rank: u32) -> bool {
-        let is_new = self
-            .decode_worker_id
-            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        if is_new {
-            self.decode_dp_rank.store(dp_rank, Ordering::SeqCst);
-        }
-        is_new
-    }
-
-    /// Record the decode worker ID, DP rank, and worker type.
-    /// The worker_type is stored to avoid MDC lookup when updating Prometheus metrics.
-    /// Returns true if worker_id was recorded for the first time.
-    pub fn record_decode_worker_full(
-        &self,
-        id: u64,
-        dp_rank: u32,
-        worker_type: &'static str,
-    ) -> bool {
-        let is_new = self
-            .decode_worker_id
-            .compare_exchange(NO_WORKER_ID, id, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        if is_new {
-            self.decode_dp_rank.store(dp_rank, Ordering::SeqCst);
-            let _ = self.decode_worker_type.set(worker_type);
-        }
-        is_new
-    }
-
     /// Set the request phase and return a permit that blocks subsequent phase changes.
     ///
     /// The returned permit must be dropped to allow the next `set_phase` call to proceed.
-    /// Under normal operation, callers can simply ignore the returned permit (letting it
-    /// drop immediately). In the bootstrap optimization path, the permit is held and
-    /// passed to the spawned prefill task, which drops it after `record_worker` completes.
-    ///
-    /// This prevents the race condition where the phase changes to Decode before the
-    /// background prefill task has recorded its worker ID.
+    /// In the bootstrap optimization path, the permit is held and passed to the spawned
+    /// prefill task, ensuring routing completes before the phase changes.
     pub async fn set_phase(&self, phase: RequestPhase) -> OwnedSemaphorePermit {
         let permit = self
             .phase_semaphore
@@ -329,68 +299,31 @@ impl RequestTracker {
         *self.phase.lock()
     }
 
-    /// Record worker ID based on the current phase.
-    ///
-    /// - Prefill phase: records as prefill_worker_id
-    /// - Decode phase: records as decode_worker_id
-    /// - Aggregated phase: records as both prefill and decode worker
-    pub fn record_worker(&self, instance_id: u64) {
-        match self.phase() {
-            RequestPhase::Prefill => {
-                self.record_prefill_worker(instance_id);
-            }
-            RequestPhase::Decode => {
-                self.record_decode_worker(instance_id);
-            }
-            RequestPhase::Aggregated => {
-                self.record_prefill_worker(instance_id);
-                self.record_decode_worker(instance_id);
-            }
-        }
-    }
-
-    /// Record worker ID and DP rank based on the current phase.
-    ///
-    /// - Prefill phase: records as prefill_worker_id/prefill_dp_rank
-    /// - Decode phase: records as decode_worker_id/decode_dp_rank
-    /// - Aggregated phase: records as both prefill and decode worker/rank
-    pub fn record_worker_with_rank(&self, instance_id: u64, dp_rank: u32) {
-        match self.phase() {
-            RequestPhase::Prefill => {
-                self.record_prefill_worker_with_rank(instance_id, dp_rank);
-            }
-            RequestPhase::Decode => {
-                self.record_decode_worker_with_rank(instance_id, dp_rank);
-            }
-            RequestPhase::Aggregated => {
-                self.record_prefill_worker_with_rank(instance_id, dp_rank);
-                self.record_decode_worker_with_rank(instance_id, dp_rank);
-            }
-        }
-    }
-
     /// Record worker ID, DP rank, and worker type based on the current phase.
     ///
-    /// This is the preferred method when worker_type is known (from MDC or router config),
-    /// as it stores the worker_type for later use in Prometheus metric updates without
-    /// requiring an expensive MDC lookup.
-    ///
-    /// - Prefill phase: records as prefill worker with given worker_type
-    /// - Decode phase: records as decode worker with given worker_type
-    /// - Aggregated phase: records as both prefill and decode worker with the same worker_type
+    /// Each slot is written exactly once by `KvPushRouter::generate()`:
+    /// - Prefill phase: stores as prefill worker
+    /// - Decode phase: stores as decode worker
+    /// - Aggregated phase: stores as both prefill and decode worker
     pub fn record_worker_full(&self, instance_id: u64, dp_rank: u32, worker_type: &'static str) {
         match self.phase() {
             RequestPhase::Prefill => {
-                self.record_prefill_worker_full(instance_id, dp_rank, worker_type);
+                self.prefill_worker_id.store(instance_id, Ordering::Relaxed);
+                self.prefill_dp_rank.store(dp_rank, Ordering::Relaxed);
+                let _ = self.prefill_worker_type.set(worker_type);
             }
             RequestPhase::Decode => {
-                self.record_decode_worker_full(instance_id, dp_rank, worker_type);
+                self.decode_worker_id.store(instance_id, Ordering::Relaxed);
+                self.decode_dp_rank.store(dp_rank, Ordering::Relaxed);
+                let _ = self.decode_worker_type.set(worker_type);
             }
             RequestPhase::Aggregated => {
-                // In aggregated mode, both prefill and decode happen on the same worker,
-                // so we record the same worker_type for both
-                self.record_prefill_worker_full(instance_id, dp_rank, worker_type);
-                self.record_decode_worker_full(instance_id, dp_rank, worker_type);
+                self.prefill_worker_id.store(instance_id, Ordering::Relaxed);
+                self.prefill_dp_rank.store(dp_rank, Ordering::Relaxed);
+                let _ = self.prefill_worker_type.set(worker_type);
+                self.decode_worker_id.store(instance_id, Ordering::Relaxed);
+                self.decode_dp_rank.store(dp_rank, Ordering::Relaxed);
+                let _ = self.decode_worker_type.set(worker_type);
             }
         }
     }
@@ -452,6 +385,51 @@ impl RequestTracker {
     /// Get the decode worker type if recorded.
     pub fn decode_worker_type(&self) -> Option<&'static str> {
         self.decode_worker_type.get().copied()
+    }
+
+    /// Write TTFT and ISL to per-worker last gauges using prefill worker labels.
+    /// Called from the Python binding path on first token.
+    pub fn observe_first_token_gauges(&self) {
+        let Some(worker_id) = self.prefill_worker_id() else {
+            return;
+        };
+        let worker_id_str = worker_id.to_string();
+        let dp_rank_str = self
+            .prefill_dp_rank()
+            .map_or("0".to_string(), |r| r.to_string());
+        let worker_type = self.prefill_worker_type().unwrap_or(WORKER_TYPE_PREFILL);
+        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+
+        if let Some(ttft) = self.ttft_ms() {
+            WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .with_label_values(labels)
+                .set(ttft / 1000.0);
+        }
+        if let Some(isl) = self.isl_tokens() {
+            WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(labels)
+                .set(isl as i64);
+        }
+    }
+
+    /// Write avg ITL to per-worker last gauge using decode worker labels.
+    /// Called from the Python binding path at stream end.
+    pub fn observe_finish_gauges(&self) {
+        let Some(worker_id) = self.decode_worker_id() else {
+            return;
+        };
+        let worker_id_str = worker_id.to_string();
+        let dp_rank_str = self
+            .decode_dp_rank()
+            .map_or("0".to_string(), |r| r.to_string());
+        let worker_type = self.decode_worker_type().unwrap_or(WORKER_TYPE_DECODE);
+        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+
+        if let Some(avg_itl) = self.avg_itl_ms() {
+            WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                .with_label_values(labels)
+                .set(avg_itl / 1000.0);
+        }
     }
 
     pub fn get_timing_info(&self) -> TimingInfo {

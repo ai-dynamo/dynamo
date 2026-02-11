@@ -429,11 +429,6 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             delta.stop_reason,
         );
 
-        // Record first token time (only succeeds on first call due to OnceLock)
-        if let Some(ref tracker) = self.tracker {
-            tracker.record_first_token();
-        }
-
         // Get worker_id info from tracker (set by KvPushRouter based on phase)
         let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
 
@@ -445,10 +440,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
-            self.tracker.as_ref().map(|tracker| {
-                tracker.record_finish();
-                tracker.get_timing_info()
-            })
+            self.tracker
+                .as_ref()
+                .map(|tracker| tracker.get_timing_info())
         } else {
             None
         };

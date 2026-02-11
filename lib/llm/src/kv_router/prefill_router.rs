@@ -530,7 +530,6 @@ impl
         }
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_permit = tracker.set_phase(RequestPhase::Prefill).await;
-        tracker.record_prefill_start();
 
         // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
         let mut prefill_req = req.clone();
@@ -555,14 +554,6 @@ impl
                     && let Some(router) = self.prefill_router.get()
                 {
                     router.select_next_worker();
-                }
-
-                // Record prefill worker on the main request's tracker for metrics.
-                // (The cloned prefill_req has its own tracker, so we need to record here)
-                // Worker type is stored at routing time to avoid expensive MDC lookups when
-                // updating Prometheus TTFT metrics later in the response stream.
-                if let Some(ref tracker) = req.tracker {
-                    tracker.record_prefill_worker_full(worker_id, dp_rank, WORKER_TYPE_PREFILL);
                 }
 
                 let routing = prefill_req.routing_mut();
@@ -590,16 +581,6 @@ impl
                 engine_ctx.link_child(prefill_context.context());
 
                 let result = self.call_prefill(prefill_context).await;
-
-                // Record prefill worker on the main request's tracker for metrics.
-                // (call_prefill returns the worker_id and dp_rank from the prefill routing)
-                // Worker type is stored at routing time to avoid expensive MDC lookups when
-                // updating Prometheus TTFT metrics later in the response stream.
-                if let Ok((_, Some((worker_id, dp_rank)))) = &result
-                    && let Some(ref tracker) = req.tracker
-                {
-                    tracker.record_prefill_worker_full(*worker_id, *dp_rank, WORKER_TYPE_PREFILL);
-                }
 
                 result.map(|(result, worker_info)| {
                     (Some(result), worker_info.map(|(id, _)| id), None)
