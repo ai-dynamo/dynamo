@@ -333,7 +333,7 @@ def parse_args():
         action="store_true",
         dest="router_track_output_blocks",
         default=False,
-        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens (default: False)",
+        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected output sequence length (agent_hints.osl in nvext). Default: False.",
     )
 
     parser.add_argument(

@@ -51,6 +51,7 @@ def pytest_configure(config):
         "multimodal: marks tests as multimodal (image/video) tests",
         "slow: marks tests as known to be slow",
         "h100: marks tests to run on H100",
+        "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
         "router: marks tests for router component",
         "planner: marks tests for planner component",
         "kvbm: marks tests for KV behavior and model determinism",

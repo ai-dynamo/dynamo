@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::time::Duration;
-#[cfg(feature = "bench")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dynamo_runtime::{
@@ -27,6 +25,7 @@ pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
 pub mod config;
+pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
@@ -64,7 +63,6 @@ pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
 pub const KV_EVENT_SUBJECT: &str = "kv-events";
-pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
 // for inter-router comms
@@ -253,6 +251,7 @@ impl KvRouter {
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
+            kv_router_config.router_queue_threshold,
         )
         .await?;
 
@@ -318,7 +317,6 @@ impl KvRouter {
         lora_name: Option<String>,
         priority_jump: f64,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
-        #[cfg(feature = "bench")]
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -328,16 +326,16 @@ impl KvRouter {
         let isl_tokens = tokens.len();
 
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
-        #[cfg(feature = "bench")]
         let hash_elapsed = start.elapsed();
+
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
-        #[cfg(feature = "bench")]
         let find_matches_elapsed = start.elapsed();
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = self
             .kv_router_config
             .compute_seq_hashes_for_tracking(tokens, self.block_size);
+        let seq_hash_elapsed = start.elapsed();
 
         let best_worker = self
             .scheduler
@@ -352,19 +350,25 @@ impl KvRouter {
                 priority_jump,
             )
             .await?;
+        let total_elapsed = start.elapsed();
+
+        metrics::ROUTING_OVERHEAD_METRICS.observe(
+            hash_elapsed,
+            find_matches_elapsed,
+            seq_hash_elapsed,
+            total_elapsed,
+        );
 
         #[cfg(feature = "bench")]
-        {
-            let total_elapsed = start.elapsed();
-            tracing::info!(
-                isl_tokens,
-                hash_us = hash_elapsed.as_micros() as u64,
-                find_matches_us = (find_matches_elapsed - hash_elapsed).as_micros() as u64,
-                schedule_us = (total_elapsed - find_matches_elapsed).as_micros() as u64,
-                total_us = total_elapsed.as_micros() as u64,
-                "find_best_match completed"
-            );
-        }
+        tracing::info!(
+            isl_tokens,
+            hash_us = hash_elapsed.as_micros() as u64,
+            find_matches_us = (find_matches_elapsed - hash_elapsed).as_micros() as u64,
+            seq_hash_us = (seq_hash_elapsed - find_matches_elapsed).as_micros() as u64,
+            schedule_us = (total_elapsed - seq_hash_elapsed).as_micros() as u64,
+            total_us = total_elapsed.as_micros() as u64,
+            "find_best_match completed"
+        );
 
         // Note: Routing decision recording (for approximate mode) is now handled
         // by KvPushRouter::generate after select_worker returns.

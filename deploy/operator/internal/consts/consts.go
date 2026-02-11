@@ -81,6 +81,10 @@ const (
 
 	DefaultGroveTerminationDelay = 15 * time.Minute
 
+	// Operator origin version: stamped on DGD at creation time by mutating webhook.
+	// Records which operator version created the resource, enabling version-gated behavior changes.
+	KubeAnnotationDynamoOperatorOriginVersion = "nvidia.com/dynamo-operator-origin-version"
+
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
 	KubeLabelMetricsEnabled      = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection

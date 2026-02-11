@@ -279,15 +279,6 @@ pub mod llm {
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
-
-    /// KV Router configuration
-    pub mod kv_router {
-        /// Queue threshold fraction for prefill token capacity.
-        /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
-        /// If NOT set, queueing is disabled and all requests go directly to ready.
-        /// Example: DYN_ROUTER_QUEUE_THRESHOLD_FRAC=1.2
-        pub const DYN_ROUTER_QUEUE_THRESHOLD_FRAC: &str = "DYN_ROUTER_QUEUE_THRESHOLD_FRAC";
-    }
 }
 
 /// Model loading and caching environment variables
@@ -456,7 +447,6 @@ mod tests {
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::metrics::DYN_METRICS_PREFIX,
-            llm::kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,

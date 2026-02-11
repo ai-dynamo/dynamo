@@ -180,24 +180,10 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_local_updates: Option<bool>,
 
-    /// Expected number of output tokens for this request.
-    /// Used as a hint for routing decisions to estimate resource requirements.
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_output_tokens: Option<u32>,
-
     /// Agent-provided hints for request handling.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_hints: Option<AgentHints>,
-
-    /// When true, the router will pin the prefix blocks on the selected worker
-    /// after generation completes. This protects the cached prefix from eviction
-    /// for subsequent requests with the same prefix (e.g., system prompt reuse
-    /// in agentic workflows).
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin: Option<bool>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -208,6 +194,21 @@ pub struct AgentHints {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_sensitivity: Option<f64>,
+
+    /// Expected output sequence length (number of output tokens).
+    /// Used as a hint for routing decisions to estimate resource requirements
+    /// and for output block tracking decay.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osl: Option<u32>,
+
+    /// When true, the router will pin the prefix blocks on the selected worker
+    /// after generation completes. This protects the cached prefix from eviction
+    /// for subsequent requests with the same prefix (e.g., system prompt reuse
+    /// in agentic workflows).
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<bool>,
 }
 
 impl Default for NvExt {
@@ -257,8 +258,6 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.enable_local_updates, None);
-        assert_eq!(nv_ext.expected_output_tokens, None);
-        assert_eq!(nv_ext.pin, None);
     }
 
     // Test valid builder configurations
