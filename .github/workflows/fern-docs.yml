@@ -444,9 +444,9 @@ jobs:
             exit 0
           fi
 
-          # Find the index of the "Next" entry and insert new version right after it
-          NEXT_IDX=$(yq '.products[0].versions | to_entries | map(select(.value.display-name == "Next")) | .[0].key' "$DOCS_FILE")
-          INSERT_IDX=$((NEXT_IDX + 1))
+          # Find the index of the "dev" entry and insert new version right after it
+          DEV_IDX=$(yq '.products[0].versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' "$DOCS_FILE")
+          INSERT_IDX=$((DEV_IDX + 1))
 
           yq -i "
             .products[0].versions |= (
