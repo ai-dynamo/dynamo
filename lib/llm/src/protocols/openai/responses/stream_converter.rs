@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_async_openai::types::responses::{
-    AssistantRole, FunctionToolCall, OutputContent, OutputItem, OutputMessage,
+    AssistantRole, FunctionToolCall, Instructions, OutputContent, OutputItem, OutputMessage,
     OutputMessageContent, OutputStatus, OutputTextContent, Response, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
     ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
@@ -26,12 +26,14 @@ use uuid::Uuid;
 
 use dynamo_async_openai::types::ChatCompletionMessageContent;
 
+use super::ResponseParams;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
 /// State machine that converts a chat completion stream into Responses API events.
 pub struct ResponseStreamConverter {
     response_id: String,
     model: String,
+    params: ResponseParams,
     created_at: u64,
     sequence_number: u64,
     // Text message tracking
@@ -55,7 +57,7 @@ struct FunctionCallState {
 }
 
 impl ResponseStreamConverter {
-    pub fn new(model: String) -> Self {
+    pub fn new(model: String, params: ResponseParams) -> Self {
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -64,6 +66,7 @@ impl ResponseStreamConverter {
         Self {
             response_id: format!("resp_{}", Uuid::new_v4().simple()),
             model,
+            params,
             created_at,
             sequence_number: 0,
             message_item_id: format!("msg_{}", Uuid::new_v4().simple()),
@@ -100,29 +103,33 @@ impl ResponseStreamConverter {
             status,
             model: self.model.clone(),
             output,
-            // Spec-required defaults
+            // Echo request params with spec-required defaults for omitted fields
             background: Some(false),
             frequency_penalty: Some(0.0),
             metadata: Some(serde_json::Value::Object(Default::default())),
             parallel_tool_calls: Some(true),
             presence_penalty: Some(0.0),
-            store: Some(true),
-            temperature: Some(1.0),
+            store: self.params.store,
+            temperature: self.params.temperature.or(Some(1.0)),
             text: Some(ResponseTextParam {
                 format: TextResponseFormatConfiguration::Text,
                 verbosity: None,
             }),
-            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
-            tools: Some(vec![]),
-            top_p: Some(1.0),
+            tool_choice: self
+                .params
+                .tool_choice
+                .clone()
+                .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto))),
+            tools: self.params.tools.clone().or(Some(vec![])),
+            top_p: self.params.top_p.or(Some(1.0)),
             truncation: Some(Truncation::Disabled),
             // Nullable required fields
             billing: None,
             conversation: None,
             error: None,
             incomplete_details: None,
-            instructions: None,
-            max_output_tokens: None,
+            instructions: self.params.instructions.clone().map(Instructions::Text),
+            max_output_tokens: self.params.max_output_tokens,
             max_tool_calls: None,
             previous_response_id: None,
             prompt: None,

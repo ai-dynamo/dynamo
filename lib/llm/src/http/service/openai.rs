@@ -50,7 +50,7 @@ use crate::protocols::openai::{
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
-    responses::{NvCreateResponse, NvResponse},
+    responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
@@ -1198,7 +1198,12 @@ async fn responses(
         return Ok(resp.into_response());
     }
 
-    // Apply template values if present
+    // Apply template values if present, with sensible defaults for the Responses API.
+    // Unlike chat completions where backends may have their own defaults, the Responses API
+    // should provide a generous default to avoid truncated responses (especially with
+    // reasoning models that emit <think> tokens).
+    const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
+
     if let Some(template) = template {
         if request.inner.model.as_deref().unwrap_or("").is_empty() {
             request.inner.model = Some(template.model.clone());
@@ -1209,8 +1214,22 @@ async fn responses(
         if request.inner.max_output_tokens.is_none() {
             request.inner.max_output_tokens = Some(template.max_completion_tokens);
         }
+    } else if request.inner.max_output_tokens.is_none() {
+        request.inner.max_output_tokens = Some(DEFAULT_MAX_OUTPUT_TOKENS);
     }
     tracing::trace!("Received responses request: {:?}", request.inner);
+
+    // Extract request parameters before into_parts() consumes the request.
+    // These are echoed back in the Response object per the OpenAI spec.
+    let response_params = ResponseParams {
+        temperature: request.inner.temperature,
+        top_p: request.inner.top_p,
+        max_output_tokens: request.inner.max_output_tokens,
+        store: request.inner.store,
+        tools: request.inner.tools.clone(),
+        tool_choice: request.inner.tool_choice.clone(),
+        instructions: request.inner.instructions.clone(),
+    };
 
     let streaming = request.inner.stream.unwrap_or(false);
     let request_id = request.id().to_string();
@@ -1278,7 +1297,7 @@ async fn responses(
         use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let mut converter = ResponseStreamConverter::new(model.clone());
+        let mut converter = ResponseStreamConverter::new(model.clone(), response_params);
         let start_events = converter.emit_start_events();
 
         // Use std::sync::Mutex (not tokio) since process_chunk/emit_end_events are
@@ -1387,14 +1406,15 @@ async fn responses(
                 })?;
 
         // Convert NvCreateChatCompletionResponse --> NvResponse
-        let response: NvResponse = response.try_into().map_err(|e| {
-            tracing::error!(
-                request_id,
-                "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
-                e
-            );
-            ErrorMessage::internal_server_error("Failed to convert internal response")
-        })?;
+        let response: NvResponse = chat_completion_to_response(response, &response_params)
+            .map_err(|e| {
+                tracing::error!(
+                    request_id,
+                    "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
+                    e
+                );
+                ErrorMessage::internal_server_error("Failed to convert internal response")
+            })?;
 
         inflight_guard.mark_ok();
 

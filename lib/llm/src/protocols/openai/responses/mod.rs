@@ -5,9 +5,9 @@ pub mod stream_converter;
 
 use dynamo_async_openai::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, InputContent, InputItem, InputParam,
-    InputRole, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
-    OutputTextContent, Response, ResponseTextParam, Role as ResponseRole, ServiceTier, Status,
-    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    InputRole, Instructions, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent,
+    OutputStatus, OutputTextContent, Response, ResponseTextParam, Role as ResponseRole, ServiceTier,
+    Status, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -566,6 +566,20 @@ fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
 // Chat Completions -> Responses API response conversion
 // ---------------------------------------------------------------------------
 
+/// Request parameters to echo back in Response objects.
+/// Extracted from the incoming CreateResponse request so that
+/// response objects reflect actual request values.
+#[derive(Clone, Debug, Default)]
+pub struct ResponseParams {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub max_output_tokens: Option<u32>,
+    pub store: Option<bool>,
+    pub tools: Option<Vec<Tool>>,
+    pub tool_choice: Option<ToolChoiceParam>,
+    pub instructions: Option<String>,
+}
+
 /// Build an assistant text message output item.
 fn make_text_message(id: String, text: String) -> OutputItem {
     OutputItem::Message(OutputMessage {
@@ -591,123 +605,128 @@ fn make_function_call(name: String, arguments: String) -> OutputItem {
     })
 }
 
-impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
-    type Error = anyhow::Error;
+/// Convert a ChatCompletion response into a Responses API response object,
+/// echoing back the actual request parameters from `params`.
+pub fn chat_completion_to_response(
+    nv_resp: NvCreateChatCompletionResponse,
+    params: &ResponseParams,
+) -> Result<NvResponse, anyhow::Error> {
+    let chat_resp = nv_resp;
+    let nvext = chat_resp.nvext.clone();
+    let message_id = format!("msg_{}", Uuid::new_v4().simple());
+    let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
-    fn try_from(nv_resp: NvCreateChatCompletionResponse) -> Result<Self, Self::Error> {
-        let chat_resp = nv_resp;
-        let nvext = chat_resp.nvext.clone();
-        let message_id = format!("msg_{}", Uuid::new_v4().simple());
-        let response_id = format!("resp_{}", Uuid::new_v4().simple());
+    let choice = chat_resp.choices.into_iter().next();
+    let mut output = Vec::new();
 
-        let choice = chat_resp.choices.into_iter().next();
-        let mut output = Vec::new();
-
-        if let Some(choice) = choice {
-            // Handle structured tool calls
-            if let Some(tool_calls) = choice.message.tool_calls {
-                for tc in &tool_calls {
-                    output.push(OutputItem::FunctionCall(FunctionToolCall {
-                        arguments: tc.function.arguments.clone(),
-                        call_id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        id: Some(format!("fc_{}", Uuid::new_v4().simple())),
-                        status: Some(OutputStatus::Completed),
-                    }));
-                }
+    if let Some(choice) = choice {
+        // Handle structured tool calls
+        if let Some(tool_calls) = choice.message.tool_calls {
+            for tc in &tool_calls {
+                output.push(OutputItem::FunctionCall(FunctionToolCall {
+                    arguments: tc.function.arguments.clone(),
+                    call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    id: Some(format!("fc_{}", Uuid::new_v4().simple())),
+                    status: Some(OutputStatus::Completed),
+                }));
             }
-
-            // Handle text content -- also parse <tool_call> blocks from models
-            // that emit tool calls as text (e.g. Qwen3)
-            let content_text = match choice.message.content {
-                Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(text)) => {
-                    Some(text)
-                }
-                Some(dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_)) => {
-                    tracing::warn!(
-                        "Multimodal content in responses API not yet supported, using placeholder"
-                    );
-                    Some("[multimodal content]".to_string())
-                }
-                None => None,
-            };
-            if let Some(content_text) = content_text
-                && !content_text.is_empty()
-            {
-                let parsed_calls = parse_tool_call_text(&content_text);
-                if !parsed_calls.is_empty() {
-                    for (name, arguments) in parsed_calls {
-                        output.push(make_function_call(name, arguments));
-                    }
-                    let remaining = strip_tool_call_text(&content_text);
-                    if !remaining.trim().is_empty() {
-                        output.push(make_text_message(
-                            message_id.clone(),
-                            remaining.into_owned(),
-                        ));
-                    }
-                } else {
-                    output.push(make_text_message(message_id.clone(), content_text));
-                }
-            }
-
-            if output.is_empty() {
-                output.push(make_text_message(message_id, String::new()));
-            }
-        } else {
-            tracing::warn!("No choices in chat completion response, using empty content");
-            output.push(make_text_message(message_id, String::new()));
         }
 
-        let created_at = chat_resp.created as u64;
-        let response = Response {
-            id: response_id,
-            object: "response".to_string(),
-            created_at,
-            completed_at: Some(created_at),
-            model: chat_resp.model,
-            status: Status::Completed,
-            output,
-            // Spec-required defaults (OpenResponses requires these as non-null)
-            background: Some(false),
-            frequency_penalty: Some(0.0),
-            metadata: Some(serde_json::Value::Object(Default::default())),
-            parallel_tool_calls: Some(true),
-            presence_penalty: Some(0.0),
-            store: Some(true),
-            temperature: Some(1.0),
-            text: Some(ResponseTextParam {
-                format: TextResponseFormatConfiguration::Text,
-                verbosity: None,
-            }),
-            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
-            tools: Some(vec![]),
-            top_p: Some(1.0),
-            truncation: Some(Truncation::Disabled),
-            // Nullable but required to be present (null is valid)
-            billing: None,
-            conversation: None,
-            error: None,
-            incomplete_details: None,
-            instructions: None,
-            max_output_tokens: None,
-            max_tool_calls: None,
-            previous_response_id: None,
-            prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
-            reasoning: None,
-            safety_identifier: None,
-            service_tier: Some(ServiceTier::Auto),
-            top_logprobs: Some(0),
-            usage: None,
+        // Handle text content -- also parse <tool_call> blocks from models
+        // that emit tool calls as text (e.g. Qwen3)
+        let content_text = match choice.message.content {
+            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(text)) => {
+                Some(text)
+            }
+            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_)) => {
+                tracing::warn!(
+                    "Multimodal content in responses API not yet supported, using placeholder"
+                );
+                Some("[multimodal content]".to_string())
+            }
+            None => None,
         };
+        if let Some(content_text) = content_text
+            && !content_text.is_empty()
+        {
+            let parsed_calls = parse_tool_call_text(&content_text);
+            if !parsed_calls.is_empty() {
+                for (name, arguments) in parsed_calls {
+                    output.push(make_function_call(name, arguments));
+                }
+                let remaining = strip_tool_call_text(&content_text);
+                if !remaining.trim().is_empty() {
+                    output.push(make_text_message(
+                        message_id.clone(),
+                        remaining.into_owned(),
+                    ));
+                }
+            } else {
+                output.push(make_text_message(message_id.clone(), content_text));
+            }
+        }
 
-        Ok(NvResponse {
-            inner: response,
-            nvext,
-        })
+        if output.is_empty() {
+            output.push(make_text_message(message_id, String::new()));
+        }
+    } else {
+        tracing::warn!("No choices in chat completion response, using empty content");
+        output.push(make_text_message(message_id, String::new()));
     }
+
+    let created_at = chat_resp.created as u64;
+    let response = Response {
+        id: response_id,
+        object: "response".to_string(),
+        created_at,
+        completed_at: Some(created_at),
+        model: chat_resp.model,
+        status: Status::Completed,
+        output,
+        // Spec-required defaults (OpenResponses requires these as non-null)
+        background: Some(false),
+        frequency_penalty: Some(0.0),
+        metadata: Some(serde_json::Value::Object(Default::default())),
+        parallel_tool_calls: Some(true),
+        presence_penalty: Some(0.0),
+        // Echo actual request values, falling back to spec defaults
+        store: params.store,
+        temperature: params.temperature.or(Some(1.0)),
+        text: Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::Text,
+            verbosity: None,
+        }),
+        tool_choice: params
+            .tool_choice
+            .clone()
+            .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto))),
+        tools: params.tools.clone().or(Some(vec![])),
+        top_p: params.top_p.or(Some(1.0)),
+        truncation: Some(Truncation::Disabled),
+        // Nullable but required to be present (null is valid)
+        billing: None,
+        conversation: None,
+        error: None,
+        incomplete_details: None,
+        instructions: params.instructions.clone().map(Instructions::Text),
+        max_output_tokens: params.max_output_tokens,
+        max_tool_calls: None,
+        previous_response_id: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        reasoning: None,
+        safety_identifier: None,
+        service_tier: Some(ServiceTier::Auto),
+        top_logprobs: Some(0),
+        usage: None,
+    };
+
+    Ok(NvResponse {
+        inner: response,
+        nvext,
+    })
 }
 
 #[cfg(test)]
@@ -1024,7 +1043,7 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped: NvResponse = chat_resp.try_into().unwrap();
+        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
 
         assert_eq!(wrapped.inner.model, "llama-3.1-8b-instruct");
         assert_eq!(wrapped.inner.status, Status::Completed);
@@ -1082,7 +1101,7 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped: NvResponse = chat_resp.try_into().unwrap();
+        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
         assert_eq!(wrapped.inner.output.len(), 1);
         match &wrapped.inner.output[0] {
             OutputItem::FunctionCall(fc) => {
