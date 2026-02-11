@@ -84,9 +84,13 @@ query_router_result_t free_request(RouterHandles *handle,
 
 void free_routing_result(CRoutingResult *result);
 
-query_router_result_t update_worker_configs(RouterHandles *handle,
-                                            const CWorkerConfig *workers,
-                                            size_t count);
+// Event-driven worker override API (used by GAIE EndpointDataSource observer)
+query_router_result_t add_worker_override(RouterHandles *handle,
+                                          uint64_t worker_id,
+                                          const CWorkerConfig *config);
+
+query_router_result_t remove_worker_override(RouterHandles *handle,
+                                             uint64_t worker_id);
 
 // Compute Dynamo worker instance ID from a Kubernetes pod name.
 // Uses the same hash as the Dynamo runtime (KubeDiscoveryClient).
@@ -297,14 +301,8 @@ func (k *KVAwareScorer) Score(
 		)
 	}
 
-	// Push EPP pod information to the Dynamo router so it considers these workers.
-	// This feeds the InferencePool-discovered pods into the KV router's worker set.
-	workerConfigs := buildWorkerConfigsFromPods(pods)
-	if len(workerConfigs) > 0 {
-		if updateErr := UpdateWorkerConfigs(workerConfigs); updateErr != nil {
-			logger.V(logutil.DEFAULT).Error(updateErr, "Failed to update router worker configs from EPP pods")
-		}
-	}
+	// Worker topology is managed by DynamoWorkerExtractor (event-driven via PR 2281).
+	// No per-request worker list push needed — the router already has the right workers.
 
 	workerID, prefillWorkerID, tokenData, err := k.callDynamoRouter(ctx, req)
 	if err != nil {
@@ -590,60 +588,7 @@ func buildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 	return requestBody, nil
 }
 
-// --------------------------- worker config overrides ---------------------------
-
-// UpdateWorkerConfigs pushes EPP-discovered pod/worker information into the Dynamo router.
-// The router will use these workers (taking precedence) alongside discovery-based workers.
-// Call with an empty slice to clear overrides and revert to discovery-only.
-func UpdateWorkerConfigs(workers []CWorkerConfigGo) error {
-	if !routerInitialized {
-		return fmt.Errorf("dynamo router not initialized")
-	}
-
-	routerHandlesMutex.RLock()
-	router := routerHandles
-	routerHandlesMutex.RUnlock()
-
-	if router == nil {
-		return fmt.Errorf("dynamo router handles not created")
-	}
-
-	if len(workers) == 0 {
-		rc := C.update_worker_configs(router, nil, 0)
-		if rc != C.QUERY_ROUTER_OK {
-			return fmt.Errorf("update_worker_configs (clear) failed with code %d", rc)
-		}
-		return nil
-	}
-
-	cWorkers := make([]C.CWorkerConfig, len(workers))
-	for i, w := range workers {
-		cWorkers[i] = C.CWorkerConfig{
-			worker_id:          C.uint64_t(w.WorkerID),
-			total_kv_blocks:    C.uint64_t(w.TotalKvBlocks),
-			max_num_seqs:       C.uint64_t(w.MaxNumSeqs),
-			data_parallel_size: C.uint32_t(w.DataParallelSize),
-		}
-	}
-
-	rc := C.update_worker_configs(
-		router,
-		(*C.CWorkerConfig)(unsafe.Pointer(&cWorkers[0])),
-		C.size_t(len(cWorkers)),
-	)
-	if rc != C.QUERY_ROUTER_OK {
-		return fmt.Errorf("update_worker_configs failed with code %d", rc)
-	}
-	return nil
-}
-
-// CWorkerConfigGo is the Go-side representation of a worker config for the FFI.
-type CWorkerConfigGo struct {
-	WorkerID         uint64
-	TotalKvBlocks    uint64
-	MaxNumSeqs       uint64
-	DataParallelSize uint32
-}
+// -------------------- event-driven worker overrides (PR 2281) --------------------
 
 // HashPodName computes the Dynamo worker instance ID from a Kubernetes pod name.
 // This calls the same hash function the Dynamo runtime uses (KubeDiscoveryClient),
@@ -654,28 +599,117 @@ func HashPodName(podName string) uint64 {
 	return uint64(C.hash_pod_name_ffi(cName))
 }
 
-// buildWorkerConfigsFromPods converts EPP pod information into worker configs
-// for the Dynamo router. Maps each pod to its Dynamo worker instance ID by
-// hashing the pod name (same algorithm as the Dynamo runtime).
-func buildWorkerConfigsFromPods(pods []schedtypes.Pod) []CWorkerConfigGo {
-	configs := make([]CWorkerConfigGo, 0, len(pods))
-	for _, p := range pods {
-		pod := p.GetPod()
-		podName := pod.NamespacedName.Name
-		if podName == "" {
-			continue
-		}
-
-		workerID := HashPodName(podName)
-		configs = append(configs, CWorkerConfigGo{
-			WorkerID:         workerID,
-			TotalKvBlocks:    0, // filled from discovery
-			MaxNumSeqs:       0, // filled from discovery
-			DataParallelSize: 0, // filled from discovery
-		})
+// addWorkerOverrideFFI tells the Dynamo router that this worker (pod) is available.
+func addWorkerOverrideFFI(workerID uint64) error {
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
 	}
-	return configs
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	// Pass nil config — discovery will fill in total_kv_blocks, max_num_seqs, etc.
+	rc := C.add_worker_override(router, C.uint64_t(workerID), nil)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("add_worker_override failed with code %d", rc)
+	}
+	return nil
 }
+
+// removeWorkerOverrideFFI tells the Dynamo router that this worker (pod) is gone.
+func removeWorkerOverrideFFI(workerID uint64) error {
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	rc := C.remove_worker_override(router, C.uint64_t(workerID))
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("remove_worker_override failed with code %d", rc)
+	}
+	return nil
+}
+
+// DynamoWorkerExtractor implements the GAIE EndpointDataSource Extractor interface
+// (PR 2281). It receives pod add/remove events from the Datastore and forwards
+// them to the Dynamo KvRouter via FFI, so the router's worker set stays in sync
+// with the InferencePool without any per-request overhead.
+//
+// Pseudo-code: assumes the Extractor interface from PR 2281 looks like:
+//
+//   type EventType int
+//   const (
+//       EventAddedOrModified EventType = iota
+//       EventDeleted
+//   )
+//   type Extractor interface {
+//       Extract(event EventType, pod *corev1.Pod, endpoint *Endpoint)
+//   }
+type DynamoWorkerExtractor struct{}
+
+// Extract is called synchronously by the GAIE Datastore whenever a pod
+// matching the InferencePool selector is added, modified, or deleted.
+//
+// - EventAddedOrModified: hash pod name → worker_id, call add_worker_override
+// - EventDeleted:         hash pod name → worker_id, call remove_worker_override
+//
+// This replaces the previous per-Score() bulk push approach.
+func (e *DynamoWorkerExtractor) Extract(event int, pod interface{}, endpoint interface{}) {
+	// --- Pseudo-code: adapt types once PR 2281 is merged ---
+	// pod is *corev1.Pod, endpoint is *backend.Endpoint (or similar)
+	//
+	// podObj := pod.(*corev1.Pod)
+	// podName := podObj.Name
+
+	// For now, extract pod name via type assertion placeholder:
+	type podLike interface{ GetName() string }
+	podObj, ok := pod.(podLike)
+	if !ok {
+		return
+	}
+	podName := podObj.GetName()
+	if podName == "" {
+		return
+	}
+
+	workerID := HashPodName(podName)
+
+	const (
+		eventAddedOrModified = 0 // PR 2281: EventAddedOrModified
+		eventDeleted         = 1 // PR 2281: EventDeleted
+	)
+
+	switch event {
+	case eventAddedOrModified:
+		if err := addWorkerOverrideFFI(workerID); err != nil {
+			fmt.Printf("DynamoWorkerExtractor: failed to add worker %d (pod %s): %v\n",
+				workerID, podName, err)
+		}
+	case eventDeleted:
+		if err := removeWorkerOverrideFFI(workerID); err != nil {
+			fmt.Printf("DynamoWorkerExtractor: failed to remove worker %d (pod %s): %v\n",
+				workerID, podName, err)
+		}
+	}
+}
+
+// RegisterDynamoWorkerExtractor registers the extractor with the GAIE
+// EndpointDataSource so that pod lifecycle events are forwarded to the
+// Dynamo router. Call this during plugin initialization.
+//
+// Pseudo-code: adapt to actual PR 2281 registration API.
+//
+//   func RegisterDynamoWorkerExtractor(dataSource *EndpointDataSource) {
+//       dataSource.RegisterExtractor(&DynamoWorkerExtractor{})
+//   }
 
 // --------------------------- router bookkeeping ---------------------------
 

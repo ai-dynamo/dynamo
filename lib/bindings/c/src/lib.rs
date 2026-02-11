@@ -408,6 +408,10 @@ pub struct RouterHandles {
     runtime: Runtime,
     /// Preprocessor for tokenization and template application (fetched via discovery)
     preprocessor: Option<Arc<OpenAIPreprocessor>>,
+    /// EPP-managed worker override map. Updated incrementally by add/remove events
+    /// from the GAIE EndpointDataSource (PR 2281). The map is sent to the KvRouter's
+    /// override watch channel whenever it changes.
+    epp_workers: std::sync::Mutex<std::collections::HashMap<u64, dynamo_llm::local_model::runtime_config::ModelRuntimeConfig>>,
 }
 
 impl RouterHandles {
@@ -718,6 +722,7 @@ pub unsafe extern "C" fn create_routers(
                 namespace: namespace_str,
                 runtime, // Store the runtime for reuse
                 preprocessor,
+                epp_workers: std::sync::Mutex::new(std::collections::HashMap::new()),
             };
             unsafe { *out_handle = Box::into_raw(Box::new(handles)) };
             QueryRouterResult::Ok
@@ -944,22 +949,20 @@ pub struct CWorkerConfig {
     pub data_parallel_size: u32,
 }
 
-/// Update the router's known workers from an external source (EPP pods).
+/// Add or update a single worker in the EPP override set.
 ///
-/// This pushes a set of worker configurations into the KvRouter, which will
-/// merge them with (taking precedence over) discovery-based workers.
-/// The router's scheduling loop will immediately start considering these workers.
-///
-/// Call with `count=0` to clear overrides and revert to discovery-only mode.
+/// Called by the GAIE EndpointDataSource observer (PR 2281) when a pod is
+/// added or modified. Incrementally updates the override map and pushes the
+/// new snapshot to the KvRouter's override watch channel.
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
-/// - `workers` must point to at least `count` valid CWorkerConfig entries (or be null if count=0)
+/// - `config` may be null (defaults will be used, enriched from discovery)
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn update_worker_configs(
+pub unsafe extern "C" fn add_worker_override(
     handle: RouterHandlesPtr,
-    workers: *const CWorkerConfig,
-    count: usize,
+    worker_id: u64,
+    config: *const CWorkerConfig,
 ) -> QueryRouterResult {
     if handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
@@ -967,41 +970,64 @@ pub unsafe extern "C" fn update_worker_configs(
 
     let handles = unsafe { &*handle };
 
-    if count == 0 {
-        handles.decode_router.clear_worker_overrides();
-        tracing::info!("Worker overrides cleared via FFI");
-        return QueryRouterResult::Ok;
-    }
+    let worker_config = if !config.is_null() {
+        let cw = unsafe { &*config };
+        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+        let mut cfg = ModelRuntimeConfig::default();
+        if cw.total_kv_blocks > 0 {
+            cfg.total_kv_blocks = Some(cw.total_kv_blocks);
+        }
+        if cw.max_num_seqs > 0 {
+            cfg.max_num_seqs = Some(cw.max_num_seqs);
+        }
+        if cw.data_parallel_size > 0 {
+            cfg.data_parallel_size = cw.data_parallel_size;
+        }
+        cfg
+    } else {
+        dynamo_llm::local_model::runtime_config::ModelRuntimeConfig::default()
+    };
 
-    if workers.is_null() {
+    // Update the override map and push snapshot to the router
+    let mut map = handles.epp_workers.lock().unwrap();
+    map.insert(worker_id, worker_config);
+    tracing::info!(worker_id, total_workers = map.len(), "EPP worker added/updated");
+    handles.decode_router.override_workers(map.clone());
+
+    QueryRouterResult::Ok
+}
+
+/// Remove a single worker from the EPP override set.
+///
+/// Called by the GAIE EndpointDataSource observer (PR 2281) when a pod is
+/// deleted. Removes the worker from the override map and pushes the updated
+/// snapshot to the KvRouter. If the map becomes empty, clears overrides
+/// entirely (reverts to discovery-only mode).
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn remove_worker_override(
+    handle: RouterHandlesPtr,
+    worker_id: u64,
+) -> QueryRouterResult {
+    if handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
 
-    let worker_slice = unsafe { std::slice::from_raw_parts(workers, count) };
+    let handles = unsafe { &*handle };
 
-    let mut worker_map = std::collections::HashMap::with_capacity(count);
-    for cw in worker_slice {
-        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
-        let mut config = ModelRuntimeConfig::default();
-        if cw.total_kv_blocks > 0 {
-            config.total_kv_blocks = Some(cw.total_kv_blocks);
-        }
-        if cw.max_num_seqs > 0 {
-            config.max_num_seqs = Some(cw.max_num_seqs);
-        }
-        if cw.data_parallel_size > 0 {
-            config.data_parallel_size = cw.data_parallel_size;
-        }
-        worker_map.insert(cw.worker_id, config);
+    let mut map = handles.epp_workers.lock().unwrap();
+    map.remove(&worker_id);
+    tracing::info!(worker_id, remaining_workers = map.len(), "EPP worker removed");
+
+    if map.is_empty() {
+        // No EPP workers left — revert to discovery-only
+        handles.decode_router.clear_worker_overrides();
+    } else {
+        handles.decode_router.override_workers(map.clone());
     }
 
-    tracing::info!(
-        worker_count = count,
-        worker_ids = ?worker_map.keys().collect::<Vec<_>>(),
-        "Updating router workers from EPP via FFI"
-    );
-
-    handles.decode_router.override_workers(worker_map);
     QueryRouterResult::Ok
 }
 
