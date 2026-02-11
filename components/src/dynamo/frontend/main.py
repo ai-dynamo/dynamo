@@ -49,6 +49,7 @@ def setup_engine_factory(
     runtime: DistributedRuntime,
     router_config: RouterConfig,
     config: FrontendConfig,
+    vllm_flags: Namespace,
 ):
     """
     When using vllm pre and post processor, create the EngineFactory that
@@ -56,7 +57,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, config)
+    return EngineFactory(runtime, router_config, config, vllm_flags)
 
 
 def _is_vllm_chat_processor(argv: list[str]) -> bool:
@@ -241,7 +242,7 @@ async def async_main():
 
     if config.chat_processor == "vllm":
         chat_engine_factory = setup_engine_factory(
-            runtime, router_config, config
+            runtime, router_config, config, vllm_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
