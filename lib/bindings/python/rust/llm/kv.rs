@@ -947,6 +947,7 @@ impl KvPushRouter {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut first_item = true;
+                let mut first_token_gauges_observed = false;
 
                 while let Some(mut response) = stream.next().await {
                     // Inject worker_id into first response if tracker is available
@@ -954,6 +955,21 @@ impl KvPushRouter {
                         first_item = false;
                         if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
                             inject_worker_id_from_tracker(data, tracker);
+                        }
+                    }
+
+                    // Observe per-worker TTFT/ISL gauges on first response with actual tokens
+                    if !first_token_gauges_observed {
+                        let has_tokens = response
+                            .data
+                            .as_ref()
+                            .map(|d| !d.token_ids.is_empty())
+                            .unwrap_or(false);
+                        if has_tokens {
+                            if let Some(ref tracker) = tracker {
+                                tracker.observe_first_token_gauges();
+                            }
+                            first_token_gauges_observed = true;
                         }
                     }
 
@@ -975,6 +991,11 @@ impl KvPushRouter {
                             break;
                         }
                     }
+                }
+
+                // Observe per-worker ITL gauge at stream end
+                if let Some(ref tracker) = tracker {
+                    tracker.observe_finish_gauges();
                 }
             });
 

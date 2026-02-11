@@ -6,7 +6,6 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::transports::event_plane::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -15,7 +14,6 @@ use std::time::Duration;
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
@@ -23,15 +21,6 @@ use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, W
 use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
 use dynamo_tokens::SequenceHash;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KVHitRateEvent {
-    pub worker_id: WorkerId,
-    #[serde(default)]
-    pub dp_rank: DpRank,
-    pub isl_blocks: usize,
-    pub overlap_blocks: u32,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
@@ -160,10 +149,6 @@ impl KvScheduler {
         let scheduler_rx = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
-        let hit_rate_publisher =
-            EventPublisher::for_namespace(component.namespace(), KV_HIT_RATE_SUBJECT)
-                .await
-                .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
         // Background task to handle scheduling requests
         tokio::spawn(async move {
@@ -199,16 +184,6 @@ impl KvScheduler {
 
                 match selector.select_worker(&workers, &request, block_size) {
                     Ok(selection) => {
-                        let event = KVHitRateEvent {
-                            worker_id: selection.worker.worker_id,
-                            dp_rank: selection.worker.dp_rank,
-                            isl_blocks: selection.required_blocks as usize,
-                            overlap_blocks: selection.overlap_blocks,
-                        };
-                        if let Err(e) = hit_rate_publisher.publish(&event).await {
-                            tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
-                        }
-
                         let response = SchedulingResponse {
                             best_worker: selection.worker,
                             overlap_blocks: selection.overlap_blocks,

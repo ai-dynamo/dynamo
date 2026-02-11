@@ -355,18 +355,16 @@ def test_vllm_kv_router_basic(
         f"Starting vLLM KV router test with {N_VLLM_WORKERS} workers using request_plane={request_plane}"
     )
 
-    try:
+    with VLLMProcess(
+        request,
+        vllm_args=VLLM_ARGS,
+        num_workers=N_VLLM_WORKERS,
+        single_gpu=True,  # fit workers into one GPU
+        request_plane=request_plane,
+    ) as vllm_workers:
         # Start vLLM workers
         logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
-        vllm_workers = VLLMProcess(
-            request,
-            vllm_args=VLLM_ARGS,
-            num_workers=N_VLLM_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-            request_plane=request_plane,
-        )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
-        vllm_workers.__enter__()
 
         # Run basic router test (starts router internally and waits for workers to be ready)
         frontend_port = allocate_frontend_ports(request, 1)[0]
@@ -381,10 +379,6 @@ def test_vllm_kv_router_basic(
             store_backend="etcd",  # Explicit for clarity
             request_plane=request_plane,
         )
-
-    finally:
-        if "vllm_workers" in locals():
-            vllm_workers.__exit__(None, None, None)
 
 
 @pytest.mark.pre_merge
@@ -402,20 +396,16 @@ def test_router_decisions_vllm_multiple_workers(
     logger.info("Starting vLLM router prefix reuse test with two workers")
     N_WORKERS = 2
 
-    try:
+    with VLLMProcess(
+        request,
+        vllm_args=VLLM_ARGS,
+        num_workers=N_WORKERS,
+        single_gpu=True,  # Worker uses GPU 0
+        request_plane=request_plane,
+    ) as vllm_workers:
         # Start 2 worker processes on the same GPU
         logger.info("Starting 2 vLLM worker processes on single GPU (gpu_mem=0.4)")
-        vllm_workers = VLLMProcess(
-            request,
-            vllm_args=VLLM_ARGS,
-            num_workers=N_WORKERS,
-            single_gpu=True,  # Worker uses GPU 0
-            request_plane=request_plane,
-        )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
-
-        # Initialize vLLM workers
-        vllm_workers.__enter__()
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
@@ -426,11 +416,6 @@ def test_router_decisions_vllm_multiple_workers(
         _test_router_decisions(
             vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=False
         )
-
-    finally:
-        # Clean up vLLM workers
-        if "vllm_workers" in locals():
-            vllm_workers.__exit__(None, None, None)
 
 
 @pytest.mark.gpu_2
@@ -454,18 +439,16 @@ def test_router_decisions_vllm_dp(
     N_WORKERS = 1
     DP_SIZE = 2
 
-    try:
+    with VLLMProcess(
+        request,
+        vllm_args=VLLM_ARGS,
+        num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
+        single_gpu=False,
+        data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
+        request_plane=request_plane,
+    ) as vllm_workers:
         logger.info("Starting 2 vLLM DP ranks (dp_size=2) (gpu_mem=0.4)")
-        vllm_workers = VLLMProcess(
-            request,
-            vllm_args=VLLM_ARGS,
-            num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
-            single_gpu=False,
-            data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
-            request_plane=request_plane,
-        )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
-        vllm_workers.__enter__()
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
@@ -477,11 +460,6 @@ def test_router_decisions_vllm_dp(
         _test_router_decisions(
             vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
         )
-
-    finally:
-        # Clean up vLLM workers
-        if "vllm_workers" in locals():
-            vllm_workers.__exit__(None, None, None)
 
 
 @pytest.mark.pre_merge
@@ -523,20 +501,18 @@ def test_vllm_indexers_sync(
 
     N_VLLM_WORKERS = 2
 
-    try:
+    with VLLMProcess(
+        request,
+        vllm_args=VLLM_ARGS,
+        num_workers=N_VLLM_WORKERS,
+        single_gpu=True,  # fit workers into one GPU
+        request_plane=request_plane,
+        store_backend=store_backend,
+        durable_kv_events=durable_kv_events,
+    ) as vllm_workers:
         # Start vLLM workers
         logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
-        vllm_workers = VLLMProcess(
-            request,
-            vllm_args=VLLM_ARGS,
-            num_workers=N_VLLM_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-            request_plane=request_plane,
-            store_backend=store_backend,
-            durable_kv_events=durable_kv_events,
-        )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
-        vllm_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)
         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
@@ -554,7 +530,3 @@ def test_vllm_indexers_sync(
         )
 
         logger.info("vLLM indexers sync test completed successfully")
-
-    finally:
-        if "vllm_workers" in locals():
-            vllm_workers.__exit__(None, None, None)
