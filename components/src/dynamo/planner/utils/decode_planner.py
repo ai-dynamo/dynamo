@@ -29,6 +29,13 @@ class DecodePlanner(BasePlanner):
         if x_sla is None:
             return None
 
+        if x_sla <= 0:
+            logger.warning(
+                f"ITL SLA unachievable: x_sla={x_sla:.1f}, "
+                "skipping load-based decode scaling"
+            )
+            return None
+
         if not self.cached_load_metrics.recent:
             return None
 
@@ -106,6 +113,12 @@ class DecodePlanner(BasePlanner):
         ) = self.decode_interpolator.find_best_throughput_per_gpu(
             itl=corrected_itl, context_length=next_isl + next_osl / 2
         )
+        if pred_decode_thpt_per_gpu <= 0:
+            logger.warning(
+                f"pred_decode_thpt_per_gpu is {pred_decode_thpt_per_gpu} "
+                "(no throughput satisfies ITL target), falling back to min_endpoint"
+            )
+            return self.args.min_endpoint
         pred_decode_throughput = next_num_req * next_osl / self.args.adjustment_interval
         next_num_d = math.ceil(
             pred_decode_throughput

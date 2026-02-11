@@ -44,17 +44,16 @@ class Metrics:
     d_load: Optional[float] = None
 
     def is_valid(self) -> bool:
-        """Check if all metrics are valid (not None and not NaN)."""
-        return (
-            self.ttft is not None
-            and self.itl is not None
-            and self.isl is not None
-            and self.osl is not None
-            and not math.isnan(self.ttft)
-            and not math.isnan(self.itl)
-            and not math.isnan(self.isl)
-            and not math.isnan(self.osl)
-        )
+        """Check if all required metrics are valid (not None and not NaN)."""
+        required = [
+            self.ttft,
+            self.itl,
+            self.isl,
+            self.osl,
+            self.num_req,
+            self.request_duration,
+        ]
+        return all(v is not None and not math.isnan(v) for v in required)
 
 
 @dataclass

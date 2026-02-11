@@ -896,10 +896,11 @@ class BasePlanner:
 
     async def run(self):
         """Main loop for the planner"""
+        require_prefill = self.component_type == SubComponentType.PREFILL
+        require_decode = self.component_type == SubComponentType.DECODE
+
         if not self.args.no_operation:
             logger.info("Validating deployment...")
-            require_prefill = self.component_type == SubComponentType.PREFILL
-            require_decode = self.component_type == SubComponentType.DECODE
             await self.connector.validate_deployment(
                 prefill_component_name=(
                     self.prefill_component_name if require_prefill else None
@@ -922,13 +923,21 @@ class BasePlanner:
 
             await self.connector.wait_for_deployment_ready()
 
+        # Model name discovery runs in all modes (needed for metrics collection)
+        if not self.args.no_operation:
             model_name = await self._get_model_name(
                 require_prefill=require_prefill, require_decode=require_decode
             )
             logger.info(f"Detected model name from deployment: {model_name}")
-            self.model_name = (
-                model_name.lower()
-            )  # normalize model name to lowercase (MDC)
+            self.model_name = model_name.lower()
+        else:
+            model_name = getattr(self.args, "model_name", None)
+            if not model_name:
+                raise ValueError(
+                    "Model name is required in no-operation mode. "
+                    "Please provide --model-name."
+                )
+            self.model_name = model_name.lower()
 
         self.shared_state.last_adjustment_time = time.time()
         self.shared_state.last_loadbased_adjustment_time = time.time()

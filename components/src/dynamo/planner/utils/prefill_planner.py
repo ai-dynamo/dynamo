@@ -39,6 +39,13 @@ class PrefillPlanner(BasePlanner):
         avg_isl = cluster_averaged.get("last_isl", 0.0)
         target_active_tokens = x_sla - avg_isl
 
+        if target_active_tokens <= 0:
+            logger.warning(
+                f"TTFT SLA unachievable at current ISL: x_sla={x_sla:.1f}, "
+                f"avg_isl={avg_isl:.1f}, skipping load-based prefill scaling"
+            )
+            return None
+
         num_workers = self.shared_state.num_p_workers
         if num_workers == 0:
             return None
@@ -97,6 +104,12 @@ class PrefillPlanner(BasePlanner):
             * min(1, self.p_correction_factor)
         )
         p_thpt_per_gpu = self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
+        if p_thpt_per_gpu <= 0:
+            logger.warning(
+                f"p_thpt_per_gpu is {p_thpt_per_gpu} "
+                "(no throughput satisfies TTFT target), falling back to min_endpoint"
+            )
+            return self.args.min_endpoint
         next_num_p = math.ceil(
             pred_prefill_throughput / p_thpt_per_gpu / self.args.prefill_engine_num_gpu
         )

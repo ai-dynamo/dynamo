@@ -81,13 +81,23 @@ class DisaggPlanner:
 
             await self.prefill_planner.connector.wait_for_deployment_ready()
 
+        # Model name discovery runs in all modes (needed for metrics collection)
+        if not self.args.no_operation:
             model_name = await self.prefill_planner._get_model_name(
                 require_prefill=True, require_decode=True
             )
             logger.info(f"Detected model name from deployment: {model_name}")
             model_name = model_name.lower()
-            self.prefill_planner.model_name = model_name
-            self.decode_planner.model_name = model_name
+        else:
+            model_name = getattr(self.args, "model_name", None)
+            if not model_name:
+                raise ValueError(
+                    "Model name is required in no-operation mode. "
+                    "Please provide --model-name."
+                )
+            model_name = model_name.lower()
+        self.prefill_planner.model_name = model_name
+        self.decode_planner.model_name = model_name
 
         self.shared_state.last_adjustment_time = time.time()
         self.shared_state.last_loadbased_adjustment_time = time.time()

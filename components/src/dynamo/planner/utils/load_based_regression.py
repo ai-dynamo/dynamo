@@ -71,14 +71,14 @@ class LoadBasedRegressionModel:
 
         Safety guards:
         - Returns None if insufficient data (cold start)
-        - Returns None if slope <= 0 (higher load must lead to higher latency)
+        - Falls back to observation-based heuristic if slope <= 0
         - Clamps result to non-negative
 
         Args:
             target_y: Target latency SLA value (e.g., TTFT in ms, ITL in ms)
 
         Returns:
-            Maximum load value that satisfies the SLA, or None if unavailable.
+            Maximum load value that satisfies the SLA, or None if insufficient data.
         """
         if not self._is_fitted and not self.fit():
             return None

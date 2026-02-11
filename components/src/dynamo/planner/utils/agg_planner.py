@@ -104,10 +104,20 @@ class AggPlanner:
 
             await self.planner.connector.wait_for_deployment_ready()
 
+        # Model name discovery runs in all modes (needed for metrics collection)
+        if not self.args.no_operation:
             model_name = await self.planner._get_model_name(
                 require_prefill=False, require_decode=True
             )
             logger.info(f"Detected model name from deployment: {model_name}")
+            self.planner.model_name = model_name.lower()
+        else:
+            model_name = getattr(self.args, "model_name", None)
+            if not model_name:
+                raise ValueError(
+                    "Model name is required in no-operation mode. "
+                    "Please provide --model-name."
+                )
             self.planner.model_name = model_name.lower()
 
         loops = [
@@ -165,6 +175,8 @@ class AggPlanner:
 
     def _prefill_scaling_decision(self, num_workers: int) -> Optional[str]:
         """Returns "up", "down", or None for prefill dimension."""
+        if not self.cached_load_metrics.recent:
+            return None
         if not self.ttft_regression.has_sufficient_data():
             logger.info(
                 f"TTFT regression: insufficient data ({self.ttft_regression.num_observations}"
@@ -180,6 +192,13 @@ class AggPlanner:
         cluster_averaged = self.cached_load_metrics.cluster_averaged
         avg_isl = cluster_averaged.get("last_isl", 0.0)
         target = x_sla - avg_isl
+
+        if target <= 0:
+            logger.warning(
+                f"Agg TTFT SLA unachievable at current ISL: x_sla={x_sla:.1f}, "
+                f"avg_isl={avg_isl:.1f}, skipping prefill scaling decision"
+            )
+            return None
 
         logger.info(
             f"Agg prefill: x_sla={x_sla:.1f}, avg_isl={avg_isl:.1f}, "
@@ -203,6 +222,8 @@ class AggPlanner:
 
     def _decode_scaling_decision(self, num_workers: int) -> Optional[str]:
         """Returns "up", "down", or None for decode dimension."""
+        if not self.cached_load_metrics.recent:
+            return None
         if not self.itl_regression.has_sufficient_data():
             logger.info(
                 f"ITL regression: insufficient data ({self.itl_regression.num_observations}"
@@ -212,6 +233,13 @@ class AggPlanner:
 
         x_sla = self.itl_regression.predict_x_from_sla(self.args.itl)
         if x_sla is None:
+            return None
+
+        if x_sla <= 0:
+            logger.warning(
+                f"Agg ITL SLA unachievable: x_sla={x_sla:.1f}, "
+                "skipping decode scaling decision"
+            )
             return None
 
         recent = self.cached_load_metrics.recent
