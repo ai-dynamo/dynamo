@@ -1,1 +1,1 @@
-../../docs/benchmarks/benchmarking.md
+../../docs/pages/benchmarks/benchmarking.md

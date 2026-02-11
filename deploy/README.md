@@ -1,1 +1,1 @@
-../docs/kubernetes/README.md
+../docs/pages/kubernetes/README.md
