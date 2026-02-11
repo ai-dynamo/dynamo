@@ -356,6 +356,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                         "Failed to add output block for request {context_id}: {e}"
                                     );
                                 }
+
+                                // Update tracker and observe avg ITL at each block boundary
+                                if let Some(ref tracker) = tracker {
+                                    tracker.record_osl(cumulative_osl);
+                                    tracker.record_finish();
+                                    if let Some(avg_itl) = tracker.avg_itl_ms() {
+                                        request_metrics
+                                            .inter_token_latency_seconds
+                                            .observe(avg_itl / 1000.0);
+                                    }
+                                }
+
                                 current_total_blocks = new_total_blocks;
                             }
                         }
@@ -365,7 +377,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            // Record final metrics on tracker and observe aggregate metrics
+            // Record final aggregate metrics (histograms sampled once per request)
             if let Some(ref tracker) = tracker {
                 tracker.record_finish();
                 tracker.record_osl(cumulative_osl);
@@ -373,11 +385,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 request_metrics
                     .output_sequence_tokens
                     .observe(cumulative_osl as f64);
-                if let Some(avg_itl) = tracker.avg_itl_ms() {
-                    request_metrics
-                        .inter_token_latency_seconds
-                        .observe(avg_itl / 1000.0);
-                }
             }
             request_metrics.requests_total.inc();
 
