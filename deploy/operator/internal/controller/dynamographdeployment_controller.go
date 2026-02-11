@@ -47,7 +47,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -239,13 +238,13 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
 		switch dynamoDeployment.Status.RollingUpdate.Phase {
-		case v1alpha1.RollingUpdatePhaseCompleted:
+		case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
 			// Keep the reconcileResult state (should be Ready if resources are ready)
-		case v1alpha1.RollingUpdatePhaseFailed:
+		case nvidiacomv1alpha1.RollingUpdatePhaseFailed:
 			state = DGDStateFailed
 			reason = "rolling_update_failed"
 			message = "Rolling update failed"
-		case v1alpha1.RollingUpdatePhasePending, v1alpha1.RollingUpdatePhaseInProgress:
+		case nvidiacomv1alpha1.RollingUpdatePhasePending, nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
 			// Rolling update in progress - resources are being transitioned
 			if state != DGDStateFailed {
 				state = DGDStatePending

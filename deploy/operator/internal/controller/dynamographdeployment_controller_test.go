@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -157,7 +156,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
@@ -181,7 +180,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-removed",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
@@ -230,7 +229,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
