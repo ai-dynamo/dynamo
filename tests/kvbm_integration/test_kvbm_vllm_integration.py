@@ -18,32 +18,36 @@ from typing import Any
 
 import pytest
 
-# Skip if vLLM is not available
-pytest.importorskip("vllm", reason="vLLM not available")
+from .common import check_module_available
 
-# Imports must be after pytest.importorskip() to handle missing vLLM gracefully
-from vllm.config import (  # noqa: E402
-    CacheConfig,
-    KVTransferConfig,
-    ModelConfig,
-    ParallelConfig,
-    VllmConfig,
-)
-from vllm.lora.request import LoRARequest  # noqa: E402
-from vllm.sampling_params import SamplingParams  # noqa: E402
-from vllm.v1.core.sched.output import (  # noqa: E402
-    CachedRequestData,
-    NewRequestData,
-    SchedulerOutput,
-)
-from vllm.v1.request import Request  # noqa: E402
+HAS_VLLM = check_module_available("vllm")
+
+if HAS_VLLM:
+    from vllm.config import (  # noqa: E402
+        CacheConfig,
+        KVTransferConfig,
+        ModelConfig,
+        ParallelConfig,
+        VllmConfig,
+    )
+    from vllm.lora.request import LoRARequest  # noqa: E402
+    from vllm.sampling_params import SamplingParams  # noqa: E402
+    from vllm.v1.core.sched.output import (  # noqa: E402
+        CachedRequestData,
+        NewRequestData,
+        SchedulerOutput,
+    )
+    from vllm.v1.request import Request  # noqa: E402
 
 # Test markers
 pytestmark = [
     pytest.mark.kvbm,
-    pytest.mark.gpu_0,
+    pytest.mark.integration,
+    pytest.mark.gpu_1,
+    pytest.mark.vllm,
     pytest.mark.nightly,
     pytest.mark.pre_merge,
+    pytest.mark.skipif(not HAS_VLLM, reason="requires vllm"),
 ]
 
 
