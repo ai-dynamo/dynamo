@@ -444,7 +444,6 @@ def parse_args() -> Config:
     config.enable_local_indexer = not args.durable_kv_events
     # For omni mode, use vLLM (AsyncOmni) tokenizer on backend
     config.use_vllm_tokenizer = args.use_vllm_tokenizer or args.omni
-    config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config
 
     # Validate custom Jinja template file exists if provided
