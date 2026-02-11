@@ -20,6 +20,13 @@
 //! synchronous and thread-safe (via `DashMap` and `RwLock`). To get the full
 //! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
 //! in a `ThreadPoolIndexer`.
+//!
+//! `worker_blocks` uses `RwLock<HashMap>` rather than `DashMap` because the
+//! outer map is almost exclusively read (`.get()`) by both the read path
+//! (`find_matches`) and the write path (event processing). Mutations (insert
+//! on first worker appearance, remove on disconnect) are rare lifecycle events.
+//! `RwLock` avoids per-access shard hashing overhead and allows concurrent
+//! readers with zero contention.
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -110,7 +117,9 @@ pub struct PositionalIndexer {
     index: DashMap<(usize, LocalBlockHash), SeqEntry>,
     /// Per-worker reverse lookup: worker -> seq_hash -> (position, local_hash)
     /// Enables efficient remove operations without global flat reverse map.
-    worker_blocks: DashMap<WorkerWithDpRank, LevelIndex>,
+    /// Outer RwLock because access is overwhelmingly reads; mutations are rare
+    /// lifecycle events (worker join/leave).
+    worker_blocks: RwLock<HashMap<WorkerWithDpRank, LevelIndex>>,
 
     jump_size: usize,
 }
@@ -127,7 +136,7 @@ impl PositionalIndexer {
 
         Self {
             index: DashMap::new(),
-            worker_blocks: DashMap::new(),
+            worker_blocks: RwLock::new(HashMap::new()),
             jump_size,
         }
     }
@@ -171,7 +180,7 @@ impl PositionalIndexer {
     /// This is called from worker threads.
     fn apply_event_impl(
         index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        worker_blocks: &RwLock<HashMap<WorkerWithDpRank, LevelIndex>>,
         event: RouterEvent,
     ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
@@ -210,7 +219,7 @@ impl PositionalIndexer {
 
     fn store_blocks_impl(
         index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        worker_blocks: &RwLock<HashMap<WorkerWithDpRank, LevelIndex>>,
         worker: WorkerWithDpRank,
         store_data: KvCacheStoreData,
         event_id: u64,
@@ -219,8 +228,9 @@ impl PositionalIndexer {
         let start_pos = match store_data.parent_hash {
             Some(parent_hash) => {
                 // Find parent position from worker_blocks
+                let wb = worker_blocks.read().unwrap();
 
-                let Some(worker_map) = worker_blocks.get(&worker) else {
+                let Some(worker_map) = wb.get(&worker) else {
                     tracing::warn!(
                         worker_id = worker.worker_id.to_string(),
                         dp_rank = worker.dp_rank,
@@ -247,11 +257,20 @@ impl PositionalIndexer {
             None => 0, // Start from position 0
         };
 
-        if !worker_blocks.contains_key(&worker) {
-            worker_blocks.insert(worker, RwLock::new(HashMap::new()));
+        {
+            let wb = worker_blocks.read().unwrap();
+            if !wb.contains_key(&worker) {
+                drop(wb);
+                worker_blocks
+                    .write()
+                    .unwrap()
+                    .entry(worker)
+                    .or_insert_with(|| RwLock::new(HashMap::new()));
+            }
         }
 
-        let worker_blocks_entry = worker_blocks.get(&worker).unwrap();
+        let wb = worker_blocks.read().unwrap();
+        let worker_blocks_entry = wb.get(&worker).unwrap();
         let mut worker_map = worker_blocks_entry.write().unwrap();
 
         for (i, block_data) in store_data.blocks.into_iter().enumerate() {
@@ -273,12 +292,13 @@ impl PositionalIndexer {
 
     fn remove_blocks_impl(
         index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        worker_blocks: &RwLock<HashMap<WorkerWithDpRank, LevelIndex>>,
         worker: WorkerWithDpRank,
         seq_hashes: &Vec<ExternalSequenceBlockHash>,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let worker_map = worker_blocks.get(&worker).ok_or_else(|| {
+        let wb = worker_blocks.read().unwrap();
+        let worker_level = wb.get(&worker).ok_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id.to_string(),
                 dp_rank = worker.dp_rank,
@@ -289,7 +309,7 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
-        let mut worker_map = worker_map.write().unwrap();
+        let mut worker_map = worker_level.write().unwrap();
 
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
@@ -316,7 +336,7 @@ impl PositionalIndexer {
     /// Static version for use in worker threads.
     fn clear_worker_blocks_impl(
         index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        worker_blocks: &RwLock<HashMap<WorkerWithDpRank, LevelIndex>>,
         worker_id: WorkerId,
     ) {
         Self::remove_or_clear_worker_blocks_impl(index, worker_blocks, worker_id, true);
@@ -338,33 +358,32 @@ impl PositionalIndexer {
     /// If `keep_worker` is false, the worker is completely removed.
     fn remove_or_clear_worker_blocks_impl(
         index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        worker_blocks: &RwLock<HashMap<WorkerWithDpRank, LevelIndex>>,
         worker_id: WorkerId,
         keep_worker: bool,
     ) {
+        let mut wb = worker_blocks.write().unwrap();
+
         // Collect all WorkerWithDpRank keys that match this worker_id
-        let workers: Vec<WorkerWithDpRank> = worker_blocks
-            .iter()
-            .filter(|entry| entry.key().worker_id == worker_id)
-            .map(|entry| *entry.key())
+        let workers: Vec<WorkerWithDpRank> = wb
+            .keys()
+            .filter(|w| w.worker_id == worker_id)
+            .copied()
             .collect();
 
         for worker in workers {
-            if let Some((_, worker_map)) = worker_blocks.remove(&worker) {
+            if let Some(worker_map) = wb.remove(&worker) {
                 // Remove each block from the index
-                for entry in worker_map.read().unwrap().iter() {
-                    let seq_hash = *entry.0;
-                    let (position, local_hash) = *entry.1;
-
-                    if let Some(mut entry) = index.get_mut(&(position, local_hash)) {
-                        let _ = entry.remove(seq_hash, worker);
+                for (seq_hash, (position, local_hash)) in worker_map.read().unwrap().iter() {
+                    if let Some(mut entry) = index.get_mut(&(*position, *local_hash)) {
+                        let _ = entry.remove(*seq_hash, worker);
                     }
                 }
             }
 
             if keep_worker {
                 // Re-insert worker with empty map to keep it tracked
-                worker_blocks.insert(worker, RwLock::new(HashMap::new()));
+                wb.insert(worker, RwLock::new(HashMap::new()));
             }
         }
     }
@@ -553,8 +572,9 @@ impl PositionalIndexer {
                 scores.scores.insert(*worker, 1);
             }
             // Populate tree_sizes
+            let wb = self.worker_blocks.read().unwrap();
             for worker in scores.scores.keys() {
-                if let Some(worker_map) = self.worker_blocks.get(worker) {
+                if let Some(worker_map) = wb.get(worker) {
                     let worker_map = worker_map.read().unwrap();
                     scores.tree_sizes.insert(*worker, worker_map.len());
                 }
@@ -605,8 +625,9 @@ impl PositionalIndexer {
         }
 
         // Populate tree_sizes from worker_blocks
+        let wb = self.worker_blocks.read().unwrap();
         for worker in scores.scores.keys() {
-            if let Some(worker_map) = self.worker_blocks.get(worker) {
+            if let Some(worker_map) = wb.get(worker) {
                 let worker_map = worker_map.read().unwrap();
                 scores.tree_sizes.insert(*worker, worker_map.len());
             }
