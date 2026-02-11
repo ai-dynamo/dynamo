@@ -306,16 +306,24 @@ RUN git lfs install
 # TRT-LLM specific: Also installs cupy-cuda13x with special index strategy (Dockerfile.trtllm lines 768-776)
 # SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
 ARG FRAMEWORK
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+RUN --mount=type=bind,source=./container/deps/requirements.runtime.txt,target=/tmp/requirements.runtime.txt \
+    --mount=type=bind,source=./container/deps/requirements.runtime.vllm.txt,target=/tmp/requirements.runtime.vllm.txt \
+    --mount=type=bind,source=./container/deps/requirements.runtime.trtllm.txt,target=/tmp/requirements.runtime.trtllm.txt \
+    --mount=type=bind,source=./container/deps/requirements.runtime.sglang.txt,target=/tmp/requirements.runtime.sglang.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt && \
+        --requirement /tmp/requirements.runtime.txt \
+        --requirement /tmp/requirements.runtime.vllm.txt \
+        --requirement /tmp/requirements.runtime.trtllm.txt \
+        --requirement /tmp/requirements.runtime.sglang.txt \
+        --requirement /tmp/requirements.test.txt \
+        --requirement /tmp/requirements.dev.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
     fi
