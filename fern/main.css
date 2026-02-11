@@ -17,28 +17,28 @@
     --nv-color-green-2: #004B31;
     --nv-color-black: #000000;
     --nv-color-white: #FFFFFF;
-    
+
     /* Grey Scale - Light */
     --nv-light-grey-1: #f7f7f7;
     --nv-light-grey-2: #EEEEEE;
     --nv-light-grey-3: #DDDDDD;
     --nv-light-grey-4: #CCCCCC;
     --nv-light-grey-5: #999999;
-    
+
     /* Grey Scale - Dark */
     --nv-dark-grey-1: #111111;
     --nv-dark-grey-2: #1A1A1A;
     --nv-dark-grey-3: #222222;
     --nv-dark-grey-4: #333333;
     --nv-dark-grey-5: #666666;
-    
+
     /* Colors by Usage */
     --nv-color-text: #000000;
     --nv-color-bg-default: #FFFFFF;
     --nv-color-bg-alt: #f7f7f7;
     --nv-color-success: #76B900;
     --nv-color-error: #f44336;
-    
+
     /* Theme-independent settings */
     --rounded: 999px;
 }
@@ -75,7 +75,7 @@ h4 {
     color: var(--nv-dark-grey-2) !important;
 }
 .dark .prose{
-    color: var(--nv-light-grey-2) !important;    
+    color: var(--nv-light-grey-2) !important;
 }
 p {
     text-decoration-thickness: 3px;
@@ -226,7 +226,7 @@ html[data-theme=dark] {
       background-color: var(--header-background);
     }
   }
-  
+
 [data-theme=default]#fern-header {
 animation: header-background-fade linear;
 animation-timeline: scroll();
@@ -513,8 +513,8 @@ svg.card-icon{
     left: 0;
     right: 0;
     height: 800px;
-    background: radial-gradient(ellipse 100% 100% at 50% 10%, 
-        rgba(191, 242, 48, 0.15) 0%, 
+    background: radial-gradient(ellipse 100% 100% at 50% 10%,
+        rgba(191, 242, 48, 0.15) 0%,
         rgba(158, 228, 179, 0.12) 30%,
         rgba(124, 215, 254, 0.12) 50%,
         rgba(124, 215, 254, 0.06) 75%,
@@ -581,33 +581,33 @@ svg.card-icon{
     .landing-page body, .landing-page html, .landing-page main {
         background: #181818 !important;
     }
-    
+
     .landing-page-gradients {
         margin-top: -100px;
         padding-top: 100px;
     }
-    
+
     .hero-section {
         padding: 2rem 2rem;
     }
-    
+
     .hero-section > * {
         max-width: none;
     }
-    
+
     .hero-content-grid {
         grid-template-columns: 1fr;
         gap: 2rem;
     }
-    
+
     .hero-heading {
         font-size: 36px;
     }
-    
+
     .hero-subtitle {
         font-size: 16px;
     }
-    
+
     .hero-title-section {
         margin-bottom: 2rem;
     }
@@ -618,7 +618,7 @@ svg.card-icon{
     .hero-heading {
         font-size: 28px;
     }
-    
+
     .hero-section {
         padding: 1.5rem 1.5rem;
     }
@@ -806,41 +806,41 @@ svg.card-icon{
     .hero-section {
         padding: 2rem 1.5rem;
     }
-    
+
     .hero-title-section {
         margin-bottom: 2rem;
     }
-    
+
     .hero-heading {
         font-size: 32px;
     }
-    
+
     .hero-subtitle {
         font-size: 16px;
     }
-    
+
     .hero-content-grid {
         grid-template-columns: 1fr;
         gap: 2rem;
     }
-    
+
     .hero-column-title {
         font-size: 20px;
     }
-    
+
     .hero-column-subtitle {
         font-size: 14px;
     }
-    
+
     .hero-card-content {
         flex-direction: column;
         align-items: flex-start;
     }
-    
+
     .hero-card-button-wrapper {
         align-self: flex-start;
     }
-    
+
     .hero-column .card-icon,
     .hero-column .card-icon svg,
     .hero-column .card-icon i {
@@ -848,19 +848,19 @@ svg.card-icon{
         width: 40px !important;
         height: 40px !important;
     }
-    
+
     .hero-column .fern-card-title {
         font-size: 14px;
     }
-    
+
     .hero-column .fern-card p {
         font-size: 11px;
     }
-    
+
     .body-section {
         padding: 2rem 1.5rem;
     }
-    
+
     .fern-selection-item-icon.use-icon {
         display: none !important;
     }
