@@ -79,12 +79,14 @@ def create_profiler_parser() -> argparse.Namespace:
 
     Config structure (camelCase preferred, snake_case supported for backwards compat):
         outputDir: String (path to the output results directory, default: profiling_results)
+        deployment_ready_timeout_s: Int (maximum time to wait for deployment to become ready in seconds, default: 1800)
+            Note: This is the DGDR CRD field name. Also supported: deployment.deploymentTimeout, deployment.deployment_timeout
         deployment:
             namespace: String (kubernetes namespace, default: dynamo-sla-profiler)
             serviceName: String (service name, default: "")
             model: String (served model name)
             dgdImage: String (container image to use for DGD components (frontend, planner, workers), overrides images in config file)
-            deploymentTimeout: Int (maximum time to wait for deployment to become ready in seconds, default: 1800)
+            deploymentTimeout: Int (alias for deployment_ready_timeout_s, default: 1800)
             modelCache:
                 pvcName: String (name of the PVC to mount the model cache,
                     if not provided, model must be HF name and will download from HF, default: "")
@@ -176,10 +178,16 @@ def create_profiler_parser() -> argparse.Namespace:
         default=_get(deployment_cfg, "dgdImage", "dgd_image", ""),
         help="Container image to use for DGD components (frontend, planner, workers). Overrides images in config file.",
     )
+    # Support multiple field names: deploymentTimeout, deployment_timeout, deployment_ready_timeout_s
+    # DGDR CRD uses deployment_ready_timeout_s at top-level config (not under deployment)
+    deployment_timeout_default = _get(
+        deployment_cfg, "deploymentTimeout", "deployment_timeout",
+        config.get("deployment_ready_timeout_s", 1800)  # Check top-level config for DGDR field
+    )
     parser.add_argument(
         "--deployment-timeout",
         type=int,
-        default=_get(deployment_cfg, "deploymentTimeout", "deployment_timeout", 1800),
+        default=deployment_timeout_default,
         help="Maximum time to wait for deployment to become ready in seconds (default: 1800)",
     )
 
