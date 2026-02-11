@@ -2241,17 +2241,14 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_dump_and_restore(variant: &str) {
-        if variant == "flat" || variant == "concurrent" {
-            // ThreadPoolIndexer variants dispatch events to worker threads,
-            // and there is no flush available through KvIndexerInterface.
-            // dump_events may run before events are processed.
-            return;
-        }
         let index = make_indexer(variant);
 
         // Store some data
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
         index.apply_event(make_store_event(1, &[1, 2, 4])).await;
+
+        // Allow background worker threads to process events.
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Dump the tree as events
         let events = index.dump_events().await.unwrap();
@@ -2262,6 +2259,9 @@ mod tests {
         for event in events {
             restored.apply_event(event).await;
         }
+
+        // Allow background worker threads to process replayed events.
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify find_matches produces same results
         let original_scores = index

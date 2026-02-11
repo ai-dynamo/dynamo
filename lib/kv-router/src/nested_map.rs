@@ -26,8 +26,8 @@ use std::sync::RwLock;
 
 use crate::indexer::SyncIndexer;
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
 };
 
 /// Entry for the innermost level of the index.
@@ -156,9 +156,63 @@ impl SyncIndexer for PositionalIndexer {
     }
 
     fn dump_events(&self) -> Vec<RouterEvent> {
-        // Not implemented for positional indexer - would require reconstructing
-        // the tree structure from the flat position-based index.
-        unimplemented!("dump_events is not supported for PositionalIndexer");
+        let mut events = Vec::new();
+        let mut event_id = 0u64;
+
+        for entry in self.worker_blocks.iter() {
+            let worker = *entry.key();
+            let worker_map = entry.value().read().unwrap();
+
+            // Collect (position, local_hash, seq_hash) and sort by position
+            // so parents are emitted before children during replay.
+            let mut blocks: Vec<_> = worker_map
+                .iter()
+                .map(|(seq_hash, (pos, local_hash))| (*pos, *local_hash, *seq_hash))
+                .collect();
+            blocks.sort_unstable_by_key(|(pos, _, _)| *pos);
+
+            // Track one valid seq_hash per position for parent_hash synthesis.
+            let mut last_at_position: HashMap<usize, ExternalSequenceBlockHash> = HashMap::new();
+
+            for (pos, local_hash, seq_hash) in blocks {
+                let parent_hash = if pos == 0 {
+                    None
+                } else {
+                    match last_at_position.get(&(pos - 1)) {
+                        Some(&parent) => Some(parent),
+                        None => {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                position = pos,
+                                "Orphaned block at position with no parent; skipping in dump"
+                            );
+                            continue;
+                        }
+                    }
+                };
+
+                events.push(RouterEvent {
+                    worker_id: worker.worker_id,
+                    event: KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash,
+                            blocks: vec![KvCacheStoredBlockData {
+                                block_hash: seq_hash,
+                                tokens_hash: local_hash,
+                                mm_extra_info: None,
+                            }],
+                        }),
+                        dp_rank: worker.dp_rank,
+                    },
+                });
+                event_id += 1;
+                last_at_position.insert(pos, seq_hash);
+            }
+        }
+
+        events
     }
 }
 
