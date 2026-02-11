@@ -220,7 +220,6 @@ pub mod frontend_service {
         pub const TOKENIZE: &str = "tokenize";
 
         /// Detokenization operation
-        /// Currently unused, will be added next.
         pub const DETOKENIZE: &str = "detokenize";
     }
 
