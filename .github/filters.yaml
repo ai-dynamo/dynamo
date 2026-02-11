@@ -55,11 +55,7 @@ ignore:
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
-  - 'container/Dockerfile.aws'
   - 'container/Dockerfile.docs'
-  - 'container/Dockerfile.epp'
-  - 'container/Dockerfile.frontend'
-  - 'container/Dockerfile.local_dev'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
@@ -79,8 +75,6 @@ core:
   - '!**/*.rst'
   - '!**/*.txt'
   - *ci
-  - 'container/build.sh'
-  - 'container/Dockerfile'
   - 'container/render.py'
   - 'container/Dockerfile.template'
   - 'container/context.yaml'
@@ -124,7 +118,6 @@ planner:
 vllm:
   - '!**/*.md'
   - '!**/*.rst'
-  - 'container/Dockerfile.vllm'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
@@ -134,7 +127,6 @@ vllm:
 sglang:
   - '!**/*.md'
   - '!**/*.rst'
-  - 'container/Dockerfile.sglang'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'
@@ -142,7 +134,6 @@ sglang:
 trtllm:
   - '!**/*.md'
   - '!**/*.rst'
-  - 'container/Dockerfile.trtllm'
   - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
@@ -157,8 +148,6 @@ frontend:
   - 'lib/**'
   - '*.toml'
   - '*.lock'
-  - 'container/build.sh'
-  - 'container/Dockerfile'
   - 'container/deps/*'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/mocker/**'
