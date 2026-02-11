@@ -152,10 +152,25 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		"oldWorkerHash", oldWorkerHash,
 		"newWorkerHash", newWorkerHash)
 
-	if rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseCompleted && oldWorkerHash != newWorkerHash {
-		logger.Info("Rolling update completed but annotation stale, updating annotation",
-			"oldHash", oldWorkerHash, "newHash", newWorkerHash)
-		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
+	if (rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseCompleted ||
+		rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseFailed) && oldWorkerHash != newWorkerHash {
+		// Check if DCDs with the new hash already exist and are serving.
+		// If so, this is just a stale annotation — update it without starting a new rollout.
+		newInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, newWorkerHash)
+		if err == nil && newInfo.TotalReadyWorkers() > 0 {
+			logger.Info("Updating stale worker hash annotation",
+				"oldHash", oldWorkerHash, "newHash", newWorkerHash)
+			r.setCurrentWorkerHash(dgd, newWorkerHash)
+			return r.Update(ctx, dgd)
+		}
+		// New spec change: reset to start a proper rolling update cycle with surge/drain.
+		logger.Info("New worker spec change detected, starting new rolling update cycle",
+			"oldHash", oldWorkerHash, "newHash", newWorkerHash,
+			"previousPhase", rollingUpdateStatus.Phase)
+		rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseNone
+		rollingUpdateStatus.StartTime = nil
+		rollingUpdateStatus.EndTime = nil
+		rollingUpdateStatus.UpdatedServices = nil
 	}
 
 	if oldWorkerHash == newWorkerHash &&
