@@ -192,19 +192,28 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	// Setup SSH for worker nodes
 	sshSetupCommands := []string{
 		"mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run",
-		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
+		"mkdir -p /run/sshd",  // Required by some sshd versions
+		"mkdir -p /root/.ssh", // For root user SSH access (mpirun --allow-run-as-root)
+		"ls -la /ssh-pk/",     // Debug: list files in ssh-pk directory
 		"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
+		"chmod 644 ~/.ssh/id_rsa.pub",
+		// Duplicate to /root/.ssh for root user SSH access
+		"cp /ssh-pk/private.key /root/.ssh/id_rsa",
+		"cp /ssh-pk/private.key.pub /root/.ssh/id_rsa.pub",
+		"cp /ssh-pk/private.key.pub /root/.ssh/authorized_keys",
+		"chmod 600 /root/.ssh/id_rsa /root/.ssh/authorized_keys",
+		"chmod 644 /root/.ssh/id_rsa.pub",
 		fmt.Sprintf("printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > ~/.ssh/config", commonconsts.MpiRunSshPort),
 		// Generate host keys in user writable directory
 		"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N ''",
 		"ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N ''",
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
 		// Create SSH daemon config to use custom host keys location and non-privileged port
-		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
+		// Note: AuthorizedKeysFile uses relative path (.ssh/) because ~ is not expanded in sshd_config
+		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile .ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 
