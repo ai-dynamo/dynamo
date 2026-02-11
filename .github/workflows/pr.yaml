@@ -184,6 +184,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: true
       test_gpu_timeout_minutes: 35
     secrets: inherit
 
@@ -203,6 +204,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: true
     secrets: inherit
 
   # ============================================================================
@@ -221,6 +223,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: true
     secrets: inherit
 
 
