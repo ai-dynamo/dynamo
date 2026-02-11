@@ -84,7 +84,10 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         Yields:
             Response dict with generated video (OpenAI-compatible format).
         """
-        logger.info(f"Video generation request: {request}")
+        logger.info(
+            f"Video generation request: model={request.get('model')}, "
+            f"size={request.get('size')}, steps={request.get('num_inference_steps')}"
+        )
         start_time = time.time()
 
         # Get trace header for distributed tracing (for logging/observability)
@@ -121,13 +124,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 input_reference=req.input_reference,
             )
 
-            # Upload to filesystem and get URLs
-            # Use user ID from request if available, otherwise fallback to context ID
-            user_id = req.user if req.user else context.id()
-
             video_data = []
             if req.response_format == "url":
-                url = await self._upload_to_fs(video_bytes, user_id, context.id())
+                url = await self._upload_to_fs(video_bytes, context.id())
                 video_data.append(VideoData(url=url))
             else:  # b64_json
                 b64 = self._encode_base64(video_bytes)
@@ -281,17 +280,21 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
     def _parse_size(self, size_str: str) -> tuple[int, int]:
         """Parse 'WxH' -> (width, height)"""
-        w, h = size_str.split("x")
-        return int(w), int(h)
+        try:
+            w, h = size_str.split("x")
+            return int(w), int(h)
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"Invalid size format '{size_str}', expected 'WxH' (e.g. '832x480')"
+            ) from e
 
     async def _upload_to_fs(
-        self, video_bytes: bytes, user_id: str, request_id: str
+        self, video_bytes: bytes, request_id: str
     ) -> str:
         """Upload video to filesystem and return URL.
 
         Args:
             video_bytes: Video data as bytes.
-            user_id: User identifier from request or context.
             request_id: Request context ID.
 
         Returns:

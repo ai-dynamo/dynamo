@@ -74,7 +74,6 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Images,
     ModelType::Videos,
     ModelType::TensorBased,
-    ModelType::Images,
     ModelType::Prefill,
 ];
 

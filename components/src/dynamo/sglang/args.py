@@ -544,6 +544,8 @@ async def parse_args(args: list[str]) -> Config:
         server_args.log_level = getattr(parsed_args, "log_level", "info")
         server_args.skip_tokenizer_init = True
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
+        server_args.tp_size = getattr(parsed_args, "tp_size", 1)
+        server_args.dp_size = getattr(parsed_args, "dp_size", 1)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False

@@ -175,7 +175,6 @@ impl ModelManager {
             .chain(self.list_images_models())
             .chain(self.list_videos_models())
             .chain(self.list_tensor_models())
-            .chain(self.list_images_models())
             .chain(self.list_prefill_models())
             .collect()
     }
