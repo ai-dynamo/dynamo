@@ -220,6 +220,30 @@ jobs:
           python3 docs-checkout/docs/convert_callouts.py --dir docs-checkout/docs/pages
           echo "Callout conversion complete."
 
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Update docs.yml preserving versions
+        run: |
+          cd fern-checkout/fern
+
+          # Save the full versions array from docs-website
+          yq '.products[0].versions' docs.yml > /tmp/preserved_versions.yml
+
+          echo "Preserved versions array:"
+          cat /tmp/preserved_versions.yml
+
+          # Copy docs.yml from main to get config updates
+          cp ../../main-checkout/fern/docs.yml docs.yml
+
+          # Restore the preserved versions array
+          yq -i '.products[0].versions = load("/tmp/preserved_versions.yml")' docs.yml
+
+          echo "Updated docs.yml:"
+          cat docs.yml
+
       - name: Check for changes
         id: changes
         run: |
