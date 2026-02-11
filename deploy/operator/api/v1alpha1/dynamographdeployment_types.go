@@ -116,7 +116,7 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Checkpoints map[string]ServiceCheckpointStatus `json:"checkpoints,omitempty"`
-	// Rollout tracks the progress of a rolling update.
+	// RollingUpdate tracks the progress of a rolling update.
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
 }

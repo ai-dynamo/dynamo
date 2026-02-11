@@ -280,7 +280,7 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, oldWorkerHash, newWorkerHash)
 	}
 
-	// Persist updated services list mid-rollout
+	// Persist updated services list mid-rolling update
 	if err := r.Status().Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to update rolling update status with updated services: %w", err)
 	}
