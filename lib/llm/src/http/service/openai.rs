@@ -876,7 +876,7 @@ async fn chat_completions(
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
-    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
+    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceed.
     validate_chat_completion_unsupported_fields(&request)?;
 
     // Handle required fields like messages shouldn't be empty.
@@ -1193,7 +1193,7 @@ async fn responses(
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
-    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
+    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceed.
     if let Some(resp) = validate_response_unsupported_fields(&request) {
         return Ok(resp.into_response());
     }
@@ -1203,10 +1203,10 @@ async fn responses(
         if request.inner.model.as_deref().unwrap_or("").is_empty() {
             request.inner.model = Some(template.model.clone());
         }
-        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
+        if request.inner.temperature.is_none() {
             request.inner.temperature = Some(template.temperature);
         }
-        if request.inner.max_output_tokens.unwrap_or(0) == 0 {
+        if request.inner.max_output_tokens.is_none() {
             request.inner.max_output_tokens = Some(template.max_completion_tokens);
         }
     }
@@ -1276,6 +1276,7 @@ async fn responses(
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
         // inner stream response data and convert it to Responses API events.
         use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let mut converter = ResponseStreamConverter::new(model.clone());
         let start_events = converter.emit_start_events();
@@ -1284,6 +1285,11 @@ async fn responses(
         // synchronous -- no .await while lock is held. Avoids async lock overhead per token.
         let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
         let converter_end = converter.clone();
+
+        // Track whether the backend sent an error event during the stream.
+        // Shared between event_stream (writer) and done_stream (reader).
+        let saw_error = std::sync::Arc::new(AtomicBool::new(false));
+        let saw_error_end = saw_error.clone();
 
         let mut http_queue_guard = Some(http_queue_guard);
 
@@ -1298,7 +1304,16 @@ async fn responses(
             })
             .filter_map(move |annotated_chunk| {
                 let converter = converter.clone();
+                let saw_error = saw_error.clone();
                 async move {
+                    // Check for backend error before extracting data.
+                    // Error events have data: None and event: Some("error").
+                    if annotated_chunk.data.is_none() {
+                        if annotated_chunk.event.as_deref() == Some("error") {
+                            saw_error.store(true, Ordering::Release);
+                        }
+                        return None;
+                    }
                     let stream_resp = annotated_chunk.data?;
                     let mut conv = converter.lock().expect("converter lock poisoned");
                     let events = conv.process_chunk(&stream_resp);
@@ -1312,7 +1327,11 @@ async fn responses(
 
         let done_stream = stream::once(async move {
             let mut conv = converter_end.lock().expect("converter lock poisoned");
-            let end_events = conv.emit_end_events();
+            let end_events = if saw_error_end.load(Ordering::Acquire) {
+                conv.emit_error_events()
+            } else {
+                conv.emit_end_events()
+            };
             stream::iter(end_events)
         })
         .flatten();

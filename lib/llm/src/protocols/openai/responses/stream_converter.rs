@@ -16,11 +16,11 @@ use dynamo_async_openai::types::responses::{
     AssistantRole, FunctionToolCall, OutputContent, OutputItem, OutputMessage,
     OutputMessageContent, OutputStatus, OutputTextContent, Response, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
-    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
-    ResponseInProgressEvent, ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
-    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
-    ServiceTier, Status, TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam,
-    Truncation,
+    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent,
+    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseStreamEvent,
+    ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam, ServiceTier, Status,
+    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use uuid::Uuid;
 
@@ -431,6 +431,19 @@ impl ResponseStreamConverter {
 
         events
     }
+
+    /// Emit error events when the stream ends due to a backend error.
+    pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        let mut events = Vec::new();
+
+        let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
+            sequence_number: self.next_seq(),
+            response: self.make_response(Status::Failed, vec![]),
+        });
+        events.push(make_sse_event(&failed));
+
+        events
+    }
 }
 
 fn make_sse_event(event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
@@ -448,17 +461,103 @@ fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
         ResponseStreamEvent::ResponseIncomplete(_) => "response.incomplete",
         ResponseStreamEvent::ResponseQueued(_) => "response.queued",
         ResponseStreamEvent::ResponseOutputItemAdded(_) => "response.output_item.added",
+        ResponseStreamEvent::ResponseOutputItemDone(_) => "response.output_item.done",
         ResponseStreamEvent::ResponseContentPartAdded(_) => "response.content_part.added",
+        ResponseStreamEvent::ResponseContentPartDone(_) => "response.content_part.done",
         ResponseStreamEvent::ResponseOutputTextDelta(_) => "response.output_text.delta",
         ResponseStreamEvent::ResponseOutputTextDone(_) => "response.output_text.done",
-        ResponseStreamEvent::ResponseContentPartDone(_) => "response.content_part.done",
-        ResponseStreamEvent::ResponseOutputItemDone(_) => "response.output_item.done",
+        ResponseStreamEvent::ResponseRefusalDelta(_) => "response.refusal.delta",
+        ResponseStreamEvent::ResponseRefusalDone(_) => "response.refusal.done",
         ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(_) => {
             "response.function_call_arguments.delta"
         }
         ResponseStreamEvent::ResponseFunctionCallArgumentsDone(_) => {
             "response.function_call_arguments.done"
         }
-        _ => "unknown",
+        ResponseStreamEvent::ResponseFileSearchCallInProgress(_) => {
+            "response.file_search_call.in_progress"
+        }
+        ResponseStreamEvent::ResponseFileSearchCallSearching(_) => {
+            "response.file_search_call.searching"
+        }
+        ResponseStreamEvent::ResponseFileSearchCallCompleted(_) => {
+            "response.file_search_call.completed"
+        }
+        ResponseStreamEvent::ResponseWebSearchCallInProgress(_) => {
+            "response.web_search_call.in_progress"
+        }
+        ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {
+            "response.web_search_call.searching"
+        }
+        ResponseStreamEvent::ResponseWebSearchCallCompleted(_) => {
+            "response.web_search_call.completed"
+        }
+        ResponseStreamEvent::ResponseReasoningSummaryPartAdded(_) => {
+            "response.reasoning_summary_part.added"
+        }
+        ResponseStreamEvent::ResponseReasoningSummaryPartDone(_) => {
+            "response.reasoning_summary_part.done"
+        }
+        ResponseStreamEvent::ResponseReasoningSummaryTextDelta(_) => {
+            "response.reasoning_summary_text.delta"
+        }
+        ResponseStreamEvent::ResponseReasoningSummaryTextDone(_) => {
+            "response.reasoning_summary_text.done"
+        }
+        ResponseStreamEvent::ResponseReasoningTextDelta(_) => "response.reasoning_text.delta",
+        ResponseStreamEvent::ResponseReasoningTextDone(_) => "response.reasoning_text.done",
+        ResponseStreamEvent::ResponseImageGenerationCallCompleted(_) => {
+            "response.image_generation_call.completed"
+        }
+        ResponseStreamEvent::ResponseImageGenerationCallGenerating(_) => {
+            "response.image_generation_call.generating"
+        }
+        ResponseStreamEvent::ResponseImageGenerationCallInProgress(_) => {
+            "response.image_generation_call.in_progress"
+        }
+        ResponseStreamEvent::ResponseImageGenerationCallPartialImage(_) => {
+            "response.image_generation_call.partial_image"
+        }
+        ResponseStreamEvent::ResponseMCPCallArgumentsDelta(_) => {
+            "response.mcp_call_arguments.delta"
+        }
+        ResponseStreamEvent::ResponseMCPCallArgumentsDone(_) => {
+            "response.mcp_call_arguments.done"
+        }
+        ResponseStreamEvent::ResponseMCPCallCompleted(_) => "response.mcp_call.completed",
+        ResponseStreamEvent::ResponseMCPCallFailed(_) => "response.mcp_call.failed",
+        ResponseStreamEvent::ResponseMCPCallInProgress(_) => "response.mcp_call.in_progress",
+        ResponseStreamEvent::ResponseMCPListToolsCompleted(_) => {
+            "response.mcp_list_tools.completed"
+        }
+        ResponseStreamEvent::ResponseMCPListToolsFailed(_) => "response.mcp_list_tools.failed",
+        ResponseStreamEvent::ResponseMCPListToolsInProgress(_) => {
+            "response.mcp_list_tools.in_progress"
+        }
+        ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(_) => {
+            "response.code_interpreter_call.in_progress"
+        }
+        ResponseStreamEvent::ResponseCodeInterpreterCallInterpreting(_) => {
+            "response.code_interpreter_call.interpreting"
+        }
+        ResponseStreamEvent::ResponseCodeInterpreterCallCompleted(_) => {
+            "response.code_interpreter_call.completed"
+        }
+        ResponseStreamEvent::ResponseCodeInterpreterCallCodeDelta(_) => {
+            "response.code_interpreter_call_code.delta"
+        }
+        ResponseStreamEvent::ResponseCodeInterpreterCallCodeDone(_) => {
+            "response.code_interpreter_call_code.done"
+        }
+        ResponseStreamEvent::ResponseOutputTextAnnotationAdded(_) => {
+            "response.output_text.annotation.added"
+        }
+        ResponseStreamEvent::ResponseCustomToolCallInputDelta(_) => {
+            "response.custom_tool_call_input.delta"
+        }
+        ResponseStreamEvent::ResponseCustomToolCallInputDone(_) => {
+            "response.custom_tool_call_input.done"
+        }
+        ResponseStreamEvent::ResponseError(_) => "error",
     }
 }
