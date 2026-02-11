@@ -666,7 +666,7 @@ def _test_router_basic(
         engine_workers.namespace,
         store_backend,
         request_plane=request_plane,
-    ) as _:
+    ):
         # Start KV router frontend
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
@@ -1038,7 +1038,7 @@ def _test_router_query_instance_id(
 
     with KVRouterProcess(
         request, block_size, frontend_port, engine_workers.namespace, store_backend
-    ) as _:
+    ):
         # Start KV router (frontend)
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
@@ -1192,35 +1192,13 @@ def _test_router_overload_503(
         f"Starting KV router frontend on port {frontend_port} with limited resources"
     )
 
-    # Custom command for router with limited block size
-    command = [
-        "python",
-        "-m",
-        "dynamo.frontend",
-        "--active-decode-blocks-threshold",
-        str(blocks_threshold),
-        "--kv-cache-block-size",
-        str(block_size),
-        "--router-mode",
-        "kv",
-        "--http-port",
-        str(frontend_port),
-    ]
-
-    with ManagedProcess(
-        command=command,
-        timeout=60,
-        display_output=True,
-        health_check_ports=[frontend_port],
-        health_check_urls=[
-            (
-                f"http://localhost:{frontend_port}/v1/models",
-                lambda r: r.status_code == 200,
-            )
-        ],
-        log_dir=request.node.name,
-        terminate_all_matching_process_names=False,
-    ) as _:
+    with KVRouterProcess(
+        request=request,
+        block_size=block_size,
+        frontend_port=frontend_port,
+        namespace=engine_workers.namespace,
+        blocks_threshold=blocks_threshold,
+    ):
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
         # Custom payload for 503 test with more tokens to consume resources
@@ -1723,7 +1701,7 @@ def _test_router_decisions_disagg(
         enforce_disagg=True,
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
-    ) as _:
+    ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
         logger.info(
@@ -2180,7 +2158,7 @@ def _test_busy_threshold_endpoint(
         blocks_threshold=initial_active_decode_blocks_threshold,
         tokens_threshold=initial_active_prefill_tokens_threshold,
         request_plane=request_plane,
-    ) as _:
+    ):
         # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
