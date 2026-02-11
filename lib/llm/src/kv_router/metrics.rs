@@ -217,99 +217,53 @@ impl RouterRequestMetrics {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {
                 let metrics = component.metrics();
-                let result = (|| -> anyhow::Result<Arc<Self>> {
-                    let requests_total = metrics.create_intcounter(
+                let requests_total = metrics
+                    .create_intcounter(
                         "router_requests_total",
                         "Total number of requests processed by the router",
                         &[],
-                    )?;
-                    let time_to_first_token_seconds = metrics.create_histogram(
+                    )
+                    .expect("failed to create router_requests_total");
+                let time_to_first_token_seconds = metrics
+                    .create_histogram(
                         "router_time_to_first_token_seconds",
                         "Time to first token observed at the router",
                         &[],
                         Some(generate_log_buckets(0.001, 480.0, 18)),
-                    )?;
-                    let inter_token_latency_seconds = metrics.create_histogram(
+                    )
+                    .expect("failed to create router_time_to_first_token_seconds");
+                let inter_token_latency_seconds = metrics
+                    .create_histogram(
                         "router_inter_token_latency_seconds",
                         "Average inter-token latency observed at the router",
                         &[],
                         Some(generate_log_buckets(0.001, 2.0, 13)),
-                    )?;
-                    let input_sequence_tokens = metrics.create_histogram(
+                    )
+                    .expect("failed to create router_inter_token_latency_seconds");
+                let input_sequence_tokens = metrics
+                    .create_histogram(
                         "router_input_sequence_tokens",
                         "Input sequence length in tokens observed at the router",
                         &[],
                         Some(generate_log_buckets(50.0, 128000.0, 12)),
-                    )?;
-                    let output_sequence_tokens = metrics.create_histogram(
+                    )
+                    .expect("failed to create router_input_sequence_tokens");
+                let output_sequence_tokens = metrics
+                    .create_histogram(
                         "router_output_sequence_tokens",
                         "Output sequence length in tokens observed at the router",
                         &[],
                         Some(generate_log_buckets(50.0, 32000.0, 10)),
-                    )?;
-                    Ok(Arc::new(Self::new(
-                        requests_total,
-                        time_to_first_token_seconds,
-                        inter_token_latency_seconds,
-                        input_sequence_tokens,
-                        output_sequence_tokens,
-                    )))
-                })();
-
-                match result {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to create router request metrics from component: {}. Using unregistered metrics as fallback.",
-                            e
-                        );
-                        Arc::new(Self::new_unregistered())
-                    }
-                }
+                    )
+                    .expect("failed to create router_output_sequence_tokens");
+                Arc::new(Self::new(
+                    requests_total,
+                    time_to_first_token_seconds,
+                    inter_token_latency_seconds,
+                    input_sequence_tokens,
+                    output_sequence_tokens,
+                ))
             })
             .clone()
-    }
-
-    /// Fallback for tests or when a MetricsRegistry is not available.
-    pub fn new_unregistered() -> Self {
-        Self::new(
-            prometheus::IntCounter::new(
-                "router_requests_total",
-                "Total number of requests processed by the router",
-            )
-            .unwrap(),
-            prometheus::Histogram::with_opts(
-                prometheus::HistogramOpts::new(
-                    "router_time_to_first_token_seconds",
-                    "Time to first token observed at the router",
-                )
-                .buckets(generate_log_buckets(0.001, 480.0, 18)),
-            )
-            .unwrap(),
-            prometheus::Histogram::with_opts(
-                prometheus::HistogramOpts::new(
-                    "router_inter_token_latency_seconds",
-                    "Average inter-token latency observed at the router",
-                )
-                .buckets(generate_log_buckets(0.001, 2.0, 13)),
-            )
-            .unwrap(),
-            prometheus::Histogram::with_opts(
-                prometheus::HistogramOpts::new(
-                    "router_input_sequence_tokens",
-                    "Input sequence length in tokens observed at the router",
-                )
-                .buckets(generate_log_buckets(50.0, 128000.0, 12)),
-            )
-            .unwrap(),
-            prometheus::Histogram::with_opts(
-                prometheus::HistogramOpts::new(
-                    "router_output_sequence_tokens",
-                    "Output sequence length in tokens observed at the router",
-                )
-                .buckets(generate_log_buckets(50.0, 32000.0, 10)),
-            )
-            .unwrap(),
-        )
     }
 }
