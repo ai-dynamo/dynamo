@@ -451,10 +451,17 @@ jobs:
           yq -i "
             .products[0].versions |= (
               .[:$INSERT_IDX] +
-              [{\"display-name\": \"$TAG\", \"path\": \"./versions/$TAG.yml\"}] +
+              [{\"display-name\": \"$TAG\", \"path\": \"./versions/$TAG.yml\", \"slug\": \"$TAG\", \"availability\": \"stable\"}] +
               .[$INSERT_IDX:]
             )
           " "$DOCS_FILE"
+
+          # Update the top-level entry to point to the new version
+          yq -i ".products[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+
+          # Update the "Latest" entry to point to the new version
+          yq -i ".products[0].versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+          yq -i ".products[0].versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
 
           echo "Updated docs.yml products/versions section:"
           yq '.products[0].versions' "$DOCS_FILE"
