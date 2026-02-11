@@ -164,8 +164,15 @@ class labels:
     # Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
     # It is used by worker/load-style metrics that need to disambiguate per-worker series.
     DP_RANK = "dp_rank"
-    # Label for model name
+    # Label for model name/path (OpenAI API standard, injected by Dynamo)
+    # This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
+    # Ensures compatibility with OpenAI-compatible tooling.
     MODEL = "model"
+    # Label for model name/path (alternative/native engine label, injected by Dynamo)
+    # Some engines natively use model_name, so we inject both model and model_name
+    # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
+    # When a metric already has a label, injection does not overwrite it (original is preserved).
+    MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     WORKER_TYPE = "worker_type"
 

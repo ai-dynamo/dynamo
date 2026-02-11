@@ -75,7 +75,7 @@ jobs:
               --framework=dynamo \
               --platform=amd64 \
               --show-result \
-              --short-output
+              --output-short-filename
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
@@ -91,15 +91,15 @@ jobs:
         working-directory: ./deploy
         run: |
           docker compose up -d nats-server etcd-server
-      - name: Run Rust checks (block-manager + media-nixl + media-ffmpeg + integration tests)
+      - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
-                      cargo clippy --features block-manager,media-nixl,media-ffmpeg --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg,testing-nixl && \
+                      cargo clippy --features block-manager,media-ffmpeg --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl && \
                       cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
         if: always()

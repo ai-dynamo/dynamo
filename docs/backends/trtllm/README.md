@@ -42,6 +42,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Client](#client)
 - [Benchmarking](#benchmarking)
 - [Multimodal Support](#multimodal-support)
+- [Video Diffusion Support](#video-diffusion-support-experimental)
 - [Logits Processing](#logits-processing)
 - [DP Rank Routing](#dp-rank-routing-attention-data-parallelism)
 - [Performance Sweep](#performance-sweep)
@@ -92,11 +93,11 @@ docker compose -f deploy/docker-compose.yml up -d
 apt-get update && apt-get -y install git git-lfs
 
 # On an x86 machine:
-python container/render.py --framework=trtllm --target=runtime --short-output
+python container/render.py --framework=trtllm --target=runtime --output-short-filename
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 
 # On an ARM machine:
-python container/render.py --framework=trtllm --target=runtime --platform=arm64 --short-output
+python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 ```
 
@@ -219,6 +220,70 @@ To benchmark your deployment with AIPerf, see this utility script, configuring t
 ## Multimodal support
 
 Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../features/multimodal/multimodal_trtllm.md).
+
+## Video Diffusion Support (Experimental)
+
+Dynamo supports video generation using diffusion models through the `--modality video_diffusion` flag.
+
+### Requirements
+
+- **visual_gen**: Part of TensorRT-LLM, located at `tensorrt_llm/visual_gen/`. Currently available **only** on the [`feat/visual_gen`](https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen) branch (not yet merged to main or any release). Install from source:
+  ```bash
+  git clone https://github.com/NVIDIA/TensorRT-LLM.git
+  cd TensorRT-LLM && git checkout feat/visual_gen
+  cd tensorrt_llm/visual_gen && pip install -e .
+  ```
+- **dynamo-runtime with video API**: The Dynamo runtime must include `ModelType.Videos` support. Ensure you're using a compatible version.
+
+### Supported Models
+
+| Diffusers Pipeline | Description | Example Model |
+|--------------------|-------------|---------------|
+| `WanPipeline` | Wan 2.1/2.2 Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
+
+The pipeline type is **auto-detected** from the model's `model_index.json` — no `--model-type` flag is needed.
+
+### Quick Start
+
+```bash
+python -m dynamo.trtllm \
+  --modality video_diffusion \
+  --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
+  --output-dir /tmp/videos
+```
+
+### API Endpoint
+
+Video generation uses the `/v1/videos/generations` endpoint:
+
+```bash
+curl -X POST http://localhost:8000/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A cat playing piano",
+    "model": "wan_t2v",
+    "size": "832x480",
+    "seconds": 4,
+    "fps": 24
+  }'
+```
+
+### Configuration Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--output-dir` | Directory for generated videos | `/tmp/dynamo_videos` |
+| `--default-height` | Default video height | `480` |
+| `--default-width` | Default video width | `832` |
+| `--default-num-frames` | Default frame count | `81` |
+| `--enable-teacache` | Enable TeaCache optimization | `False` |
+| `--disable-torch-compile` | Disable torch.compile | `False` |
+
+### Limitations
+
+- Video diffusion is experimental and not recommended for production use
+- Only text-to-video is supported in this release (image-to-video planned)
+- Requires GPU with sufficient VRAM for the diffusion model
 
 ## Logits Processing
 
