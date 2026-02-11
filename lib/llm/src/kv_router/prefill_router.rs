@@ -123,6 +123,7 @@ impl PrefillRouter {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
@@ -212,7 +213,9 @@ impl PrefillRouter {
             let client = kv_chooser.client().clone();
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 
@@ -232,7 +235,9 @@ impl PrefillRouter {
             let client = endpoint.client().await?;
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 

@@ -191,11 +191,9 @@ impl ModelWatcher {
                     // checksums don't match, reject the new worker. Different namespaces
                     // may legitimately have different checksums.
                     let ws_key = worker_set_key(&mcid.namespace, card.model_type);
-                    let can_add = self.manager.is_valid_checksum(
-                        card.name(),
-                        &ws_key,
-                        card.mdcsum(),
-                    );
+                    let can_add =
+                        self.manager
+                            .is_valid_checksum(card.name(), &ws_key, card.mdcsum());
                     if can_add.is_some_and(|is_valid| !is_valid) {
                         tracing::error!(
                             model_name = card.name(),
@@ -292,15 +290,16 @@ impl ModelWatcher {
         // In disaggregated deployments, prefill and decode are different components
         // in the same namespace, so we must check at the component level to avoid
         // removing one type's WorkerSet while the other still has workers.
-        let component_has_instances = active_instances
-            .iter()
-            .any(|(eid, _)| eid.namespace == *worker_namespace && eid.component == *worker_component);
+        let component_has_instances = active_instances.iter().any(|(eid, _)| {
+            eid.namespace == *worker_namespace && eid.component == *worker_component
+        });
 
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
             if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, &ws_key) {
                 // remove_prefill_activator uses deployment namespace (not ws_key)
-                self.manager.remove_prefill_activator(&model_name, worker_namespace);
+                self.manager
+                    .remove_prefill_activator(&model_name, worker_namespace);
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,
@@ -346,22 +345,25 @@ impl ModelWatcher {
         let namespace = mcid.namespace.clone();
         let ws_key = worker_set_key(&namespace, card.model_type);
 
-        if let Some(model) = self.manager.get_model(&model_name) {
-            if model.has_worker_set(&ws_key) {
-                self.manager
-                    .save_model_card(&mcid.to_path(), card.clone())?;
-                tracing::debug!(
-                    model_name = card.name(),
-                    namespace = namespace,
-                    "Worker joined existing WorkerSet, skipping pipeline build"
-                );
-                return Ok(());
-            }
+        if let Some(model) = self.manager.get_model(&model_name)
+            && model.has_worker_set(&ws_key)
+        {
+            self.manager
+                .save_model_card(&mcid.to_path(), card.clone())?;
+            tracing::debug!(
+                model_name = card.name(),
+                namespace = namespace,
+                "Worker joined existing WorkerSet, skipping pipeline build"
+            );
+            return Ok(());
         }
 
         // Guard against concurrent pipeline construction for the same (model, namespace, type)
         let registration_key = ModelManager::model_namespace_key(&model_name, &ws_key);
-        if !self.registering_worker_sets.insert(registration_key.clone()) {
+        if !self
+            .registering_worker_sets
+            .insert(registration_key.clone())
+        {
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
             tracing::debug!(
@@ -396,7 +398,11 @@ impl ModelWatcher {
         let endpoint = component.endpoint(&mcid.endpoint);
         let client = endpoint.client().await?;
         let instance_watcher = client.instance_avail_watcher();
-        tracing::debug!(model_name = card.name(), namespace = mcid.namespace, "building worker set pipeline");
+        tracing::debug!(
+            model_name = card.name(),
+            namespace = mcid.namespace,
+            "building worker set pipeline"
+        );
         self.manager
             .save_model_card(&mcid.to_path(), card.clone())?;
 
@@ -409,11 +415,7 @@ impl ModelWatcher {
         let ws_key = worker_set_key(&namespace, card.model_type);
 
         // Build the WorkerSet with all applicable engines
-        let mut worker_set = WorkerSet::new(
-            namespace.clone(),
-            checksum.to_string(),
-            card.clone(),
-        );
+        let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
         worker_set.set_instance_watcher(instance_watcher);
 
         if card.model_input == ModelInput::Tokens
@@ -693,12 +695,16 @@ impl ModelWatcher {
 
             // Prefill sets have no engines — we add the WorkerSet first for tracking,
             // then activate the prefill router.
-            self.manager.add_worker_set(card.name(), &ws_key, worker_set);
+            self.manager
+                .add_worker_set(card.name(), &ws_key, worker_set);
 
             // Note: activate_prefill_router is keyed by deployment namespace (not ws_key)
             // because it coordinates between decode and prefill WorkerSets that share
             // the same deployment namespace but have different ws_keys ("ns" vs "ns:prefill").
-            let Ok(()) = self.manager.activate_prefill_router(card.name(), &namespace, endpoint) else {
+            let Ok(()) = self
+                .manager
+                .activate_prefill_router(card.name(), &namespace, endpoint)
+            else {
                 tracing::warn!(
                     model_name = card.name(),
                     "Failed to activate prefill router - prefill model may already be activated"
@@ -723,7 +729,8 @@ impl ModelWatcher {
         }
 
         // Add the completed WorkerSet to the Model
-        self.manager.add_worker_set(card.name(), &ws_key, worker_set);
+        self.manager
+            .add_worker_set(card.name(), &ws_key, worker_set);
 
         Ok(())
     }
