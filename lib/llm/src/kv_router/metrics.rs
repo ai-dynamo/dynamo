@@ -267,3 +267,130 @@ impl RouterRequestMetrics {
             .clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prometheus::{Encoder, TextEncoder};
+
+    fn gather_pef(registry: &prometheus::Registry) -> String {
+        let encoder = TextEncoder::new();
+        let mut buffer = Vec::new();
+        encoder.encode(&registry.gather(), &mut buffer).unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn test_worker_load_metrics_pef() {
+        let registry = prometheus::Registry::new();
+        let metrics = WorkerLoadMetrics {
+            active_decode_blocks: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::WORKER_ACTIVE_DECODE_BLOCKS
+                    ),
+                    "Active KV cache decode blocks per worker",
+                ),
+                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .unwrap(),
+            active_prefill_tokens: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::WORKER_ACTIVE_PREFILL_TOKENS
+                    ),
+                    "Active prefill tokens queued per worker",
+                ),
+                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .unwrap(),
+        };
+        registry
+            .register(Box::new(metrics.active_decode_blocks.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(metrics.active_prefill_tokens.clone()))
+            .unwrap();
+
+        metrics.observe(123, 0, "decode", 42, 100);
+
+        let output = gather_pef(&registry);
+        let expected = "\
+# HELP dynamo_frontend_worker_active_decode_blocks Active KV cache decode blocks per worker
+# TYPE dynamo_frontend_worker_active_decode_blocks gauge
+dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 42
+# HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens queued per worker
+# TYPE dynamo_frontend_worker_active_prefill_tokens gauge
+dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 100
+";
+        assert_eq!(
+            output, expected,
+            "\nActual PEF:\n{output}\nExpected PEF:\n{expected}"
+        );
+    }
+
+    #[test]
+    fn test_routing_overhead_metric_names_pef() {
+        let registry = prometheus::Registry::new();
+        let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18).unwrap();
+        let make = |suffix: &str, help: &str| {
+            let name = format!("{}_{}", name_prefix::ROUTING_OVERHEAD, suffix);
+            prometheus::Histogram::with_opts(
+                prometheus::HistogramOpts::new(name, help).buckets(buckets.clone()),
+            )
+            .unwrap()
+        };
+
+        let total = make(
+            routing_overhead::TOTAL_MS,
+            "Total routing overhead per request in milliseconds",
+        );
+        registry.register(Box::new(total.clone())).unwrap();
+        total.observe(1.5);
+
+        let output = gather_pef(&registry);
+        assert!(
+            output.contains("# HELP dynamo_routing_overhead_total_ms"),
+            "PEF missing HELP for routing overhead metric"
+        );
+        assert!(
+            output.contains("# TYPE dynamo_routing_overhead_total_ms histogram"),
+            "PEF missing TYPE for routing overhead metric"
+        );
+        assert!(
+            output.contains("dynamo_routing_overhead_total_ms_count 1"),
+            "PEF missing observation count"
+        );
+    }
+
+    #[test]
+    fn test_routing_overhead_saturating_sub() {
+        let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18).unwrap();
+        let make = |name: &str| {
+            prometheus::Histogram::with_opts(
+                prometheus::HistogramOpts::new(name, "test").buckets(buckets.clone()),
+            )
+            .unwrap()
+        };
+        let metrics = RoutingOverheadMetrics {
+            block_hashing: make("test_block_hashing_ms"),
+            indexer_find_matches: make("test_find_matches_ms"),
+            seq_hashing: make("test_seq_hashing_ms"),
+            scheduling: make("test_scheduling_ms"),
+            total: make("test_total_ms"),
+        };
+
+        // Out-of-order durations: each phase < previous (would panic without saturating_sub)
+        metrics.observe(
+            Duration::from_millis(10),
+            Duration::from_millis(5),
+            Duration::from_millis(3),
+            Duration::from_millis(1),
+        );
+        // Reaching here without panic confirms saturating_sub works
+    }
+}

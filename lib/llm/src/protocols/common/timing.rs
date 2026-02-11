@@ -479,3 +479,163 @@ pub struct TimingInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hit_rate: Option<f64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn test_record_isl_osl() {
+        let tracker = RequestTracker::new();
+
+        tracker.record_isl(512, 256);
+        assert_eq!(tracker.isl_tokens(), Some(512));
+        assert_eq!(tracker.cached_tokens(), Some(256));
+
+        tracker.record_osl(100);
+        assert_eq!(tracker.osl_tokens(), 100);
+    }
+
+    #[test]
+    fn test_ttft_ms() {
+        let tracker = RequestTracker::new();
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_first_token();
+
+        let ttft = tracker.ttft_ms().unwrap();
+        assert!(ttft >= 5.0, "TTFT should be at least 5ms, got {ttft}");
+    }
+
+    #[test]
+    fn test_ttft_ms_none_before_first_token() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.ttft_ms().is_none());
+    }
+
+    #[test]
+    fn test_avg_itl_ms() {
+        let tracker = RequestTracker::new();
+        tracker.record_first_token();
+        thread::sleep(Duration::from_millis(20));
+        tracker.record_osl(11); // 11 tokens => 10 inter-token gaps
+        tracker.record_finish();
+
+        let itl = tracker.avg_itl_ms().unwrap();
+        assert!(itl > 0.0, "avg ITL should be positive, got {itl}");
+    }
+
+    #[test]
+    fn test_avg_itl_ms_none_with_single_token() {
+        let tracker = RequestTracker::new();
+        tracker.record_first_token();
+        tracker.record_osl(1);
+        tracker.record_finish();
+
+        assert!(
+            tracker.avg_itl_ms().is_none(),
+            "avg ITL should be None with < 2 output tokens"
+        );
+    }
+
+    #[test]
+    fn test_kv_hit_rate() {
+        let tracker = RequestTracker::new();
+        tracker.record_kv_hit(3, 10);
+
+        let rate = tracker.kv_hit_rate().unwrap();
+        assert!(
+            (rate - 0.3).abs() < f64::EPSILON,
+            "KV hit rate should be 0.3, got {rate}"
+        );
+    }
+
+    #[test]
+    fn test_kv_hit_rate_zero_isl() {
+        let tracker = RequestTracker::new();
+        tracker.record_kv_hit(0, 0);
+        assert!(
+            tracker.kv_hit_rate().is_none(),
+            "KV hit rate should be None when isl_blocks is 0"
+        );
+    }
+
+    #[test]
+    fn test_total_time_ms() {
+        let tracker = RequestTracker::new();
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_finish();
+
+        let total = tracker.total_time_ms().unwrap();
+        assert!(
+            total >= 5.0,
+            "total time should be at least 5ms, got {total}"
+        );
+    }
+
+    #[test]
+    fn test_observe_first_token_gauges_no_panic_without_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_first_token();
+        tracker.record_isl(100, 50);
+        // No worker recorded — should return early without panic
+        tracker.observe_first_token_gauges();
+    }
+
+    #[test]
+    fn test_observe_finish_gauges_no_panic_without_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_first_token();
+        tracker.record_osl(10);
+        tracker.record_finish();
+        // No worker recorded — should return early without panic
+        tracker.observe_finish_gauges();
+    }
+
+    #[test]
+    fn test_observe_first_token_gauges_with_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_worker_full(42, 0, WORKER_TYPE_PREFILL);
+        thread::sleep(Duration::from_millis(5));
+        tracker.record_first_token();
+        tracker.record_isl(256, 128);
+
+        tracker.observe_first_token_gauges();
+
+        let labels = &["42", "0", WORKER_TYPE_PREFILL];
+        let ttft_val = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert!(
+            ttft_val > 0.0,
+            "TTFT gauge should be positive after observe, got {ttft_val}"
+        );
+
+        let isl_val = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert_eq!(isl_val, 256, "ISL gauge should be 256, got {isl_val}");
+    }
+
+    #[test]
+    fn test_observe_finish_gauges_with_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_worker_full(99, 1, WORKER_TYPE_DECODE);
+        tracker.record_first_token();
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_osl(5);
+        tracker.record_finish();
+
+        tracker.observe_finish_gauges();
+
+        let labels = &["99", "1", WORKER_TYPE_DECODE];
+        let itl_val = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert!(
+            itl_val > 0.0,
+            "ITL gauge should be positive after observe, got {itl_val}"
+        );
+    }
+}
