@@ -201,6 +201,19 @@ jobs:
             cp main-checkout/docs/convert_callouts.py docs-checkout/docs/convert_callouts.py
           fi
 
+          # Sync components/ directory (e.g., CustomFooter.tsx)
+          if [ -d main-checkout/fern/components ]; then
+            echo "Syncing components/ from main to docs-website branch..."
+            rm -rf fern-checkout/fern/components
+            cp -r main-checkout/fern/components fern-checkout/fern/components
+          fi
+
+          # Sync main.css
+          if [ -f main-checkout/fern/main.css ]; then
+            echo "Syncing main.css from main to docs-website branch..."
+            cp main-checkout/fern/main.css fern-checkout/fern/main.css
+          fi
+
       - name: Convert GitHub callouts to Fern format
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
