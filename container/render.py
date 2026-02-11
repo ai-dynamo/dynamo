@@ -10,10 +10,29 @@ import yaml
 from jinja2 import Environment, FileSystemLoader
 
 
-def parse_args():
+def flatten_context(context, prefix=""):
+    flat = {}
+    for key, value in context.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            # Check if this dict contains only scalar values (leaf node)
+            if all(not isinstance(v, dict) for v in value.values()):
+                # This is a leaf dict, add all its items
+                for sub_key, sub_value in value.items():
+                    flat[f"{full_key}.{sub_key}"] = sub_value
+            else:
+                # This dict has nested dicts, recurse
+                flat.update(flatten_context(value, full_key))
+        else:
+            flat[full_key] = value
+    return flat
+
+
+def parse_args(context):
     parser = argparse.ArgumentParser(
         description="Renders dynamo Dockerfiles from templates"
     )
+
     parser.add_argument(
         "--framework",
         type=str,
@@ -30,7 +49,7 @@ def parse_args():
         "--platform",
         type=str,
         default="amd64",
-        help="Dockerfile platform to use. [amdg64, arm64]",
+        help="Dockerfile platform to use. [amd64, arm64]",
     )
     parser.add_argument(
         "--cuda-version",
@@ -49,9 +68,31 @@ def parse_args():
         action="store_true",
         help="Prints the rendered Dockerfile to stdout.",
     )
+
+    flat_context = flatten_context(context)
+    for key, value in flat_context.items():
+        arg_name = f"--{key}"
+        parser.add_argument(
+            arg_name,
+            type=str,
+            default=None,
+            help=f"Override context value: {key} (default: {value})",
+        )
+
     args = parser.parse_args()
     return args
 
+
+def apply_overrides(context, args, flat_context_keys):
+    for key in flat_context_keys:
+        arg_value = getattr(args, key, None)
+        if arg_value is not None:
+            keys = key.split(".")
+            current = context
+            for k in keys[:-1]:
+                current = current[k]
+            current[keys[-1]] = arg_value
+    return context
 
 def validate_args(args):
     valid_inputs = {
@@ -111,11 +152,14 @@ def render(args, context, script_dir):
 
 
 def main():
-    args = parse_args()
-    validate_args(args)
     script_dir = Path(__file__).parent
     with open(f"{script_dir}/context.yaml", "r") as f:
         context = yaml.safe_load(f)
+
+    args = parse_args(context)
+    flat_context = flatten_context(context)
+    apply_overrides(context, args, flat_context.keys())
+    validate_args(args)
 
     render(args, context, script_dir)
 
