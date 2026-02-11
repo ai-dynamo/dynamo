@@ -8,6 +8,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
+from vllm.config import ECTransferConfig
+
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput
 from dynamo.runtime import DistributedRuntime
@@ -87,6 +89,7 @@ class WorkerFactory:
         Modes:
         - Aggregated (P+D): Prefill and decode on same worker
         - Disaggregated (P→D): Prefill forwards to separate decode worker
+        - DynamoMultimodalEmbeddingCacheConnector ec_both: In-memory CPU embedding cache via vLLM ECTransferConfig
         """
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -99,6 +102,31 @@ class WorkerFactory:
             load_lora_endpoint = component.endpoint("load_lora")
             unload_lora_endpoint = component.endpoint("unload_lora")
             list_loras_endpoint = component.endpoint("list_loras")
+
+        # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
+        # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
+        if (
+            not config.route_to_encoder
+            and config.multimodal_embedding_cache_capacity_gb > 0
+        ):
+            logger.info(
+                "Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector "
+                "(capacity=%.2f GB)",
+                config.multimodal_embedding_cache_capacity_gb,
+            )
+            instance_id = 0
+            engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
+            ec_transfer_config = ECTransferConfig(
+                engine_id=engine_id,
+                ec_role="ec_both",
+                ec_connector="DynamoMultimodalEmbeddingCacheConnector",
+                ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
+                ec_connector_extra_config={
+                    "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
+                },
+            )
+            config.engine_args.ec_transfer_config = ec_transfer_config
+            logger.info(f"Configured ec_both with engine_id={engine_id}")
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         if pre_created_engine is not None:
