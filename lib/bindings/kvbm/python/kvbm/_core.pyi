@@ -525,6 +525,32 @@ class PyTrtllmKvConnectorWorker:
         """
         ...
 
+    def register_indexer_k_caches(
+        self,
+        dtype_width_bytes: int,
+        indexer_k_tensor: Any,
+    ) -> None:
+        """
+        Register an indexer K cache tensor for DSA models.
+        Must be called after register_kv_caches and before finalize_registration.
+
+        Parameters:
+        -----------
+        dtype_width_bytes: int
+            Data type width in bytes (e.g., 2 for fp16)
+        indexer_k_tensor: Any
+            The indexer K cache tensor (torch.Tensor)
+        """
+        ...
+
+    def finalize_registration(self) -> None:
+        """
+        Finalize KV cache registration and build the KVBM worker.
+        Must be called exactly once after register_kv_caches
+        (and optionally register_indexer_k_caches for DSA models).
+        """
+        ...
+
 
 class PyTrtllmKvConnectorLeader:
     """

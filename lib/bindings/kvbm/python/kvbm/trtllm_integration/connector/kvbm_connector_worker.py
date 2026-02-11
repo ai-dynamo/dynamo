@@ -200,6 +200,14 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         # Default to old way of processing offload
         self.use_forward_pass_callable = False
 
+        # Detect DSA (DeepSeek Sparse Attention) for indexer k cache support
+        print("SPARSE ATTENTION CONFIG: ", llm_args.sparse_attention_config)
+        self._uses_dsa = (
+            hasattr(llm_args, "sparse_attention_config")
+            and llm_args.sparse_attention_config is not None
+            and getattr(llm_args.sparse_attention_config, "algorithm", None) == "dsa"
+        )
+
     def register_forward_pass_callable(self) -> callable:
         """
         Register a callable object which will be called at the
@@ -243,6 +251,33 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             kv_cache_tensor,
             raw_event_handles,
         )
+
+        if not self._uses_dsa:
+            # Non-DSA: finalize immediately (preserves existing behavior)
+            self._connector.finalize_registration()
+        else:
+            logger.info(
+                "DSA model detected — deferring finalization until "
+                "register_indexer_k_caches is called"
+            )
+
+    def register_indexer_k_cache(self, indexer_k_tensor: torch.Tensor):
+        """
+        Register the indexer K cache tensor for DSA models.
+        Must be called after register_kv_caches and will finalize registration.
+        Args:
+            indexer_k_tensor: The indexer K cache tensor.
+        """
+        dtype_width_bytes = indexer_k_tensor.dtype.itemsize
+        logger.info(
+            f"Registering indexer k cache on rank {self.rank}: "
+            f"shape={list(indexer_k_tensor.shape)}, "
+            f"dtype_bytes={dtype_width_bytes}"
+        )
+        self._connector.register_indexer_k_caches(
+            dtype_width_bytes, indexer_k_tensor
+        )
+        self._connector.finalize_registration()
 
     def bind_connector_meta(self, metadata: object):
         """Set the connector metadata from the scheduler.

@@ -19,7 +19,9 @@ use crate::{
     extract_distributed_runtime_from_obj, get_current_cancel_token, get_current_tokio_handle,
 };
 use anyhow;
-use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig, NcclConfig};
+use dynamo_llm::block_manager::distributed::{
+    AdditionalCacheGroupConfig, KvbmWorker, KvbmWorkerConfig, NcclConfig,
+};
 use dynamo_llm::block_manager::layout::LayoutType;
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -53,6 +55,34 @@ pub trait Worker: Send + Sync {
     /// Does slot bookkeeping synchronously, then spawns an async task to poll the event
     /// and send operations to the scheduler when complete.
     fn submit_offload_on_event(&mut self, event: u64) -> anyhow::Result<()>;
+
+    /// Register an additional indexer k cache (for DSA models).
+    /// Must be called after register_kv_caches and before finalize_registration.
+    fn register_indexer_k_caches(
+        &mut self,
+        dtype_width_bytes: usize,
+        tensor: Arc<VllmTensor>,
+    ) -> anyhow::Result<()>;
+
+    /// Finalize registration: build the KvbmWorker from pending configs.
+    /// Must be called exactly once after register_kv_caches (and optionally register_indexer_k_caches).
+    fn finalize_registration(&mut self) -> anyhow::Result<()>;
+}
+
+/// Pending primary cache config, stored between register_kv_caches and finalize_registration.
+struct PendingPrimaryConfig {
+    num_device_blocks: usize,
+    page_size: usize,
+    device_id: usize,
+    dtype_width_bytes: usize,
+    kv_cache_tensor: Arc<VllmTensor>,
+    raw_event_handles: Vec<u64>,
+}
+
+/// Pending indexer k cache config, stored between register_indexer_k_caches and finalize_registration.
+struct PendingIndexerConfig {
+    dtype_width_bytes: usize,
+    tensor: Arc<VllmTensor>,
 }
 
 pub struct KvConnectorWorker {
@@ -85,6 +115,12 @@ pub struct KvConnectorWorker {
 
     /// Raw pointer to NCCL communicator for replicated mode
     nccl_comm_ptr: Option<usize>,
+
+    /// Pending primary cache registration (deferred until finalize_registration)
+    pending_primary: Option<PendingPrimaryConfig>,
+
+    /// Pending indexer k cache registration (for DSA models)
+    pending_indexer_k: Option<PendingIndexerConfig>,
 }
 
 impl KvConnectorWorker {
@@ -135,6 +171,8 @@ impl KvConnectorWorker {
             rank,
             world_size,
             nccl_comm_ptr,
+            pending_primary: None,
+            pending_indexer_k: None,
         })
     }
 }
@@ -188,43 +226,23 @@ impl Worker for KvConnectorWorker {
         raw_event_handles: Vec<u64>,
     ) -> anyhow::Result<()> {
         if self.kvbm_worker.get().is_some() {
-            tracing::warn!("kvbm worker already registered");
             return Err(anyhow::anyhow!("kvbm worker already registered"));
         }
+        if self.pending_primary.is_some() {
+            return Err(anyhow::anyhow!(
+                "register_kv_caches already called; call finalize_registration first"
+            ));
+        }
 
-        let kv_cache_tensors = vec![kv_cache_tensor as Arc<dyn TorchTensor>];
-
-        // Build NCCL config for replicated mode if parameters are provided
-        let nccl_config = build_nccl_config(self.rank, self.world_size, self.nccl_comm_ptr);
-
-        let config = KvbmWorkerConfig::builder()
-            .cancel_token(get_current_cancel_token())
-            .num_device_blocks(num_device_blocks)
-            .page_size(page_size)
-            .tensors(kv_cache_tensors)
-            .device_id(device_id)
-            .dtype_width_bytes(dtype_width_bytes)
-            .device_layout_type(LayoutType::FullyContiguous)
-            .host_layout_type(LayoutType::FullyContiguous)
-            .disk_layout_type(LayoutType::FullyContiguous)
-            .leader_pub_url(get_leader_zmq_pub_url())
-            .leader_ack_url(get_leader_zmq_ack_url())
-            .scheduler_client(Some(self.transfer_client.clone()))
-            .rank(self.rank)
-            .world_size(self.world_size)
-            .nccl_config(nccl_config)
-            .build()?;
-
-        self.layer_events = raw_event_handles;
-
-        let worker = get_current_tokio_handle().block_on(async move {
-            let worker = KvbmWorker::new(config, true).await?;
-            anyhow::Ok(worker)
-        })?;
-
-        self.kvbm_worker
-            .set(worker)
-            .map_err(|_| anyhow::anyhow!("failed to set kvbm worker"))?;
+        self.layer_events = raw_event_handles.clone();
+        self.pending_primary = Some(PendingPrimaryConfig {
+            num_device_blocks,
+            page_size,
+            device_id,
+            dtype_width_bytes,
+            kv_cache_tensor,
+            raw_event_handles,
+        });
 
         Ok(())
     }
@@ -499,6 +517,85 @@ impl Worker for KvConnectorWorker {
 
         Ok(())
     }
+
+    fn register_indexer_k_caches(
+        &mut self,
+        dtype_width_bytes: usize,
+        tensor: Arc<VllmTensor>,
+    ) -> anyhow::Result<()> {
+        if self.pending_primary.is_none() {
+            return Err(anyhow::anyhow!(
+                "register_kv_caches must be called before register_indexer_k_caches"
+            ));
+        }
+        if self.pending_indexer_k.is_some() {
+            return Err(anyhow::anyhow!(
+                "register_indexer_k_caches already called"
+            ));
+        }
+
+        self.pending_indexer_k = Some(PendingIndexerConfig {
+            dtype_width_bytes,
+            tensor,
+        });
+
+        Ok(())
+    }
+
+    fn finalize_registration(&mut self) -> anyhow::Result<()> {
+        if self.kvbm_worker.get().is_some() {
+            return Err(anyhow::anyhow!("kvbm worker already finalized"));
+        }
+
+        let primary = self.pending_primary.take().ok_or_else(|| {
+            anyhow::anyhow!("register_kv_caches must be called before finalize_registration")
+        })?;
+
+        let kv_cache_tensors = vec![primary.kv_cache_tensor as Arc<dyn TorchTensor>];
+
+        // Build NCCL config for replicated mode if parameters are provided
+        let nccl_config = build_nccl_config(self.rank, self.world_size, self.nccl_comm_ptr);
+
+        // Build additional cache groups from pending indexer config
+        let mut additional_cache_groups = Vec::new();
+        if let Some(indexer) = self.pending_indexer_k.take() {
+            additional_cache_groups.push(AdditionalCacheGroupConfig {
+                name: "indexer_k".to_string(),
+                tensors: vec![indexer.tensor as Arc<dyn TorchTensor>],
+                dtype_width_bytes: indexer.dtype_width_bytes,
+            });
+        }
+
+        let config = KvbmWorkerConfig::builder()
+            .cancel_token(get_current_cancel_token())
+            .num_device_blocks(primary.num_device_blocks)
+            .page_size(primary.page_size)
+            .tensors(kv_cache_tensors)
+            .device_id(primary.device_id)
+            .dtype_width_bytes(primary.dtype_width_bytes)
+            .device_layout_type(LayoutType::FullyContiguous)
+            .host_layout_type(LayoutType::FullyContiguous)
+            .disk_layout_type(LayoutType::FullyContiguous)
+            .leader_pub_url(get_leader_zmq_pub_url())
+            .leader_ack_url(get_leader_zmq_ack_url())
+            .scheduler_client(Some(self.transfer_client.clone()))
+            .rank(self.rank)
+            .world_size(self.world_size)
+            .nccl_config(nccl_config)
+            .additional_cache_groups(additional_cache_groups)
+            .build()?;
+
+        let worker = get_current_tokio_handle().block_on(async move {
+            let worker = KvbmWorker::new(config, true).await?;
+            anyhow::Ok(worker)
+        })?;
+
+        self.kvbm_worker
+            .set(worker)
+            .map_err(|_| anyhow::anyhow!("failed to set kvbm worker"))?;
+
+        Ok(())
+    }
 }
 
 #[pyclass]
@@ -590,6 +687,23 @@ impl PyTrtllmKvConnectorWorker {
     pub fn submit_offload_on_event(&mut self, event: u64) -> PyResult<()> {
         self.connector_worker
             .submit_offload_on_event(event)
+            .map_err(to_pyerr)
+    }
+
+    pub fn register_indexer_k_caches(
+        &mut self,
+        dtype_width_bytes: usize,
+        indexer_k_tensor: Py<PyAny>,
+    ) -> PyResult<()> {
+        let rust_tensor = Arc::new(VllmTensor::new(indexer_k_tensor).map_err(to_pyerr)?);
+        self.connector_worker
+            .register_indexer_k_caches(dtype_width_bytes, rust_tensor)
+            .map_err(to_pyerr)
+    }
+
+    pub fn finalize_registration(&mut self) -> PyResult<()> {
+        self.connector_worker
+            .finalize_registration()
             .map_err(to_pyerr)
     }
 }

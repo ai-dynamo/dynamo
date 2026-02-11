@@ -25,6 +25,7 @@ use nixl_sys::Agent as NixlAgent;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use transfer::CacheGroup;
 
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +49,16 @@ impl WorkerState {
     fn is_ready(&self) -> bool {
         self.ready_for_ping.load(Ordering::SeqCst)
     }
+}
+
+/// Configuration for an additional cache group (e.g. DSA indexer k cache).
+/// Each additional group has its own tensors and dtype but shares `num_blocks` and `page_size`
+/// with the primary cache.
+#[derive(Clone)]
+pub struct AdditionalCacheGroupConfig {
+    pub name: String,
+    pub tensors: Vec<Arc<dyn TorchTensor>>,
+    pub dtype_width_bytes: usize,
 }
 
 pub fn load_and_validate_tensors(
@@ -103,6 +114,7 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
 }
 
 // Helper: perform allocation and build transfer handler (factored from previous code)
+#[allow(clippy::too_many_arguments)]
 async fn perform_allocation_and_build_handler(
     device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
     mut layout_builder: LayoutConfigBuilder,
@@ -111,6 +123,11 @@ async fn perform_allocation_and_build_handler(
     worker_id: usize,
     device_id: usize,
     scheduler_client: Option<TransferSchedulerClient>,
+    additional_device_layouts: Vec<(
+        String,
+        Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+        LayoutConfigBuilder,
+    )>,
 ) -> anyhow::Result<BlockTransferHandler> {
     // Determine if this rank should allocate G2/G3 (host/disk)
     // - Sharded mode (rank=None): all ranks allocate
@@ -157,16 +174,15 @@ async fn perform_allocation_and_build_handler(
         })?,
     );
 
-    // device - always allocated on all ranks
-    let device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+    // --- Primary cache group ---
+    let primary_device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
         device_layout,
         transfer_context.nixl_agent().as_ref(),
         0,
         worker_id,
     )?);
 
-    // host (G2) - only allocated if should_allocate_offload
-    let host_blocks = if should_allocate_offload && leader_meta.num_host_blocks > 0 {
+    let primary_host_blocks = if should_allocate_offload && leader_meta.num_host_blocks > 0 {
         let host_allocator = Arc::new(PinnedAllocator::default());
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
@@ -182,8 +198,7 @@ async fn perform_allocation_and_build_handler(
         None
     };
 
-    // disk (G3) - only allocated if should_allocate_offload
-    let disk_blocks = if should_allocate_offload && leader_meta.num_disk_blocks > 0 {
+    let primary_disk_blocks = if should_allocate_offload && leader_meta.num_disk_blocks > 0 {
         let disk_allocator = Arc::new(DiskAllocator);
         let disk_layout = layout_builder
             .num_blocks(leader_meta.num_disk_blocks)
@@ -199,10 +214,82 @@ async fn perform_allocation_and_build_handler(
         None
     };
 
-    let handler = BlockTransferHandler::new(
-        device_blocks,
-        host_blocks,
-        disk_blocks,
+    let primary_group = CacheGroup {
+        name: "primary".to_string(),
+        device: BlockTransferHandler::get_local_data(primary_device_blocks),
+        host: BlockTransferHandler::get_local_data(primary_host_blocks),
+        disk: BlockTransferHandler::get_local_data(primary_disk_blocks),
+    };
+
+    let mut cache_groups = vec![primary_group];
+
+    // --- Additional cache groups (e.g. DSA indexer k cache) ---
+    // block_set_idx starts at 3 (0=primary device, 1=primary host, 2=primary disk)
+    let mut block_set_idx = 3;
+    for (name, additional_device_layout, mut additional_layout_builder) in
+        additional_device_layouts
+    {
+        tracing::info!(
+            "Building additional cache group '{}': num_layers={}, outer_dim={}, inner_dim={}, dtype_bytes={}",
+            name,
+            additional_device_layout.config().num_layers,
+            additional_device_layout.config().outer_dim,
+            additional_device_layout.config().inner_dim,
+            additional_device_layout.config().dtype_width_bytes
+        );
+
+        let add_device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+            additional_device_layout,
+            transfer_context.nixl_agent().as_ref(),
+            block_set_idx,
+            worker_id,
+        )?);
+        block_set_idx += 1;
+
+        let add_host_blocks = if should_allocate_offload && leader_meta.num_host_blocks > 0 {
+            let host_allocator = Arc::new(PinnedAllocator::default());
+            let host_layout = additional_layout_builder
+                .num_blocks(leader_meta.num_host_blocks)
+                .build()?
+                .allocate_layout(worker_config.host_layout_type, host_allocator)?;
+            Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+                host_layout,
+                transfer_context.nixl_agent().as_ref(),
+                block_set_idx,
+                worker_id,
+            )?)
+        } else {
+            None
+        };
+        block_set_idx += 1;
+
+        let add_disk_blocks = if should_allocate_offload && leader_meta.num_disk_blocks > 0 {
+            let disk_allocator = Arc::new(DiskAllocator);
+            let disk_layout = additional_layout_builder
+                .num_blocks(leader_meta.num_disk_blocks)
+                .build()?
+                .allocate_layout(worker_config.disk_layout_type, disk_allocator)?;
+            Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+                disk_layout,
+                transfer_context.nixl_agent().as_ref(),
+                block_set_idx,
+                worker_id,
+            )?)
+        } else {
+            None
+        };
+        block_set_idx += 1;
+
+        cache_groups.push(CacheGroup {
+            name,
+            device: BlockTransferHandler::get_local_data(add_device_blocks),
+            host: BlockTransferHandler::get_local_data(add_host_blocks),
+            disk: BlockTransferHandler::get_local_data(add_disk_blocks),
+        });
+    }
+
+    let handler = BlockTransferHandler::new_multi(
+        cache_groups,
         transfer_context,
         scheduler_client,
         worker_config.nccl_config,
@@ -244,6 +331,15 @@ struct LeaderMetadataHandler {
     handler_cell: Arc<RwLock<Option<BlockTransferHandler>>>,
     handler_tx: Arc<Mutex<Option<oneshot::Sender<BlockTransferHandler>>>>,
     started: AtomicBool,
+    additional_device_layouts: Mutex<
+        Option<
+            Vec<(
+                String,
+                Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+                LayoutConfigBuilder,
+            )>,
+        >,
+    >,
 }
 
 #[async_trait]
@@ -295,6 +391,12 @@ impl Handler for LeaderMetadataHandler {
             }
         };
 
+        // Take additional device layouts once.
+        let additional_layouts = {
+            let mut guard = self.additional_device_layouts.lock().await;
+            guard.take().unwrap_or_default()
+        };
+
         // Capture what we need and run allocation in the background.
         let layout_builder = self.layout_builder.clone();
         let worker_config = self.worker_config.clone();
@@ -314,6 +416,7 @@ impl Handler for LeaderMetadataHandler {
                 worker_id,
                 device_id,
                 scheduler_client,
+                additional_layouts,
             )
             .await
             {
@@ -443,6 +546,10 @@ pub struct KvbmWorkerConfig {
     /// NCCL configuration for replicated mode
     #[builder(default = "transfer::NcclConfig::disabled()")]
     nccl_config: transfer::NcclConfig,
+
+    /// Additional cache groups (e.g. DSA indexer k cache) that move in lockstep with primary
+    #[builder(default = "Vec::new()")]
+    additional_cache_groups: Vec<AdditionalCacheGroupConfig>,
 }
 
 impl KvbmWorkerConfig {
@@ -525,7 +632,7 @@ impl KvbmWorker {
             }
         };
 
-        let bytes_per_block =
+        let mut bytes_per_block =
             num_layers * outer_dim * config.page_size * inner_dim * config.dtype_width_bytes;
 
         let mut layout_builder_instance = LayoutConfigBuilder::default();
@@ -543,6 +650,88 @@ impl KvbmWorker {
 
         let layout_builder = layout_builder.clone();
 
+        // Process additional cache groups (e.g. DSA indexer k cache)
+        let mut additional_device_layouts: Vec<(
+            String,
+            Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+            LayoutConfigBuilder,
+        )> = Vec::new();
+
+        for additional_group in &config.additional_cache_groups {
+            let (add_device_tensors, add_shape) =
+                load_and_validate_tensors(&additional_group.tensors, config.device_id)?;
+
+            // Validate same num_device_blocks (shape[0])
+            let add_num_device_blocks = add_shape[0];
+            if add_num_device_blocks != config.num_device_blocks {
+                return Err(anyhow::anyhow!(
+                    "Additional cache group '{}' has {} device blocks, but primary has {}. They must match.",
+                    additional_group.name,
+                    add_num_device_blocks,
+                    config.num_device_blocks
+                ));
+            }
+
+            if add_shape.len() < 3 {
+                return Err(anyhow::anyhow!(
+                    "Additional cache group '{}' has unsupported shape: {:?}",
+                    additional_group.name,
+                    add_shape
+                ));
+            }
+
+            // Infer layout dimensions for the additional cache.
+            // FullyContiguous layout: [num_blocks, num_layers, outer_dim, page_size * inner_dim]
+            let add_num_layers = add_shape[1];
+            let add_outer_dim = add_shape[2];
+            let add_inner_dim =
+                add_shape[3..].iter().product::<usize>() / config.page_size;
+
+            tracing::info!(
+                "Additional cache group '{}': num_layers={}, outer_dim={}, page_size={}, inner_dim={}, dtype_bytes={}",
+                additional_group.name,
+                add_num_layers,
+                add_outer_dim,
+                config.page_size,
+                add_inner_dim,
+                additional_group.dtype_width_bytes
+            );
+
+            let add_bytes = add_num_layers
+                * add_outer_dim
+                * config.page_size
+                * add_inner_dim
+                * additional_group.dtype_width_bytes;
+            bytes_per_block += add_bytes;
+
+            let mut add_layout_builder_instance = LayoutConfigBuilder::default();
+            let add_layout_builder = add_layout_builder_instance
+                .num_layers(add_num_layers)
+                .outer_dim(add_outer_dim)
+                .page_size(config.page_size)
+                .inner_dim(add_inner_dim)
+                .dtype_width_bytes(additional_group.dtype_width_bytes);
+
+            let add_device_layout = add_layout_builder
+                .num_blocks(config.num_device_blocks)
+                .build()?
+                .create_layout(LayoutType::FullyContiguous, add_device_tensors)?;
+
+            let add_layout_builder = add_layout_builder.clone();
+
+            additional_device_layouts.push((
+                additional_group.name.clone(),
+                add_device_layout,
+                add_layout_builder,
+            ));
+        }
+
+        tracing::info!(
+            "Total bytes_per_block (primary + {} additional groups): {}",
+            additional_device_layouts.len(),
+            bytes_per_block
+        );
+
         let (task, handler_rx) = if layout_blocking {
             Self::run_blocking_layout_initialization(
                 config,
@@ -550,6 +739,7 @@ impl KvbmWorker {
                 device_layout,
                 layout_builder,
                 layout_type,
+                additional_device_layouts,
             )
             .await?
         } else {
@@ -559,6 +749,7 @@ impl KvbmWorker {
                 device_layout,
                 layout_builder,
                 layout_type,
+                additional_device_layouts,
             )
             .await?
         };
@@ -569,12 +760,18 @@ impl KvbmWorker {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_blocking_layout_initialization(
         config: KvbmWorkerConfig,
         bytes_per_block: usize,
         device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
         layout_builder: LayoutConfigBuilder,
         layout_type: LayoutType,
+        additional_device_layouts: Vec<(
+            String,
+            Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+            LayoutConfigBuilder,
+        )>,
     ) -> anyhow::Result<(
         CriticalTaskExecutionHandle,
         oneshot::Receiver<transfer::BlockTransferHandler>,
@@ -605,6 +802,7 @@ impl KvbmWorker {
                     layout_ready_tx_cell,
                     scheduler_client,
                     bytes_per_block,
+                    additional_device_layouts,
                 )
             },
             cancel_token.clone(),
@@ -620,12 +818,18 @@ impl KvbmWorker {
         Ok((task, handler_rx))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_non_blocking_layout_initialization(
         config: KvbmWorkerConfig,
         bytes_per_block: usize,
         device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage> + Send + 'static>,
         layout_builder: LayoutConfigBuilder,
         layout_type: LayoutType,
+        additional_device_layouts: Vec<(
+            String,
+            Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+            LayoutConfigBuilder,
+        )>,
     ) -> anyhow::Result<(
         CriticalTaskExecutionHandle,
         oneshot::Receiver<transfer::BlockTransferHandler>,
@@ -667,6 +871,7 @@ impl KvbmWorker {
                         layout_ready_tx_cell,
                         scheduler,
                         bytes_per_block,
+                        additional_device_layouts,
                     );
 
                     // If worker_task returns Result, handle/log it inside the spawned task.
@@ -676,7 +881,7 @@ impl KvbmWorker {
                         }
                     });
 
-                    // 3) wait for the worker’s layout allocation readiness
+                    // 3) wait for the worker's layout allocation readiness
                     match layout_ready_rx.await {
                         Ok(_) => tracing::info!("worker layout allocation finished."),
                         Err(_) => tracing::warn!("worker layout readiness channel dropped"),
@@ -729,6 +934,11 @@ impl KvbmWorker {
         layout_ready_tx: tokio::sync::Mutex<Option<oneshot::Sender<String>>>,
         scheduler_client: Option<TransferSchedulerClient>,
         bytes_per_block: usize,
+        additional_device_layouts: Vec<(
+            String,
+            Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+            LayoutConfigBuilder,
+        )>,
     ) -> anyhow::Result<()> {
         let worker_id = config.device_id;
         // Readiness gating for ping
@@ -770,6 +980,9 @@ impl KvbmWorker {
                 handler_cell: transfer_handler_cell.clone(),
                 handler_tx, // sends BlockTransferHandler to caller
                 started: AtomicBool::new(false),
+                additional_device_layouts: tokio::sync::Mutex::new(Some(
+                    additional_device_layouts,
+                )),
             }) as Arc<dyn Handler>,
         );
 
