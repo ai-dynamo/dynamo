@@ -9,8 +9,7 @@ import re
 import signal
 from contextlib import contextmanager
 from multiprocessing.context import SpawnProcess
-from typing import Any, Optional
-from urllib import request
+from typing import Any
 
 import pytest
 
@@ -465,32 +464,9 @@ async def test_fault_scenario(
     if image:
         scenario.deployment.set_image(image)
 
-    model: Optional[str] = None
+    model = scenario.get_model()
     if scenario.model:
-        scenario.deployment.set_model(scenario.model)
-        model = scenario.model
-    else:
-        # Get model from the appropriate worker based on backend
-        try:
-            if scenario.backend == "vllm":
-                model = scenario.deployment["VllmDecodeWorker"].model
-            elif scenario.backend == "sglang":
-                model = scenario.deployment["decode"].model
-            elif scenario.backend == "trtllm":
-                # Determine deployment type from scenario deployment name
-                if (
-                    "agg" in scenario.deployment.name
-                    and "disagg" not in scenario.deployment.name
-                ):
-                    model = scenario.deployment["TRTLLMWorker"].model
-                else:
-                    model = scenario.deployment["TRTLLMDecodeWorker"].model
-            else:
-                model = None
-        except (KeyError, AttributeError):
-            model = None
-    # Fallback to default if still None
-    model = model or "Qwen/Qwen3-0.6B"
+        scenario.deployment.set_model(model)
 
     scenario.deployment.set_logging(True, "info")
 

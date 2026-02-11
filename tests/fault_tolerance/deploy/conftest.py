@@ -55,6 +55,11 @@ def pytest_generate_tests(metafunc):
             if getattr(scenario_obj, "requires_custom_build", False):
                 marks.append(pytest.mark.custom_build)
 
+            # Add backend marker (vllm / sglang / trtllm) for -m filtering
+            backend = getattr(scenario_obj, "backend", None)
+            if backend:
+                marks.append(getattr(pytest.mark, backend))
+
             # Always use pytest.param for type consistency (even with empty marks)
             argvalues.append(pytest.param(scenario_name, marks=marks))
             ids.append(scenario_name)

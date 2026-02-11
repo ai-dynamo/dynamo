@@ -349,6 +349,43 @@ class Scenario:
     # If None, factory will determine checkers based on scenario name and deployment
     checkers: Optional[List["BaseChecker"]] = field(default=None)
 
+    _DEFAULT_MODEL: str = field(default="Qwen/Qwen3-0.6B", init=False, repr=False)
+
+    def get_model(self) -> str:
+        """Resolve the model for this scenario.
+
+        Priority:
+        1. Explicit ``self.model`` (set by scenario definition or CLI override)
+        2. Model baked into the deployment YAML (read from the appropriate
+           worker service using WORKER_MAP)
+        3. Fallback default (Qwen/Qwen3-0.6B)
+        """
+        if self.model:
+            return self.model
+
+        # Determine deployment type from deployment name
+        deploy_name = self.deployment.name
+        is_agg = "agg" in deploy_name and "disagg" not in deploy_name
+
+        workers = WORKER_MAP.get(self.backend, {})
+        if not workers:
+            return self._DEFAULT_MODEL
+
+        # Pick the right decode worker key
+        if self.backend == "trtllm" and is_agg:
+            decode_key = "decode_agg"
+        else:
+            decode_key = "decode"
+
+        worker_name = workers.get(decode_key)
+        if worker_name is None:
+            return self._DEFAULT_MODEL
+
+        try:
+            return self.deployment[worker_name].model or self._DEFAULT_MODEL
+        except (KeyError, AttributeError):
+            return self._DEFAULT_MODEL
+
 
 # Helper functions to create deployment specs
 def _create_deployment_info(backend: str, yaml_path: str) -> DeploymentInfo:
