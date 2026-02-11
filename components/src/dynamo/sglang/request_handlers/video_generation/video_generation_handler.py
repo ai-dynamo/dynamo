@@ -5,7 +5,6 @@ import asyncio
 import base64
 import io
 import logging
-import os
 import random
 import time
 from typing import Any, AsyncGenerator, Optional
@@ -56,13 +55,6 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
         self.fs_url = config.dynamo_args.video_generation_fs_url
-
-        fs_url_parts = self.fs_url.split("://")
-        self.protocol = fs_url_parts[0] if "://" in self.fs_url else "file"
-
-        self.root_path = ""  # s3 uses bucket
-        if self.protocol == "file":
-            self.root_path = fs_url_parts[1] if len(fs_url_parts) > 1 else "/"
 
         logger.info(
             f"Video generation worker handler initialized with fs_url={self.fs_url}"
@@ -303,69 +295,14 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             request_id: Request context ID.
 
         Returns:
-            Public URL for the uploaded video.
+            URL for the uploaded video.
         """
-        video_filename = f"{request_id}.mp4"
-        storage_path = video_filename
-        full_path = f"{self.root_path}/{storage_path}"
+        storage_path = f"{request_id}.mp4"
 
-        # Ensure output directory exists for local filesystem
-        if self.protocol == "file":
-            os.makedirs(self.root_path, exist_ok=True)
+        # DirFileSystem handles root path and protocol internally
+        await asyncio.to_thread(self.fs.pipe, storage_path, video_bytes)
 
-        # Use pipe() for writing bytes (standard fsspec API)
-        await asyncio.to_thread(self.fs.pipe, full_path, video_bytes)
-
-        return self._generate_url(full_path, storage_path)
-
-    def _generate_url(self, full_path: str, storage_path: str) -> str:
-        """Generate public URL based on filesystem type.
-
-        Args:
-            full_path: Full filesystem path.
-            storage_path: Relative storage path (users/{user_id}/...).
-
-        Returns:
-            Public URL string.
-        """
-        # If no fs_url configured, return fallback path
-        if not self.fs_url:
-            return f"file://{full_path}"
-
-        # Parse filesystem type from URL
-        if self.fs_url.startswith("s3://"):
-            # Extract bucket and construct S3 URL
-            # s3://bucket/path -> https://bucket.s3.amazonaws.com/path
-            parts = self.fs_url.replace("s3://", "").split("/", 1)
-            bucket = parts[0]
-            base_path = parts[1] if len(parts) > 1 else ""
-            # Try to get region from environment or use default
-            region = os.environ.get("AWS_REGION", "us-east-1")
-            if region != "us-east-1":
-                return f"https://{bucket}.s3.{region}.amazonaws.com/{base_path}/{storage_path}"
-            return f"https://{bucket}.s3.amazonaws.com/{base_path}/{storage_path}"
-        elif self.fs_url.startswith("gs://"):
-            # GCS URL format: gs://bucket/path -> https://storage.googleapis.com/bucket/path
-            bucket_path = self.fs_url.replace("gs://", "")
-            return f"https://storage.googleapis.com/{bucket_path}/{storage_path}"
-        elif self.fs_url.startswith("az://") or self.fs_url.startswith("abfss://"):
-            # Azure Blob Storage
-            # az://container@account/path -> https://account.blob.core.windows.net/container/path
-            if self.fs_url.startswith("az://"):
-                # az://container@account/path format
-                az_path = self.fs_url.replace("az://", "")
-                if "@" in az_path:
-                    container_account, path = az_path.split("/", 1)
-                    container, account = container_account.split("@")
-                    return f"https://{account}.blob.core.windows.net/{container}/{path}/{storage_path}"
-            return full_path  # Return as-is if format unclear
-        elif self.fs_url.startswith("file://"):
-            # Local filesystem
-            return f"file://{full_path}"
-        else:
-            # Unknown filesystem type, return path as-is
-            logger.warning(f"Unknown filesystem type for URL generation: {self.fs_url}")
-            return full_path
+        return f"{self.fs_url}/{storage_path}"
 
     def _encode_base64(self, video_bytes: bytes) -> str:
         """Encode video as base64 string"""

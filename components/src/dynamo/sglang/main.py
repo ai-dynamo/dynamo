@@ -12,6 +12,7 @@ import uvloop
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType
@@ -433,49 +434,36 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     """Initialize image diffusion worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    print(f"Server args: {server_args}")
-    print(f"Dynamo args: {dynamo_args}")
-
     # Initialize DiffGenerator (not sgl.Engine)
     from sglang.multimodal_gen import DiffGenerator
 
     if not server_args.model_path:
         raise ValueError("--model is required for diffusion workers")
 
-    generator = DiffGenerator.from_pretrained(model_path=server_args.model_path)
+    # Parallelism configuration
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    num_gpus = tp_size * dp_size
+
+    # Distributed configuration
+    dist_timeout = getattr(server_args, "dist_timeout", None)
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=server_args.model_path,
+        # Parallelism configuration
+        num_gpus=num_gpus,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        # Distributed configuration
+        dist_timeout=dist_timeout,
+    )
 
     # Initialize fsspec filesystems for image storage
-    fs = None
     fs_url = dynamo_args.image_diffusion_fs_url
 
     # Initialize primary filesystem
     if not fs_url:
         raise ValueError("--image-diffusion-fs-url is required for diffusion workers")
-
-    try:
-        import fsspec
-
-        # Extract protocol from URL (s3://, gs://, az://, file://)
-        fs_url_parts = fs_url.split("://")
-        protocol = fs_url_parts[0] if "://" in fs_url else "file"
-
-        # Initialize filesystem, configure fsspec using json configuration file
-        #  - json configuration file: ~/.config/fsspec/s3.json
-        #  - environment variables i.e. FSSPEC_S3_SECRET
-        fs = fsspec.filesystem(protocol, auto_mkdir=True)
-        logging.info(
-            f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})"
-        )
-    except ImportError:
-        logging.warning(
-            "fsspec not available. Filesystem uploads will fail. "
-            "Install with: pip install fsspec"
-        )
-    except Exception as e:
-        logging.warning(
-            f"Failed to initialize fsspec filesystem for {fs_url}: {e}. "
-            "Filesystem uploads may fail."
-        )
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -491,7 +479,7 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
         generator,
         config,
         publisher=None,
-        fs=fs,
+        fs=get_fs(fs_url),
     )
 
     # Create proper health check payload that sends a minimal diffusion request
@@ -527,19 +515,31 @@ async def init_video_generation(runtime: DistributedRuntime, config: Config):
     """Initialize video generation worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    logging.info(f"Server args: {server_args}")
-    logging.info(f"Dynamo args: {dynamo_args}")
-
     # Initialize DiffGenerator (not sgl.Engine) - same as image diffusion
     from sglang.multimodal_gen import DiffGenerator
 
     if not server_args.model_path:
         raise ValueError("--model is required for video generation workers")
 
-    generator = DiffGenerator.from_pretrained(model_path=server_args.model_path)
+    # Parallelism configuration
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    num_gpus = tp_size * dp_size
+
+    # Distributed configuration
+    dist_timeout = getattr(server_args, "dist_timeout", None)
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=server_args.model_path,
+        # Parallelism configuration
+        num_gpus=num_gpus,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        # Distributed configuration
+        dist_timeout=dist_timeout,
+    )
 
     # Initialize fsspec filesystems for video storage
-    fs = None
     fs_url = dynamo_args.video_generation_fs_url
 
     # Initialize primary filesystem
@@ -548,46 +548,18 @@ async def init_video_generation(runtime: DistributedRuntime, config: Config):
             "--video-generation-fs-url is required for video generation workers"
         )
 
-    try:
-        import fsspec
-
-        # Extract protocol from URL (s3://, gs://, az://, file://)
-        fs_url_parts = fs_url.split("://")
-        protocol = fs_url_parts[0] if "://" in fs_url else "file"
-
-        # Initialize filesystem, configure fsspec using json configuration file
-        #  - json configuration file: ~/.config/fsspec/s3.json
-        #  - environment variables i.e. FSSPEC_S3_SECRET
-        fs = fsspec.filesystem(protocol, auto_mkdir=True)
-        logging.info(
-            f"fsspec filesystem initialized for video storage: {fs_url} (protocol: {protocol})"
-        )
-    except ImportError:
-        logging.warning(
-            "fsspec not available. Filesystem uploads will fail. "
-            "Install with: pip install fsspec"
-        )
-    except Exception as e:
-        logging.warning(
-            f"Failed to initialize fsspec filesystem for {fs_url}: {e}. "
-            "Filesystem uploads may fail."
-        )
-
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Video generation doesn't have metrics publisher like LLM
-    # Could add custom metrics for frames/sec, videos/sec later
-
     handler = VideoGenerationWorkerHandler(
         component,
         generator,
         config,
         publisher=None,
-        fs=fs,
+        fs=get_fs(fs_url),
     )
 
     # Create proper health check payload that sends a minimal video request
