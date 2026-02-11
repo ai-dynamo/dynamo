@@ -472,6 +472,9 @@ def setup_vllm_engine(config, stat_logger=None):
         try:
             from modelexpress import register_modelexpress_loaders
 
+            # Ensure the ModelExpress server URL env var is set for the model loader
+            if config.modelexpress_server:
+                os.environ["MODEL_EXPRESS_URL"] = config.modelexpress_server
             register_modelexpress_loaders()
             # Use wrapper worker to ensure loaders are registered in spawned worker processes
             engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
