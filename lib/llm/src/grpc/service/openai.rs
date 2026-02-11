@@ -20,7 +20,7 @@ use super::kserve::inference;
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, InflightGuard, process_response_and_observe_metrics},
+    metrics::{Endpoint, InflightGuard, ResultType, process_response_and_observe_metrics},
 };
 use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
@@ -165,6 +165,8 @@ pub fn grpc_monitor_for_disconnects<T>(
                     }
                 }
                 _ = context.stopped() => {
+                    // Client disconnected or context cancelled
+                    inflight_guard.set_result_type(ResultType::Cancelled);
                     tracing::trace!("Context stopped; breaking stream");
                     break;
                 }

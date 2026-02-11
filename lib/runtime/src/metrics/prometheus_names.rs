@@ -112,6 +112,36 @@ pub mod labels {
 
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
+
+    /// Label name for the endpoint on frontend request metrics
+    /// (e.g. "chat_completions", "completions", "embeddings").
+    ///
+    /// Note: distinct from [`ENDPOINT`] (`"dynamo_endpoint"`) which is the
+    /// auto-injected system-level endpoint label.
+    pub const REQUEST_ENDPOINT: &str = "endpoint";
+
+    /// Label name for the request type on frontend request metrics
+    /// (e.g. "stream", "unary").
+    pub const REQUEST_TYPE: &str = "request_type";
+
+    /// Label name for result type classification on frontend request metrics.
+    ///
+    /// Categorises each completed request into a high-level bucket so that
+    /// operators can distinguish client-side errors from server-side failures
+    /// and define SLIs/SLOs that exclude expected 4xx behaviour.
+    pub const RESULT_TYPE: &str = "result_type";
+
+    /// Label name for the HTTP status code on frontend request metrics.
+    ///
+    /// Carries the numeric status code as a string (e.g. "200", "404", "500")
+    /// for fine-grained drill-down alongside the coarser [`RESULT_TYPE`].
+    pub const HTTP_STATUS_CODE: &str = "http_status_code";
+
+    /// Label name for the type of migration.
+    pub const MIGRATION_TYPE: &str = "migration_type";
+
+    /// Label name for tokenizer operation.
+    pub const OPERATION: &str = "operation";
 }
 
 /// Frontend service metrics (LLM HTTP service)
@@ -208,12 +238,6 @@ pub mod frontend_service {
     pub const WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS: &str =
         "worker_last_inter_token_latency_seconds";
 
-    /// Label name for the type of migration
-    pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
-
-    /// Label name for tokenizer operation
-    pub const OPERATION_LABEL: &str = "operation";
-
     /// Operation label values for tokenizer latency metric
     pub mod operation {
         /// Tokenization operation
@@ -233,13 +257,28 @@ pub mod frontend_service {
         pub const ONGOING_REQUEST: &str = "ongoing_request";
     }
 
-    /// Status label values
-    pub mod status {
-        /// Value for successful requests
+    /// Result type label values for frontend request metrics.
+    pub mod result_type {
+        /// Request completed successfully (2xx)
         pub const SUCCESS: &str = "success";
 
-        /// Value for failed requests
-        pub const ERROR: &str = "error";
+        /// Client sent an invalid request (400 Bad Request, 422 Unprocessable Entity)
+        pub const VALIDATION: &str = "validation";
+
+        /// Requested resource was not found (404 Not Found)
+        pub const NOT_FOUND: &str = "not_found";
+
+        /// Service is overloaded or temporarily unavailable (503, 429)
+        pub const OVERLOAD: &str = "overload";
+
+        /// Request was cancelled by the client (stream disconnect)
+        pub const CANCELLED: &str = "cancelled";
+
+        /// Unexpected server-side failure (500 Internal Server Error)
+        pub const INTERNAL: &str = "internal";
+
+        /// Requested feature is not implemented (501 Not Implemented)
+        pub const NOT_IMPLEMENTED: &str = "not_implemented";
     }
 
     /// Request type label values

@@ -21,6 +21,8 @@ pub struct ModuleDef {
     pub doc_comment: String,
     pub is_macro_generated: bool,
     pub macro_prefix: Option<String>,
+    /// Nested sub-modules (e.g. `frontend_service::labels`)
+    pub submodules: Vec<ModuleDef>,
 }
 
 pub struct PrometheusParser {
@@ -61,6 +63,7 @@ impl PrometheusParser {
         let mut constants = Vec::new();
         let mut is_macro_generated = false;
         let mut macro_prefix = None;
+        let mut submodules = Vec::new();
 
         for item in items {
             match item {
@@ -74,6 +77,11 @@ impl PrometheusParser {
                     if let Some(prefix) = Self::extract_macro_prefix(macro_item) {
                         is_macro_generated = true;
                         macro_prefix = Some(prefix);
+                    }
+                }
+                Item::Mod(sub_module) => {
+                    if let Some(parsed_sub) = Self::parse_module(sub_module)? {
+                        submodules.push(parsed_sub);
                     }
                 }
                 _ => {}
@@ -103,6 +111,7 @@ impl PrometheusParser {
             doc_comment,
             is_macro_generated,
             macro_prefix,
+            submodules,
         }))
     }
 

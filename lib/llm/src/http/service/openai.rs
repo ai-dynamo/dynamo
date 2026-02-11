@@ -34,7 +34,7 @@ use super::{
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
     metrics::{
-        Endpoint, EventConverter, process_response_and_observe_metrics,
+        Endpoint, EventConverter, InflightGuard, ResultType, process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
     service_v2,
@@ -206,6 +206,15 @@ impl ErrorMessage {
     }
 }
 
+/// Classify an [`ErrorResponse`] and set the result type + HTTP status code on the
+/// [`InflightGuard`] before propagating the error. This ensures the `result_type` and
+/// `status_code` labels on `requests_total` reflect the actual failure category.
+fn classify_result(guard: &mut InflightGuard, resp: ErrorResponse) -> ErrorResponse {
+    let status_code = resp.0.as_u16();
+    guard.set_result(ResultType::classify(resp.0, &resp.1.message), status_code);
+    resp
+}
+
 impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
         ErrorMessage {
@@ -370,11 +379,17 @@ async fn completions_single(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
+    // Create inflight_guard early so all error paths (including model_not_found) are tracked
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
     // todo - error handling should be more robust
     let engine = state
         .manager()
         .get_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|_| classify_result(&mut inflight_guard, ErrorMessage::model_not_found()))?;
 
     let parsing_options = state.manager().get_parsing_options(&model);
 
@@ -383,17 +398,13 @@ async fn completions_single(
     // prepare to process any annotations
     let annotations = request.annotations();
 
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
-
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        classify_result(
+            &mut inflight_guard,
+            ErrorMessage::from_anyhow(e, "Failed to generate completions"),
+        )
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -471,6 +482,11 @@ async fn completions_single(
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.set_result_type(ResultType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -494,10 +510,16 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
+    // Create inflight_guard early so all error paths (including model_not_found) are tracked
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
     let engine = state
         .manager()
         .get_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|_| classify_result(&mut inflight_guard, ErrorMessage::model_not_found()))?;
 
     let parsing_options = state.manager().get_parsing_options(&model);
 
@@ -505,12 +527,6 @@ async fn completions_batch(
 
     // prepare to process any annotations
     let annotations = request.annotations();
-
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
 
     // Generate streams for each prompt in the batch
     let mut all_streams = Vec::new();
@@ -529,10 +545,12 @@ async fn completions_batch(
         let single_request_context = Context::with_id(single_request, unique_request_id);
 
         // Generate stream for this prompt
-        let stream = engine
-            .generate(single_request_context)
-            .await
-            .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+        let stream = engine.generate(single_request_context).await.map_err(|e| {
+            classify_result(
+                &mut inflight_guard,
+                ErrorMessage::from_anyhow(e, "Failed to generate completions"),
+            )
+        })?;
 
         // Capture context from first stream
         if first_ctx.is_none() {
@@ -633,6 +651,11 @@ async fn completions_batch(
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.set_result_type(ResultType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -660,25 +683,27 @@ async fn embeddings(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
-    // todo - error handling should be more robust
-    let engine = state
-        .manager()
-        .get_embeddings_engine(model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    // this will increment the inflight gauge for the model
+    // Create inflight_guard early so all error paths (including model_not_found) are tracked
     let mut inflight =
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Embeddings, streaming);
 
+    // todo - error handling should be more robust
+    let engine = state
+        .manager()
+        .get_embeddings_engine(model)
+        .map_err(|_| classify_result(&mut inflight, ErrorMessage::model_not_found()))?;
+
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate embeddings"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        classify_result(
+            &mut inflight,
+            ErrorMessage::from_anyhow(e, "Failed to generate embeddings"),
+        )
+    })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -913,12 +938,18 @@ async fn chat_completions(
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
+    // Create inflight_guard early so all error paths (including model_not_found) are tracked
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
+
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
         .manager()
         .get_chat_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|_| classify_result(&mut inflight_guard, ErrorMessage::model_not_found()))?;
 
     let parsing_options = state.manager().get_parsing_options(&model);
 
@@ -926,17 +957,13 @@ async fn chat_completions(
 
     let annotations = request.annotations();
 
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
-
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        classify_result(
+            &mut inflight_guard,
+            ErrorMessage::from_anyhow(e, "Failed to generate completions"),
+        )
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -1000,7 +1027,7 @@ async fn chat_completions(
                 .await
                 .map_err(|error_response| {
                     tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                    error_response
+                    classify_result(&mut inflight_guard, error_response)
                 })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -1029,6 +1056,11 @@ async fn chat_completions(
                 })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.set_result_type(ResultType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -1239,12 +1271,18 @@ async fn responses(
         request
     });
 
+    // Create inflight_guard early so all error paths (including model_not_found) are tracked
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Responses, false);
+
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
         .manager()
         .get_chat_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|_| classify_result(&mut inflight_guard, ErrorMessage::model_not_found()))?;
 
     let parsing_options = state.manager().get_parsing_options(&model);
 
@@ -1253,16 +1291,15 @@ async fn responses(
     tracing::trace!("Issuing generate call for chat completions");
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        classify_result(
+            &mut inflight_guard,
+            ErrorMessage::from_anyhow(e, "Failed to generate completions"),
+        )
+    })?;
 
-    // Create inflight_guard now that actual processing has begun
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Responses, false);
+    // Capture the context to detect client disconnects
+    let ctx = stream.context();
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -1302,6 +1339,11 @@ async fn responses(
     })?;
 
     inflight_guard.mark_ok();
+    // If the engine context was killed (client disconnect), the response was
+    // assembled but never delivered. Override to cancelled.
+    if ctx.is_killed() {
+        inflight_guard.set_result_type(ResultType::Cancelled);
+    }
 
     Ok(Json(response).into_response())
 }
@@ -1579,17 +1621,17 @@ async fn images(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
-    // Get the image generation engine
-    let engine = state
-        .manager()
-        .get_images_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    // this will increment the inflight gauge for the model
+    // Create inflight_guard early so all error paths (including model_not_found) are tracked
     let mut inflight =
         state
             .metrics_clone()
             .create_inflight_guard(&model, Endpoint::Images, streaming);
+
+    // Get the image generation engine
+    let engine = state
+        .manager()
+        .get_images_engine(&model)
+        .map_err(|_| classify_result(&mut inflight, ErrorMessage::model_not_found()))?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -1597,10 +1639,12 @@ async fn images(
     // Note: This uses ServerStreamingEngine for internal routing/distribution,
     // NOT for client-facing SSE streaming. The stream is immediately folded into
     // a single response below.
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate images"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        classify_result(
+            &mut inflight,
+            ErrorMessage::from_anyhow(e, "Failed to generate images"),
+        )
+    })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first response
     let mut http_queue_guard = Some(http_queue_guard);
@@ -2481,5 +2525,150 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(error_response.1.message, "Connection timeout");
         }
+    }
+
+    #[test]
+    fn test_classify_result_model_not_found() {
+        use crate::http::service::metrics::{Endpoint, Metrics, ResultType};
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut guard =
+            metrics
+                .clone()
+                .create_inflight_guard("test-model", Endpoint::ChatCompletions, false);
+        let resp = ErrorMessage::model_not_found();
+        let _ = classify_result(&mut guard, resp);
+        drop(guard);
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &crate::http::service::metrics::RequestType::Unary,
+            &ResultType::NotFound,
+            404,
+        );
+        assert_eq!(count, 1, "model_not_found should classify as NotFound/404");
+    }
+
+    #[test]
+    fn test_classify_result_not_implemented() {
+        use crate::http::service::metrics::{Endpoint, Metrics, ResultType};
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut guard =
+            metrics
+                .clone()
+                .create_inflight_guard("test-model", Endpoint::ChatCompletions, false);
+        let resp = ErrorMessage::not_implemented_error("unsupported feature");
+        let _ = classify_result(&mut guard, resp);
+        drop(guard);
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &crate::http::service::metrics::RequestType::Unary,
+            &ResultType::NotImplemented,
+            501,
+        );
+        assert_eq!(
+            count, 1,
+            "not_implemented_error should classify as NotImplemented/501"
+        );
+    }
+
+    #[test]
+    fn test_classify_result_service_overloaded() {
+        use crate::http::service::metrics::{Endpoint, Metrics, ResultType};
+        use dynamo_runtime::pipeline::error::PipelineError;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut guard =
+            metrics
+                .clone()
+                .create_inflight_guard("test-model", Endpoint::ChatCompletions, false);
+        let err: anyhow::Error =
+            PipelineError::ServiceOverloaded("workers busy".to_string()).into();
+        let resp = ErrorMessage::from_anyhow(err, "generate failed");
+        let _ = classify_result(&mut guard, resp);
+        drop(guard);
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &crate::http::service::metrics::RequestType::Unary,
+            &ResultType::Overload,
+            503,
+        );
+        assert_eq!(
+            count, 1,
+            "ServiceOverloaded should classify as Overload/503"
+        );
+    }
+
+    #[test]
+    fn test_classify_result_validation() {
+        use crate::http::service::metrics::{Endpoint, Metrics, ResultType};
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut guard =
+            metrics
+                .clone()
+                .create_inflight_guard("test-model", Endpoint::ChatCompletions, false);
+        let resp = ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "Validation: bad input".to_string(),
+        });
+        let _ = classify_result(&mut guard, resp);
+        drop(guard);
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &crate::http::service::metrics::RequestType::Unary,
+            &ResultType::Validation,
+            400,
+        );
+        assert_eq!(
+            count, 1,
+            "400 Bad Request should classify as Validation/400"
+        );
+    }
+
+    #[test]
+    fn test_classify_result_internal() {
+        use crate::http::service::metrics::{Endpoint, Metrics, ResultType};
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut guard =
+            metrics
+                .clone()
+                .create_inflight_guard("test-model", Endpoint::ChatCompletions, false);
+        let resp = ErrorMessage::internal_server_error("something broke");
+        let _ = classify_result(&mut guard, resp);
+        drop(guard);
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &crate::http::service::metrics::RequestType::Unary,
+            &ResultType::Internal,
+            500,
+        );
+        assert_eq!(count, 1, "500 should classify as Internal/500");
     }
 }

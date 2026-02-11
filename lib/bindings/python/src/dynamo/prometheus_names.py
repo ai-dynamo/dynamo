@@ -98,10 +98,49 @@ class frontend_service:
     # Last observed inter-token latency per worker (in seconds)
     # Gauge metric tracking the most recent ITL for each worker
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
-    # Label name for the type of migration
-    MIGRATION_TYPE_LABEL = "migration_type"
-    # Label name for tokenizer operation
-    OPERATION_LABEL = "operation"
+
+    class migration_type:
+        """Migration type label values"""
+
+        # Migration during initial stream creation (NoResponders error)
+        NEW_REQUEST = "new_request"
+        # Migration during ongoing request (stream disconnected)
+        ONGOING_REQUEST = "ongoing_request"
+
+    class operation:
+        """Operation label values for tokenizer latency metric"""
+
+        # Tokenization operation
+        TOKENIZE = "tokenize"
+        # Detokenization operation
+        # Currently unused, will be added next.
+        DETOKENIZE = "detokenize"
+
+    class request_type:
+        """Request type label values"""
+
+        # Value for streaming requests
+        STREAM = "stream"
+        # Value for unary requests
+        UNARY = "unary"
+
+    class result_type:
+        """Result type label values for frontend request metrics."""
+
+        # Request completed successfully (2xx)
+        SUCCESS = "success"
+        # Client sent an invalid request (400 Bad Request, 422 Unprocessable Entity)
+        VALIDATION = "validation"
+        # Requested resource was not found (404 Not Found)
+        NOT_FOUND = "not_found"
+        # Service is overloaded or temporarily unavailable (503, 429)
+        OVERLOAD = "overload"
+        # Request was cancelled by the client (stream disconnect)
+        CANCELLED = "cancelled"
+        # Unexpected server-side failure (500 Internal Server Error)
+        INTERNAL = "internal"
+        # Requested feature is not implemented (501 Not Implemented)
+        NOT_IMPLEMENTED = "not_implemented"
 
 
 class kvbm:
@@ -164,6 +203,8 @@ class labels:
     # Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
     # It is used by worker/load-style metrics that need to disambiguate per-worker series.
     DP_RANK = "dp_rank"
+    # Label for worker instance ID (etcd lease ID).
+    WORKER_ID = "worker_id"
     # Label for model name/path (OpenAI API standard, injected by Dynamo)
     # This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
     # Ensures compatibility with OpenAI-compatible tooling.
@@ -175,6 +216,27 @@ class labels:
     MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     WORKER_TYPE = "worker_type"
+    # Label name for the endpoint on frontend request metrics
+    # (e.g. "chat_completions", "completions", "embeddings").
+    # Note: distinct from [`ENDPOINT`] (`"dynamo_endpoint"`) which is the
+    # auto-injected system-level endpoint label.
+    REQUEST_ENDPOINT = "endpoint"
+    # Label name for the request type on frontend request metrics
+    # (e.g. "stream", "unary").
+    REQUEST_TYPE = "request_type"
+    # Label name for result type classification on frontend request metrics.
+    # Categorises each completed request into a high-level bucket so that
+    # operators can distinguish client-side errors from server-side failures
+    # and define SLIs/SLOs that exclude expected 4xx behaviour.
+    RESULT_TYPE = "result_type"
+    # Label name for the HTTP status code on frontend request metrics.
+    # Carries the numeric status code as a string (e.g. "200", "404", "500")
+    # for fine-grained drill-down alongside the coarser [`RESULT_TYPE`].
+    HTTP_STATUS_CODE = "http_status_code"
+    # Label name for the type of migration.
+    MIGRATION_TYPE = "migration_type"
+    # Label name for tokenizer operation.
+    OPERATION = "operation"
 
 
 class model_info:
@@ -189,6 +251,23 @@ class name_prefix:
     COMPONENT = "dynamo_component"
     # Prefix for frontend service metrics
     FRONTEND = "dynamo_frontend"
+    # Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
+    ROUTING_OVERHEAD = "dynamo_routing_overhead"
+
+
+class routing_overhead:
+    """Routing overhead phase latency histogram names (raw Prometheus, not component-scoped)."""
+
+    # Time spent computing block hashes
+    BLOCK_HASHING_MS = "block_hashing_ms"
+    # Time spent in indexer find_matches
+    INDEXER_FIND_MATCHES_MS = "indexer_find_matches_ms"
+    # Time spent computing sequence hashes
+    SEQ_HASHING_MS = "seq_hashing_ms"
+    # Time spent in scheduler worker selection
+    SCHEDULING_MS = "scheduling_ms"
+    # Total routing overhead per request
+    TOTAL_MS = "total_ms"
 
 
 class task_tracker:
@@ -226,3 +305,19 @@ class work_handler:
     ERRORS_TOTAL = "errors_total"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"
+
+    class error_types:
+        """Error type values for work handler metrics"""
+
+        # Deserialization error
+        DESERIALIZATION = "deserialization"
+        # Invalid message format error
+        INVALID_MESSAGE = "invalid_message"
+        # Response stream creation error
+        RESPONSE_STREAM = "response_stream"
+        # Generation error
+        GENERATE = "generate"
+        # Response publishing error
+        PUBLISH_RESPONSE = "publish_response"
+        # Final message publishing error
+        PUBLISH_FINAL = "publish_final"

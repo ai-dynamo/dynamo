@@ -14,6 +14,7 @@ use dynamo_llm::{
     },
 };
 use dynamo_runtime::metrics::prometheus_names::frontend_service::METRICS_PREFIX_ENV;
+use dynamo_runtime::metrics::prometheus_names::{frontend_service, labels, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
     pipeline::{
@@ -89,10 +90,15 @@ async fn test_metrics_prefix_default() {
             .unwrap();
 
         // Assert metrics that are actually present in the default configuration
-        assert!(body.contains("dynamo_frontend_requests_total"));
-        assert!(body.contains("dynamo_frontend_inflight_requests"));
-        assert!(body.contains("dynamo_frontend_request_duration_seconds"));
-        assert!(body.contains("dynamo_frontend_disconnected_clients"));
+        let p = name_prefix::FRONTEND;
+        assert!(body.contains(&format!("{}_{}", p, frontend_service::REQUESTS_TOTAL)));
+        assert!(body.contains(&format!("{}_{}", p, frontend_service::INFLIGHT_REQUESTS)));
+        assert!(body.contains(&format!(
+            "{}_{}",
+            p,
+            frontend_service::REQUEST_DURATION_SECONDS
+        )));
+        assert!(body.contains(&format!("{}_{}", p, frontend_service::DISCONNECTED_CLIENTS)));
 
         token.cancel();
         let _ = handle.await;
@@ -126,8 +132,15 @@ async fn test_metrics_prefix_custom() {
             .text()
             .await
             .unwrap();
-        assert!(body.contains("custom_prefix_requests_total"));
-        assert!(!body.contains("dynamo_frontend_requests_total"));
+        assert!(body.contains(&format!(
+            "custom_prefix_{}",
+            frontend_service::REQUESTS_TOTAL
+        )));
+        assert!(!body.contains(&format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::REQUESTS_TOTAL
+        )));
 
         token.cancel();
         let _ = handle.await;
@@ -160,8 +173,15 @@ async fn test_metrics_prefix_sanitized() {
             .text()
             .await
             .unwrap();
-        assert!(body.contains("nv_llm_http_service_requests_total"));
-        assert!(!body.contains("dynamo_frontend_requests_total"));
+        assert!(body.contains(&format!(
+            "nv_llm_http_service_{}",
+            frontend_service::REQUESTS_TOTAL
+        )));
+        assert!(!body.contains(&format!(
+            "{}_{}",
+            name_prefix::FRONTEND,
+            frontend_service::REQUESTS_TOTAL
+        )));
 
         token.cancel();
         let _ = handle.await;
@@ -270,17 +290,38 @@ async fn test_metrics_with_mock_model() {
         println!("=== END METRICS ===");
 
         // Assert that key metrics are present with the mockmodel
-        assert!(metrics_body.contains("dynamo_frontend_requests_total"));
-        assert!(metrics_body.contains("model=\"mockmodel\""));
-        assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));
-        assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
-        assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
-        assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
+        let p = name_prefix::FRONTEND;
+        assert!(metrics_body.contains(&format!("{}_{}", p, frontend_service::REQUESTS_TOTAL)));
+        assert!(metrics_body.contains(&format!("{}=\"mockmodel\"", labels::MODEL)));
+        assert!(metrics_body.contains(&format!("{}_{}", p, frontend_service::INFLIGHT_REQUESTS)));
+        assert!(metrics_body.contains(&format!(
+            "{}_{}",
+            p,
+            frontend_service::REQUEST_DURATION_SECONDS
+        )));
+        assert!(metrics_body.contains(&format!(
+            "{}_{}",
+            p,
+            frontend_service::OUTPUT_SEQUENCE_TOKENS
+        )));
+        assert!(metrics_body.contains(&format!("{}_{}", p, frontend_service::QUEUED_REQUESTS)));
 
         // Verify specific request counter incremented
-        assert!(metrics_body.contains("endpoint=\"chat_completions\""));
-        assert!(metrics_body.contains("request_type=\"stream\""));
-        assert!(metrics_body.contains("status=\"success\""));
+        assert!(metrics_body.contains(&format!(
+            "{}=\"{}\"",
+            labels::REQUEST_ENDPOINT,
+            Endpoint::ChatCompletions.as_str()
+        )));
+        assert!(metrics_body.contains(&format!(
+            "{}=\"{}\"",
+            labels::REQUEST_TYPE,
+            frontend_service::request_type::STREAM
+        )));
+        assert!(metrics_body.contains(&format!(
+            "{}=\"{}\"",
+            labels::RESULT_TYPE,
+            frontend_service::result_type::SUCCESS
+        )));
 
         // Clean up
         cancel_token.cancel();
@@ -470,23 +511,40 @@ mod integration_tests {
 
         // Assert basic metrics are present (using service_name from the model)
         let model_name = model.service_name();
-        assert!(metrics_body.contains("dynamo_frontend_requests_total"));
-        assert!(metrics_body.contains(&format!("model=\"{}\"", model_name)));
-        assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));
-        assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
-        assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
-        assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
+        let p = name_prefix::FRONTEND;
+        assert!(metrics_body.contains(&format!("{}_{}", p, frontend_service::REQUESTS_TOTAL)));
+        assert!(metrics_body.contains(&format!("{}=\"{}\"", labels::MODEL, model_name)));
+        assert!(metrics_body.contains(&format!("{}_{}", p, frontend_service::INFLIGHT_REQUESTS)));
+        assert!(metrics_body.contains(&format!(
+            "{}_{}",
+            p,
+            frontend_service::REQUEST_DURATION_SECONDS
+        )));
+        assert!(metrics_body.contains(&format!(
+            "{}_{}",
+            p,
+            frontend_service::OUTPUT_SEQUENCE_TOKENS
+        )));
+        assert!(metrics_body.contains(&format!("{}_{}", p, frontend_service::QUEUED_REQUESTS)));
 
         // Assert MDC-based model configuration metrics are present
         // These MUST be present for the test to pass
         assert!(
-            metrics_body.contains("dynamo_frontend_model_context_length"),
+            metrics_body.contains(&format!("{}_{}", p, frontend_service::MODEL_CONTEXT_LENGTH)),
             "MDC metrics not found! Metrics body: {}",
             metrics_body
         );
 
-        assert!(metrics_body.contains("dynamo_frontend_model_kv_cache_block_size"));
-        assert!(metrics_body.contains("dynamo_frontend_model_migration_limit"));
+        assert!(metrics_body.contains(&format!(
+            "{}_{}",
+            p,
+            frontend_service::MODEL_KV_CACHE_BLOCK_SIZE
+        )));
+        assert!(metrics_body.contains(&format!(
+            "{}_{}",
+            p,
+            frontend_service::MODEL_MIGRATION_LIMIT
+        )));
 
         // Note: The following metrics are not present in this test because they require
         // actual inference engines (vllm/sglang/trtllm *.py) with real runtime configurations:
@@ -495,9 +553,21 @@ mod integration_tests {
         // - dynamo_frontend_model_max_num_batched_tokens (requires actual batching config from real engines)
 
         // Verify specific request counter incremented
-        assert!(metrics_body.contains("endpoint=\"chat_completions\""));
-        assert!(metrics_body.contains("request_type=\"stream\""));
-        assert!(metrics_body.contains("status=\"success\""));
+        assert!(metrics_body.contains(&format!(
+            "{}=\"{}\"",
+            labels::REQUEST_ENDPOINT,
+            Endpoint::ChatCompletions.as_str()
+        )));
+        assert!(metrics_body.contains(&format!(
+            "{}=\"{}\"",
+            labels::REQUEST_TYPE,
+            frontend_service::request_type::STREAM
+        )));
+        assert!(metrics_body.contains(&format!(
+            "{}=\"{}\"",
+            labels::RESULT_TYPE,
+            frontend_service::result_type::SUCCESS
+        )));
 
         // etcd lease will ensure we everything is deleted from etcd
 

@@ -22,7 +22,7 @@ use dynamo_llm::{
         service::{
             Metrics,
             error::HttpError,
-            metrics::{Endpoint, RequestType, Status},
+            metrics::{Endpoint, RequestType, ResultType},
             service_v2::HttpService,
         },
     },
@@ -191,74 +191,79 @@ impl
     }
 }
 
-fn compare_counter(
+/// Expected counter state for a single model.
+/// Keys: (endpoint_str, request_type_str, result_type_str, status_code) → count
+type CounterMap = std::collections::HashMap<(String, String, String, u16), u64>;
+
+fn assert_counter(
     metrics: &Metrics,
     model: &str,
     endpoint: &Endpoint,
     request_type: &RequestType,
-    status: &Status,
+    result_type: &ResultType,
+    status_code: u16,
     expected: u64,
 ) {
     assert_eq!(
-        metrics.get_request_counter(model, endpoint, request_type, status),
+        metrics.get_request_counter(model, endpoint, request_type, result_type, status_code),
         expected,
-        "model: {}, endpoint: {:?}, request_type: {:?}, status: {:?}",
+        "model: {}, endpoint: {}, request_type: {}, result_type: {}, status_code: {}",
         model,
         endpoint.as_str(),
         request_type.as_str(),
-        status.as_str()
+        result_type.as_str(),
+        status_code
     );
 }
 
-fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Status) -> usize {
-    let endpoint = match endpoint {
-        Endpoint::Completions => 0,
-        Endpoint::ChatCompletions => 1,
-        Endpoint::Embeddings => todo!(),
-        Endpoint::Responses => todo!(),
-        Endpoint::Tensor => todo!(),
-        Endpoint::Images => todo!(),
-    };
-
-    let request_type = match request_type {
-        RequestType::Unary => 0,
-        RequestType::Stream => 1,
-    };
-
-    let status = match status {
-        Status::Success => 0,
-        Status::Error => 1,
-    };
-
-    endpoint * 4 + request_type * 2 + status
-}
-
-fn compare_counters(metrics: &Metrics, model: &str, expected: &[u64; 8]) {
-    for endpoint in &[Endpoint::Completions, Endpoint::ChatCompletions] {
-        for request_type in &[RequestType::Unary, RequestType::Stream] {
-            for status in &[Status::Success, Status::Error] {
-                let index = compute_index(endpoint, request_type, status);
-                compare_counter(
-                    metrics,
-                    model,
-                    endpoint,
-                    request_type,
-                    status,
-                    expected[index],
-                );
-            }
-        }
+fn compare_counters(metrics: &Metrics, model: &str, expected: &CounterMap) {
+    for ((ep, rt, res, code), &count) in expected {
+        let endpoint = match ep.as_str() {
+            "completions" => Endpoint::Completions,
+            "chat_completions" => Endpoint::ChatCompletions,
+            _ => panic!("unexpected endpoint: {}", ep),
+        };
+        let request_type = match rt.as_str() {
+            "unary" => RequestType::Unary,
+            "stream" => RequestType::Stream,
+            _ => panic!("unexpected request_type: {}", rt),
+        };
+        let result_type = match res.as_str() {
+            "success" => ResultType::Success,
+            "validation" => ResultType::Validation,
+            "not_found" => ResultType::NotFound,
+            "overload" => ResultType::Overload,
+            "cancelled" => ResultType::Cancelled,
+            "internal" => ResultType::Internal,
+            "not_implemented" => ResultType::NotImplemented,
+            _ => panic!("unexpected result_type: {}", res),
+        };
+        assert_counter(
+            metrics,
+            model,
+            &endpoint,
+            &request_type,
+            &result_type,
+            *code,
+            count,
+        );
     }
 }
 
 fn inc_counter(
-    endpoint: Endpoint,
-    request_type: RequestType,
-    status: Status,
-    expected: &mut [u64; 8],
+    endpoint: &Endpoint,
+    request_type: &RequestType,
+    result_type: &ResultType,
+    status_code: u16,
+    expected: &mut CounterMap,
 ) {
-    let index = compute_index(&endpoint, &request_type, &status);
-    expected[index] += 1;
+    let key = (
+        endpoint.as_str().to_string(),
+        request_type.as_str().to_string(),
+        result_type.as_str().to_string(),
+        status_code,
+    );
+    *expected.entry(key).or_insert(0) += 1;
 }
 
 #[allow(deprecated)]
@@ -300,11 +305,8 @@ async fn test_http_service() {
     let metrics = state.metrics_clone();
     metrics.register(&registry).unwrap();
 
-    let mut foo_counters = [0u64; 8];
-    let mut bar_counters = [0u64; 8];
-
-    compare_counters(&metrics, "foo", &foo_counters);
-    compare_counters(&metrics, "bar", &bar_counters);
+    let mut foo_counters: CounterMap = CounterMap::new();
+    let mut bar_counters: CounterMap = CounterMap::new();
 
     let client = reqwest::Client::new();
 
@@ -351,9 +353,10 @@ async fn test_http_service() {
     let _ = response.bytes().await.unwrap();
 
     inc_counter(
-        Endpoint::ChatCompletions,
-        RequestType::Stream,
-        Status::Success,
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &ResultType::Success,
+        200,
         &mut foo_counters,
     );
     compare_counters(&metrics, "foo", &foo_counters);
@@ -427,9 +430,10 @@ async fn test_http_service() {
 
     assert!(response.status().is_success(), "{:?}", response);
     inc_counter(
-        Endpoint::ChatCompletions,
-        RequestType::Unary,
-        Status::Success,
+        &Endpoint::ChatCompletions,
+        &RequestType::Unary,
+        &ResultType::Success,
+        200,
         &mut foo_counters,
     );
     compare_counters(&metrics, "foo", &foo_counters);
@@ -452,9 +456,10 @@ async fn test_http_service() {
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     inc_counter(
-        Endpoint::ChatCompletions,
-        RequestType::Stream,
-        Status::Error,
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &ResultType::Validation,
+        403,
         &mut bar_counters,
     );
     compare_counters(&metrics, "foo", &foo_counters);
@@ -473,9 +478,10 @@ async fn test_http_service() {
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     inc_counter(
-        Endpoint::ChatCompletions,
-        RequestType::Unary,
-        Status::Error,
+        &Endpoint::ChatCompletions,
+        &RequestType::Unary,
+        &ResultType::Validation,
+        403,
         &mut bar_counters,
     );
     compare_counters(&metrics, "foo", &foo_counters);
@@ -498,9 +504,10 @@ async fn test_http_service() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     inc_counter(
-        Endpoint::Completions,
-        RequestType::Unary,
-        Status::Error,
+        &Endpoint::Completions,
+        &RequestType::Unary,
+        &ResultType::Validation,
+        401,
         &mut bar_counters,
     );
     compare_counters(&metrics, "foo", &foo_counters);
@@ -519,9 +526,10 @@ async fn test_http_service() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     inc_counter(
-        Endpoint::Completions,
-        RequestType::Stream,
-        Status::Error,
+        &Endpoint::Completions,
+        &RequestType::Stream,
+        &ResultType::Validation,
+        401,
         &mut bar_counters,
     );
     compare_counters(&metrics, "foo", &foo_counters);
@@ -1051,6 +1059,20 @@ async fn test_client_disconnect_cancellation_unary() {
         elapsed
     );
 
+    // Verify the metrics recorded the request as cancelled/499
+    let metrics = state.metrics_clone();
+    let registry = Registry::new();
+    metrics.register(&registry).unwrap();
+    assert_counter(
+        &metrics,
+        "slow-model",
+        &Endpoint::ChatCompletions,
+        &RequestType::Unary,
+        &ResultType::Cancelled,
+        499,
+        1,
+    );
+
     tracing::info!(
         "✅ Client disconnect test passed! Request cancelled in {:?}, engine detected cancellation",
         elapsed
@@ -1151,6 +1173,20 @@ async fn test_client_disconnect_cancellation_streaming() {
         elapsed < std::time::Duration::from_secs(3),
         "Stream cancellation should have propagated reasonably quickly, took {:?}",
         elapsed
+    );
+
+    // Verify the metrics recorded the request as cancelled/499
+    let metrics = state.metrics_clone();
+    let registry = Registry::new();
+    metrics.register(&registry).unwrap();
+    assert_counter(
+        &metrics,
+        "slow-stream-model",
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &ResultType::Cancelled,
+        499,
+        1,
     );
 
     tracing::info!(

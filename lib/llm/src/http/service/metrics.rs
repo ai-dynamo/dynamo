@@ -11,7 +11,7 @@ use axum::{
 use dynamo_runtime::{
     config::environment_names::llm::metrics as env_metrics,
     metrics::prometheus_names::{
-        frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
+        frontend_service, labels, name_prefix, sanitize_frontend_prometheus_prefix,
     },
 };
 use prometheus::{
@@ -263,16 +263,23 @@ pub struct HttpQueueGuard {
     model: String,
 }
 
-/// RAII object for inflight gauge and request counters
-/// If this object is dropped without calling `mark_ok`, then the request will increment
-/// the request counter with the `status` label with [`frontend_service::status::ERROR`]; otherwise, it will increment
-/// the counter with `status` label [`frontend_service::status::SUCCESS`]
+/// RAII object for inflight gauge and request counters.
+///
+/// Tracks the lifecycle of a single request. On drop, it decrements the inflight gauge,
+/// increments the request counter with the classified `result_type` and `status_code`
+/// labels, and records the request duration.
+///
+/// The default result type is [`ResultType::Internal`] (status 500). Call
+/// [`mark_ok`](Self::mark_ok) for successful completions, or
+/// [`set_result`](Self::set_result) to classify specific failure modes before the
+/// guard is dropped.
 pub struct InflightGuard {
     metrics: Arc<Metrics>,
     model: String,
     endpoint: Endpoint,
     request_type: RequestType,
-    status: Status,
+    result_type: ResultType,
+    status_code: u16,
     timer: Instant,
 }
 
@@ -307,11 +314,33 @@ pub enum RequestType {
     Stream,
 }
 
-/// Status
-#[derive(PartialEq)]
-pub enum Status {
+/// High-level result classification for frontend request metrics.
+///
+/// Each completed request is classified into one of these categories to enable
+/// structured monitoring, accurate SLI/SLO definitions, and targeted alerting.
+/// Paired with a numeric HTTP status code for fine-grained drill-down.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResultType {
+    /// Request completed successfully (2xx)
     Success,
-    Error,
+
+    /// Client sent an invalid request (400, 422)
+    Validation,
+
+    /// Requested resource was not found (404)
+    NotFound,
+
+    /// Service is overloaded or temporarily unavailable (503, 429)
+    Overload,
+
+    /// Request was cancelled by the client (stream disconnect)
+    Cancelled,
+
+    /// Unexpected server-side failure (500)
+    Internal,
+
+    /// Requested feature is not implemented (501)
+    NotImplemented,
 }
 
 /// Track response-specific metrics
@@ -413,7 +442,13 @@ impl Metrics {
                 frontend_metric_name(frontend_service::REQUESTS_TOTAL),
                 "Total number of LLM requests processed",
             ),
-            &["model", "endpoint", "request_type", "status"],
+            &[
+                labels::MODEL,
+                labels::REQUEST_ENDPOINT,
+                labels::REQUEST_TYPE,
+                labels::RESULT_TYPE,
+                labels::HTTP_STATUS_CODE,
+            ],
         )
         .unwrap();
 
@@ -422,7 +457,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
                 "Number of inflight requests",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -437,7 +472,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::QUEUED_REQUESTS),
                 "Number of requests in HTTP processing queue",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -453,7 +488,7 @@ impl Metrics {
                 "Duration of LLM requests",
             )
             .buckets(request_duration_buckets),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -468,7 +503,7 @@ impl Metrics {
                 "Input sequence length in tokens",
             )
             .buckets(input_sequence_buckets.clone()),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -483,7 +518,7 @@ impl Metrics {
                 "Output sequence length in tokens",
             )
             .buckets(output_sequence_buckets),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -492,7 +527,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::OUTPUT_TOKENS_TOTAL),
                 "Total number of output tokens generated (updates in real-time)",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -507,7 +542,7 @@ impl Metrics {
                 "Time to first token in seconds",
             )
             .buckets(time_to_first_token_buckets),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -521,7 +556,7 @@ impl Metrics {
                 "Inter-token latency in seconds",
             )
             .buckets(inter_token_latency_buckets),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -531,7 +566,7 @@ impl Metrics {
                 "Number of cached tokens (prefix cache hits) per request",
             )
             .buckets(input_sequence_buckets.clone()),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -543,7 +578,7 @@ impl Metrics {
             .buckets(vec![
                 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0,
             ]),
-            &[frontend_service::OPERATION_LABEL],
+            &[labels::OPERATION],
         )
         .unwrap();
 
@@ -556,7 +591,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_TOTAL_KV_BLOCKS),
                 "Total KV cache blocks available for a worker serving the model",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -565,7 +600,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MAX_NUM_SEQS),
                 "Maximum number of sequences for a worker serving the model",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -574,7 +609,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MAX_NUM_BATCHED_TOKENS),
                 "Maximum number of batched tokens for a worker serving the model",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -583,7 +618,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_CONTEXT_LENGTH),
                 "Maximum context length in tokens for a worker serving the model",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -592,7 +627,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_KV_CACHE_BLOCK_SIZE),
                 "KV cache block size in tokens for a worker serving the model",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -601,7 +636,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_LIMIT),
                 "Maximum number of request migrations allowed for the model",
             ),
-            &["model"],
+            &[labels::MODEL],
         )
         .unwrap();
 
@@ -610,7 +645,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_TOTAL),
                 "Total number of request migrations due to worker unavailability",
             ),
-            &["model", frontend_service::MIGRATION_TYPE_LABEL],
+            &[labels::MODEL, labels::MIGRATION_TYPE],
         )
         .unwrap();
 
@@ -637,24 +672,28 @@ impl Metrics {
         }
     }
 
-    /// Get the number of successful requests for the given dimensions:
+    /// Get the request count for the given dimensions:
     /// - model
     /// - endpoint (completions/chat_completions)
     /// - request type (unary/stream)
-    /// - status (success/error)
+    /// - result_type (success/validation/not_found/overload/cancelled/internal/not_implemented)
+    /// - status_code (HTTP status code as string, e.g. "200", "404")
     pub fn get_request_counter(
         &self,
         model: &str,
         endpoint: &Endpoint,
         request_type: &RequestType,
-        status: &Status,
+        result_type: &ResultType,
+        status_code: u16,
     ) -> u64 {
+        let code = status_code.to_string();
         self.request_counter
             .with_label_values(&[
                 model,
                 endpoint.as_str(),
                 request_type.as_str(),
-                status.as_str(),
+                result_type.as_str(),
+                &code,
             ])
             .get()
     }
@@ -663,20 +702,24 @@ impl Metrics {
     /// - model
     /// - endpoint (completions/chat_completions)
     /// - request type (unary/stream)
-    /// - status (success/error)
+    /// - result_type (success/validation/not_found/overload/cancelled/internal/not_implemented)
+    /// - status_code (HTTP status code as string, e.g. "200", "404")
     fn inc_request_counter(
         &self,
         model: &str,
         endpoint: &Endpoint,
         request_type: &RequestType,
-        status: &Status,
+        result_type: &ResultType,
+        status_code: u16,
     ) {
+        let code = status_code.to_string();
         self.request_counter
             .with_label_values(&[
                 model,
                 endpoint.as_str(),
                 request_type.as_str(),
-                status.as_str(),
+                result_type.as_str(),
+                &code,
             ])
             .inc()
     }
@@ -892,19 +935,45 @@ impl InflightGuard {
         // Increment the inflight gauge when the guard is created
         metrics.inc_inflight_gauge(&model);
 
-        // Return the RAII Guard
+        // Return the RAII Guard — defaults to Internal/500; callers must
+        // explicitly mark success or classify the specific result type.
         InflightGuard {
             metrics,
             model,
             endpoint,
             request_type,
-            status: Status::Error,
+            result_type: ResultType::Internal,
+            status_code: 500,
             timer,
         }
     }
 
+    /// Mark the request as successfully completed (200 OK).
     pub(crate) fn mark_ok(&mut self) {
-        self.status = Status::Success;
+        self.result_type = ResultType::Success;
+        self.status_code = 200;
+    }
+
+    /// Classify the result for this request before the guard is dropped.
+    ///
+    /// Sets both the high-level result category and the exact HTTP status code.
+    /// Use this when an error occurs and you know the specific failure category
+    /// (e.g., validation, not_found, overload). If not called, the default
+    /// classification is [`ResultType::Internal`] with status 500.
+    pub(crate) fn set_result(&mut self, result_type: ResultType, status_code: u16) {
+        self.result_type = result_type;
+        self.status_code = status_code;
+    }
+
+    /// Classify the result from a [`ResultType`] alone, using its default
+    /// HTTP status code.
+    ///
+    /// Convenience wrapper around [`set_result`](Self::set_result) for cases
+    /// where no explicit status code is available (e.g. client disconnect → 499,
+    /// gRPC errors mapped to HTTP).
+    pub(crate) fn set_result_type(&mut self, result_type: ResultType) {
+        self.status_code = result_type.default_status_code();
+        self.result_type = result_type;
     }
 }
 
@@ -922,7 +991,8 @@ impl Drop for InflightGuard {
             &self.model,
             &self.endpoint,
             &self.request_type,
-            &self.status,
+            &self.result_type,
+            self.status_code,
         );
 
         // Record the duration of the request
@@ -968,12 +1038,77 @@ impl RequestType {
     }
 }
 
-impl Status {
+impl ResultType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Status::Success => frontend_service::status::SUCCESS,
-            Status::Error => frontend_service::status::ERROR,
+            ResultType::Success => frontend_service::result_type::SUCCESS,
+            ResultType::Validation => frontend_service::result_type::VALIDATION,
+            ResultType::NotFound => frontend_service::result_type::NOT_FOUND,
+            ResultType::Overload => frontend_service::result_type::OVERLOAD,
+            ResultType::Cancelled => frontend_service::result_type::CANCELLED,
+            ResultType::Internal => frontend_service::result_type::INTERNAL,
+            ResultType::NotImplemented => frontend_service::result_type::NOT_IMPLEMENTED,
         }
+    }
+
+    /// Classify a result type from an HTTP status code and error message.
+    ///
+    /// Maps HTTP status codes (and optionally message prefixes) to a
+    /// structured result category for metrics labeling.
+    pub fn classify(status_code: axum::http::StatusCode, message: &str) -> Self {
+        use axum::http::StatusCode;
+
+        match status_code {
+            // 2xx: success
+            code if code.is_success() => ResultType::Success,
+
+            // 400, 422: validation errors
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => ResultType::Validation,
+
+            // 404: resource not found
+            StatusCode::NOT_FOUND => ResultType::NotFound,
+
+            // 429, 503: overload / rate limiting
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => ResultType::Overload,
+
+            // 501: not implemented
+            StatusCode::NOT_IMPLEMENTED => ResultType::NotImplemented,
+
+            // Remaining 4xx: treat as validation (client errors)
+            code if code.is_client_error() => {
+                tracing::debug!(
+                    status_code = %code,
+                    message = %message,
+                    "Classifying unhandled 4xx as validation error"
+                );
+                ResultType::Validation
+            }
+
+            // 5xx and everything else: internal
+            _ => ResultType::Internal,
+        }
+    }
+
+    /// Default HTTP status code that represents this result type.
+    ///
+    /// Used when no explicit status code is available (e.g. client disconnects,
+    /// gRPC errors mapped to HTTP, guard drops without classification).
+    pub fn default_status_code(&self) -> u16 {
+        match self {
+            ResultType::Success => 200,
+            ResultType::Validation => 400,
+            ResultType::NotFound => 404,
+            ResultType::Overload => 503,
+            ResultType::Cancelled => 499, // nginx convention for client-closed
+            ResultType::Internal => 500,
+            ResultType::NotImplemented => 501,
+        }
+    }
+}
+
+impl std::fmt::Display for ResultType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1846,6 +1981,328 @@ mod tests {
                 .get_histogram()
                 .get_sample_count(),
             1
+        );
+    }
+
+    #[test]
+    fn test_result_type_classify_success() {
+        assert_eq!(
+            ResultType::classify(StatusCode::OK, ""),
+            ResultType::Success
+        );
+        assert_eq!(
+            ResultType::classify(StatusCode::CREATED, ""),
+            ResultType::Success
+        );
+    }
+
+    #[test]
+    fn test_result_type_classify_validation() {
+        assert_eq!(
+            ResultType::classify(StatusCode::BAD_REQUEST, "Validation: invalid field"),
+            ResultType::Validation
+        );
+        assert_eq!(
+            ResultType::classify(StatusCode::UNPROCESSABLE_ENTITY, "bad json"),
+            ResultType::Validation
+        );
+        // Other 4xx client errors default to validation
+        assert_eq!(
+            ResultType::classify(StatusCode::FORBIDDEN, "access denied"),
+            ResultType::Validation
+        );
+        assert_eq!(
+            ResultType::classify(StatusCode::METHOD_NOT_ALLOWED, ""),
+            ResultType::Validation
+        );
+    }
+
+    #[test]
+    fn test_result_type_classify_not_found() {
+        assert_eq!(
+            ResultType::classify(StatusCode::NOT_FOUND, "Model not found"),
+            ResultType::NotFound
+        );
+    }
+
+    #[test]
+    fn test_result_type_classify_overload() {
+        assert_eq!(
+            ResultType::classify(StatusCode::SERVICE_UNAVAILABLE, "Service overloaded"),
+            ResultType::Overload
+        );
+        assert_eq!(
+            ResultType::classify(StatusCode::TOO_MANY_REQUESTS, "Rate limited"),
+            ResultType::Overload
+        );
+    }
+
+    #[test]
+    fn test_result_type_classify_not_implemented() {
+        assert_eq!(
+            ResultType::classify(StatusCode::NOT_IMPLEMENTED, "Feature not supported"),
+            ResultType::NotImplemented
+        );
+    }
+
+    #[test]
+    fn test_result_type_classify_internal() {
+        assert_eq!(
+            ResultType::classify(StatusCode::INTERNAL_SERVER_ERROR, "something broke"),
+            ResultType::Internal
+        );
+        assert_eq!(
+            ResultType::classify(StatusCode::BAD_GATEWAY, "upstream error"),
+            ResultType::Internal
+        );
+    }
+
+    #[test]
+    fn test_result_type_as_str_round_trip() {
+        use dynamo_runtime::metrics::prometheus_names::frontend_service::result_type;
+
+        assert_eq!(ResultType::Success.as_str(), result_type::SUCCESS);
+        assert_eq!(ResultType::Validation.as_str(), result_type::VALIDATION);
+        assert_eq!(ResultType::NotFound.as_str(), result_type::NOT_FOUND);
+        assert_eq!(ResultType::Overload.as_str(), result_type::OVERLOAD);
+        assert_eq!(ResultType::Cancelled.as_str(), result_type::CANCELLED);
+        assert_eq!(ResultType::Internal.as_str(), result_type::INTERNAL);
+        assert_eq!(
+            ResultType::NotImplemented.as_str(),
+            result_type::NOT_IMPLEMENTED
+        );
+    }
+
+    #[test]
+    fn test_result_type_display() {
+        use dynamo_runtime::metrics::prometheus_names::frontend_service::result_type;
+
+        assert_eq!(format!("{}", ResultType::Success), result_type::SUCCESS);
+        assert_eq!(
+            format!("{}", ResultType::Validation),
+            result_type::VALIDATION
+        );
+        assert_eq!(format!("{}", ResultType::NotFound), result_type::NOT_FOUND);
+        assert_eq!(format!("{}", ResultType::Overload), result_type::OVERLOAD);
+        assert_eq!(format!("{}", ResultType::Cancelled), result_type::CANCELLED);
+        assert_eq!(format!("{}", ResultType::Internal), result_type::INTERNAL);
+        assert_eq!(
+            format!("{}", ResultType::NotImplemented),
+            result_type::NOT_IMPLEMENTED
+        );
+    }
+
+    #[test]
+    fn test_result_type_default_status_codes() {
+        assert_eq!(ResultType::Success.default_status_code(), 200);
+        assert_eq!(ResultType::Validation.default_status_code(), 400);
+        assert_eq!(ResultType::NotFound.default_status_code(), 404);
+        assert_eq!(ResultType::Overload.default_status_code(), 503);
+        assert_eq!(ResultType::Cancelled.default_status_code(), 499);
+        assert_eq!(ResultType::Internal.default_status_code(), 500);
+        assert_eq!(ResultType::NotImplemented.default_status_code(), 501);
+    }
+
+    #[test]
+    fn test_inflight_guard_default_result_type() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        // Create and drop a guard without marking success — should default to internal/500
+        {
+            let _guard = metrics.clone().create_inflight_guard(
+                "test-model",
+                Endpoint::ChatCompletions,
+                false,
+            );
+        }
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &RequestType::Unary,
+            &ResultType::Internal,
+            500,
+        );
+        assert_eq!(count, 1, "Default result type should be 'internal' / 500");
+    }
+
+    #[test]
+    fn test_inflight_guard_mark_ok() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        // Create, mark OK, then drop
+        {
+            let mut guard = metrics.clone().create_inflight_guard(
+                "test-model",
+                Endpoint::ChatCompletions,
+                false,
+            );
+            guard.mark_ok();
+        }
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &RequestType::Unary,
+            &ResultType::Success,
+            200,
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_set_result() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        // Create, set to NotFound/404, then drop
+        {
+            let mut guard = metrics.clone().create_inflight_guard(
+                "test-model",
+                Endpoint::ChatCompletions,
+                false,
+            );
+            guard.set_result(ResultType::NotFound, 404);
+        }
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &RequestType::Unary,
+            &ResultType::NotFound,
+            404,
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_set_result_overload() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard("test-model", Endpoint::Completions, true);
+            guard.set_result(ResultType::Overload, 503);
+        }
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::Completions,
+            &RequestType::Stream,
+            &ResultType::Overload,
+            503,
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_cancelled() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        {
+            let mut guard = metrics.clone().create_inflight_guard(
+                "test-model",
+                Endpoint::ChatCompletions,
+                true,
+            );
+            guard.set_result_type(ResultType::Cancelled);
+        }
+
+        // Cancelled uses 499 (nginx convention) via default_status_code
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &RequestType::Stream,
+            &ResultType::Cancelled,
+            499,
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_set_result_type_convenience() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        // set_result_type should use the ResultType's default status code
+        {
+            let mut guard = metrics.clone().create_inflight_guard(
+                "test-model",
+                Endpoint::ChatCompletions,
+                false,
+            );
+            guard.set_result_type(ResultType::NotImplemented);
+        }
+
+        let count = metrics.get_request_counter(
+            "test-model",
+            &Endpoint::ChatCompletions,
+            &RequestType::Unary,
+            &ResultType::NotImplemented,
+            501,
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_result_type_label_names() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        // Create and drop a guard to produce a metric
+        {
+            let mut guard = metrics.clone().create_inflight_guard(
+                "test-model",
+                Endpoint::ChatCompletions,
+                false,
+            );
+            guard.mark_ok();
+        }
+
+        // Gather and verify labels match the constants in prometheus_names.rs.
+        // The metric name includes the "dynamo_frontend_" prefix applied at registration.
+        let metric_families = registry.gather();
+        let requests_total = metric_families
+            .iter()
+            .find(|mf| mf.name() == "dynamo_frontend_requests_total")
+            .expect("requests_total metric should exist");
+
+        let metric = &requests_total.get_metric()[0];
+        let label_names: Vec<&str> = metric.get_label().iter().map(|l| l.name()).collect();
+        assert!(
+            label_names.contains(&labels::RESULT_TYPE),
+            "Expected '{}' label, found: {:?}",
+            labels::RESULT_TYPE,
+            label_names
+        );
+        assert!(
+            label_names.contains(&labels::HTTP_STATUS_CODE),
+            "Expected '{}' label, found: {:?}",
+            labels::HTTP_STATUS_CODE,
+            label_names
+        );
+        assert!(
+            !label_names.contains(&"error_type"),
+            "Should not have old 'error_type' label, found: {:?}",
+            label_names
+        );
+        assert!(
+            !label_names.contains(&"status"),
+            "Should not have old 'status' label, found: {:?}",
+            label_names
         );
     }
 }

@@ -46,33 +46,52 @@ impl<'a> PythonGenerator<'a> {
         let mut module_names: Vec<&String> = self.modules.keys().collect();
         module_names.sort();
 
-        // Generate simple classes with constants as class attributes
         for module_name in module_names {
             let module = &self.modules[module_name];
-            lines.push(format!("class {}:", module_name));
-
-            // Use doc comment from module if available
-            if !module.doc_comment.is_empty() {
-                let first_line = module.doc_comment.lines().next().unwrap_or("").trim();
-                if !first_line.is_empty() {
-                    lines.push(format!("    \"\"\"{}\"\"\"", first_line));
-                }
-            }
-            lines.push("".to_string());
-
-            for constant in &module.constants {
-                if !constant.doc_comment.is_empty() {
-                    for comment_line in constant.doc_comment.lines() {
-                        lines.push(format!("    # {}", comment_line));
-                    }
-                }
-                lines.push(format!("    {} = \"{}\"", constant.name, constant.value));
-            }
-
-            lines.push("".to_string());
+            Self::generate_class(&mut lines, module, 0);
         }
 
         lines.join("\n")
+    }
+
+    /// Recursively generate a Python class for a module and its sub-modules.
+    /// `depth` controls indentation (0 = top-level, 1 = nested inside a class, etc.)
+    fn generate_class(lines: &mut Vec<String>, module: &ModuleDef, depth: usize) {
+        let indent = "    ".repeat(depth);
+        let inner = "    ".repeat(depth + 1);
+
+        lines.push(format!("{}class {}:", indent, module.name));
+
+        // Use doc comment from module if available
+        if !module.doc_comment.is_empty() {
+            let first_line = module.doc_comment.lines().next().unwrap_or("").trim();
+            if !first_line.is_empty() {
+                lines.push(format!("{}\"\"\"{}\"\"\"", inner, first_line));
+            }
+        }
+        lines.push("".to_string());
+
+        for constant in &module.constants {
+            if !constant.doc_comment.is_empty() {
+                for comment_line in constant.doc_comment.lines() {
+                    lines.push(format!("{}# {}", inner, comment_line));
+                }
+            }
+            lines.push(format!(
+                "{}{} = \"{}\"",
+                inner, constant.name, constant.value
+            ));
+        }
+
+        // Generate nested sub-module classes (sorted for determinism)
+        let mut submodules = module.submodules.clone();
+        submodules.sort_by(|a, b| a.name.cmp(&b.name));
+        for submodule in &submodules {
+            lines.push("".to_string());
+            Self::generate_class(lines, submodule, depth + 1);
+        }
+
+        lines.push("".to_string());
     }
 }
 

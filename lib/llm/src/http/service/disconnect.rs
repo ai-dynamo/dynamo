@@ -33,7 +33,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
 
-use crate::http::service::metrics::{InflightGuard, Metrics};
+use crate::http::service::metrics::{InflightGuard, Metrics, ResultType};
 
 #[derive(Clone, Copy)]
 pub enum ConnectionStatus {
@@ -171,6 +171,12 @@ pub fn monitor_for_disconnects(
     mut stream_handle: ConnectionHandle,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
+
+    // Default to Cancelled/499: if the stream is dropped unexpectedly (e.g. client
+    // disconnect causing a broken-pipe on the SSE write), the guard will report
+    // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
+    inflight_guard.set_result_type(ResultType::Cancelled);
+
     async_stream::try_stream! {
         tokio::pin!(stream);
         loop {
@@ -196,6 +202,8 @@ pub fn monitor_for_disconnects(
                     }
                 }
                 _ = context.stopped() => {
+                    // Client disconnected or context cancelled
+                    inflight_guard.set_result_type(ResultType::Cancelled);
                     tracing::trace!("Context stopped; breaking stream");
                     break;
                 }

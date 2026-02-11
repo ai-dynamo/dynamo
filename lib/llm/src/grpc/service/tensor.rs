@@ -17,7 +17,7 @@ use super::kserve;
 use validator::Validate;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::metrics::InflightGuard;
+use crate::http::service::metrics::{InflightGuard, ResultType};
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{Endpoint, process_response_and_observe_metrics},
@@ -172,6 +172,8 @@ pub fn grpc_monitor_for_disconnects<T>(
                 }
                 // todo - test request cancellation with kserve frontend and tensor-based models
                 _ = context.stopped() => {
+                    // Client disconnected or context cancelled
+                    inflight_guard.set_result_type(ResultType::Cancelled);
                     tracing::trace!("Context stopped; breaking stream");
                     break;
                 }
