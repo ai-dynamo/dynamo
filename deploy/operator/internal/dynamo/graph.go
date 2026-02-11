@@ -507,7 +507,8 @@ func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 }
 
 // GetDCDResourceName returns the Kubernetes resource name for a DynamoComponentDeployment.
-// Worker components include the workerHash suffix; for non-workers, workerHash is ignored.
+// If using for a non DCD resource (i.e. Ingress or VirtualService), use the empty string for the workerHash.
+// For DCD Resources, Worker components include the workerHash suffix; for non-workers, workerHash is ignored
 func GetDCDResourceName(dgd *v1alpha1.DynamoGraphDeployment, serviceName string, workerHash string) string {
 	baseName := fmt.Sprintf("%s-%s", dgd.Name, strings.ToLower(serviceName))
 	if spec := dgd.Spec.Services[serviceName]; spec != nil && IsWorkerComponent(spec.ComponentType) && workerHash != "" {
