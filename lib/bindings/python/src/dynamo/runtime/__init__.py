@@ -35,7 +35,9 @@ def dynamo_worker(enable_nats: bool = True):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
             discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd")
-            runtime = DistributedRuntime(loop, discovery_backend, request_plane, enable_nats)
+            runtime = DistributedRuntime(
+                loop, discovery_backend, request_plane, enable_nats
+            )
 
             await func(runtime, *args, **kwargs)
 

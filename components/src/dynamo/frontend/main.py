@@ -412,7 +412,9 @@ async def async_main():
     )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.discovery_backend, flags.request_plane, enable_nats)
+    runtime = DistributedRuntime(
+        loop, flags.discovery_backend, flags.request_plane, enable_nats
+    )
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))

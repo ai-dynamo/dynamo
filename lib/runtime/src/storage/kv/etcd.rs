@@ -273,7 +273,9 @@ mod concurrent_create_tests {
         });
     }
 
-    async fn test_concurrent_create(storage: &crate::storage::kv::Manager) -> Result<(), StoreError> {
+    async fn test_concurrent_create(
+        storage: &crate::storage::kv::Manager,
+    ) -> Result<(), StoreError> {
         // Create a bucket for testing
         let bucket = Arc::new(tokio::sync::Mutex::new(
             storage

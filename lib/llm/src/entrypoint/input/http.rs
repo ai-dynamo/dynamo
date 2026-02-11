@@ -57,7 +57,8 @@ pub async fn run(
             ref chat_engine_factory,
         } => {
             // Pass the discovery client so the /health endpoint can query active instances
-            http_service_builder = http_service_builder.discovery(Some(distributed_runtime.discovery()));
+            http_service_builder =
+                http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
 
             let router_config = model.router_config();

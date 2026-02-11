@@ -665,7 +665,9 @@ def runtime_services(request, discovery_backend, request_plane):
 
 
 @pytest.fixture()
-def runtime_services_dynamic_ports(request, discovery_backend, request_plane, durable_kv_events):
+def runtime_services_dynamic_ports(
+    request, discovery_backend, request_plane, durable_kv_events
+):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
     This fixture actually allocates dynamic ports by passing port=0 to the servers.

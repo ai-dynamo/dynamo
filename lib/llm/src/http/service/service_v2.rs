@@ -26,7 +26,6 @@ use derive_builder::Builder;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::metrics::prometheus_names::name_prefix;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -357,7 +356,11 @@ impl HttpServiceConfigBuilder {
                 temp_cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, temp_cancel_token));
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            temp_cancel_token,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
