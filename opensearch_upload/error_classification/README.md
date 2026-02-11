@@ -4,18 +4,10 @@ Automatically categorizes common errors from CI/CD workflows using Claude API an
 
 ## Overview
 
-This system classifies test failures, Docker build errors, Rust tests, and infrastructure errors into 10 consistent categories:
+This system classifies test failures, Docker build errors, Rust tests, and infrastructure errors into 2 broad categories for consistent classification:
 
-1. **dependency_error** - Package installation, version conflicts
-2. **timeout** - Test/build timeouts, deadlocks
-3. **resource_exhaustion** - OOM, disk full, GPU memory
-4. **network_error** - Connection failures, DNS issues
-5. **assertion_failure** - Test assertion failures
-6. **compilation_error** - Build/compile failures
-7. **runtime_error** - Crashes, segfaults, exceptions
-8. **infrastructure_error** - GitHub Actions runner issues
-9. **configuration_error** - Config parsing, env setup
-10. **flaky_test** - Intermittent failures
+1. **infrastructure_error** - Infrastructure/platform issues: network problems, runner/node issues, platform failures, resource limits (OOM, disk full)
+2. **code_error** - Code/build/test issues: build failures, test failures, runtime errors, dependency issues, configuration errors
 
 ## Architecture
 

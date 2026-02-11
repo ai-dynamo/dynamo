@@ -7,17 +7,10 @@ from typing import List
 
 
 # Core error categories for classification
+# Simplified to 2 categories for more consistent classification
 ERROR_CATEGORIES = [
-    "dependency_error",      # Package installation, version conflicts
-    "timeout",               # Test/build timeouts, deadlocks
-    "resource_exhaustion",   # OOM, disk full, GPU memory
-    "network_error",         # Connection failures, DNS issues
-    "assertion_failure",     # Test assertion failures
-    "compilation_error",     # Build/compile failures
-    "runtime_error",         # Crashes, segfaults, exceptions
-    "infrastructure_error",  # GitHub Actions runner issues
-    "configuration_error",   # Config parsing, env setup
-    "flaky_test",           # Intermittent failures
+    "infrastructure_error",  # Network issues, runner problems, infrastructure failures
+    "code_error",           # Errors from code: build, test, compilation, runtime failures
 ]
 
 

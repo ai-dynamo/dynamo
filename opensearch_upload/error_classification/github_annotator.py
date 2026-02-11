@@ -13,21 +13,11 @@ from dataclasses import dataclass
 
 # Category to severity mapping
 CATEGORY_SEVERITY = {
-    # Critical - always needs immediate attention
+    # Infrastructure errors - platform/network issues that often block entire jobs
     "infrastructure_error": ("failure", "🔴"),
-    "compilation_error": ("failure", "🔴"),
-    "dependency_error": ("failure", "🔴"),
 
-    # Important - should be fixed but not blocking
-    "configuration_error": ("warning", "🟠"),
-    "resource_exhaustion": ("warning", "🟠"),
-    "timeout": ("warning", "🟠"),
-
-    # Informational - useful context
-    "network_error": ("notice", "🟡"),
-    "runtime_error": ("notice", "🟡"),
-    "assertion_failure": ("notice", "🔵"),
-    "flaky_test": ("notice", "🟣"),
+    # Code errors - build/test/runtime issues in the code itself
+    "code_error": ("warning", "🟠"),
 }
 
 
@@ -480,8 +470,8 @@ class GitHubAnnotator:
         error_contexts: Dict[str, Any]
     ) -> str:
         """Build markdown summary table."""
-        # Group by severity
-        critical, important, informational = self._group_by_severity(classifications)
+        # Group by category
+        infrastructure, code_errors, _ = self._group_by_severity(classifications)
 
         # Count unique jobs
         unique_jobs = len(set(c.job_name for c in classifications if c.job_name))
@@ -490,12 +480,12 @@ class GitHubAnnotator:
         md = "## 🤖 AI Error Classification Summary\n\n"
         md += f"Found **{len(classifications)} unique error(s)** across **{unique_jobs} job(s)** in this workflow\n\n"
 
-        # Critical errors table
-        if critical:
-            md += "### 🔴 Critical (Immediate attention needed)\n\n"
+        # Infrastructure errors table
+        if infrastructure:
+            md += "### 🔴 Infrastructure Errors (Platform/Network Issues)\n\n"
             md += "| Job | Step | Error Type | Confidence | Summary |\n"
             md += "|-----|------|------------|------------|---------|"
-            for c in critical:
+            for c in infrastructure:
                 job_name = self._truncate(c.job_name or "unknown", 30)
                 step_name = self._truncate(c.step_name or "unknown", 25)
                 error_type = c.primary_category.replace("_", " ").title()
@@ -505,27 +495,12 @@ class GitHubAnnotator:
                 md += f"\n| {job_name} | {step_name} | {error_type} | {confidence} | {summary} |"
             md += "\n\n"
 
-        # Important errors table
-        if important:
-            md += "### 🟠 Important (Should be fixed)\n\n"
+        # Code errors table
+        if code_errors:
+            md += "### 🟠 Code Errors (Build/Test/Runtime Issues)\n\n"
             md += "| Job | Step | Error Type | Confidence | Summary |\n"
             md += "|-----|------|------------|------------|---------|"
-            for c in important:
-                job_name = self._truncate(c.job_name or "unknown", 30)
-                step_name = self._truncate(c.step_name or "unknown", 25)
-                error_type = c.primary_category.replace("_", " ").title()
-                confidence = f"{int(c.confidence_score * 100)}%"
-                summary = self._truncate(c.root_cause_summary or "", 60)
-
-                md += f"\n| {job_name} | {step_name} | {error_type} | {confidence} | {summary} |"
-            md += "\n\n"
-
-        # Informational errors table
-        if informational:
-            md += "### 🔵 Informational\n\n"
-            md += "| Job | Step | Error Type | Confidence | Summary |\n"
-            md += "|-----|------|------------|------------|---------|"
-            for c in informational:
+            for c in code_errors:
                 job_name = self._truncate(c.job_name or "unknown", 30)
                 step_name = self._truncate(c.step_name or "unknown", 25)
                 error_type = c.primary_category.replace("_", " ").title()
@@ -562,17 +537,10 @@ class GitHubAnnotator:
         return md
 
     def _group_by_severity(self, classifications: List[Any]) -> tuple:
-        """Group classifications by severity."""
-        critical = [c for c in classifications if c.primary_category in [
-            "infrastructure_error", "compilation_error", "dependency_error"
-        ]]
-        important = [c for c in classifications if c.primary_category in [
-            "configuration_error", "resource_exhaustion", "timeout", "network_error"
-        ]]
-        informational = [c for c in classifications if c.primary_category in [
-            "runtime_error", "assertion_failure", "flaky_test"
-        ]]
-        return critical, important, informational
+        """Group classifications by category (infrastructure vs code errors)."""
+        infrastructure = [c for c in classifications if c.primary_category == "infrastructure_error"]
+        code_errors = [c for c in classifications if c.primary_category == "code_error"]
+        return infrastructure, code_errors, []  # Return 3-tuple for backward compat (third is empty)
 
     def _truncate(self, text: str, max_length: int) -> str:
         """Truncate text to max length with ellipsis."""
