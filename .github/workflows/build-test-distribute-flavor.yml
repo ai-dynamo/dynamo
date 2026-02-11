@@ -30,6 +30,7 @@ on:
       run_multi_gpu_tests:
         description: 'Whether to run multi-gpu tests'
         required: false
+        type: boolean
         default: false
       copy_to_acr:
         description: 'Whether to copy images to ACR'
@@ -390,7 +391,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
-  
+
   # ============================================================================
   # COPY TO ACR
   # ============================================================================
