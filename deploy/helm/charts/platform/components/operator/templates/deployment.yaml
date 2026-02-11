@@ -170,13 +170,6 @@ spec:
           - --checkpoint-oci-credentials-secret={{ .Values.checkpoint.storage.oci.credentialsSecretRef }}
           {{- end }}
           {{- end }}
-        {{- if .Values.trafficProxy }}
-        {{- if .Values.trafficProxy.image }}
-          - --traffic-proxy-image={{ .Values.trafficProxy.image.repository }}:{{ .Values.trafficProxy.image.tag }}
-        {{- end }}
-        {{- if .Values.trafficProxy.replicas }}
-          - --traffic-proxy-replicas={{ .Values.trafficProxy.replicas }}
-        {{- end }}
         {{- end }}
         command:
         - /manager

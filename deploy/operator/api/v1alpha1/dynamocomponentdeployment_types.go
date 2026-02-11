@@ -334,7 +334,7 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 
 // GetDynamoNamespace returns the Dynamo namespace for this component.
 func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
-	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.Namespace, s.GetParentGraphDeploymentName())
+	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
 }
 
 // ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
