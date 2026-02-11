@@ -130,6 +130,7 @@ async fn main_loop(
         // Stream the output to stdout
         let mut stdout = std::io::stdout();
         let mut assistant_message = String::new();
+        let mut assistant_reasoning = String::new();
         while let Some(item) = stream.next().await {
             if cancel_token.is_cancelled() {
                 break;
@@ -153,6 +154,9 @@ async fn main_loop(
                                 let _ = stdout.flush();
                             }
                         }
+                    }
+                    if let Some(reasoning) = &chat_comp.delta.reasoning_content {
+                        assistant_reasoning += reasoning;
                     }
                     if let Some(reason) = chat_comp.finish_reason {
                         tracing::trace!("finish reason: {reason:?}");
@@ -183,6 +187,7 @@ async fn main_loop(
         let assistant_message = dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(
             dynamo_async_openai::types::ChatCompletionRequestAssistantMessage {
                 content: Some(assistant_content),
+                reasoning_content: (!assistant_reasoning.is_empty()).then_some(assistant_reasoning),
                 ..Default::default()
             },
         );

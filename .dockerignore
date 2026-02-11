@@ -42,6 +42,7 @@
 **/target/*
 **/*safetensors
 container/Dockerfile*
+container/*.Dockerfile
 .venv
 .venv-docs
 

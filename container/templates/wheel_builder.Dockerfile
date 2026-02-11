@@ -1,122 +1,7 @@
-# syntax=docker/dockerfile:1.10.0
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+{#
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# NOTE FOR dynamo_base AND wheel_builder STAGES:
-#
-# All changes to dynamo_base and wheel_builder stages should be replicated across
-# Dockerfile and Dockerfile.<framework> images.:
-#   - Dockerfile
-#   - Dockerfile.vllm
-#   - Dockerfile.sglang
-#   - Dockerfile.trtllm
-# This duplication was introduced purposely to quickly enable Docker layer caching and
-# deduplication. Please ensure these stages stay in sync until the duplication can be
-# addressed.
-#
-# Throughout this file, we make certain paths group-writable because this allows
-# both the dynamo user (UID 1000) and Dev Container users (UID != 1000) to work
-# properly without needing slow chown -R operations (which can add 2-10 extra
-# minutes).
-#
-# DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
-#   /workspace            - Users create/modify project files
-#   /home/dynamo          - Users create config/cache files
-#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.12/site-packages for pip install
-#
-# HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
-# 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
-# 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
-# 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
-
-# This section contains build arguments that are common and shared with
-# the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
-ARG BASE_IMAGE
-ARG BASE_IMAGE_TAG
-
-ARG PYTHON_VERSION
-ARG ENABLE_KVBM
-ARG ENABLE_GPU_MEMORY_SERVICE
-ARG ENABLE_MEDIA_NIXL
-ARG ENABLE_MEDIA_FFMPEG
-ARG CARGO_BUILD_JOBS
-
-ARG RUNTIME_IMAGE="lmsysorg/sglang"
-ARG RUNTIME_IMAGE_TAG="v0.5.8-runtime"
-
-# SCCACHE configuration
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET=""
-ARG SCCACHE_REGION=""
-
-# NIXL configuration
-ARG NIXL_UCX_REF
-ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF
-ARG NIXL_LIBFABRIC_REF
-
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
-#
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
-#
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#
-# NOTE: There isn't an easy way to define one of these values based on the other value
-# without adding if statements everywhere, so just define both as ARGs for now.
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
-
-##################################
-########## Base Image ############
-##################################
-
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynamo_base
-
-ARG ARCH
-ARG ARCH_ALT
-
-USER root
-WORKDIR /opt/dynamo
-
-# Install uv package manager
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-# Install NATS server
-ENV NATS_VERSION="v2.10.28"
-RUN --mount=type=cache,target=/var/cache/apt \
-    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${ARCH}.deb && \
-    dpkg -i nats-server-${NATS_VERSION}-${ARCH}.deb && rm nats-server-${NATS_VERSION}-${ARCH}.deb
-
-# Install etcd
-ENV ETCD_VERSION="v3.5.21"
-RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
-    mkdir -p /usr/local/bin/etcd && \
-    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
-    rm /tmp/etcd.tar.gz
-ENV PATH=/usr/local/bin/etcd/:$PATH
-
-# Rust Setup
-# Rust environment setup
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.90.0
-
-# Define Rust target based on ARCH_ALT ARG
-ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
-
-# Install Rust
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
-
+#}
 ##################################
 ##### Wheel Build Image ##########
 ##################################
@@ -147,6 +32,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 # Copy artifacts from base stage
 COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
+
 # Install system dependencies
 RUN dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
@@ -156,7 +42,7 @@ RUN dnf install -y almalinux-release-synergy && \
         automake \
         libtool \
         make \
-        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        # RPM build tools (required for gdrcopy's build-rpm-packages.sh)
         rpm-build \
         rpm-sign \
         # Build tools
@@ -184,7 +70,11 @@ RUN dnf install -y almalinux-release-synergy && \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel && \
+        hwloc-devel \
+        libcurl-devel \
+        openssl-devel \
+        libuuid-devel \
+        zlib-devel && \
     dnf clean all && rm -rf /var/cache/dnf/
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
@@ -249,11 +139,13 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
 # Build FFmpeg from source
 # Do not delete the source tarball for legal reasons
-ARG FFMPEG_VERSION=7.1
+ARG FFMPEG_VERSION
+ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
 if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
@@ -358,7 +250,32 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
 
+{% if framework == "vllm" %}
+# Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
+ARG AWS_SDK_CPP_VERSION=1.11.581
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+        https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
+    mkdir -p /tmp/aws-sdk-cpp/build && \
+    cd /tmp/aws-sdk-cpp/build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_ONLY="s3" \
+        -DENABLE_TESTING=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=ON && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/aws-sdk-cpp && \
+    ldconfig && \
+    /tmp/use-sccache.sh show-stats "AWS SDK C++"
+{% endif %}
+
 # build and install nixl
+ARG CUDA_MAJOR
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
@@ -371,11 +288,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
     git checkout ${NIXL_REF} && \
-    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1) && \
-    if [ "$CUDA_MAJOR" -ne 12 ] && [ "$CUDA_MAJOR" -ne 13 ]; then \
-        echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'" && \
-        exit 1; \
-    fi && \
     PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
     ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
@@ -435,30 +347,25 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    FEATURES=""; \
-    if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
-    fi; \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        FEATURES="$FEATURES media-ffmpeg"; \
-    fi; \
-    if [ -n "$FEATURES" ]; then \
-        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
+    if [ "$ENABLE_KVBM" == "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
         auditwheel repair \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
+            --exclude 'lib*.so*' \
             --plat manylinux_2_28_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
+
 
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
 ARG ENABLE_GPU_MEMORY_SERVICE
@@ -466,149 +373,3 @@ RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         source ${VIRTUAL_ENV}/bin/activate && \
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
-
-##################################
-########## Runtime Image #########
-##################################
-
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
-
-# cleanup unnecessary libs (python3-blinker conflicts with pip-installed blinker from Flask/dash)
-RUN apt remove -y python3-apt python3-blinker &&\
-    pip uninstall -y termplotlib
-
-# This ARG is still utilized for SGLANG Version extraction
-ARG RUNTIME_IMAGE_TAG
-WORKDIR /workspace
-
-# Install NATS and ETCD
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-
-ENV PATH=/usr/local/bin/etcd:$PATH
-
-# Create dynamo user with group 0 for OpenShift compatibility
-RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
-    && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    # Non-recursive chown - only the directories themselves, not contents
-    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
-    # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
-    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
-    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
-    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
-
-# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # required for verification of GPG keys
-        gnupg2 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy attribution files
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-
-# Copy ffmpeg
-RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
-    true # in case ffmpeg not enabled
-
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
-
-ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
-# Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
-ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=bind,source=.,target=/mnt/local_src \
-    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    export PIP_CACHE_DIR=/root/.cache/pip && \
-    pip install --break-system-packages \
-        /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-        sglang==${SGLANG_VERSION} && \
-    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
-    fi
-
-# Install common and test dependencies as root
-RUN --mount=type=bind,source=.,target=/mnt/local_src \
-    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    export PIP_CACHE_DIR=/root/.cache/pip && \
-    pip install --break-system-packages \
-        --requirement /mnt/local_src/container/deps/requirements.txt \
-        --requirement /mnt/local_src/container/deps/requirements.test.txt \
-        sglang==${SGLANG_VERSION} && \
-    cd /workspace/benchmarks && \
-    pip install --break-system-packages . && \
-    #TODO: Temporary change until upstream sglang runtime image is updated
-    pip install --break-system-packages "urllib3>=2.6.3" && \
-    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
-    chmod -R g+w /workspace/benchmarks && \
-    # Install NVIDIA packages based on CUDA version
-    CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \
-    if [ "$CUDA_MAJOR" = "12" ]; then \
-        # Install NVIDIA packages that are needed for DeepEP to work properly
-        # This is done in the upstream runtime image too, but these packages are overridden in earlier commands
-        pip install --break-system-packages --force-reinstall --no-deps \
-            nvidia-nccl-cu12==2.28.3 \
-            nvidia-cudnn-cu12==9.16.0.29 \
-            nvidia-cutlass-dsl==4.3.5; \
-    elif [ "$CUDA_MAJOR" = "13" ]; then \
-        # CUDA 13: Install CuDNN for PyTorch 2.9.1 compatibility
-        pip install --break-system-packages --force-reinstall --no-deps \
-            nvidia-nccl-cu13==2.28.3 \
-            nvidia-cublas==13.1.0.3 \
-            nvidia-cutlass-dsl==4.3.1 \
-            nvidia-cudnn-cu13==9.16.0.29; \
-    fi
-
-# Switch back to dynamo user after package installations
-USER dynamo
-
-# Copy tests, deploy and components for CI with correct ownership
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
-COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
-COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
-COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
-COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
-
-# Enable forceful shutdown of inflight requests
-ENV SGLANG_FORCE_SHUTDOWN=1
-
-# Setup launch banner in common directory accessible to all users
-RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
-
-# Our scripting assumes /workspace is where dynamo is located
-# In order to maintain the ability to have sglang and dynamo
-# in the same workspace, symlink /workspace to /sgl-workspace/dynamo
-USER root
-
-# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
-RUN chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-    ln -s /workspace /sgl-workspace/dynamo
-
-USER dynamo
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
-

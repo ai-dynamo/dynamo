@@ -148,7 +148,7 @@ async fn engine_for(
             // Auto-discover backends
             Ok(EngineConfig::Dynamic {
                 model: Box::new(local_model),
-                engine_factory: None,
+                chat_engine_factory: None,
             })
         }
         Output::Echo => Ok(EngineConfig::InProcessText {

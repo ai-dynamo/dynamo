@@ -5,10 +5,12 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 import sglang as sgl
 import uvloop
 
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
@@ -22,11 +24,7 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import (
-    DynamoSglangPublisher,
-    setup_prometheus_registry,
-    setup_sgl_metrics,
-)
+from dynamo.sglang.publisher import DynamoSglangPublisher, setup_sgl_metrics
 from dynamo.sglang.register import (
     register_image_diffusion_model,
     register_llm_with_readiness_gate,
@@ -129,7 +127,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    # Time model loading
+    start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
+    load_time = time.time() - start_time
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -143,9 +144,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+    # Record model load time immediately after publisher setup (which creates the gauges)
+    publisher.component_gauges.set_model_load_time(load_time)
+    logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
@@ -230,10 +231,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
     if server_args.node_rank >= 1:
@@ -317,10 +314,6 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
     if server_args.node_rank >= 1:
@@ -390,10 +383,6 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
-
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -542,11 +531,14 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     await encode_worker_client.wait_for_instances()
 
     try:
-        await asyncio.gather(
+        _ = await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, server_args.served_model_name),
+                    (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+                ],
             ),
             register_llm_with_readiness_gate(
                 None,  # engine
@@ -593,7 +585,10 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         await generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
+            metrics_labels=[
+                (prometheus_names.labels.MODEL, server_args.served_model_name),
+                (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+            ],
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

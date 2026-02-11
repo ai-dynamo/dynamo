@@ -2,6 +2,7 @@
 .vs/
 .vscode/
 .helix
+*rendered.Dockerfile
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
@@ -100,6 +101,11 @@ generated-values.yaml
 .build/
 **/.devcontainer/.env
 TensorRT-LLM
+
+# The Linux kernel generates core dump files when a process crashes (receives signals
+# like SIGSEGV, SIGABRT, SIGBUS, etc.). The Linux container's /proc/sys/kernel/core_pattern
+# determines the filename (typically core or core.<pid>)
+core
 
 # Ruler Generated Files
 /.cursor/instructions.md

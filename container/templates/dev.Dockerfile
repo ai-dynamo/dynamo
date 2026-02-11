@@ -1,52 +1,7 @@
-# syntax=docker/dockerfile:1.10.0
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+{#
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-# Unified development image with two targets:
-# - dev: Root-based development for use with run.sh
-# - local-dev: Non-root development with UID/GID remapping for Dev Container plugin
-#
-# IMPORTANT (concat model):
-# This Dockerfile is intended to be used via the temp concatenated Dockerfile flow in
-# `container/build.sh` (which prepends the selected framework Dockerfile):
-#   - container/Dockerfile
-#   - container/Dockerfile.vllm
-#   - container/Dockerfile.trtllm
-#   - container/Dockerfile.sglang
-#
-# The concatenated file provides the stages this Dockerfile depends on:
-#   - `dynamo_base`   (framework base stage; used for cached tool binaries like maturin)
-#   - `wheel_builder` (framework wheel_builder stage; used for cached Rust/Cargo and SGLang NIXL deps)
-#
-# Dependency graph (concat flow):
-#
-#   container/build.sh concatenates:
-#     [framework Dockerfile] + [this file]
-#
-#   Framework Dockerfile (examples: Dockerfile.vllm / Dockerfile.trtllm / Dockerfile.sglang)
-#   defines these stages (names matter; this file refers to them by name):
-#
-#     dynamo_base  (FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG})
-#        ├─ wheel_builder (FROM quay.io/pypa/manylinux_2_28_*)
-#        ├─ framework     (builds framework install + /opt/dynamo/venv, etc.)
-#        └─ runtime       (FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG}; copies from dynamo_base/wheel_builder/framework)
-#             └─ dev      (root dev image; adds dev-time linking config and pulls in tooling from dynamo_tools)
-#                  └─ local-dev (non-root dev image with UID/GID remapping)
-#
-#   Side stage used by `dev`:
-#
-#     dynamo_tools (FROM runtime; installs extra developer utilities that `dev` copies in)
-#
-# Both targets share:
-# - Developer utilities and tools from dynamo-tools
-# - Rust toolchain + maturin for editable installs (from concatenated framework stages)
-# - NIXL dependencies for SGLang (from concatenated framework wheel_builder stage)
-#
-# Note on build args:
-# - `ARCH` / `ARCH_ALT` are declared in the prepended framework Dockerfile; we re-declare them only
-#   in stages where they are used (Docker requires ARG re-declare per-stage).
-
-
+#}
 # ======================================================================
 # STAGE: dynamo_tools for developers
 # ======================================================================
@@ -171,10 +126,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Add NVIDIA devtools repository and install development tools (nsight-systems).
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" | \
-        gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH} /" | \
-        tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/amd64/nvidia.pub" \
+        | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/amd64 /" \
+        | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends nsight-systems-2025.5.1 && \
     rm -rf /var/lib/apt/lists/*
@@ -400,86 +355,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi && \
     chmod -R g+w /root/.cache /home/dynamo/.cache 2>/dev/null || true
 
-# Set commit SHA for tests (passed via build.sh as --build-arg)
+# Set commit SHA for tests (passed via docker build as --build-arg)
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
-
-# ======================================================================
-# TARGET: local-dev (non-root development with UID/GID remapping)
-# ======================================================================
-FROM dev AS local-dev
-
-ENV USERNAME=dynamo
-ARG USER_UID
-ARG USER_GID
-
-# Copy rustup home into a writable per-user location so sanity_check passes.
-# (dev target already has rustup/cargo/maturin from concatenated wheel_builder/dynamo_base)
-RUN cp -r /usr/local/rustup /home/dynamo/.rustup && \
-    chown -R dynamo:0 /home/dynamo/.rustup
-
-# Put rustup state under the user's home (writable) while still using /usr/local/cargo/bin shims.
-ENV RUSTUP_HOME=/home/${USERNAME}/.rustup
-ENV CARGO_HOME=/home/${USERNAME}/.cargo
-ENV PATH=/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
-
-# https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
-# Configure user with sudo access for Dev Container workflows
-#
-# 🚨 PERFORMANCE / PERMISSIONS MEMO (DO NOT VIOLATE)
-# NEVER use `chown -R` or `chmod -R` in local-dev images.
-# - It can take minutes on large mounts (and makes devcontainers feel "hung")
-# - It is unnecessary: permissioning should be done via COPY --chmod/--chown and a few targeted, non-recursive ops.
-# If you think you need recursion here, stop and redesign the permissions flow.
-RUN mkdir -p /etc/sudoers.d \
-    && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
-    && chmod 0440 /etc/sudoers.d/$USERNAME \
-    && mkdir -p /home/$USERNAME \
-    # Handle GID conflicts: if target GID exists and it's not our group, remove it
-    && (getent group $USER_GID | grep -v "^$USERNAME:" && groupdel $(getent group $USER_GID | cut -d: -f1) || true) \
-    # Create group if it doesn't exist, otherwise modify existing group
-    && (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) \
-    && usermod -u $USER_UID -g $USER_GID -G 0 $USERNAME \
-    && chown $USERNAME:$USER_GID /home/$USERNAME \
-    && chsh -s /bin/bash $USERNAME
-
-# Set workspace directory variable
-ENV WORKSPACE_DIR=${WORKSPACE_DIR}
-
-# Development environment variables for the local-dev target
-# Path configuration notes:
-# - DYNAMO_HOME: Main project directory (workspace mount point)
-# - CARGO_TARGET_DIR: Build artifacts in workspace/target for persistence
-# - PATH: Includes cargo binaries for rust tool access
-ENV HOME=/home/$USERNAME
-ENV DYNAMO_HOME=${WORKSPACE_DIR}
-ENV CARGO_TARGET_DIR=${WORKSPACE_DIR}/target
-ENV PATH=${CARGO_HOME}/bin:$PATH
-
-# Switch to dynamo user (dev stage has umask 002, so files should already be group-writable)
-USER $USERNAME
-WORKDIR $HOME
-
-# Create user-level cargo/rustup state dirs as the target user (avoids root-owned caches).
-RUN mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}"
-
-# Ensure Python user site-packages exists and is writable (important for non-venv frameworks like SGLang).
-RUN python3 -c 'import os, site; p = site.getusersitepackages(); os.makedirs(p, exist_ok=True); print(p)'
-
-# https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
-RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
-    && mkdir -p $HOME/.commandhistory \
-    && chmod g+w $HOME/.commandhistory \
-    && touch $HOME/.commandhistory/.bash_history \
-    && echo "$SNIPPET" >> "$HOME/.bashrc"
-
-RUN mkdir -p /home/$USERNAME/.cache/ \
-    && mkdir -p /home/$USERNAME/.cache/pre-commit \
-    && chmod g+w /home/$USERNAME/.cache/ \
-    && chmod g+w /home/$USERNAME/.cache/pre-commit
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
