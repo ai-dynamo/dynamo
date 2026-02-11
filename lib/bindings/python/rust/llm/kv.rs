@@ -705,15 +705,14 @@ impl KvIndexer {
                 )
                 .into();
 
-            // Use the shared start_kv_router_background function for event consumption
-            // Pass None for snapshot_tx and get_workers_tx to skip snapshot handling in Python bindings
+            let indexer = llm_rs::kv_router::Indexer::KvIndexer(
+                llm_rs::kv_router::indexer::KvIndexer::clone(&inner),
+            );
+
             llm_rs::kv_router::subscriber::start_kv_router_background(
                 component.inner.clone(),
                 consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                inner.event_sender(),
-                inner.remove_worker_sender(),
-                None,
-                None,
+                indexer,
                 cancellation_token,
                 None,
                 true,
