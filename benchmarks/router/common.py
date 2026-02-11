@@ -63,7 +63,7 @@ def add_common_args(parser):
     parser.add_argument(
         "--use-expected-osl",
         action="store_true",
-        help="Pass expected_output_tokens to nvext for router tracking",
+        help="Pass agent_hints.osl to nvext for router output block tracking",
     )
 
 
@@ -208,7 +208,7 @@ def prepare_trace_dataset(args, output_dir, logger):
 
     Handles three paths:
     1. No synthesis needed: use the original dataset as-is
-    2. Expected OSL injection only: inject expected_output_tokens into nvext
+    2. Expected OSL injection only: inject agent_hints.osl into nvext
     3. Full synthesis: generate synthetic data from the input dataset
 
     Returns:
@@ -239,8 +239,8 @@ def prepare_trace_dataset(args, output_dir, logger):
         return requests, trace_dataset_path
 
     if not needs_synthesis and args.use_expected_osl:
-        # Only inject expected_output_tokens into nvext, no other synthesis
-        logger.info("Injecting expected_output_tokens into original trace dataset...")
+        # Only inject agent_hints.osl into nvext, no other synthesis
+        logger.info("Injecting agent_hints.osl into original trace dataset...")
 
         requests = []
         with open(args.input_dataset, "r") as f:
@@ -251,7 +251,7 @@ def prepare_trace_dataset(args, output_dir, logger):
             osl = request.get("output_tokens", 0)
             if "nvext" not in request:
                 request["nvext"] = {}
-            request["nvext"]["expected_output_tokens"] = osl
+            request["nvext"].setdefault("agent_hints", {})["osl"] = osl
 
         trace_dataset_path = os.path.join(output_dir, "trace_with_expected_osl.jsonl")
         with open(trace_dataset_path, "w") as f:
@@ -317,8 +317,8 @@ def prepare_trace_dataset(args, output_dir, logger):
             osl = request.get("output_tokens", 0)
             if "nvext" not in request:
                 request["nvext"] = {}
-            request["nvext"]["expected_output_tokens"] = osl
-        logger.info("Injected expected_output_tokens into nvext for each request")
+            request["nvext"].setdefault("agent_hints", {})["osl"] = osl
+        logger.info("Injected agent_hints.osl into nvext for each request")
 
     with open(trace_dataset_path, "w") as f:
         for request in requests:

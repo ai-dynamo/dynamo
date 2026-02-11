@@ -101,6 +101,7 @@ pub struct KvScheduler {
 }
 
 impl KvScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
@@ -109,6 +110,7 @@ impl KvScheduler {
         replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
+        queue_threshold: Option<f64>,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -176,6 +178,7 @@ impl KvScheduler {
             slots.clone(),
             workers_with_configs.clone(),
             ready_notify.clone(),
+            queue_threshold,
         ));
         let queue_clone = queue.clone();
 

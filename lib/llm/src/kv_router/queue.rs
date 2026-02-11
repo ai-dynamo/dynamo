@@ -6,7 +6,6 @@ use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_runtime::config::environment_names::llm::kv_router as env_kv_router;
 use tokio::sync::{Mutex, Notify};
 
 use crate::discovery::RuntimeConfigWatch;
@@ -17,26 +16,6 @@ use super::sequence::ActiveSequencesMultiWorker;
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
-
-/// Returns the queue threshold fraction if set, None if queueing is disabled
-fn queue_threshold_frac() -> Option<f64> {
-    let val = std::env::var(env_kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC).ok()?;
-    let Ok(frac) = val.parse::<f64>() else {
-        tracing::warn!(
-            "{} set to invalid value '{val}', ignoring",
-            env_kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC
-        );
-        return None;
-    };
-    if frac.is_nan() || frac <= 0.0 {
-        tracing::warn!(
-            "{} must be > 0 (got {frac}), ignoring",
-            env_kv_router::DYN_ROUTER_QUEUE_THRESHOLD_FRAC
-        );
-        return None;
-    }
-    Some(frac)
-}
 
 /// Entry in the priority queue, ordered by effective arrival time (lower = higher priority).
 /// Effective arrival = elapsed time since queue start minus `priority_jump`.
@@ -68,7 +47,7 @@ impl PartialOrd for QueueEntry {
 
 /// Queue for managing scheduling requests with interior mutability.
 /// Requests are held in `pending` when all workers are busy, and moved to `ready` when capacity frees up.
-/// If queueing is disabled (env var not set), all requests go directly to `ready`.
+/// If queueing is disabled (threshold_frac is None), all requests go directly to `ready`.
 /// Requests are ordered by effective arrival time: arrival_offset - priority_jump.
 pub struct SchedulerQueue {
     pending: Mutex<BinaryHeap<QueueEntry>>,
@@ -87,8 +66,8 @@ impl SchedulerQueue {
         slots: Arc<ActiveSequencesMultiWorker>,
         workers_with_configs: RuntimeConfigWatch,
         ready_notify: Arc<Notify>,
+        threshold_frac: Option<f64>,
     ) -> Self {
-        let threshold_frac = queue_threshold_frac();
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
         }
@@ -115,7 +94,7 @@ impl SchedulerQueue {
     }
 
     /// Enqueue a new request.
-    /// If queueing is disabled (env var not set), fast-track to ready.
+    /// If queueing is disabled (threshold not set), fast-track to ready.
     /// Otherwise, check busy condition and place in ready or pending.
     pub async fn enqueue(&self, request: SchedulingRequest) {
         let Some(threshold) = self.threshold_frac else {

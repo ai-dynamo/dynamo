@@ -253,6 +253,7 @@ impl KvRouter {
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
+            kv_router_config.router_queue_threshold,
         )
         .await?;
 

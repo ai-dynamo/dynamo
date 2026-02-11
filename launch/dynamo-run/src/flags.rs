@@ -88,6 +88,13 @@ pub struct Flags {
     #[arg(long)]
     pub router_track_active_blocks: Option<bool>,
 
+    /// KV Router: Queue threshold fraction for prefill token capacity.
+    /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
+    /// Enables priority scheduling via latency_sensitivity hints. Must be > 0.
+    /// If not set, queueing is disabled.
+    #[arg(long)]
+    pub router_queue_threshold: Option<f64>,
+
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
     /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
@@ -188,6 +195,9 @@ impl Flags {
         }
         if let Some(v) = self.router_track_active_blocks {
             cfg.router_track_active_blocks = v;
+        }
+        if self.router_queue_threshold.is_some() {
+            cfg.router_queue_threshold = self.router_queue_threshold;
         }
         RouterConfig::new(self.router_mode.into(), cfg)
     }

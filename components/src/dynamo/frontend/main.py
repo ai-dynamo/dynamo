@@ -248,7 +248,13 @@ def parse_args():
         action="store_true",
         dest="router_track_output_blocks",
         default=False,
-        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
+        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected output sequence length (agent_hints.osl in nvext). By default, output blocks are not tracked.",
+    )
+    parser.add_argument(
+        "--router-queue-threshold",
+        type=float,
+        default=None,
+        help="KV Router: Queue threshold fraction for prefill token capacity. When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints. Must be > 0. If not set, queueing is disabled and all requests go directly to the scheduler.",
     )
     parser.add_argument(
         "--enforce-disagg",
@@ -436,6 +442,7 @@ async def async_main():
             router_ttl_secs=flags.router_ttl,
             router_max_tree_size=flags.router_max_tree_size,
             router_prune_target_ratio=flags.router_prune_target_ratio,
+            router_queue_threshold=flags.router_queue_threshold,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

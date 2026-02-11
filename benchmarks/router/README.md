@@ -262,18 +262,18 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 
 #### Prerequisites: enable the priority queue
 
-The router queue only activates when the `DYN_ROUTER_QUEUE_THRESHOLD_FRAC` environment variable is set. Without it, requests bypass the queue entirely and priority has no effect.
+The router queue only activates when `--router-queue-threshold` is set. Without it, requests bypass the queue entirely and priority has no effect.
 
 ```bash
 # Launch the router with priority queue enabled.
 # The fraction (e.g. 1.2) controls the busy threshold:
-# workers are considered "busy" when active blocks exceed
-# threshold_frac * total_blocks. Values > 1.0 effectively make
+# workers are considered "busy" when active prefill tokens exceed
+# threshold * max_num_batched_tokens. Values > 1.0 effectively make
 # the queue always active.
-DYN_ROUTER_QUEUE_THRESHOLD_FRAC=1.2 \
-  python -m dynamo.frontend \
+python -m dynamo.frontend \
     --router-mode kv \
-    --router-reset-states
+    --router-reset-states \
+    --router-queue-threshold 1.2
 ```
 
 #### Running the benchmark
