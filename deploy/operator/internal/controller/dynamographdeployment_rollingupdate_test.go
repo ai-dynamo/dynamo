@@ -2549,3 +2549,147 @@ func TestResolveRollingUpdateParams(t *testing.T) {
 		})
 	}
 }
+
+// --- reconcileRollingUpdate state machine tests ---
+
+func TestReconcileRollingUpdate_NoChange(t *testing.T) {
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	hash := dynamo.ComputeWorkerSpecHash(dgd)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	err := r.reconcileRollingUpdate(context.Background(), dgd)
+	require.NoError(t, err)
+	// Phase should stay Completed — no spec change
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+}
+
+func TestReconcileRollingUpdate_SpecChangeStartsRollout(t *testing.T) {
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "stale000"}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	err := r.reconcileRollingUpdate(context.Background(), dgd)
+	require.NoError(t, err)
+	// Should transition to Pending (new rollout started)
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
+	assert.NotNil(t, dgd.Status.RollingUpdate.StartTime)
+}
+
+func TestReconcileRollingUpdate_PendingToInProgress(t *testing.T) {
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "oldhash0"}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhasePending,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	err := r.reconcileRollingUpdate(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+}
+
+func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	hash := dynamo.ComputeWorkerSpecHash(dgd)
+	// Hash matches current but phase is InProgress — stuck
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	err := r.reconcileRollingUpdate(context.Background(), dgd)
+	require.NoError(t, err)
+	// Should auto-complete
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+}
+
+func TestReconcileRollingUpdate_NewRollingUpdate(t *testing.T) {
+	newHash := "newhash1"
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "oldhash0"}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
+	}
+
+	// Create a DCD with the new hash that has ready replicas — stale annotation scenario
+	newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-" + newHash,
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          newHash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				ServiceName:   "worker",
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+				ReadyReplicas: ptr.To(int32(1)),
+			},
+		},
+	}
+
+	r := createTestReconcilerWithStatus(dgd, newDCD)
+
+	// When computed hash != current hash and no DCDs exist with computed hash, start rollout.
+	err := r.reconcileRollingUpdate(context.Background(), dgd)
+	require.NoError(t, err)
+	// Should start a new rolling update (Pending) since computed hash DCDs don't exist
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
+}
+
+func TestReconcileRollingUpdate_FailedPhaseNoOp(t *testing.T) {
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	hash := dynamo.ComputeWorkerSpecHash(dgd)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseFailed,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	err := r.reconcileRollingUpdate(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseFailed, dgd.Status.RollingUpdate.Phase)
+}
+
+func TestReconcileRollingUpdate_NonePhaseStartsRollout(t *testing.T) {
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "oldhash0"}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseNone,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	err := r.reconcileRollingUpdate(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
+	assert.NotNil(t, dgd.Status.RollingUpdate.StartTime)
+	assert.Nil(t, dgd.Status.RollingUpdate.UpdatedServices)
+}

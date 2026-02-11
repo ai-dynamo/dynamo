@@ -6696,3 +6696,172 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		})
 	}
 }
+
+func TestIsWorkerComponent(t *testing.T) {
+	workers := []string{commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode}
+	nonWorkers := []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner, commonconsts.ComponentTypeEPP, "custom", ""}
+
+	for _, ct := range workers {
+		assert.True(t, IsWorkerComponent(ct), "%s should be a worker", ct)
+	}
+	for _, ct := range nonWorkers {
+		assert.False(t, IsWorkerComponent(ct), "%s should not be a worker", ct)
+	}
+}
+
+func TestRollingUpdateContext_InProgress(t *testing.T) {
+	assert.False(t, RollingUpdateContext{}.InProgress())
+	assert.False(t, RollingUpdateContext{NewWorkerHash: "abc"}.InProgress())
+	assert.True(t, RollingUpdateContext{OldWorkerReplicas: map[string]int32{"w": 1}}.InProgress())
+}
+
+func TestGetDCDResourceName(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill":  {ComponentType: commonconsts.ComponentTypePrefill},
+				"decode":   {ComponentType: commonconsts.ComponentTypeDecode},
+				"worker":   {ComponentType: commonconsts.ComponentTypeWorker},
+				"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+			},
+		},
+	}
+
+	// Workers get hash suffix
+	assert.Equal(t, "my-dgd-prefill-abc12345", GetDCDResourceName(dgd, "prefill", "abc12345"))
+	assert.Equal(t, "my-dgd-decode-abc12345", GetDCDResourceName(dgd, "decode", "abc12345"))
+	assert.Equal(t, "my-dgd-worker-abc12345", GetDCDResourceName(dgd, "worker", "abc12345"))
+
+	// Non-workers never get hash suffix
+	assert.Equal(t, "my-dgd-frontend", GetDCDResourceName(dgd, "frontend", "abc12345"))
+
+	// Empty hash — workers don't get suffix
+	assert.Equal(t, "my-dgd-prefill", GetDCDResourceName(dgd, "prefill", ""))
+}
+
+func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill":  {ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(4))},
+				"frontend": {ComponentType: commonconsts.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	ruCtx := RollingUpdateContext{
+		NewWorkerHash:     "aabb1122",
+		OldWorkerReplicas: map[string]int32{"prefill": 2},
+		NewWorkerReplicas: map[string]int32{"prefill": 2},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(ctx, dgd, nil, &RestartState{}, nil, ruCtx)
+	assert.NoError(t, err)
+
+	// Worker DCD: hash suffix in name, hash label, replica override
+	prefillDCD := dcds["prefill"]
+	assert.Equal(t, "my-dgd-prefill-aabb1122", prefillDCD.Name)
+	assert.Equal(t, "aabb1122", prefillDCD.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(2), *prefillDCD.Spec.Replicas)
+
+	// Non-worker DCD: no hash suffix, no hash label, original replicas
+	frontendDCD := dcds["frontend"]
+	assert.Equal(t, "my-dgd-frontend", frontendDCD.Name)
+	assert.Empty(t, frontendDCD.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
+}
+
+func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(3))},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, RollingUpdateContext{})
+	assert.NoError(t, err)
+
+	dcd := dcds["worker"]
+	assert.Equal(t, "my-dgd-worker", dcd.Name)
+	assert.Empty(t, dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(3), *dcd.Spec.Replicas)
+}
+
+func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
+	// Worker with hash label gets WorkerHashSuffix
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
+	}
+	compCtx := generateComponentContext(component, "dgd", "ns", 1, "kubernetes")
+	assert.Equal(t, "abc123", compCtx.WorkerHashSuffix)
+
+	// Worker without hash label
+	component2 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+	}
+	compCtx2 := generateComponentContext(component2, "dgd", "ns", 1, "kubernetes")
+	assert.Empty(t, compCtx2.WorkerHashSuffix)
+
+	// Frontend never gets WorkerHashSuffix, even with the label
+	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
+	}
+	compCtx3 := generateComponentContext(component3, "dgd", "ns", 1, "kubernetes")
+	assert.Empty(t, compCtx3.WorkerHashSuffix)
+}
+
+func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
+	w := NewWorkerDefaults()
+
+	// With suffix
+	container, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace:  "ns-dgd",
+		ComponentType:    commonconsts.ComponentTypeWorker,
+		WorkerHashSuffix: "abc123",
+	})
+	assert.NoError(t, err)
+	found := false
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoNamespaceWorkerSuffixEnvVar {
+			assert.Equal(t, "abc123", env.Value)
+			found = true
+		}
+	}
+	assert.True(t, found, "DYN_NAMESPACE_WORKER_SUFFIX should be set")
+
+	// Without suffix — env var should NOT be present
+	container2, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "ns-dgd",
+		ComponentType:   commonconsts.ComponentTypeWorker,
+	})
+	assert.NoError(t, err)
+	for _, env := range container2.Env {
+		assert.NotEqual(t, commonconsts.DynamoNamespaceWorkerSuffixEnvVar, env.Name,
+			"DYN_NAMESPACE_WORKER_SUFFIX should not be set when suffix is empty")
+	}
+}
+
+func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
+	f := NewFrontendDefaults()
+	container, err := f.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "myns-mydgd",
+		ComponentType:   commonconsts.ComponentTypeFrontend,
+	})
+	assert.NoError(t, err)
+	found := false
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoNamespacePrefixEnvVar {
+			assert.Equal(t, "myns-mydgd", env.Value)
+			found = true
+		}
+	}
+	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
+}
