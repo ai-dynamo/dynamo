@@ -220,30 +220,27 @@ jobs:
           python3 docs-checkout/docs/convert_callouts.py --dir docs-checkout/docs/pages
           echo "Callout conversion complete."
 
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
       - name: Update docs.yml preserving versions
         run: |
           cd docs-checkout/docs
 
-          # Extract the list of versioned entries from current docs.yml (on docs-website branch)
-          # These are entries after "path: ./versions/next.yml"
-          # We need to preserve them while updating the rest from main
+          # Extract released version entries (non-"Next") from current docs-website docs.yml
+          yq '.products[0].versions | map(select(.display-name != "Next"))' docs.yml > /tmp/preserved_versions.yml
 
-          # Get version entries (lines containing "display-name: v" and their path lines)
-          VERSION_ENTRIES=$(awk '/- display-name: v/{found=1} found{print; if(/path:/) found=0}' docs.yml)
+          echo "Preserved version entries:"
+          cat /tmp/preserved_versions.yml
 
           # Copy docs.yml from main as base
           cp ../../main-checkout/docs/docs.yml docs.yml
 
-          # If we had version entries, append them after the next.yml line
-          if [ -n "$VERSION_ENTRIES" ]; then
-            echo "Preserving version entries:"
-            echo "$VERSION_ENTRIES"
-
-            # Create a temp file with the version entries properly indented
-            echo "$VERSION_ENTRIES" > /tmp/version_entries.txt
-
-            # Insert version entries after the next.yml path line
-            sed -i '/path: \.\/versions\/next\.yml/r /tmp/version_entries.txt' docs.yml
+          # Append preserved version entries under products[0].versions
+          if [ "$(yq 'length' /tmp/preserved_versions.yml)" -gt 0 ]; then
+            yq -i '.products[0].versions += load("/tmp/preserved_versions.yml")' docs.yml
           fi
 
           echo "Updated docs.yml:"
@@ -363,6 +360,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
       - name: Create versioned pages directory
         run: |
           TAG="${{ steps.version.outputs.tag }}"
@@ -437,26 +439,25 @@ jobs:
           echo "Updating $DOCS_FILE to include $TAG..."
 
           # Check if version already in docs.yml
-          if grep -q "display-name: $TAG" "$DOCS_FILE"; then
+          if yq ".products[0].versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
             echo "Version $TAG already in docs.yml, skipping update"
             exit 0
           fi
 
-          # Insert new version after "Next" entry
-          # The new version should be inserted after the "path: ./versions/next.yml" line
-          # Use a temp file approach for reliable multi-line insertion
-          awk -v tag="$TAG" '
-            /path: \.\/versions\/next\.yml/ {
-              print
-              print "  - display-name: " tag
-              print "    path: ./versions/" tag ".yml"
-              next
-            }
-            { print }
-          ' "$DOCS_FILE" > "${DOCS_FILE}.tmp" && mv "${DOCS_FILE}.tmp" "$DOCS_FILE"
+          # Find the index of the "Next" entry and insert new version right after it
+          NEXT_IDX=$(yq '.products[0].versions | to_entries | map(select(.value.display-name == "Next")) | .[0].key' "$DOCS_FILE")
+          INSERT_IDX=$((NEXT_IDX + 1))
 
-          echo "Updated docs.yml versions section:"
-          grep -A 20 "^versions:" "$DOCS_FILE"
+          yq -i "
+            .products[0].versions |= (
+              .[:$INSERT_IDX] +
+              [{\"display-name\": \"$TAG\", \"path\": \"./versions/$TAG.yml\"}] +
+              .[$INSERT_IDX:]
+            )
+          " "$DOCS_FILE"
+
+          echo "Updated docs.yml products/versions section:"
+          yq '.products[0].versions' "$DOCS_FILE"
 
       - name: Commit and push changes
         run: |
