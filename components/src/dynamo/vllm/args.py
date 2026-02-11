@@ -21,7 +21,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
-from dynamo.vllm.vllm_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 
 from . import envs
 

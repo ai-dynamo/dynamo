@@ -3,6 +3,8 @@
 
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
+from typing import Optional
+
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
@@ -211,13 +213,13 @@ class DynamoVllmConfig(ConfigBase):
     # vLLM-native encoder (ECConnector)
     vllm_native_encoder_worker: bool
     ec_connector_backend: str
-    ec_storage_path: str
-    ec_extra_config: str
+    ec_storage_path: Optional[str] = None
+    ec_extra_config: Optional[str] = None
     ec_consumer_mode: bool
 
     # vLLM-Omni
     omni: bool
-    stage_configs_path: str
+    stage_configs_path: Optional[str] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""

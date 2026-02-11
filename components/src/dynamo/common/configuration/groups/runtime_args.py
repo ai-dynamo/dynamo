@@ -3,6 +3,8 @@
 
 """Dynamo runtime configuration ArgGroup."""
 
+from typing import Optional
+
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -16,17 +18,20 @@ class DynamoRuntimeConfig(ConfigBase):
     store_kv: str
     request_plane: str
     event_plane: str
-    migration_limit: int
     connector: list[str]
     enable_local_indexer: bool
+    durable_kv_events: bool
 
-    dyn_tool_call_parser: str
-    dyn_reasoning_parser: str
-    custom_jinja_template: str
+    dyn_tool_call_parser: Optional[str] = None
+    dyn_reasoning_parser: Optional[str] = None
+    custom_jinja_template: Optional[str] = None
     endpoint_types: str
-    dump_config_to: str
+    dump_config_to: Optional[str] = None
 
     def validate(self) -> None:
+        # TODO  get a better way for spot fixes like this.
+        self.enable_local_indexer = not self.durable_kv_events
+
         if not self.namespace:
             raise ValueError("namespace is required")
 
@@ -71,15 +76,6 @@ class DynamoRuntimeArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--migration-limit",
-            env_var="DYN_MIGRATION_LIMIT",
-            default=0,
-            help="Maximum number of times a request may be migrated to a different engine worker.",
-            arg_type=int,
-        )
-
-        add_argument(
-            g,
             flag_name="--connector",
             env_var="DYN_CONNECTOR",
             default=["nixl"],
@@ -89,10 +85,10 @@ class DynamoRuntimeArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-local-indexer",
-            env_var="DYN_LOCAL_INDEXER",
+            flag_name="--durable-kv-events",
+            env_var="DYN_DURABLE_KV_EVENTS",
             default=False,
-            help="Enable worker-local KV indexer for tracking this worker's own KV cache state.",
+            help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
         )
 
         # Optional: tool/reasoning parsers (choices from dynamo._core when available)

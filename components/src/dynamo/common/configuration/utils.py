@@ -78,7 +78,11 @@ def add_argument(
 
     names = [flag_name]
 
-    env_help = _build_help_message(help, env_var, default_with_env, obsolete_flag)
+    if obsolete_flag:
+        # Accept obsolete flag as an alias (still show deprecation note in help)
+        names.append(obsolete_flag)
+
+    env_help = _build_help_message(help, env_var, default, obsolete_flag)
 
     add_arg_opts = {
         "dest": arg_dest,
@@ -129,7 +133,7 @@ def _build_help_message(
     Build help message with env var and default value.
     """
     if obsolete_flag:
-        return f"{help_text}\nenv var: {env_var} | default: {default}\nobsolete flag: {obsolete_flag}"
+        return f"{help_text}\nenv var: {env_var} | default: {default}\ndeprecating flag: {obsolete_flag}"
     return f"{help_text}\nenv var: {env_var} | default: {default}"
 
 

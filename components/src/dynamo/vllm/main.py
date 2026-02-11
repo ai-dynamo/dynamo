@@ -849,7 +849,7 @@ async def init(
         await _handle_non_leader_node(config.engine_args.data_parallel_rank)
         return
 
-    # Parse endpoint types from --dyn-endpoint-types flag
+    # Parse endpoint types from --endpoint-types flag
     model_type = parse_endpoint_types(config.endpoint_types)
     logger.info(f"Registering model with endpoint types: {config.endpoint_types}")
 
