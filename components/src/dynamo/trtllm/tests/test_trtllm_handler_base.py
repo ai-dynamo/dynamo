@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from unittest import mock
 
 import pytest
-
+import torch
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True
+    )
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 pytestmark = [

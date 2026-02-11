@@ -7,6 +7,13 @@ import re
 from pathlib import Path
 
 import pytest
+import torch
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True
+    )
 
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import cmd_line_args
