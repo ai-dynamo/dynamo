@@ -13,7 +13,7 @@ The Planner is Dynamo's autoscaling controller. It supports two scaling modes: *
 
 ## Throughput-Based Scaling
 
-The throughput-based mode observes traffic metrics from Prometheus, predicts future load, and uses pre-deployment profiling data to compute the optimal number of prefill/decode replicas.
+![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](../../assets/img/planner-architecture.svg)
 
 ## Scaling Algorithm
 
