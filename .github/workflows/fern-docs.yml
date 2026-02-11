@@ -220,11 +220,6 @@ jobs:
           python3 docs-checkout/docs/convert_callouts.py --dir docs-checkout/docs/pages
           echo "Callout conversion complete."
 
-      - name: Install yq
-        run: |
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
-
       - name: Update docs.yml preserving versions
         run: |
           cd fern-checkout/fern
@@ -357,11 +352,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Install yq
-        run: |
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
 
       - name: Create versioned pages directory
         run: |
