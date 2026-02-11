@@ -10,6 +10,7 @@ preventing orphaned child processes from holding pipe FDs and causing hangs.
 
 import asyncio
 import signal
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,7 +24,7 @@ pytestmark = [
 ]
 
 
-def test_timeout_kills_process_group(tmp_path):
+def test_timeout_kills_process_group():
     """On timeout, the entire process group must be killed via os.killpg."""
     target_pid = 99999
     generator = LoadGenerator()
@@ -42,14 +43,15 @@ def test_timeout_kills_process_group(tmp_path):
         raise asyncio.TimeoutError()
 
     async def _run():
-        with (
-            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
-            patch("asyncio.wait_for", side_effect=fake_wait_for),
-            patch("os.killpg") as mock_killpg,
-        ):
-            with pytest.raises(RuntimeError, match="timed out"):
-                await generator.generate_load(1.0, 1, str(tmp_path))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+                patch("asyncio.wait_for", side_effect=fake_wait_for),
+                patch("os.killpg") as mock_killpg,
+            ):
+                with pytest.raises(RuntimeError, match="timed out"):
+                    await generator.generate_load(1.0, 1, tmp_dir)
 
-            mock_killpg.assert_called_once_with(target_pid, signal.SIGKILL)
+                mock_killpg.assert_called_once_with(target_pid, signal.SIGKILL)
 
     asyncio.run(_run())
