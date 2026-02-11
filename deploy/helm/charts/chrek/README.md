@@ -167,9 +167,9 @@ Ensure your storage class supports `ReadWriteMany` access mode for multi-node de
 
 ## Related Documentation
 
-- [ChReK Overview](../../../../docs/kubernetes/chrek/README.md) - ChReK architecture and use cases
-- [ChReK with Dynamo Platform](../../../../docs/kubernetes/chrek/dynamo.md) - Integration guide
-- [ChReK Standalone Usage](../../../../docs/kubernetes/chrek/standalone.md) - Use ChReK without Dynamo Platform
+- [ChReK Overview](../../../../docs/pages/kubernetes/chrek/README.md) - ChReK architecture and use cases
+- [ChReK with Dynamo Platform](../../../../docs/pages/kubernetes/chrek/dynamo.md) - Integration guide
+- [ChReK Standalone Usage](../../../../docs/pages/kubernetes/chrek/standalone.md) - Use ChReK without Dynamo Platform
 
 ## License
 
