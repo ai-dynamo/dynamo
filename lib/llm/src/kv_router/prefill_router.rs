@@ -348,7 +348,7 @@ impl PrefillRouter {
     ///
     /// If `phase_permit` is provided, it is dropped after the first output is received,
     /// allowing subsequent `set_phase` calls to proceed. This is used in the bootstrap
-    /// optimization path to ensure `record_worker` completes before the phase changes.
+    /// optimization path to ensure `record_worker_full` completes before the phase changes.
     ///
     /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     async fn execute_prefill(
@@ -363,7 +363,7 @@ impl PrefillRouter {
             .await
             .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
 
-        // Drop phase permit now - routing is complete, record_worker was called in select_worker.
+        // Drop phase permit now - routing is complete, record_worker_full was called in select_worker.
         // This unblocks set_phase(Decode) in the main task without waiting for prefill output.
         drop(phase_permit);
 
@@ -564,7 +564,7 @@ impl
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
-                // Pass phase permit to spawned task - it drops after first output (record_worker complete)
+                // Pass phase permit to spawned task - it drops after first output (record_worker_full complete)
                 // This allows set_phase(Decode) below to proceed only after prefill routing is done
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_permit);
 
@@ -606,7 +606,7 @@ impl
 
                 // Set phase to Decode for the decode request.
                 // In bootstrap path, this blocks until the spawned prefill task drops its permit
-                // (after first output / record_worker completes), ensuring correct phase for routing.
+                // (after first output / record_worker_full completes), ensuring correct phase for routing.
                 if let Some(ref tracker) = req.tracker {
                     let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     // Permit is dropped immediately - decode proceeds, no need to hold it

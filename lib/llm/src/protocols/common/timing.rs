@@ -139,7 +139,7 @@ pub struct RequestTracker {
     /// Semaphore for coordinating phase transitions.
     /// Acquiring a permit blocks subsequent set_phase calls until the permit is dropped.
     /// This prevents race conditions in the bootstrap optimization path where prefill
-    /// runs in background and needs to complete record_worker before phase changes.
+    /// runs in background and needs to complete record_worker_full before phase changes.
     phase_semaphore: Arc<Semaphore>,
 
     /// How long it took to tokenize the input
