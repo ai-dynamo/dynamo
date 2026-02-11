@@ -182,7 +182,7 @@ func TestStripNonPodTemplateFields(t *testing.T) {
 		SubComponentType: "sub",
 		DynamoNamespace:  ptr.To("ns"),
 		Replicas:         ptr.To(int32(3)),
-		Autoscaling:      &v1alpha1.Autoscaling{},
+		Autoscaling:      &v1alpha1.Autoscaling{}, //nolint:staticcheck // SA1019: testing backward compatibility with deprecated field
 		ScalingAdapter:   &v1alpha1.ScalingAdapter{},
 		Ingress:          &v1alpha1.IngressSpec{Enabled: true},
 		ModelRef:         &v1alpha1.ModelReference{Name: "m"},
@@ -201,7 +201,7 @@ func TestStripNonPodTemplateFields(t *testing.T) {
 	assert.Empty(t, stripped.SubComponentType)
 	assert.Nil(t, stripped.DynamoNamespace)
 	assert.Nil(t, stripped.Replicas)
-	assert.Nil(t, stripped.Autoscaling)
+	assert.Nil(t, stripped.Autoscaling) //nolint:staticcheck // SA1019: testing backward compatibility with deprecated field
 	assert.Nil(t, stripped.ScalingAdapter)
 	assert.Nil(t, stripped.Ingress)
 	assert.Nil(t, stripped.ModelRef)

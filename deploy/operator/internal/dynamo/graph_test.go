@@ -3758,17 +3758,6 @@ func assertDYNNamespace(t *testing.T, podSpec corev1.PodSpec, expectedNamespace 
 	}
 }
 
-func assertEnvVar(t *testing.T, envs []corev1.EnvVar, name, expectedValue string) {
-	t.Helper()
-	for _, env := range envs {
-		if env.Name == name {
-			assert.Equal(t, expectedValue, env.Value, "env var %s value mismatch", name)
-			return
-		}
-	}
-	t.Errorf("env var %s not found", name)
-}
-
 // Mock SecretsRetriever for testing
 type mockSecretsRetriever struct{}
 

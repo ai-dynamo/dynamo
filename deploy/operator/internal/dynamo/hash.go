@@ -95,7 +95,7 @@ func stripNonPodTemplateFields(spec *v1alpha1.DynamoComponentDeploymentSharedSpe
 	stripped.SubComponentType = ""
 	stripped.DynamoNamespace = nil
 	stripped.Replicas = nil
-	stripped.Autoscaling = nil
+	stripped.Autoscaling = nil //nolint:staticcheck // SA1019: intentionally clearing deprecated field for backward compatibility
 	stripped.ScalingAdapter = nil
 	stripped.Ingress = nil
 	stripped.ModelRef = nil

@@ -37,12 +37,17 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 )
 
+const (
+	testOldWorkerHash = "oldhash1"
+	testNewWorkerHash = "newhash2"
+)
+
 // createTestDGD creates a DynamoGraphDeployment for testing with the given services
-func createTestDGD(name, namespace string, services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) *nvidiacomv1alpha1.DynamoGraphDeployment {
+func createTestDGD(name string, services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) *nvidiacomv1alpha1.DynamoGraphDeployment {
 	return &nvidiacomv1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: namespace,
+			Namespace: "default",
 		},
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 			Services: services,
@@ -126,7 +131,7 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", "default", tt.services)
+			dgd := createTestDGD("test-dgd", tt.services)
 
 			if tt.existingHash == "compute" {
 				hash := dynamo.ComputeWorkerSpecHash(dgd)
@@ -146,7 +151,7 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 }
 
 func TestInitializeWorkerHashIfNeeded_FirstDeploy(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
 			Envs: []corev1.EnvVar{
@@ -174,7 +179,7 @@ func TestInitializeWorkerHashIfNeeded_FirstDeploy(t *testing.T) {
 
 func TestInitializeWorkerHashIfNeeded_AlreadyInitialized(t *testing.T) {
 	existingHash := "existing-hash"
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
 			Envs: []corev1.EnvVar{
@@ -226,7 +231,7 @@ func TestSupportsManagedRollingUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", "default", tt.services)
+			dgd := createTestDGD("test-dgd", tt.services)
 			r := createTestReconciler(dgd)
 
 			result := r.supportsManagedRollingUpdate(dgd)
@@ -242,7 +247,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 	workerEnvs := []corev1.EnvVar{{Name: "WORKER_VAR", Value: "value1"}}
 	frontendEnvs := []corev1.EnvVar{{Name: "FRONTEND_VAR", Value: "value1"}}
 
-	dgd1 := createTestDGD("test", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd1 := createTestDGD("test", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: consts.ComponentTypeWorker, Envs: workerEnvs},
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: frontendEnvs},
 	})
@@ -250,7 +255,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 	hash1 := dynamo.ComputeWorkerSpecHash(dgd1)
 
 	// Change only frontend envs
-	dgd2 := createTestDGD("test", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd2 := createTestDGD("test", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: consts.ComponentTypeWorker, Envs: workerEnvs},
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: []corev1.EnvVar{{Name: "FRONTEND_VAR", Value: "changed"}}},
 	})
@@ -259,7 +264,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 	assert.Equal(t, hash1, hash2, "Hash should not change when only frontend changes")
 
 	// Change worker envs
-	dgd3 := createTestDGD("test", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd3 := createTestDGD("test", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: consts.ComponentTypeWorker, Envs: []corev1.EnvVar{{Name: "WORKER_VAR", Value: "changed"}}},
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: frontendEnvs},
 	})
@@ -270,7 +275,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 
 func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 	// Test that prefill and decode component types are also considered workers
-	dgd1 := createTestDGD("test", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd1 := createTestDGD("test", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: consts.ComponentTypePrefill, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v1"}}},
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v1"}}},
 	})
@@ -279,7 +284,7 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 	assert.NotEmpty(t, hash1, "Hash should be computed for prefill/decode")
 
 	// Change prefill spec
-	dgd2 := createTestDGD("test", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd2 := createTestDGD("test", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: consts.ComponentTypePrefill, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v2"}}},
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v1"}}},
 	})
@@ -288,7 +293,7 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 	assert.NotEqual(t, hash1, hash2, "Hash should change when prefill specs change")
 
 	// Change decode spec
-	dgd3 := createTestDGD("test", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd3 := createTestDGD("test", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: consts.ComponentTypePrefill, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v1"}}},
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v2"}}},
 	})
@@ -319,7 +324,7 @@ func TestGetOrCreateRollingUpdateStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
 			dgd.Status.RollingUpdate = tt.existingStatus
@@ -373,7 +378,7 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
 			dgd.Status.RollingUpdate = tt.status
@@ -448,7 +453,7 @@ func TestGetDesiredWorkerReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", "default", tt.services)
+			dgd := createTestDGD("test-dgd", tt.services)
 			r := createTestReconciler(dgd)
 
 			result := r.getDesiredWorkerReplicas(dgd)
@@ -458,9 +463,9 @@ func TestGetDesiredWorkerReplicas(t *testing.T) {
 }
 
 func TestDeleteOldWorkerDCDs(t *testing.T) {
-	newWorkerHash := "newhash2"
+	newWorkerHash := testNewWorkerHash
 
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 
@@ -471,7 +476,7 @@ func TestDeleteOldWorkerDCDs(t *testing.T) {
 			Namespace: "default",
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          "oldhash1",
+				consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
@@ -516,7 +521,7 @@ func TestDeleteOldWorkerDCDs(t *testing.T) {
 }
 
 func TestDeleteOldWorkerDCDs_NoDCDsToDelete(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 
@@ -549,10 +554,10 @@ func createTestReconcilerWithStatus(dgd *nvidiacomv1alpha1.DynamoGraphDeployment
 }
 
 func TestContinueRollingUpdate_UpdatedServicesPartialCompletion(t *testing.T) {
-	oldWorkerHash := "oldhash1"
-	newWorkerHash := "newhash2"
+	oldWorkerHash := testOldWorkerHash
+	newWorkerHash := testNewWorkerHash
 
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {
 			ComponentType: consts.ComponentTypePrefill,
 			Replicas:      ptr.To(int32(2)),
@@ -654,10 +659,10 @@ func TestContinueRollingUpdate_UpdatedServicesPartialCompletion(t *testing.T) {
 }
 
 func TestContinueRollingUpdate_AggregateReadyButPerServiceNot(t *testing.T) {
-	oldWorkerHash := "oldhash1"
-	newWorkerHash := "newhash2"
+	oldWorkerHash := testOldWorkerHash
+	newWorkerHash := testNewWorkerHash
 
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {
 			ComponentType: consts.ComponentTypePrefill,
 			Replicas:      ptr.To(int32(2)),
@@ -738,14 +743,14 @@ func TestContinueRollingUpdate_AggregateReadyButPerServiceNot(t *testing.T) {
 }
 
 func TestStartRollingUpdate_UpdatedServicesInitializedToNil(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
 			Replicas:      ptr.To(int32(2)),
 		},
 	})
 	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: "oldhash1",
+		consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
 	}
 	// Simulate a previous rolling update that had UpdatedServices populated
 	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
@@ -757,7 +762,7 @@ func TestStartRollingUpdate_UpdatedServicesInitializedToNil(t *testing.T) {
 	ctx := context.Background()
 
 	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.startRollingUpdate(ctx, dgd, rollingUpdateStatus, "newhash2")
+	err := r.startRollingUpdate(ctx, dgd, rollingUpdateStatus, testNewWorkerHash)
 	require.NoError(t, err)
 
 	assert.Nil(t, rollingUpdateStatus.UpdatedServices)
@@ -765,10 +770,10 @@ func TestStartRollingUpdate_UpdatedServicesInitializedToNil(t *testing.T) {
 }
 
 func TestCompleteRollingUpdate_UpdatedServicesContainsAllWorkers(t *testing.T) {
-	oldWorkerHash := "oldhash1"
-	newWorkerHash := "newhash2"
+	oldWorkerHash := testOldWorkerHash
+	newWorkerHash := testNewWorkerHash
 
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"frontend": {
 			ComponentType: consts.ComponentTypeFrontend,
 			Replicas:      ptr.To(int32(1)),
@@ -803,10 +808,10 @@ func TestCompleteRollingUpdate_UpdatedServicesContainsAllWorkers(t *testing.T) {
 }
 
 func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
-	oldWorkerHash := "oldhash1"
-	newWorkerHash := "newhash2"
+	oldWorkerHash := testOldWorkerHash
+	newWorkerHash := testNewWorkerHash
 
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {
 			ComponentType: consts.ComponentTypePrefill,
 			Replicas:      ptr.To(int32(2)),
@@ -887,7 +892,7 @@ func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
 func TestGetWorkerInfoForWorkerHash(t *testing.T) {
 	workerHash := "hash1234"
 
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: consts.ComponentTypePrefill},
 		"decode":  {ComponentType: consts.ComponentTypeDecode},
 	})
@@ -1111,7 +1116,7 @@ func TestMergeWorkerServiceStatuses(t *testing.T) {
 
 func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 	t.Run("old DCD exists with status", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"prefill": {
 				ComponentType: consts.ComponentTypePrefill,
 				Replicas:      ptr.To(int32(2)),
@@ -1124,7 +1129,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 				Namespace: "default",
 				Labels: map[string]string{
 					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-					consts.KubeLabelDynamoWorkerHash:          "oldhash1",
+					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
 				},
 			},
 			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
@@ -1149,7 +1154,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:     "newhash2",
+			NewWorkerHash:     testNewWorkerHash,
 			OldWorkerReplicas: map[string]int32{"prefill": 1},
 			NewWorkerReplicas: map[string]int32{"prefill": 2},
 		}
@@ -1165,7 +1170,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 	})
 
 	t.Run("old DCD not found - skips gracefully", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"prefill": {
 				ComponentType: consts.ComponentTypePrefill,
 				Replicas:      ptr.To(int32(2)),
@@ -1176,7 +1181,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:     "newhash2",
+			NewWorkerHash:     testNewWorkerHash,
 			OldWorkerReplicas: map[string]int32{"prefill": 1},
 			NewWorkerReplicas: map[string]int32{"prefill": 2},
 		}
@@ -1190,7 +1195,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 
 func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 	t.Run("worker DCD with hash suffix - finds annotation", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"frontend": {
 				ComponentType: consts.ComponentTypeFrontend,
 			},
@@ -1243,7 +1248,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 	})
 
 	t.Run("worker DCD not found during rolling update - gracefully skips", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"frontend": {
 				ComponentType: consts.ComponentTypeFrontend,
 			},
@@ -1252,7 +1257,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 			},
 		})
 		dgd.Annotations = map[string]string{
-			consts.AnnotationCurrentWorkerHash: "oldhash1",
+			consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
 		}
 
 		frontendDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
@@ -1281,13 +1286,13 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 	})
 
 	t.Run("non-worker without hash suffix - found normally", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"frontend": {
 				ComponentType: consts.ComponentTypeFrontend,
 			},
 		})
 		dgd.Annotations = map[string]string{
-			consts.AnnotationCurrentWorkerHash: "oldhash1",
+			consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
 		}
 
 		frontendDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
@@ -1317,7 +1322,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 func TestCheckComponentServiceFullyUpdated(t *testing.T) {
 	t.Run("worker with hash suffix - finds DCD", func(t *testing.T) {
 		workerHash := "abc12345"
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: consts.ComponentTypeWorker,
 			},
@@ -1352,7 +1357,7 @@ func TestCheckComponentServiceFullyUpdated(t *testing.T) {
 	})
 
 	t.Run("non-worker without hash suffix - finds DCD", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"frontend": {
 				ComponentType: consts.ComponentTypeFrontend,
 			},
@@ -1384,7 +1389,7 @@ func TestCheckComponentServiceFullyUpdated(t *testing.T) {
 	})
 
 	t.Run("worker without hash annotation - falls back to non-hash name", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: consts.ComponentTypeWorker,
 			},
@@ -1418,7 +1423,7 @@ func TestCheckComponentServiceFullyUpdated(t *testing.T) {
 }
 
 func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
 			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
@@ -1463,7 +1468,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
 }
 
 func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {
 			ComponentType: consts.ComponentTypePrefill,
 		},
@@ -1553,7 +1558,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
 
 func TestFindLegacyWorkerDCDs(t *testing.T) {
 	t.Run("finds worker DCDs without hash label", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
@@ -1582,7 +1587,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 	})
 
 	t.Run("ignores non-worker DCDs", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"frontend": {ComponentType: consts.ComponentTypeFrontend},
 		})
 
@@ -1610,7 +1615,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 	})
 
 	t.Run("ignores DCDs that already have hash label", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
@@ -1639,7 +1644,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 	})
 
 	t.Run("ignores DCDs from other DGDs", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
@@ -1667,7 +1672,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 	})
 
 	t.Run("no DCDs at all", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
@@ -1682,7 +1687,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 
 func TestListOldWorkerDCDs(t *testing.T) {
 	t.Run("finds legacy DCDs as old", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
@@ -1714,7 +1719,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 	})
 
 	t.Run("excludes current hash DCDs", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
@@ -1744,7 +1749,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 	})
 
 	t.Run("excludes non-worker DCDs", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"frontend": {ComponentType: consts.ComponentTypeFrontend},
 			"worker":   {ComponentType: consts.ComponentTypeWorker},
 		})
@@ -1756,7 +1761,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 				Namespace: "default",
 				Labels: map[string]string{
 					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-					consts.KubeLabelDynamoWorkerHash:          "oldhash1",
+					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
 				},
 			},
 			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
@@ -1773,7 +1778,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 				Namespace: "default",
 				Labels: map[string]string{
 					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-					consts.KubeLabelDynamoWorkerHash:          "oldhash1",
+					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
 				},
 			},
 			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
@@ -1787,7 +1792,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 		r := createTestReconciler(dgd, frontendDCD, workerDCD)
 		ctx := context.Background()
 
-		result, err := r.listOldWorkerDCDs(ctx, dgd, "newhash2")
+		result, err := r.listOldWorkerDCDs(ctx, dgd, testNewWorkerHash)
 		require.NoError(t, err)
 		assert.Len(t, result, 1)
 		assert.Equal(t, "test-dgd-worker-oldhash1", result[0].Name)
@@ -1796,7 +1801,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 
 func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 	t.Run("scales legacy-named DCD via label lookup", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: consts.ComponentTypeWorker,
 				Replicas:      ptr.To(int32(3)),
@@ -1842,7 +1847,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 	})
 
 	t.Run("no-op when rolling update not in progress", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
@@ -1861,7 +1866,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 	})
 
 	t.Run("skips when replicas already at desired value", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: consts.ComponentTypeWorker,
 				Replicas:      ptr.To(int32(3)),
@@ -1908,7 +1913,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 
 func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 	t.Run("aggregates status from legacy-named DCD", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: consts.ComponentTypeWorker,
 				Replicas:      ptr.To(int32(3)),
@@ -1962,7 +1967,7 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 	})
 
 	t.Run("no legacy DCDs found - returns empty", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: consts.ComponentTypeWorker,
 			},
@@ -1984,7 +1989,7 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 }
 
 func TestDeleteOldWorkerDCDs_LegacyDCDs(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 
@@ -2038,7 +2043,7 @@ func TestDeleteOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 }
 
 func TestDeleteOldWorkerDCDs_MultipleGenerations(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 
@@ -2109,7 +2114,7 @@ func TestDeleteOldWorkerDCDs_MultipleGenerations(t *testing.T) {
 }
 
 func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 
@@ -2180,7 +2185,7 @@ func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
 }
 
 func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
 			Replicas:      ptr.To(int32(4)),
@@ -2257,7 +2262,7 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 }
 
 func TestAggregateOldWorkerServiceStatuses_MultipleOldGenerations(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
 			Replicas:      ptr.To(int32(4)),
@@ -2343,7 +2348,7 @@ func TestContinueRollingUpdate_CascadingSpecChange(t *testing.T) {
 	// B DCDs should be treated as old alongside A DCDs.
 	newWorkerHash := "hashcccc"
 
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
 			Replicas:      ptr.To(int32(2)),
@@ -2553,7 +2558,7 @@ func TestResolveRollingUpdateParams(t *testing.T) {
 // --- reconcileRollingUpdate state machine tests ---
 
 func TestReconcileRollingUpdate_NoChange(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	hash := dynamo.ComputeWorkerSpecHash(dgd)
@@ -2570,7 +2575,7 @@ func TestReconcileRollingUpdate_NoChange(t *testing.T) {
 }
 
 func TestReconcileRollingUpdate_SpecChangeStartsRollout(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "stale000"}
@@ -2587,7 +2592,7 @@ func TestReconcileRollingUpdate_SpecChangeStartsRollout(t *testing.T) {
 }
 
 func TestReconcileRollingUpdate_PendingToInProgress(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "oldhash0"}
@@ -2602,7 +2607,7 @@ func TestReconcileRollingUpdate_PendingToInProgress(t *testing.T) {
 }
 
 func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	hash := dynamo.ComputeWorkerSpecHash(dgd)
@@ -2621,7 +2626,7 @@ func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
 
 func TestReconcileRollingUpdate_NewRollingUpdate(t *testing.T) {
 	newHash := "newhash1"
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "oldhash0"}
@@ -2662,7 +2667,7 @@ func TestReconcileRollingUpdate_NewRollingUpdate(t *testing.T) {
 }
 
 func TestReconcileRollingUpdate_FailedPhaseNoOp(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	hash := dynamo.ComputeWorkerSpecHash(dgd)
@@ -2678,7 +2683,7 @@ func TestReconcileRollingUpdate_FailedPhaseNoOp(t *testing.T) {
 }
 
 func TestReconcileRollingUpdate_NonePhaseStartsRollout(t *testing.T) {
-	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: "oldhash0"}
