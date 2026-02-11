@@ -270,6 +270,8 @@ navigation:
             path: ../pages/backends/vllm/prometheus.md
           - page: Prompt Embeddings
             path: ../pages/backends/vllm/prompt-embeddings.md
+          - page: vLLM-Omni
+            path: ../pages/backends/vllm/vllm-omni.md
       - section: SGLang Details
         contents:
           - page: Expert Distribution (EPLB)
