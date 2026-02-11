@@ -1086,8 +1086,7 @@ async def init_multimodal_worker(
 async def init_omni(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
-    """
-    Initialize Omni worker for multi-stage pipeline generation using vLLM-Omni.
+    """Initialize Omni worker for multi-stage pipeline generation using vLLM-Omni.
 
     Supports text-to-text, text-to-image, and text-to-video generation
     through a single unified OmniHandler.
