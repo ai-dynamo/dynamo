@@ -12,19 +12,22 @@ import uuid
 from typing import Any, AsyncGenerator, Optional
 
 import torch
-from PIL import Image
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
+from dynamo.sglang.protocol import (
+    CreateVideoRequest,
+    VideoData,
+    VideoGenerationResponse,
+)
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
 
 
-class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
-    """Handler for diffusion image generation.
+class VideoGenerationWorkerHandler(BaseGenerativeHandler):
+    """Handler for video generation (T2V/I2V).
 
     Inherits from BaseGenerativeHandler for common infrastructure like
     tracing, metrics publishing, and cancellation support.
@@ -38,22 +41,22 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         publisher: Optional[DynamoSglangPublisher] = None,
         fs: Any = None,  # fsspec.AbstractFileSystem for primary storage
     ):
-        """Initialize diffusion worker handler.
+        """Initialize video generation worker handler.
 
         Args:
             component: The Dynamo runtime component.
             generator: The SGLang DiffGenerator instance.
             config: SGLang and Dynamo configuration.
-            publisher: Optional metrics publisher (not used for diffusion currently).
-            fs: Optional fsspec filesystem for primary image storage.
+            publisher: Optional metrics publisher (not used for video currently).
+            fs: Optional fsspec filesystem for primary video storage.
         """
         # Call parent constructor for common setup
         super().__init__(component, config, publisher)
 
-        # Image diffusion-specific initialization
+        # Video generation-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
-        self.fs_url = config.dynamo_args.image_diffusion_fs_url
+        self.fs_url = config.dynamo_args.video_generation_fs_url
 
         fs_url_parts = self.fs_url.split("://")
         self.protocol = fs_url_parts[0] if "://" in self.fs_url else "file"
@@ -63,7 +66,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             self.root_path = fs_url_parts[1] if len(fs_url_parts) > 1 else "/"
 
         logger.info(
-            f"Image diffusion worker handler initialized with fs_url={self.fs_url}"
+            f"Video generation worker handler initialized with fs_url={self.fs_url}"
         )
 
     def cleanup(self) -> None:
@@ -71,7 +74,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         if self.generator is not None:
             del self.generator
         torch.cuda.empty_cache()
-        logger.info("Image diffusion generator cleanup complete")
+        logger.info("Video generation generator cleanup complete")
         # Call parent cleanup for any base class cleanup
         super().cleanup()
 
@@ -79,183 +82,240 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         self, request: dict[str, Any], context: Context
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
-        Generate image(s) from text prompt.
+        Generate video from text/image prompt.
 
-        Unlike LLM streaming, diffusion returns complete image(s) at end.
+        Unlike LLM streaming, video returns complete video at end.
 
         Args:
             request: Request dict with prompt and generation parameters.
             context: Context object for cancellation handling.
 
         Yields:
-            Response dict with generated images (OpenAI-compatible format).
+            Response dict with generated video (OpenAI-compatible format).
         """
-        logger.info(f"Image diffusion request: {request}")
+        logger.info(f"Video generation request: {request}")
+        start_time = time.time()
 
         # Get trace header for distributed tracing (for logging/observability)
         trace_header = self._get_trace_header(context)
         if trace_header:
-            logger.debug(f"Image diffusion request with trace: {trace_header}")
+            logger.debug(f"Video generation request with trace: {trace_header}")
 
         try:
-            # # Check for cancellation before starting generation
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled before generation: {context.id()}")
-            #     return
-
             # Default to 50 steps if not provided
             request["num_inference_steps"] = request.get("num_inference_steps", 50)
 
-            req = CreateImageRequest(**request)
+            req = CreateVideoRequest(**request)
 
             # Parse size
             width, height = self._parse_size(req.size)
 
-            # Check for cancellation after parsing
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled during setup: {context.id()}")
-            #     return
+            # Calculate num_frames if not explicitly provided
+            num_frames = req.num_frames
+            if num_frames is None:
+                num_frames = req.fps * req.seconds
 
-            # Generate images (may batch multiple requests at same step)
-            images = await self._generate_images(
+            # Generate video
+            video_bytes = await self._generate_video(
                 prompt=req.prompt,
-                negative_prompt=req.negative_prompt,
                 width=width,
                 height=height,
+                num_frames=num_frames,
+                fps=req.fps,
                 num_inference_steps=req.num_inference_steps,
                 guidance_scale=req.guidance_scale,
                 seed=req.seed,
+                request_id=context.id(),
+                negative_prompt=req.negative_prompt,
+                input_reference=req.input_reference,
             )
-
-            # # Check for cancellation after generation
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled after generation: {context.id()}")
-            #     return
 
             # Upload to filesystem and get URLs
             # Use user ID from request if available, otherwise fallback to context ID
             user_id = req.user if req.user else context.id()
 
-            image_data = []
-            for img in images:
-                if req.response_format == "url":
-                    url = await self._upload_to_fs(img, user_id, context.id())
-                    image_data.append(ImageData(url=url))
-                else:  # b64_json
-                    b64 = self._encode_base64(img)
-                    image_data.append(ImageData(b64_json=b64))
+            video_data = []
+            if req.response_format == "url":
+                url = await self._upload_to_fs(video_bytes, user_id, context.id())
+                video_data.append(VideoData(url=url))
+            else:  # b64_json
+                b64 = self._encode_base64(video_bytes)
+                video_data.append(VideoData(b64_json=b64))
 
-            response = ImagesResponse(created=int(time.time()), data=image_data)
+            inference_time = time.time() - start_time
+
+            response = VideoGenerationResponse(
+                id=f"video-{context.id()}",
+                model=req.model,
+                created=int(time.time()),
+                data=video_data,
+                inference_time_s=inference_time,
+            )
 
             yield response.model_dump()
 
         except Exception as e:
-            logger.error(f"Error in diffusion generation: {e}", exc_info=True)
+            logger.error(f"Error in video generation: {e}", exc_info=True)
             # Return error response
-            error_response = {
-                "created": int(time.time()),
-                "data": [],
-                "error": str(e),
-            }
-            yield error_response
+            error_response = VideoGenerationResponse(
+                id=f"video-{context.id()}",
+                model=request.get("model", "unknown"),
+                created=int(time.time()),
+                status="failed",
+                progress=0,
+                data=[],
+                error=str(e),
+            )
+            yield error_response.model_dump()
 
-    async def _generate_images(
+    async def _generate_video(
         self,
         prompt: str,
         width: int,
         height: int,
+        num_frames: int,
+        fps: int,
         num_inference_steps: int,
         guidance_scale: float,
         seed: Optional[int],
+        request_id: str,
         negative_prompt: Optional[str] = None,
-    ) -> list[bytes]:
-        """Generate images using SGLang DiffGenerator"""
-        # DiffGenerator handles batching internally if multiple images
-        # Run in thread pool to avoid blocking event loop
+        input_reference: Optional[str] = None,
+    ) -> bytes:
+        """Generate video using SGLang DiffGenerator.
+
+        Args:
+            prompt: Text prompt for video generation.
+            width: Video width in pixels.
+            height: Video height in pixels.
+            num_frames: Number of frames to generate.
+            fps: Frames per second for output video.
+            num_inference_steps: Number of denoising steps.
+            guidance_scale: CFG scale for generation.
+            seed: Random seed for reproducibility.
+            request_id: Request ID for logging.
+            negative_prompt: Optional negative prompt.
+            input_reference: Optional image path for I2V.
+
+        Returns:
+            Video bytes (mp4 format).
+        """
+        # Build args for DiffGenerator
         args = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
             "height": height,
             "width": width,
+            "num_frames": num_frames,
+            "fps": fps,
             "num_inference_steps": num_inference_steps,
             "save_output": False,  # We handle saving ourselves
             "guidance_scale": guidance_scale,
             "seed": seed if seed else random.randint(0, 1000000),
         }
+
+        # Add image_path for I2V if provided
+        if input_reference:
+            args["image_path"] = input_reference
+
+        logger.info(
+            f"Generating video with {num_frames} frames at {width}x{height}, "
+            f"{num_inference_steps} steps, request_id={request_id}"
+        )
+
+        # Run in thread pool to avoid blocking event loop
         result = await asyncio.to_thread(
             self.generator.generate,
             sampling_params_kwargs=args,
         )
 
-        images = result["frames"] if "frames" in result else []
+        # Result contains 'frames' with list of frames
+        frames = result.get("frames", [])
+        if not frames:
+            raise RuntimeError("DiffGenerator returned no frames")
 
-        # Convert images to bytes (handle PIL Images, numpy arrays, or bytes)
-        image_bytes_list = []
-        for img in images:
-            # TODO: checkdoes sglang return only int arrays?
-            if isinstance(img, bytes):
-                image_bytes_list.append(img)
-            elif Image is not None and isinstance(img, Image.Image):
-                # Convert PIL Image to bytes
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                image_bytes_list.append(buf.getvalue())
-            else:
-                # Try to convert numpy array or other formats
-                try:
-                    import numpy as np
+        # Convert frames to video bytes
+        video_bytes = await self._frames_to_video(frames, fps)
+        return video_bytes
 
-                    if isinstance(img, np.ndarray):
-                        # Convert numpy array to PIL Image then to bytes
-                        pil_img = Image.fromarray(img)
-                        buf = io.BytesIO()
-                        pil_img.save(buf, format="PNG")
-                        image_bytes_list.append(buf.getvalue())
-                    else:
-                        raise ValueError(f"Unsupported image type: {type(img)}")
-                except ImportError:
-                    raise RuntimeError(
-                        "Cannot convert image format. Install Pillow: pip install Pillow"
-                    )
+    async def _frames_to_video(
+        self, frames: list, fps: int, codec: str = "libx264"
+    ) -> bytes:
+        """Convert list of frames to video bytes.
 
-        return image_bytes_list
+        Args:
+            frames: List of frames (PIL Images or numpy arrays).
+            fps: Frames per second.
+            codec: Video codec to use.
+
+        Returns:
+            Video bytes in mp4 format.
+        """
+        try:
+            import numpy as np
+            from PIL import Image
+
+            # Convert frames to numpy arrays if needed
+            np_frames = []
+            for frame in frames:
+                if isinstance(frame, Image.Image):
+                    np_frames.append(np.array(frame))
+                elif isinstance(frame, np.ndarray):
+                    np_frames.append(frame)
+                else:
+                    raise ValueError(f"Unsupported frame type: {type(frame)}")
+
+            # Use imageio to write video
+            import imageio
+
+            output_buffer = io.BytesIO()
+            with imageio.get_writer(
+                output_buffer,
+                format="mp4",
+                fps=fps,
+                codec=codec,
+                output_params=["-pix_fmt", "yuv420p"],
+            ) as writer:
+                for frame in np_frames:
+                    writer.append_data(frame)
+
+            output_buffer.seek(0)
+            return output_buffer.read()
+
+        except ImportError as e:
+            raise RuntimeError(
+                f"Missing dependency for video encoding: {e}. "
+                "Install with: pip install imageio imageio-ffmpeg"
+            )
 
     def _parse_size(self, size_str: str) -> tuple[int, int]:
-        """Parse '1024x1024' -> (1024, 1024)"""
+        """Parse 'WxH' -> (width, height)"""
         w, h = size_str.split("x")
-        # TODO: allowed sizes, max 1024? configurable?
         return int(w), int(h)
 
     async def _upload_to_fs(
-        self, image_bytes: bytes, user_id: str, request_id: str
+        self, video_bytes: bytes, user_id: str, request_id: str
     ) -> str:
-        """Upload image to filesystem and return URL.
-
-        Uses per-user storage path:
-            users/{user_id}/generations/{request_id}/{image_uuid}.png
+        """Upload video to filesystem and return URL.
 
         Args:
-            image_bytes: Image data as bytes.
+            video_bytes: Video data as bytes.
             user_id: User identifier from request or context.
             request_id: Request context ID.
 
         Returns:
-            Public URL for the uploaded image.
+            Public URL for the uploaded video.
         """
-        image_uuid = str(uuid.uuid4())
-        image_filename = f"{image_uuid}.png"
-
-        # Per-user storage path
-        storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
+        video_filename = f"{request_id}.mp4"
+        storage_path = video_filename
         full_path = f"{self.root_path}/{storage_path}"
 
-        # Ensure parent directories exist for local filesystem
+        # Ensure output directory exists for local filesystem
         if self.protocol == "file":
-            parent_dir = os.path.dirname(full_path)
-            os.makedirs(parent_dir, exist_ok=True)
+            os.makedirs(self.root_path, exist_ok=True)
 
         # Use pipe() for writing bytes (standard fsspec API)
-        await asyncio.to_thread(self.fs.pipe, full_path, image_bytes)
+        await asyncio.to_thread(self.fs.pipe, full_path, video_bytes)
 
         return self._generate_url(full_path, storage_path)
 
@@ -308,6 +368,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             logger.warning(f"Unknown filesystem type for URL generation: {self.fs_url}")
             return full_path
 
-    def _encode_base64(self, image_bytes: bytes) -> str:
-        """Encode image as base64 string"""
-        return base64.b64encode(image_bytes).decode("utf-8")
+    def _encode_base64(self, video_bytes: bytes) -> str:
+        """Encode video as base64 string"""
+        return base64.b64encode(video_bytes).decode("utf-8")

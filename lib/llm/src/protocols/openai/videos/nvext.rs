@@ -10,7 +10,7 @@ pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
 }
 
-/// NVIDIA extensions to the OpenAI Images API
+/// NVIDIA extensions to the OpenAI Videos API
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
 pub struct NvExt {
