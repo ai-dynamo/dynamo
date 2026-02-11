@@ -286,6 +286,7 @@ impl OpenAIPreprocessor {
                     .as_ref()
                     .and_then(|h| h.latency_sensitivity),
                 lora_name,
+                pin: nvext.pin,
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {

@@ -284,7 +284,7 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser);
+            let kv_push_router = KvPushRouter::new_with_cache_control(router, chooser).await?;
             ServiceBackend::from_engine(Arc::new(kv_push_router))
         }
     };

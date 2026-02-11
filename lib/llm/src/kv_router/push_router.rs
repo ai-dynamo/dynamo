@@ -7,11 +7,13 @@ use anyhow::Result;
 use dynamo_runtime::{
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
-        SingleIn, async_trait,
+        RouterMode, SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
+    protocols::maybe_error::MaybeError,
 };
 use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
@@ -23,9 +25,50 @@ use crate::{
     protocols::common::{llm_backend::LLMEngineOutput, timing::RequestPhase},
 };
 
+/// Response from the worker's cache_control service mesh endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControlResponse {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpinned_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evicted_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_count: Option<u32>,
+}
+
+impl MaybeError for CacheControlResponse {
+    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        CacheControlResponse {
+            status: "error".to_string(),
+            message: Some(err.to_string()),
+            pinned_count: None,
+            unpinned_count: None,
+            evicted_count: None,
+            skipped_count: None,
+        }
+    }
+
+    fn err(&self) -> Option<anyhow::Error> {
+        if self.status == "error" {
+            Some(anyhow::anyhow!(
+                "cache_control error: {}",
+                self.message.as_deref().unwrap_or("unknown")
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    cache_control_client: Option<PushRouter<serde_json::Value, Annotated<CacheControlResponse>>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -40,7 +83,34 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
+        KvPushRouter {
+            inner,
+            chooser,
+            cache_control_client: None,
+        }
+    }
+
+    /// Create a KvPushRouter with a cache_control client for PIN operations.
+    /// The cache_control client connects to the worker's `cache_control` service mesh endpoint,
+    /// enabling post-generation pin/unpin of prefix blocks.
+    pub async fn new_with_cache_control(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        chooser: Arc<KvRouter>,
+    ) -> Result<Self> {
+        let component = chooser.client().endpoint.component().clone();
+        let cc_endpoint = component.endpoint("cache_control");
+        let cc_client = cc_endpoint.client().await?;
+        let cc_push_router =
+            PushRouter::<serde_json::Value, Annotated<CacheControlResponse>>::from_client(
+                cc_client,
+                RouterMode::KV,
+            )
+            .await?;
+        Ok(KvPushRouter {
+            inner,
+            chooser,
+            cache_control_client: Some(cc_push_router),
+        })
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -265,6 +335,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks =
             self.chooser.kv_router_config().router_track_output_blocks && handle_local_updates;
 
+        // Extract PIN hint before consuming the request
+        let pin_prefix = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.pin)
+            .unwrap_or(false);
+        let token_ids_for_pin = if pin_prefix {
+            Some(request.token_ids.clone())
+        } else {
+            None
+        };
+        let cc_client = if pin_prefix {
+            self.cache_control_client.clone()
+        } else {
+            None
+        };
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -346,6 +433,45 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 && let Err(e) = chooser.free(&context_id).await
             {
                 tracing::warn!("Failed to free request {context_id}: {e}");
+            }
+
+            // After stream completion, if pin hint was set, fire-and-forget pin_prefix
+            // to the worker. This runs after all response tokens have been yielded.
+            if pin_prefix {
+                if let (Some(cc), Some(token_ids)) = (&cc_client, &token_ids_for_pin) {
+                    let pin_request = serde_json::json!({
+                        "action": "pin_prefix",
+                        "token_ids": token_ids,
+                    });
+                    let cc_clone = cc.clone();
+                    let pin_context_id = context_id.clone();
+                    tokio::spawn(async move {
+                        match cc_clone.direct(SingleIn::new(pin_request), instance_id).await {
+                            Ok(mut stream) => {
+                                if let Some(resp) = stream.next().await {
+                                    tracing::debug!(
+                                        request_id = %pin_context_id,
+                                        worker_id = instance_id,
+                                        ?resp,
+                                        "pin_prefix response"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    request_id = %pin_context_id,
+                                    worker_id = instance_id,
+                                    "Failed to pin prefix: {e}"
+                                );
+                            }
+                        }
+                    });
+                } else if cc_client.is_none() {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        "pin=true but no cache_control_client configured"
+                    );
+                }
             }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))

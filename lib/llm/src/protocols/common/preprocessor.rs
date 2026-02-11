@@ -58,6 +58,11 @@ pub struct RoutingHints {
     /// ahead in the scheduler queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_jump: Option<f64>,
+
+    /// When true, the router pins the prefix blocks on the selected worker
+    /// after generation completes, protecting them from eviction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

@@ -72,6 +72,14 @@ class StandaloneRouterHandler:
                 kv_router_config=self.kv_router_config,
             )
 
+            # Create cache_control client for PIN operations
+            cache_control_endpoint = (
+                self.runtime.namespace(namespace)
+                .component(component)
+                .endpoint("cache_control")
+            )
+            self.cache_control_client = await cache_control_endpoint.client()
+
         except Exception as e:
             logger.error(f"Failed to initialize KvPushRouter: {e}")
             raise
@@ -150,6 +158,99 @@ class StandaloneRouterHandler:
         )
 
         yield worker_id
+
+    async def cache_control(self, request, context=None):
+        """Service mesh endpoint for cache control operations.
+
+        Dispatches to the worker's cache_control endpoint via the service mesh client.
+        Supported actions: pin_prefix, unpin_prefix.
+
+        Args:
+            request: Dict with "action" key and action-specific parameters.
+            context: Optional Dynamo context.
+
+        Yields:
+            Single dict with operation result.
+        """
+        if self.cache_control_client is None:
+            yield {"status": "error", "message": "cache_control_client not initialized"}
+            return
+
+        try:
+            async for response in self.cache_control_client.round_robin(request):
+                yield response
+                return
+        except Exception as e:
+            logger.error(f"cache_control failed: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def pin_prefix(self, request, context=None):
+        """Pin prefix blocks on the best worker for the given token_ids.
+
+        Args:
+            request: Dict with "token_ids" list.
+            context: Optional Dynamo context.
+
+        Yields:
+            Single dict with pin result.
+        """
+        token_ids = request.get("token_ids", [])
+        if not token_ids:
+            yield {"status": "error", "message": "token_ids required"}
+            return
+
+        if self.kv_push_router is None:
+            yield {"status": "error", "message": "Router not initialized"}
+            return
+
+        # Find the best worker for these tokens
+        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_push_router.best_worker(
+            token_ids
+        )
+
+        # Send pin_prefix to that worker via cache_control
+        pin_request = {"action": "pin_prefix", "token_ids": token_ids}
+        try:
+            async for response in self.cache_control_client.direct(pin_request, worker_id):
+                yield response
+                return
+        except Exception as e:
+            logger.error(f"pin_prefix failed on worker {worker_id}: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def unpin_prefix(self, request, context=None):
+        """Unpin prefix blocks on the best worker for the given token_ids.
+
+        Args:
+            request: Dict with "token_ids" list.
+            context: Optional Dynamo context.
+
+        Yields:
+            Single dict with unpin result.
+        """
+        token_ids = request.get("token_ids", [])
+        if not token_ids:
+            yield {"status": "error", "message": "token_ids required"}
+            return
+
+        if self.kv_push_router is None:
+            yield {"status": "error", "message": "Router not initialized"}
+            return
+
+        # Find the best worker for these tokens
+        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_push_router.best_worker(
+            token_ids
+        )
+
+        # Send unpin_prefix to that worker via cache_control
+        unpin_request = {"action": "unpin_prefix", "token_ids": token_ids}
+        try:
+            async for response in self.cache_control_client.direct(unpin_request, worker_id):
+                yield response
+                return
+        except Exception as e:
+            logger.error(f"unpin_prefix failed on worker {worker_id}: {e}")
+            yield {"status": "error", "message": str(e)}
 
 
 def parse_args():
@@ -316,10 +417,13 @@ async def worker(runtime: DistributedRuntime):
     # Expose endpoints
     generate_endpoint = component.endpoint("generate")
     best_worker_endpoint = component.endpoint("best_worker_id")
+    cache_control_endpoint = component.endpoint("cache_control")
+    pin_prefix_endpoint = component.endpoint("pin_prefix")
+    unpin_prefix_endpoint = component.endpoint("unpin_prefix")
 
     logger.debug("Starting to serve endpoints...")
 
-    # Serve both endpoints concurrently
+    # Serve all endpoints concurrently
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -329,6 +433,21 @@ async def worker(runtime: DistributedRuntime):
             ),
             best_worker_endpoint.serve_endpoint(
                 handler.best_worker_id,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "router")],
+            ),
+            cache_control_endpoint.serve_endpoint(
+                handler.cache_control,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "router")],
+            ),
+            pin_prefix_endpoint.serve_endpoint(
+                handler.pin_prefix,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "router")],
+            ),
+            unpin_prefix_endpoint.serve_endpoint(
+                handler.unpin_prefix,
                 graceful_shutdown=True,
                 metrics_labels=[("service", "router")],
             ),

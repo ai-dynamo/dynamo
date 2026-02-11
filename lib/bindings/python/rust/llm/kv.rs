@@ -1029,8 +1029,11 @@ impl KvPushRouter {
             )
             .await?;
 
-            // Create KvPushRouter (kv_router is already Arc<KvRouter>)
-            let kv_push_router = llm_rs::kv_router::KvPushRouter::new(push_router, kv_router);
+            // Create KvPushRouter with cache_control client (kv_router is already Arc<KvRouter>)
+            let kv_push_router =
+                llm_rs::kv_router::KvPushRouter::new_with_cache_control(push_router, kv_router)
+                    .await
+                    .map_err(to_pyerr)?;
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),

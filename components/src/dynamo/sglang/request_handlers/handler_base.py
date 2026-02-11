@@ -317,6 +317,67 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             "new_version": req.new_version,
         }
 
+    async def pin_prefix(self, body: dict) -> dict:
+        """Pin a prefix by token_ids to resist eviction.
+
+        Args:
+            body: Dict with "token_ids" list of token IDs.
+        """
+        token_ids = body.get("token_ids", [])
+        if not token_ids:
+            return {"status": "error", "message": "token_ids required"}
+        try:
+            result = await self.engine.tokenizer_manager.pin_prefix(token_ids)
+            return {
+                "status": "ok" if result.success else "error",
+                "pinned_count": result.pinned_count,
+                "message": result.message,
+            }
+        except Exception as e:
+            logging.error(f"Failed to pin prefix: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def unpin_prefix(self, body: dict) -> dict:
+        """Unpin a prefix by token_ids to allow normal eviction.
+
+        Args:
+            body: Dict with "token_ids" list of token IDs.
+        """
+        token_ids = body.get("token_ids", [])
+        if not token_ids:
+            return {"status": "error", "message": "token_ids required"}
+        try:
+            result = await self.engine.tokenizer_manager.unpin_prefix(token_ids)
+            return {
+                "status": "ok" if result.success else "error",
+                "unpinned_count": result.unpinned_count,
+                "message": result.message,
+            }
+        except Exception as e:
+            logging.error(f"Failed to unpin prefix: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def cache_control(self, request, context=None):
+        """Service mesh endpoint for cache control operations.
+
+        Dispatches to pin_prefix / unpin_prefix.
+
+        Args:
+            request: Dict with "action" key and action-specific parameters.
+            context: Optional Dynamo context (unused but required by protocol).
+
+        Yields:
+            Single dict with operation result.
+        """
+        action = request.get("action")
+        if action == "pin_prefix":
+            result = await self.pin_prefix(request)
+        elif action == "unpin_prefix":
+            result = await self.unpin_prefix(request)
+        else:
+            result = {"status": "error", "message": f"Unknown action: {action}"}
+        yield result
+
     def register_engine_routes(self, runtime) -> None:
         """Register all engine routes for this handler.
 
@@ -331,6 +392,8 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         runtime.register_engine_route(
             "resume_memory_occupation", self.resume_memory_occupation
         )
+        runtime.register_engine_route("pin_prefix", self.pin_prefix)
+        runtime.register_engine_route("unpin_prefix", self.unpin_prefix)
         runtime.register_engine_route(
             "update_weights_from_disk", self.update_weights_from_disk
         )

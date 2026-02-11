@@ -177,6 +177,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    cache_control_endpoint = component.endpoint("cache_control")
+
     try:
         # Start endpoint immediately and register model concurrently
         # Requests queue until ready_event is set (TODO: Part of new PR)
@@ -186,6 +188,11 @@ async def init(runtime: DistributedRuntime, config: Config):
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            cache_control_endpoint.serve_endpoint(
+                handler.cache_control,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
             ),
             register_llm_with_readiness_gate(
                 engine,
@@ -250,6 +257,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
+    cache_control_endpoint = component.endpoint("cache_control")
+
     try:
         # Start endpoint immediately and register model concurrently
         # Registration publishes runtime_config with bootstrap endpoint for optimization
@@ -259,6 +268,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            cache_control_endpoint.serve_endpoint(
+                handler.cache_control,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
             ),
             register_llm_with_readiness_gate(
                 engine,
