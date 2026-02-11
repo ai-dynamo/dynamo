@@ -56,11 +56,11 @@ def get_checkers_for_scenario(test_name: str, scenario: Scenario) -> List[BaseCh
     """
     # 1. Explicit checkers take priority
     if scenario.checkers is not None:
-        logger.info(f"Using explicit checkers for {test_name}: {scenario.checkers}")
+        logger.debug(f"Using explicit checkers for {test_name}: {scenario.checkers}")
         return scenario.checkers
 
     # 2. Pattern-based checker selection
-    logger.info(f"Using pattern-based checker selection for {test_name}")
+    logger.debug(f"Using pattern-based checker selection for {test_name}")
 
     checkers: List[BaseChecker] = []
 
@@ -74,7 +74,7 @@ def get_checkers_for_scenario(test_name: str, scenario: Scenario) -> List[BaseCh
     if results_checker:
         checkers.append(results_checker)
 
-    logger.info(f"Selected checkers: {[c.name for c in checkers]}")
+    logger.debug(f"Selected checkers: {[c.name for c in checkers]}")
     return checkers
 
 
@@ -111,7 +111,7 @@ def get_scenario_checker(test_name: str, scenario: Scenario) -> Optional[BaseChe
         return ProcessTerminationChecker()
 
     # Default: no specific scenario checker
-    logger.info(f"No specific scenario checker for {test_name}")
+    logger.debug(f"No specific scenario checker for {test_name}")
     return None
 
 
@@ -162,8 +162,8 @@ def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
 
     # Select appropriate results checker
     if has_redundancy:
-        logger.info("Using HighAvailabilityResultsChecker (DP > 1)")
+        logger.debug("Using HighAvailabilityResultsChecker (DP > 1)")
         return HighAvailabilityResultsChecker()
     else:
-        logger.info("Using SingleWorkerResultsChecker (DP = 1)")
+        logger.debug("Using SingleWorkerResultsChecker (DP = 1)")
         return SingleWorkerResultsChecker()

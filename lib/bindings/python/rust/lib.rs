@@ -163,8 +163,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
-    m.add_class::<llm::kv::KvIndexer>()?;
-    m.add_class::<llm::kv::ApproxKvIndexer>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::kv::ZmqKvEventListener>()?;
@@ -835,11 +833,13 @@ impl Endpoint {
         })
     }
 
-    fn client<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        self.client2(py, RouterMode::RoundRobin)
-    }
-
-    fn client2<'p>(&self, py: Python<'p>, router_mode: RouterMode) -> PyResult<Bound<'p, PyAny>> {
+    #[pyo3(signature = (router_mode = None))]
+    fn client<'p>(
+        &self,
+        py: Python<'p>,
+        router_mode: Option<RouterMode>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
