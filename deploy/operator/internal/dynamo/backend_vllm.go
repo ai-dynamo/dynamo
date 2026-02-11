@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/featuregate"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -25,7 +27,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 
 	if isMultinode {
 		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources, numberOfNodes)
+		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources, numberOfNodes, component.Annotations)
 
 		// Remove probes for multinode worker and leader
 		if role == RoleWorker {
@@ -69,17 +71,21 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	// do nothing
 }
 
-// updateVLLMMultinodeArgs will inject Ray-specific flags for tensor parallel multinode deployments
-// OR data parallel flags for data parallel multinode deployments
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
+// updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
+// parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32, annotations map[string]string) {
 	expandedArgs := getExpandedArgs(container)
-	if needsRayDistributedLaunch(expandedArgs, resources) {
-		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
+	if needsMultinodeDistributedLaunch(expandedArgs, resources) {
+		if shouldUseMpBackend(annotations) {
+			injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
+		} else {
+			injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
+		}
 	} else if needsDataParallelLaunch(expandedArgs, resources) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
 	} else {
 		logger := log.Log.WithName("vllm-backend")
-		logger.Info("No need to inject Ray-specific or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
+		logger.Info("No need to inject distributed or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
 	}
 }
 
@@ -91,6 +97,83 @@ func getExpandedArgs(container *corev1.Container) []string {
 		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
 	}
 	return expandedArgs
+}
+
+// shouldUseMpBackend determines whether to use multiprocessing (mp) or Ray for vLLM
+// multi-node distributed launches.
+//
+// Decision logic:
+//  1. Explicit override annotation takes priority (user set "mp" or "ray")
+//  2. Operator origin version feature gate: uses featuregate.VLLMMultiprocessing
+func shouldUseMpBackend(annotations map[string]string) bool {
+	logger := log.Log.WithName("vllm-backend")
+
+	// Step 1: Check explicit override
+	if override, exists := annotations[commonconsts.KubeAnnotationVLLMDistributedExecutorBackend]; exists {
+		switch strings.ToLower(override) {
+		case "mp":
+			logger.Info("Using mp backend (explicit override)")
+			return true
+		case "ray":
+			logger.Info("Using ray backend (explicit override)")
+			return false
+		default:
+			logger.Info("Ignoring invalid vllm-distributed-executor-backend annotation value, falling through to version check",
+				"value", override)
+		}
+	}
+
+	// Step 2: Check operator origin version gate
+	return featuregate.VLLMMultiprocessing.IsEnabled(annotations)
+}
+
+// injectMpDistributedLaunchFlags injects vLLM multiprocessing flags for multi-node TP/PP deployments.
+//
+// Leader: runs the original vLLM command with --distributed-executor-backend mp,
+// --nnodes, --node-rank 0, --master-addr, --master-port
+//
+// Worker: waits for leader's master port to be listening (TCP port-wait loop),
+// then runs the same vLLM command with --node-rank <rank> and the same coordination flags
+func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) {
+	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+	mpFlags := fmt.Sprintf("--distributed-executor-backend mp --nnodes %d --master-addr %s --master-port %s",
+		numberOfNodes, leaderHostname, commonconsts.VLLMMpMasterPort)
+
+	needsShell := false
+
+	switch role {
+	case RoleLeader:
+		mpFlags += " --node-rank 0"
+	case RoleWorker:
+		nodeRank, _ := multinodeDeployer.GetNodeRank()
+		needsShell = true // Always need shell for port-wait loop
+		mpFlags += fmt.Sprintf(" --node-rank %s", nodeRank)
+	}
+
+	injectFlagsIntoContainerCommand(container, mpFlags, needsShell, "vllm")
+
+	// For workers, prepend a port-wait loop to ensure the leader's master port
+	// is listening before starting vLLM distributed init.
+	if role == RoleWorker {
+		injectMpWorkerPortWait(container, leaderHostname)
+	}
+}
+
+// injectMpWorkerPortWait prepends a TCP port-wait loop to the worker container command.
+// The worker waits until the leader's master port (used by PyTorch TCPStore for distributed init)
+// is accepting connections before starting the vLLM process.
+// Uses Python's socket module since nc/netcat may not be available in the container image.
+func injectMpWorkerPortWait(container *corev1.Container, leaderHostname string) {
+	if len(container.Args) == 0 {
+		return
+	}
+
+	waitPrefix := fmt.Sprintf(
+		`echo 'Waiting for leader master port at %s:%s...' && until python3 -c 'import socket; s=socket.create_connection(("%s", %s), timeout=2); s.close()' 2>/dev/null; do sleep 2; done && echo 'Leader master port ready' && `,
+		leaderHostname, commonconsts.VLLMMpMasterPort, leaderHostname, commonconsts.VLLMMpMasterPort,
+	)
+
+	container.Args[0] = waitPrefix + container.Args[0]
 }
 
 func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
@@ -179,9 +262,9 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 	injectFlagsIntoContainerCommand(container, strings.Join(flags, " "), needsShell, "vllm")
 }
 
-// if world size (within DP rank) > GPU count, then we need to inject ray
-// world size = tensor parallel size * pipeline parallel size
-func needsRayDistributedLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
+// needsMultinodeDistributedLaunch returns true when the model's world size (TP * PP)
+// exceeds the GPU count of a single node, requiring multi-node distribution (via mp or ray).
+func needsMultinodeDistributedLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
 	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
 		return false
