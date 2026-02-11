@@ -79,7 +79,9 @@ class ImageLoader:
 
             # PIL is sync, so offload to a thread to avoid blocking the event loop
             # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
-            image = await asyncio.to_thread(Image.open, image_data, formats=["JPEG", "PNG", "WEBP"])
+            image = await asyncio.to_thread(
+                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
+            )
 
             # Validate image format and convert to RGB
             if image.format not in ("JPEG", "PNG", "WEBP"):
