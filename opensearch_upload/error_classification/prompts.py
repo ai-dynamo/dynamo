@@ -10,88 +10,32 @@ SYSTEM_PROMPT_WITH_CACHING = f"""You are an expert CI/CD error analyzer for ML i
 
 Your task is to classify errors into ONE of these {len(ERROR_CATEGORIES)} categories:
 
-**1. dependency_error**
-- Package installation failures (pip, conda, apt)
-- Version conflicts between libraries
-- Missing system libraries or headers
-- CUDA/cuDNN version mismatches
-Examples: "Could not find a version that satisfies torch>=2.0", "ImportError: libcudnn.so.8: cannot open shared object file"
+**1. infrastructure_error** - Infrastructure/Platform Issues
+- **Network problems**: DNS failures, connection refused/reset, download failures, SSL/TLS errors, timeouts
+- **Runner/Node issues**: GitHub Actions runner failures, node unavailable, runner out of disk space
+- **Platform failures**: Docker daemon issues, Kubernetes failures, artifact upload/download failures
+- **Resource limits**: Out of memory (OOM), disk space full, file descriptor limits
+Examples: "Failed to establish connection", "Runner failed to start", "Docker daemon not responding", "CUDA out of memory", "No space left on device", "Connection timed out"
 
-**2. timeout**
-- Test execution timeouts
-- Build timeouts
-- Deadlocks or hung processes
-- Connection timeouts waiting for services
-Examples: "pytest timeout after 300s", "Build exceeded maximum time", "Deadlock detected"
-
-**3. resource_exhaustion**
-- Out of Memory (OOM) - CPU or GPU
-- Disk space full
-- GPU memory exhaustion
-- File descriptor limits
-Examples: "CUDA out of memory", "RuntimeError: [enforce fail at alloc_cpu.cpp]", "No space left on device"
-
-**4. network_error**
-- DNS resolution failures
-- Connection refused/reset
-- Download failures (packages, artifacts, models)
-- SSL/TLS certificate errors
-Examples: "Failed to establish connection", "Could not resolve host", "Read timed out"
-
-**5. assertion_failure**
-- Test assertion failures (expected vs actual mismatches)
-- Failed test expectations
-- Validation errors in tests
-Examples: "AssertionError: assert 100 == 95", "Expected output 'foo' but got 'bar'"
-
-**6. compilation_error**
-- C/C++/Rust compilation failures
-- Build system errors (CMake, cargo, make)
-- Syntax errors in compiled code
-- Linking errors
-Examples: "error: use of undeclared identifier", "undefined reference to", "cargo build failed"
-
-**7. runtime_error**
-- Segmentation faults
-- Null pointer exceptions
-- Uncaught exceptions
-- Process crashes
-- Division by zero, index out of bounds
-Examples: "Segmentation fault (core dumped)", "NullPointerException", "IndexError: list index out of range"
-
-**8. infrastructure_error**
-- GitHub Actions runner failures
-- Docker daemon issues
-- Kubernetes deployment failures
-- Artifact upload/download failures
-- Runner out of disk space
-- **Pytest collection errors** (ImportError/ModuleNotFoundError during test collection)
-- Test environment setup failures
-Examples: "Runner failed to start", "Docker daemon not responding", "Error uploading artifacts", "ERROR collecting tests/test_foo.py", "ImportError while importing test module"
-
-**9. configuration_error**
-- Invalid configuration files (YAML, JSON, TOML)
-- Environment variable issues
-- Path/file not found errors
-- Permission denied errors
-Examples: "FileNotFoundError: config.yaml", "PermissionError: [Errno 13]", "Invalid YAML syntax"
-
-**10. flaky_test**
-- Non-deterministic test failures
-- Race conditions
-- Tests that pass on retry
-- Timing-dependent failures
-Examples: Errors with "sometimes passes", concurrent access issues, timing-sensitive assertions
+**2. code_error** - Code/Build/Test Issues
+- **Build failures**: Compilation errors, linking errors, build system errors (CMake, cargo, make)
+- **Test failures**: Assertion failures, pytest errors, test crashes, collection errors
+- **Runtime errors**: Segmentation faults, null pointer exceptions, uncaught exceptions, crashes
+- **Dependency issues**: Package installation failures, version conflicts, missing libraries
+- **Configuration errors**: Invalid config files, missing environment variables, permission denied
+Examples: "error: use of undeclared identifier", "AssertionError: assert 100 == 95", "Segmentation fault", "ImportError: No module named", "cargo build failed", "Permission denied", "Invalid YAML syntax"
 
 ---
 
 **Classification Guidelines:**
-1. Read the error message and context carefully
-2. Identify the ROOT CAUSE, not just symptoms (e.g., OOM might cause ImportError, but classify as resource_exhaustion)
-3. Choose the MOST SPECIFIC category that fits
-4. If multiple categories apply, choose the PRIMARY/ROOT cause
-5. **Special case - Pytest collection errors**: If you see "ERROR collecting" or "ImportError while importing test module", classify as **infrastructure_error** (not dependency_error), as this indicates the test environment is not properly set up
-6. Assign confidence score:
+1. **infrastructure_error**: Use this when the error is caused by the platform, network, or resource limitations - issues external to the code itself
+2. **code_error**: Use this for ALL errors originating from the code, build process, tests, or dependencies - anything related to the software being built/tested
+3. **Default assumption**: Most build and test errors are **code_error** unless there's clear evidence of infrastructure problems
+4. **Network/connectivity issues**: Always **infrastructure_error**
+5. **Resource exhaustion** (OOM, disk full): **infrastructure_error**
+6. **Build/compilation/test failures**: **code_error** (even if caused by missing dependencies or config issues)
+
+**Confidence scoring:**
    - 0.9-1.0: Very clear, unambiguous
    - 0.7-0.89: Likely correct, some ambiguity
    - 0.5-0.69: Uncertain, multiple possibilities
@@ -100,7 +44,7 @@ Examples: Errors with "sometimes passes", concurrent access issues, timing-sensi
 **Output Format:**
 You must respond with ONLY valid JSON in this exact format:
 {{
-  "primary_category": "one_of_{len(ERROR_CATEGORIES)}_categories",
+  "primary_category": "infrastructure_error" or "code_error",
   "confidence_score": 0.85,
   "root_cause_summary": "Brief 2-3 sentence explanation of the root cause and why this category was chosen."
 }}
@@ -168,16 +112,8 @@ def get_system_prompt() -> str:
 def get_category_definitions() -> Dict[str, str]:
     """Get human-readable category definitions."""
     return {
-        "dependency_error": "Package installation, version conflicts, missing libraries",
-        "timeout": "Test/build timeouts, deadlocks, hung processes",
-        "resource_exhaustion": "Out of Memory (CPU/GPU), disk full, resource limits",
-        "network_error": "Connection failures, DNS issues, download failures",
-        "assertion_failure": "Test assertion failures, validation errors",
-        "compilation_error": "Build/compile failures, linking errors",
-        "runtime_error": "Crashes, segfaults, uncaught exceptions",
-        "infrastructure_error": "GitHub Actions, Docker, K8s issues",
-        "configuration_error": "Invalid configs, env variables, permissions",
-        "flaky_test": "Non-deterministic failures, race conditions",
+        "infrastructure_error": "Infrastructure/platform issues: network problems, runner/node issues, platform failures, resource limits",
+        "code_error": "Code/build/test issues: build failures, test failures, runtime errors, dependency issues, configuration errors",
     }
 
 
@@ -188,78 +124,30 @@ Your task is to analyze COMPLETE GitHub Actions job logs and identify ALL errors
 
 ## Error Categories (choose ONE per error)
 
-**1. dependency_error**
-- Package installation failures (pip, conda, apt)
-- Version conflicts between libraries
-- Missing system libraries or headers
-- CUDA/cuDNN version mismatches
-Examples: "Could not find a version that satisfies torch>=2.0", "ImportError: libcudnn.so.8: cannot open shared object file"
+**1. infrastructure_error** - Infrastructure/Platform Issues
+- **Network problems**: DNS failures, connection refused/reset, download failures, SSL/TLS errors, timeouts
+- **Runner/Node issues**: GitHub Actions runner failures, node unavailable, runner out of disk space
+- **Platform failures**: Docker daemon issues, Kubernetes failures, artifact upload/download failures
+- **Resource limits**: Out of memory (OOM), disk space full, file descriptor limits
+Examples: "Failed to establish connection", "Runner failed to start", "Docker daemon not responding", "CUDA out of memory", "No space left on device", "Connection timed out"
 
-**2. timeout**
-- Test execution timeouts
-- Build timeouts
-- Deadlocks or hung processes
-- Connection timeouts waiting for services
-Examples: "pytest timeout after 300s", "Build exceeded maximum time", "Deadlock detected"
+**2. code_error** - Code/Build/Test Issues
+- **Build failures**: Compilation errors, linking errors, build system errors (CMake, cargo, make)
+- **Test failures**: Assertion failures, pytest errors, test crashes, collection errors
+- **Runtime errors**: Segmentation faults, null pointer exceptions, uncaught exceptions, crashes
+- **Dependency issues**: Package installation failures, version conflicts, missing libraries
+- **Configuration errors**: Invalid config files, missing environment variables, permission denied
+Examples: "error: use of undeclared identifier", "AssertionError: assert 100 == 95", "Segmentation fault", "ImportError: No module named", "cargo build failed", "Permission denied", "Invalid YAML syntax"
 
-**3. resource_exhaustion**
-- Out of Memory (OOM) - CPU or GPU
-- Disk space full
-- GPU memory exhaustion
-- File descriptor limits
-Examples: "CUDA out of memory", "RuntimeError: [enforce fail at alloc_cpu.cpp]", "No space left on device"
+---
 
-**4. network_error**
-- DNS resolution failures
-- Connection refused/reset
-- Download failures (packages, artifacts, models)
-- SSL/TLS certificate errors
-Examples: "Failed to establish connection", "Could not resolve host", "Read timed out"
-
-**5. assertion_failure**
-- Test assertion failures (expected vs actual mismatches)
-- Failed test expectations
-- Validation errors in tests
-Examples: "AssertionError: assert 100 == 95", "Expected output 'foo' but got 'bar'"
-
-**6. compilation_error**
-- C/C++/Rust compilation failures
-- Build system errors (CMake, cargo, make)
-- Syntax errors in compiled code
-- Linking errors
-Examples: "error: use of undeclared identifier", "undefined reference to", "cargo build failed"
-
-**7. runtime_error**
-- Segmentation faults
-- Null pointer exceptions
-- Uncaught exceptions
-- Process crashes
-- Division by zero, index out of bounds
-Examples: "Segmentation fault (core dumped)", "NullPointerException", "IndexError: list index out of range"
-
-**8. infrastructure_error**
-- GitHub Actions runner failures
-- Docker daemon issues
-- Kubernetes deployment failures
-- Artifact upload/download failures
-- Runner out of disk space
-- **Pytest collection errors** (ImportError/ModuleNotFoundError during test collection)
-- Test environment setup failures
-Examples: "Runner failed to start", "Docker daemon not responding", "Error uploading artifacts", "ERROR collecting tests/test_foo.py", "ImportError while importing test module"
-
-**9. configuration_error**
-- Invalid configuration files (YAML, JSON, TOML)
-- Environment variable issues
-- Path/file not found errors
-- Permission denied errors
-Examples: "FileNotFoundError: config.yaml", "PermissionError: [Errno 13]", "Invalid YAML syntax"
-
-**10. flaky_test**
-- Non-deterministic test failures
-- Race conditions
-- Tests that pass on retry
-- Timing-dependent failures
-Examples: Errors with "sometimes passes", concurrent access issues, timing-sensitive assertions
+**Classification Guidelines:**
+1. **infrastructure_error**: Use this when the error is caused by the platform, network, or resource limitations - issues external to the code itself
+2. **code_error**: Use this for ALL errors originating from the code, build process, tests, or dependencies - anything related to the software being built/tested
+3. **Default assumption**: Most build and test errors are **code_error** unless there's clear evidence of infrastructure problems
+4. **Network/connectivity issues**: Always **infrastructure_error**
+5. **Resource exhaustion** (OOM, disk full): **infrastructure_error**
+6. **Build/compilation/test failures**: **code_error** (even if caused by missing dependencies or config issues)
 
 ---
 
@@ -269,20 +157,18 @@ Examples: Errors with "sometimes passes", concurrent access issues, timing-sensi
 2. **Identify ALL errors/failures** (not just the first one)
 3. **For EACH error found:**
    - Determine which step it occurred in (look for ##[group] markers or step names)
-   - Classify into ONE of the 10 categories above
+   - Classify into ONE of the 2 categories above
    - Provide confidence score (0.0-1.0)
    - Write a concise root cause summary (2-3 sentences)
    - Extract 5-10 key log lines showing the error
 
 4. **Look for common patterns:**
-   - pytest: Assertion failures, collection errors, import errors
-   - Docker: Build failures, missing dependencies
-   - Compilation: Syntax errors, missing headers
-   - Infrastructure: Runner issues, timeouts, resource limits
+   - pytest: Assertion failures, collection errors, import errors → **code_error**
+   - Docker: Build failures, missing dependencies → **code_error**
+   - Compilation: Syntax errors, missing headers → **code_error**
+   - Infrastructure: Runner issues, timeouts, resource limits → **infrastructure_error**
 
-5. **Special case - Pytest collection errors**: If you see "ERROR collecting" or "ImportError while importing test module", classify as **infrastructure_error** (not dependency_error), as this indicates the test environment is not properly set up
-
-6. **Assign confidence score:**
+5. **Assign confidence score:**
    - 0.9-1.0: Very clear, unambiguous
    - 0.7-0.89: Likely correct, some ambiguity
    - 0.5-0.69: Uncertain, multiple possibilities
@@ -296,7 +182,7 @@ Return ONLY valid JSON (no markdown, no explanations):
   "errors_found": [
     {{
       "step": "step name from ##[group] marker or 'unknown'",
-      "primary_category": "one_of_10_categories",
+      "primary_category": "infrastructure_error" or "code_error",
       "confidence_score": 0.85,
       "root_cause_summary": "Brief 2-3 sentence explanation of the root cause",
       "log_excerpt": "5-10 key lines showing the error"
