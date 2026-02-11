@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
-use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -554,14 +554,20 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, store_kv, request_plane, enable_nats=None))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None))]
     fn new(
         event_loop: PyObject,
-        store_kv: String,
+        discovery_backend: String,
         request_plane: String,
         enable_nats: Option<bool>,
     ) -> PyResult<Self> {
-        let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
+        let discovery_backend_config = match discovery_backend.as_str() {
+            "kubernetes" => DiscoveryBackend::Kubernetes,
+            other => {
+                let selector: kv::Selector = other.parse().map_err(to_pyerr)?;
+                DiscoveryBackend::KvStore(selector)
+            }
+        };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
@@ -603,7 +609,7 @@ impl DistributedRuntime {
         let enable_nats = enable_nats.unwrap_or(true); // Default to true
 
         let runtime_config = DistributedConfig {
-            store_backend: selected_kv_store,
+            discovery_backend: discovery_backend_config,
             nats_config: if request_plane.is_nats() || enable_nats {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {

@@ -120,11 +120,11 @@ pub struct Flags {
     #[arg(long, value_parser = clap::value_parser!(u32).range(0..1024))]
     pub migration_limit: Option<u32>,
 
-    /// Which key-value backend to use: etcd, mem, file.
+    /// Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory).
     /// Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details.
     /// File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.
-    #[arg(long, default_value = "etcd", value_parser = ["etcd", "file", "mem"])]
-    pub store_kv: String,
+    #[arg(long, default_value = "etcd", value_parser = ["kubernetes", "etcd", "file", "mem"])]
+    pub discovery_backend: String,
 
     /// Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp].
     #[arg(long, default_value = "tcp", value_parser = ["nats", "http", "tcp"])]

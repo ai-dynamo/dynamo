@@ -72,7 +72,7 @@ spec:
               value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: HF_HOME
               value: /opt/models
-            - name: DYN_STORE_KV
+            - name: DYN_DISCOVERY_BACKEND
               value: "mem"
           args:
           - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"

@@ -37,7 +37,7 @@ class Config:
     is_prefill_worker: bool
     is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
-    store_kv: str
+    discovery_backend: str
     request_plane: str
     event_plane: str
     enable_local_indexer: bool = True
@@ -268,11 +268,11 @@ def parse_args() -> Config:
         help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
     )
     parser.add_argument(
-        "--store-kv",
+        "--discovery-backend",
         type=str,
-        choices=["etcd", "file", "mem"],
-        default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        choices=["kubernetes", "etcd", "file", "mem"],
+        default=os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        help="Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -448,7 +448,7 @@ def parse_args() -> Config:
     config.ec_consumer_mode = args.ec_consumer_mode
     config.omni = args.omni
     config.stage_configs_path = args.stage_configs_path
-    config.store_kv = args.store_kv
+    config.discovery_backend = args.discovery_backend
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
     config.enable_local_indexer = not args.durable_kv_events

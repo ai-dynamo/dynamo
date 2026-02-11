@@ -310,11 +310,11 @@ def parse_args():
     )
     add_config_dump_args(parser)
     parser.add_argument(
-        "--store-kv",
+        "--discovery-backend",
         type=str,
-        choices=["etcd", "file", "mem"],
-        default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        choices=["kubernetes", "etcd", "file", "mem"],
+        default=os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        help="Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -412,7 +412,7 @@ async def async_main():
     )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
+    runtime = DistributedRuntime(loop, flags.discovery_backend, flags.request_plane, enable_nats)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))

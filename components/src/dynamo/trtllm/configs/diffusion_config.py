@@ -29,7 +29,7 @@ class DiffusionConfig:
     namespace: str = DYN_NAMESPACE
     component: str = "diffusion"
     endpoint: str = "generate"
-    store_kv: str = "etcd"
+    discovery_backend: str = "etcd"
     request_plane: str = "tcp"
     event_plane: str = "nats"
 

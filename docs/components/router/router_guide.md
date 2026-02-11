@@ -180,7 +180,7 @@ The main KV-aware routing arguments:
 > - **No KV events** (`--no-kv-events`): State persistence is not supported.
 >
 > **Request plane is independent of KV event transport.**
-> The router can run without etcd or NATS when using ZMQ event plane (`--event-plane zmq`) and file/mem store (`--store-kv file` or `--store-kv mem`); in this case, KV events use ZMQ transport instead of NATS.
+> The router can run without etcd or NATS when using ZMQ event plane (`--event-plane zmq`) and file/mem discovery (`--discovery-backend file` or `--discovery-backend mem`); in this case, KV events use ZMQ transport instead of NATS.
 > `DYN_REQUEST_PLANE` controls how **requests** are sent (TCP/HTTP/NATS), but KV-aware routing uses **NATS** for KV events only in JetStream or NATS Core modes (not ZMQ mode).
 > When KV events are enabled (default) with NATS-based event plane, NATS is automatically initialized. You can optionally set `NATS_SERVER=nats://...` to specify a custom NATS server; otherwise, it defaults to `localhost:4222`.
 > `--no-kv-events` disables KV event transport entirely.
