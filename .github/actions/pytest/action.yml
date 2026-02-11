@@ -153,8 +153,9 @@ runs:
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          -v "$(pwd)/container/deps:/tmp/deps:ro" \
           ${{ inputs.image_tag }} \
-          bash -c "${PYTEST_CMD}"
+          bash -c "uv pip install -q -r /tmp/deps/requirements.test.txt && ${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -243,8 +244,9 @@ runs:
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          -v "$(pwd)/container/deps:/tmp/deps:ro" \
           ${{ inputs.image_tag }} \
-          bash -c "${PYTEST_CMD}"
+          bash -c "uv pip install -q -r /tmp/deps/requirements.test.txt && ${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV

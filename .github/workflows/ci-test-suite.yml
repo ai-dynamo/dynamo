@@ -942,7 +942,6 @@ jobs:
           source venv/bin/activate
           pip install --upgrade pip
           pip install -r container/deps/requirements.test.txt
-          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
           # Create test-results directory
           mkdir -p test-results
           # Run the pytest command with JUnit XML output

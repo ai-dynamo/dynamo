@@ -81,13 +81,13 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
         pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
     fi
 
-# Install common and test dependencies as root
+# Install runtime dependencies as root
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
-        --requirement /mnt/local_src/container/deps/requirements.txt \
-        --requirement /mnt/local_src/container/deps/requirements.test.txt \
+        --requirement /mnt/local_src/container/deps/requirements.runtime.txt \
+        --requirement /mnt/local_src/container/deps/requirements.runtime.sglang.txt \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
