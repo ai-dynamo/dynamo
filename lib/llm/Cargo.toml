@@ -13,7 +13,7 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = ["media-nixl", "block-manager"]
+default = ["block-manager"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
@@ -25,8 +25,7 @@ block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-nixl = ["dep:nixl-sys", "dep:flate2"]
-media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
+media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 
@@ -117,8 +116,8 @@ nixl-sys = { version = "=0.9.0", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
-# media-nixl (zlib compression for NIXL metadata)
-flate2 = { version = "1", optional = true }
+# media (zlib compression for NIXL metadata)
+flate2 = { version = "1" }
 
 # block_manager_bench
 clap = { version = "4.5.49", features = ["derive"], optional = true }

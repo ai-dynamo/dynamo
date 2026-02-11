@@ -26,6 +26,7 @@ from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Context
@@ -847,6 +848,19 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+
+        # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
+        # Explicit field mapping avoids breakage if either side adds fields the other
+        # doesn't know about (e.g. Rust's "backend"/"choice" vs TRT-LLM's fields).
+        guided_decoding = overrides.pop("guided_decoding", None)
+        if guided_decoding is not None and isinstance(guided_decoding, dict):
+            overrides["guided_decoding"] = GuidedDecodingParams(
+                json=guided_decoding.get("json"),
+                regex=guided_decoding.get("regex"),
+                grammar=guided_decoding.get("grammar"),
+                json_object=guided_decoding.get("json_object", False),
+                structural_tag=guided_decoding.get("structural_tag"),
+            )
 
         # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
         # 1. it catches unsupported fields / attributes.

@@ -28,7 +28,6 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
@@ -95,7 +94,11 @@ pub struct LLMMetricAnnotation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokenizer_latency: Option<Duration>,
+    pub tokenize_latency: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize_total_latency: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize_count: Option<u64>,
 }
 
 impl LLMMetricAnnotation {
@@ -141,7 +144,6 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
-    #[cfg(feature = "media-nixl")]
     media_loader: Option<MediaLoader>,
 }
 
@@ -177,7 +179,6 @@ impl OpenAIPreprocessor {
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
 
-        #[cfg(feature = "media-nixl")]
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
@@ -191,7 +192,6 @@ impl OpenAIPreprocessor {
             lora_name,
             runtime_config,
             tool_call_parser,
-            #[cfg(feature = "media-nixl")]
             media_loader,
         }))
     }
@@ -336,7 +336,6 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
-        #[cfg(feature = "media-nixl")]
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
 
@@ -366,7 +365,6 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
-                #[cfg(feature = "media-nixl")]
                 if self.media_loader.is_some() {
                     fetch_tasks.push((type_str, content_part.clone()));
                     continue;
@@ -381,7 +379,6 @@ impl OpenAIPreprocessor {
         }
 
         // Execute all fetch tasks
-        #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
@@ -532,7 +529,7 @@ impl OpenAIPreprocessor {
         let encode_start = Instant::now();
         let encoding = self.tokenizer.encode(prompt)?;
         if let Some(t) = tracker {
-            t.record_tokenizer_latency(encode_start.elapsed());
+            t.record_tokenize_latency(encode_start.elapsed());
         }
         Ok(encoding)
     }
@@ -722,7 +719,9 @@ impl OpenAIPreprocessor {
                         decode_worker_id,
                         decode_dp_rank,
                         decode_worker_type,
-                        tokenizer_latency: tracker.as_ref().and_then(|t| t.tokenizer_latency()),
+                        tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                        detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
+                        detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -783,7 +782,11 @@ impl OpenAIPreprocessor {
                             decode_worker_id,
                             decode_dp_rank,
                             decode_worker_type,
-                            tokenizer_latency: tracker.as_ref().and_then(|t| t.tokenizer_latency()),
+                            tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                            detokenize_total_latency: tracker
+                                .as_ref()
+                                .and_then(|t| t.detokenize_total_latency()),
+                            detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
 
                         // Create annotation string
@@ -1051,6 +1054,7 @@ impl
         let (mut common_request, annotations) = self
             .preprocess_request(&request, tracker.as_deref())
             .await?;
+        tracing::trace!(request = ?common_request, "Pre-processed request");
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;

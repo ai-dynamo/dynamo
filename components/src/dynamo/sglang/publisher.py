@@ -283,7 +283,7 @@ class DynamoSglangPublisher:
 
 
 def setup_prometheus_registry(
-    engine: sgl.Engine, generate_endpoint: Endpoint
+    engine: sgl.Engine, generate_endpoint: Endpoint, config: Config
 ) -> CollectorRegistry:
     """Set up Prometheus registry for SGLang metrics collection.
 
@@ -304,6 +304,7 @@ def setup_prometheus_registry(
     Args:
         engine: The SGLang engine instance.
         generate_endpoint: The Dynamo endpoint for generation requests.
+        config: SGLang configuration including dynamo_args with namespace/component/endpoint.
 
     Returns:
         Configured CollectorRegistry with multiprocess support.
@@ -314,10 +315,15 @@ def setup_prometheus_registry(
     multiprocess.MultiProcessCollector(registry)
 
     # Register callback for SGLang metrics (sglang:* prefixed)
+    # Auto-label injection: hierarchy labels are added automatically
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
         metric_prefix_filters=["sglang:"],
+        namespace_name=config.dynamo_args.namespace,
+        component_name=config.dynamo_args.component,
+        endpoint_name=config.dynamo_args.endpoint,
+        model_name=engine.server_args.served_model_name,
     )
 
     return registry
@@ -344,7 +350,7 @@ async def setup_sgl_metrics(
     # SGLang only calls set_prometheus_multiproc_dir() when enable_metrics=True,
     # so MultiProcessCollector will crash without it.
     if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+        setup_prometheus_registry(engine, generate_endpoint, config)
 
     # Always register the Dynamo component metrics callback (total_blocks,
     # gpu_cache_usage, model_load_time). These use a dedicated registry that

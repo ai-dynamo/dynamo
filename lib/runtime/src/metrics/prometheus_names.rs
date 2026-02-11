@@ -68,9 +68,18 @@ pub mod name_prefix {
 
     /// Prefix for frontend service metrics
     pub const FRONTEND: &str = "dynamo_frontend";
+
+    /// Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
+    pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
+///
+/// These labels are auto-injected into metrics by the hierarchy system:
+/// - Rust: lib/runtime/src/metrics.rs create_metric() function
+/// - Python: components/src/dynamo/common/utils/prometheus.py register_engine_metrics_callback()
+///
+/// Python codegen: These constants are exported to lib/bindings/python/src/dynamo/prometheus_names.py
 pub mod labels {
     /// Label for component identification
     pub const COMPONENT: &str = "dynamo_component";
@@ -87,8 +96,19 @@ pub mod labels {
     /// It is used by worker/load-style metrics that need to disambiguate per-worker series.
     pub const DP_RANK: &str = "dp_rank";
 
-    /// Label for model name
+    /// Label for worker instance ID (etcd lease ID).
+    pub const WORKER_ID: &str = "worker_id";
+
+    /// Label for model name/path (OpenAI API standard, injected by Dynamo)
+    /// This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
+    /// Ensures compatibility with OpenAI-compatible tooling.
     pub const MODEL: &str = "model";
+
+    /// Label for model name/path (alternative/native engine label, injected by Dynamo)
+    /// Some engines natively use model_name, so we inject both model and model_name
+    /// to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
+    /// When a metric already has a label, injection does not overwrite it (original is preserved).
+    pub const MODEL_NAME: &str = "model_name";
 
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
@@ -200,7 +220,6 @@ pub mod frontend_service {
         pub const TOKENIZE: &str = "tokenize";
 
         /// Detokenization operation
-        /// Currently unused, will be added next.
         pub const DETOKENIZE: &str = "detokenize";
     }
 
@@ -351,6 +370,27 @@ pub mod kvbm {
 
     /// Number of failed object storage write operations (blocks)
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
+}
+
+/// Routing overhead phase latency histogram names (raw Prometheus, not component-scoped).
+///
+/// These are combined with [`name_prefix::ROUTING_OVERHEAD`] to form full metric names,
+/// e.g. `dynamo_routing_overhead_block_hashing_ms`.
+pub mod routing_overhead {
+    /// Time spent computing block hashes
+    pub const BLOCK_HASHING_MS: &str = "block_hashing_ms";
+
+    /// Time spent in indexer find_matches
+    pub const INDEXER_FIND_MATCHES_MS: &str = "indexer_find_matches_ms";
+
+    /// Time spent computing sequence hashes
+    pub const SEQ_HASHING_MS: &str = "seq_hashing_ms";
+
+    /// Time spent in scheduler worker selection
+    pub const SCHEDULING_MS: &str = "scheduling_ms";
+
+    /// Total routing overhead per request
+    pub const TOTAL_MS: &str = "total_ms";
 }
 
 // KvRouter (including KvInexer) Prometheus metric names
