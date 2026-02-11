@@ -109,7 +109,6 @@ pub struct CreateImageRequest {
     /// The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference.
     pub num_inference_steps: Option<u8>,
 
-
     /// The number of images to generate. Must be between 1 and 10.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n: Option<u8>, // min:1 max:10 default:1

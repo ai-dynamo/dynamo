@@ -1724,7 +1724,6 @@ pub fn videos_router(
     (vec![doc], router)
 }
 
-
 #[cfg(test)]
 mod tests {
 
