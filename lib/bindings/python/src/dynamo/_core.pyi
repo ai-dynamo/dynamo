@@ -164,16 +164,11 @@ class Endpoint:
         """
         ...
 
-    async def client(self) -> Client:
+    async def client(self, router_mode: Optional[RouterMode] = None) -> Client:
         """
-        Create a `Client` capable of calling served instances of this endpoint using round-robin routing.
-        """
-        ...
+        Create a `Client` capable of calling served instances of this endpoint.
 
-    async def client2(self, router_mode: RouterMode) -> Client:
-        """
-        Create a `Client` capable of calling served instances of this endpoint, using a specific
-        router mode (random, round-robin, kv).
+        By default this uses round-robin routing when `router_mode` is not provided.
         """
         ...
 

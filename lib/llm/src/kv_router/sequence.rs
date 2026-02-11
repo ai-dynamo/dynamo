@@ -37,10 +37,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use super::metrics::WORKER_LOAD_METRICS;
 use super::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank,
 };
-use crate::discovery::{WORKER_ACTIVE_DECODE_BLOCKS_GAUGE, WORKER_ACTIVE_PREFILL_TOKENS_GAUGE};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::CancellationToken;
@@ -1046,22 +1046,13 @@ impl ActiveSequencesMultiWorker {
         };
 
         // Update Prometheus gauges directly (router's own bookkeeping)
-        let worker_id_str = worker.worker_id.to_string();
-        let dp_rank_str = worker.dp_rank.to_string();
-        WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-            .with_label_values(&[
-                worker_id_str.as_str(),
-                dp_rank_str.as_str(),
-                self.worker_type,
-            ])
-            .set(active_blocks as i64);
-        WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-            .with_label_values(&[
-                worker_id_str.as_str(),
-                dp_rank_str.as_str(),
-                self.worker_type,
-            ])
-            .set(active_tokens as i64);
+        WORKER_LOAD_METRICS.observe(
+            worker.worker_id,
+            worker.dp_rank,
+            self.worker_type,
+            active_blocks,
+            active_tokens,
+        );
 
         // Also publish ActiveLoad to NATS for other subscribers (if NATS is available)
         let active_load = ActiveLoad {

@@ -30,6 +30,7 @@ TRTLLM_BLOCK_SIZE = 32  # fixed internally to 32
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.router,
     pytest.mark.trtllm,
     pytest.mark.model(MODEL_NAME),
 ]

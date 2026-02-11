@@ -29,6 +29,7 @@ MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.router,
     pytest.mark.sglang,
     pytest.mark.model(MODEL_NAME),
 ]
