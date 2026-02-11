@@ -1564,6 +1564,7 @@ pub fn responses_router(
     let router = Router::new()
         .route(&path, post(handler_responses))
         .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
 }
