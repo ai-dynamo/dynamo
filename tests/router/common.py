@@ -528,6 +528,7 @@ async def send_request_via_python_kv_router(
     )
 
     # Retry loop sending request to worker with exponential backoff
+    stream = None
     for attempt in range(max_retries + 1):
         try:
             logger.debug(f"Sending request to {log_message} (attempt {attempt + 1})")
@@ -556,6 +557,11 @@ async def send_request_via_python_kv_router(
                 raise RuntimeError(
                     f"Failed to connect to workers after {max_retries + 1} attempts"
                 ) from e
+
+    if stream is None:
+        raise RuntimeError(
+            f"Failed to get a valid stream from workers after {max_retries + 1} attempts"
+        )
 
     # Collect tokens and worker IDs from the SSE stream
     generated_tokens = []
@@ -653,18 +659,16 @@ def _test_router_basic(
         AssertionError: If requests fail or frontend doesn't become ready
         TimeoutError: If frontend doesn't become ready within timeout
     """
-    try:
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        request_plane=request_plane,
+    ):
         # Start KV router frontend
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(
-            request,
-            block_size,
-            frontend_port,
-            engine_workers.namespace,
-            store_backend,
-            request_plane=request_plane,
-        )
-        kv_router.__enter__()
 
         frontend_url = f"http://localhost:{frontend_port}"
 
@@ -689,10 +693,6 @@ def _test_router_basic(
         )
 
         logger.info(f"Successfully completed {num_requests} requests")
-
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
 
 
 def _test_router_two_routers(
@@ -1036,13 +1036,11 @@ def _test_router_query_instance_id(
         AssertionError: If annotation response structure is incorrect or contains generation content
     """
 
-    try:
+    with KVRouterProcess(
+        request, block_size, frontend_port, engine_workers.namespace, store_backend
+    ):
         # Start KV router (frontend)
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(
-            request, block_size, frontend_port, engine_workers.namespace, store_backend
-        )
-        kv_router.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
@@ -1164,10 +1162,6 @@ def _test_router_query_instance_id(
         logger.info(f"Decode Worker ID: {result['decode_worker_id']}")
         logger.info(f"Token count: {result['token_count']}")
 
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
-
 
 def _test_router_overload_503(
     engine_workers,
@@ -1194,42 +1188,17 @@ def _test_router_overload_503(
         AssertionError: If 503 response is not received when expected
     """
 
-    try:
-        logger.info(
-            f"Starting KV router frontend on port {frontend_port} with limited resources"
-        )
+    logger.info(
+        f"Starting KV router frontend on port {frontend_port} with limited resources"
+    )
 
-        # Custom command for router with limited block size
-        command = [
-            "python",
-            "-m",
-            "dynamo.frontend",
-            "--active-decode-blocks-threshold",
-            str(blocks_threshold),
-            "--kv-cache-block-size",
-            str(block_size),
-            "--router-mode",
-            "kv",
-            "--http-port",
-            str(frontend_port),
-        ]
-
-        kv_router = ManagedProcess(
-            command=command,
-            timeout=60,
-            display_output=True,
-            health_check_ports=[frontend_port],
-            health_check_urls=[
-                (
-                    f"http://localhost:{frontend_port}/v1/models",
-                    lambda r: r.status_code == 200,
-                )
-            ],
-            log_dir=request.node.name,
-            terminate_all_matching_process_names=False,
-        )
-        kv_router.__enter__()
-
+    with KVRouterProcess(
+        request=request,
+        block_size=block_size,
+        frontend_port=frontend_port,
+        namespace=engine_workers.namespace,
+        blocks_threshold=blocks_threshold,
+    ):
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
         # Custom payload for 503 test with more tokens to consume resources
@@ -1324,10 +1293,6 @@ def _test_router_overload_503(
         assert success, "Failed to verify 503 response when resources are exhausted"
 
         logger.info("Successfully verified 503 response when all workers are busy")
-
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
 
 
 def _test_router_indexers_sync(
@@ -1727,23 +1692,21 @@ def _test_router_decisions_disagg(
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
         AssertionError: If prefill_worker_id is in decode_worker_ids (not true disagg)
     """
-    try:
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        decode_workers.namespace,
+        store_backend,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        durable_kv_events=durable_kv_events,
+    ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
         logger.info(
             f"Starting KV router frontend on port {frontend_port} for disagg test"
         )
-        kv_router = KVRouterProcess(
-            request,
-            block_size,
-            frontend_port,
-            decode_workers.namespace,
-            store_backend,
-            enforce_disagg=True,
-            request_plane=request_plane,
-            durable_kv_events=durable_kv_events,
-        )
-        kv_router.__enter__()
 
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
@@ -1907,10 +1870,6 @@ def _test_router_decisions_disagg(
             f"  - All 4 requests routed to same prefill_worker_id={prefill_id} (prefix reuse)\n"
             f"  - Prefill worker is NOT in decode worker set {unique_decode_ids} (true disagg)"
         )
-
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
 
 
 def _test_router_decisions(
@@ -2190,20 +2149,18 @@ def _test_busy_threshold_endpoint(
     initial_active_decode_blocks_threshold = 0.9
     initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
 
-    try:
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        blocks_threshold=initial_active_decode_blocks_threshold,
+        tokens_threshold=initial_active_prefill_tokens_threshold,
+        request_plane=request_plane,
+    ):
         # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(
-            request,
-            block_size,
-            frontend_port,
-            engine_workers.namespace,
-            store_backend,
-            blocks_threshold=initial_active_decode_blocks_threshold,
-            tokens_threshold=initial_active_prefill_tokens_threshold,
-            request_plane=request_plane,
-        )
-        kv_router.__enter__()
 
         frontend_url = f"http://localhost:{frontend_port}"
         busy_threshold_url = f"{frontend_url}/busy_threshold"
@@ -2464,7 +2421,3 @@ def _test_busy_threshold_endpoint(
                 logger.info("All busy_threshold endpoint tests passed!")
 
         asyncio.run(test_busy_threshold_api())
-
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
