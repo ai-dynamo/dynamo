@@ -12,70 +12,19 @@ import argparse
 import asyncio
 import math
 import os
-
-# Mock dependencies before importing planner modules
-import sys
-
-# We'll import the actual Planner class to test its calculation logic
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
-# Create mock modules for dependencies that might not be available in test environment
-mock_prometheus = MagicMock()
-mock_prometheus.Gauge = MagicMock()
-mock_prometheus.start_http_server = MagicMock()
-
-mock_runtime = MagicMock()
-mock_runtime.logging = MagicMock()
-mock_runtime.logging.configure_dynamo_logging = MagicMock()
-
-# Save originals so we can restore after module-level mocking
-_saved_modules = {
-    key: sys.modules.get(key)
-    for key in [
-        "prometheus_client",
-        "prometheus_client.parser",
-        "dynamo.runtime",
-        "dynamo.runtime.logging",
-    ]
-}
-
-# Patch them into sys.modules before importing
-sys.modules["prometheus_client"] = mock_prometheus
-sys.modules["prometheus_client.parser"] = MagicMock()
-sys.modules["dynamo.runtime"] = mock_runtime
-sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
-
-from dynamo.planner.utils.decode_planner import DecodePlanner  # noqa: E402
-
-# Now import after mocking
-from dynamo.planner.utils.planner_core import (  # noqa: E402
-    Metrics,
+from dynamo.planner.utils.decode_planner import DecodePlanner
+from dynamo.planner.utils.planner_core import (
     PlannerSharedState,
     _apply_global_gpu_budget,
 )
-from dynamo.planner.utils.prefill_planner import PrefillPlanner  # noqa: E402
+from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.utils.prometheus import Metrics
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
-
-# Restore original sys.modules so mocking in this file doesn't pollute other
-# test modules (e.g. tests that rely on the real prometheus_client.parser).
-# We must also re-bind text_string_to_metric_families in prometheus.py because
-# it was already imported with the mocked module.
-for _key, _original in _saved_modules.items():
-    if _original is None:
-        sys.modules.pop(_key, None)
-    else:
-        sys.modules[_key] = _original
-
-from prometheus_client.parser import (  # noqa: E402
-    text_string_to_metric_families as _real_parser_fn,
-)
-
-import dynamo.planner.utils.prometheus as _prom_mod  # noqa: E402
-
-_prom_mod.text_string_to_metric_families = _real_parser_fn
 
 
 class PlannerHarness:
