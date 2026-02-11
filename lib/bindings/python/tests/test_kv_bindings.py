@@ -16,12 +16,10 @@
 
 import json
 import threading
-from typing import List
 
 import pytest
 
-from dynamo.llm import KvEventPublisher, RadixTree
-from dynamo.runtime import Component
+from dynamo.llm import RadixTree
 
 pytestmark = pytest.mark.pre_merge
 
@@ -191,35 +189,3 @@ def test_radix_tree_thread_safety(
     assert (
         len(blocks_after_removal) == expected_blocks_after_removal
     ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
-
-
-class EventPublisher:
-    def __init__(self, component: Component, worker_id: int, kv_block_size: int):
-        self.publisher = KvEventPublisher(component, worker_id, kv_block_size)
-        # Counter for generating unique block hashes (event_id is now managed internally by publisher)
-        self.block_hash_counter = 0
-        self.block_hashes: List[int] = []
-
-    def store_event(self, tokens, lora_id):
-        # Parent hash should reference the last published block, not the current one
-        parent_hash = self.block_hashes[-1] if self.block_hashes else None
-        self.publisher.publish_stored(
-            tokens,  # token_ids
-            [
-                len(tokens),
-            ],  # num_block_tokens
-            [
-                self.block_hash_counter,
-            ],  # block_hashes
-            lora_id,  # lora_id
-            parent_hash,  # parent_hash
-        )
-        self.block_hashes.append(self.block_hash_counter)
-        self.block_hash_counter += 1
-
-    def remove_event(self):
-        self.publisher.publish_removed(
-            [
-                self.block_hashes[-1],
-            ],  # block_hashes
-        )
