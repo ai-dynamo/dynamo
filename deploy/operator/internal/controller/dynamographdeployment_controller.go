@@ -1030,14 +1030,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	rollingUpdateCtx := r.buildRollingUpdateContext(ctx, dynamoDeployment)
 
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment, rollingUpdateCtx)
+	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
 	if rollingUpdateCtx.InProgress() {
 		logger.Info("Rolling update in progress",
-			"oldWorkerHash", rollingUpdateCtx.OldWorkerHash,
 			"newWorkerHash", rollingUpdateCtx.NewWorkerHash,
 			"oldWorkerReplicas", rollingUpdateCtx.OldWorkerReplicas)
 	}
@@ -1092,12 +1091,12 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	return result, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, rollingUpdateCtx dynamo.RollingUpdateContext) (map[string]string, error) {
+func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 
 	restartAnnotations := make(map[string]string)
 	for serviceName := range dgd.Spec.Services {
-		dcdName := dynamo.GetDCDResourceName(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
+		dcdName := dynamo.GetDCDResourceName(dgd, serviceName, dynamo.ComputeWorkerSpecHash(dgd))
 		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
 

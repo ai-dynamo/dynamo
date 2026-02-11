@@ -256,13 +256,11 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 }
 
 func (r RollingUpdateContext) InProgress() bool {
-	return r.OldWorkerHash != r.NewWorkerHash
+	return len(r.OldWorkerReplicas) > 0
 }
 
 // RollingUpdateContext provides information about an in-progress rolling update.
 type RollingUpdateContext struct {
-	// OldWorkerHash is the short hash (8 chars) for the old worker spec, used for DCD naming
-	OldWorkerHash string
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
 	NewWorkerHash string
 	// OldWorkerReplicas maps service name to the desired replica count for old workers.
