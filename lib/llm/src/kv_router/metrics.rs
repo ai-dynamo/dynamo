@@ -180,6 +180,8 @@ pub struct RouterRequestMetrics {
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
+use crate::http::service::metrics::generate_log_buckets;
+
 impl RouterRequestMetrics {
     fn new(
         requests_total: prometheus::IntCounter,
@@ -212,25 +214,25 @@ impl RouterRequestMetrics {
                         "router_time_to_first_token_seconds",
                         "Time to first token observed at the router",
                         &[],
-                        None,
+                        Some(generate_log_buckets(0.001, 480.0, 18)),
                     )?;
                     let inter_token_latency_seconds = metrics.create_histogram(
                         "router_inter_token_latency_seconds",
                         "Average inter-token latency observed at the router",
                         &[],
-                        None,
+                        Some(generate_log_buckets(0.001, 2.0, 13)),
                     )?;
                     let input_sequence_tokens = metrics.create_histogram(
                         "router_input_sequence_tokens",
                         "Input sequence length in tokens observed at the router",
                         &[],
-                        None,
+                        Some(generate_log_buckets(50.0, 128000.0, 12)),
                     )?;
                     let output_sequence_tokens = metrics.create_histogram(
                         "router_output_sequence_tokens",
                         "Output sequence length in tokens observed at the router",
                         &[],
-                        None,
+                        Some(generate_log_buckets(50.0, 32000.0, 10)),
                     )?;
                     Ok(Arc::new(Self::new(
                         requests_total,
@@ -263,25 +265,37 @@ impl RouterRequestMetrics {
                 "Total number of requests processed by the router",
             )
             .unwrap(),
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
-                "router_time_to_first_token_seconds",
-                "Time to first token observed at the router",
-            ))
+            prometheus::Histogram::with_opts(
+                prometheus::HistogramOpts::new(
+                    "router_time_to_first_token_seconds",
+                    "Time to first token observed at the router",
+                )
+                .buckets(generate_log_buckets(0.001, 480.0, 18)),
+            )
             .unwrap(),
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
-                "router_inter_token_latency_seconds",
-                "Average inter-token latency observed at the router",
-            ))
+            prometheus::Histogram::with_opts(
+                prometheus::HistogramOpts::new(
+                    "router_inter_token_latency_seconds",
+                    "Average inter-token latency observed at the router",
+                )
+                .buckets(generate_log_buckets(0.001, 2.0, 13)),
+            )
             .unwrap(),
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
-                "router_input_sequence_tokens",
-                "Input sequence length in tokens observed at the router",
-            ))
+            prometheus::Histogram::with_opts(
+                prometheus::HistogramOpts::new(
+                    "router_input_sequence_tokens",
+                    "Input sequence length in tokens observed at the router",
+                )
+                .buckets(generate_log_buckets(50.0, 128000.0, 12)),
+            )
             .unwrap(),
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
-                "router_output_sequence_tokens",
-                "Output sequence length in tokens observed at the router",
-            ))
+            prometheus::Histogram::with_opts(
+                prometheus::HistogramOpts::new(
+                    "router_output_sequence_tokens",
+                    "Output sequence length in tokens observed at the router",
+                )
+                .buckets(generate_log_buckets(50.0, 32000.0, 10)),
+            )
             .unwrap(),
         )
     }
