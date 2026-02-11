@@ -74,6 +74,12 @@ pub mod name_prefix {
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
+///
+/// These labels are auto-injected into metrics by the hierarchy system:
+/// - Rust: lib/runtime/src/metrics.rs create_metric() function
+/// - Python: components/src/dynamo/common/utils/prometheus.py register_engine_metrics_callback()
+///
+/// Python codegen: These constants are exported to lib/bindings/python/src/dynamo/prometheus_names.py
 pub mod labels {
     /// Label for component identification
     pub const COMPONENT: &str = "dynamo_component";
@@ -93,8 +99,16 @@ pub mod labels {
     /// Label for worker instance ID (etcd lease ID).
     pub const WORKER_ID: &str = "worker_id";
 
-    /// Label for model name
+    /// Label for model name/path (OpenAI API standard, injected by Dynamo)
+    /// This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
+    /// Ensures compatibility with OpenAI-compatible tooling.
     pub const MODEL: &str = "model";
+
+    /// Label for model name/path (alternative/native engine label, injected by Dynamo)
+    /// Some engines natively use model_name, so we inject both model and model_name
+    /// to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
+    /// When a metric already has a label, injection does not overwrite it (original is preserved).
+    pub const MODEL_NAME: &str = "model_name";
 
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     pub const WORKER_TYPE: &str = "worker_type";

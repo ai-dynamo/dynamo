@@ -25,7 +25,7 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     discovery::WORKER_TYPE_DECODE,
-    entrypoint::{self, EngineFactoryCallback, RouterConfig},
+    entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
@@ -61,7 +61,7 @@ pub struct ModelWatcher {
     migration_limit: u32,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
-    engine_factory: Option<EngineFactoryCallback>,
+    chat_engine_factory: Option<ChatEngineFactoryCallback>,
     metrics: Arc<Metrics>,
     registering_models: DashSet<String>,
 }
@@ -81,7 +81,7 @@ impl ModelWatcher {
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
         migration_limit: u32,
-        engine_factory: Option<EngineFactoryCallback>,
+        chat_engine_factory: Option<ChatEngineFactoryCallback>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
@@ -91,7 +91,7 @@ impl ModelWatcher {
             migration_limit,
             notify_on_model: Notify::new(),
             model_update_tx: None,
-            engine_factory,
+            chat_engine_factory,
             metrics,
             registering_models: DashSet::new(),
         }
@@ -435,7 +435,15 @@ impl ModelWatcher {
             // handle Chat or Completions requests, so handle whatever the model supports.
 
             let endpoint = component.endpoint(&mcid.endpoint);
-            let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
+            // Create the KV router whenever any local routed pipeline will be built.
+            // The chat factory builds its own router, but completions currently always
+            // uses the local routed pipeline and therefore still needs a chooser.
+            let needs_local_chat_pipeline =
+                card.model_type.supports_chat() && self.chat_engine_factory.is_none();
+            let needs_local_completions_pipeline = card.model_type.supports_completions();
+            let kv_chooser = if self.router_config.router_mode == RouterMode::KV
+                && (needs_local_chat_pipeline || needs_local_completions_pipeline)
+            {
                 Some(
                     self.manager
                         .kv_chooser_for(
@@ -487,11 +495,17 @@ impl ModelWatcher {
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
-                // Work in progress. This will allow creating  a chat_engine from Python.
-                let chat_engine = if let Some(ref factory) = self.engine_factory {
-                    factory(card.clone())
-                        .await
-                        .context("python engine_factory")?
+                let factory_engine = if let Some(ref factory) = self.chat_engine_factory {
+                    match factory(mcid.clone(), card.clone()).await {
+                        Ok(engine) => Some(engine),
+                        Err(err) => return Err(err).context("python chat_engine_factory"),
+                    }
+                } else {
+                    None
+                };
+
+                let chat_engine = if let Some(engine) = factory_engine {
+                    engine
                 } else {
                     entrypoint::build_routed_pipeline::<
                         NvCreateChatCompletionRequest,
@@ -518,7 +532,7 @@ impl ModelWatcher {
                 tracing::info!("Chat completions is ready");
             }
 
-            // Add completions engine only if the model supports completions
+            // Add completions engine only if the model supports completions.
             if card.model_type.supports_completions() {
                 let formatter = PromptFormatter::no_op();
                 let PromptFormatter::OAI(formatter) = formatter;

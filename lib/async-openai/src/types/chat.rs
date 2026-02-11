@@ -476,6 +476,10 @@ pub struct ChatCompletionRequestAssistantMessage {
     /// The contents of the assistant message. Required unless `tool_calls` or `function_call` is specified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ChatCompletionRequestAssistantMessageContent>,
+    /// Optional internal reasoning content from a previous assistant turn.
+    /// Used by reasoning-capable models that consume prior chain-of-thought-like context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// The refusal message by the assistant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
@@ -1273,5 +1277,41 @@ mod tests {
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("mm_processor_kwargs"));
+    }
+
+    #[test]
+    fn test_assistant_request_reasoning_content_roundtrip() {
+        let json = r#"{
+            "model": "deepseek-v3.2",
+            "messages": [
+                {"role": "user", "content": "test"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "thinking...",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "f",
+                            "arguments": "{}"
+                        }
+                    }]
+                }
+            ]
+        }"#;
+
+        let request: CreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let assistant = match &request.messages[1] {
+            ChatCompletionRequestMessage::Assistant(msg) => msg,
+            _ => panic!("expected assistant message"),
+        };
+
+        assert_eq!(assistant.reasoning_content.as_deref(), Some("thinking..."));
+
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serialized["messages"][1]["reasoning_content"],
+            serde_json::Value::String("thinking...".to_string())
+        );
     }
 }
