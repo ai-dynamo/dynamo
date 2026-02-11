@@ -79,6 +79,14 @@ For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guid
 
 For more configuration options and tuning guidelines, see the [Router Guide](router-guide.md).
 
+## Global Router (Hierarchical Routing)
+
+**Global Router** enables hierarchical routing by sitting between the frontend and local routers. It selects the appropriate group of workers for each request based on configurable policies, supporting disaggregated topologies where groups are tuned for different workload characteristics and semantic roles.
+
+Here is an example python implementation of the global router working together with local routers and workers separated into different pools:
+- **Component details**: [`components/src/dynamo/global_router/`](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/global_router/)
+- **Example**: [`examples/hierarchical_planner/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/hierarchical_planner/)
+
 ## Prerequisites and Limitations
 
 **Requirements:**
