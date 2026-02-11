@@ -45,11 +45,38 @@ spec:
               - containerPort: 8000
                 name: http
                 protocol: TCP
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
             env:
               - name: DYNAMO_PORT
                 value: "8000"
               - name: DYN_HTTP_PORT
                 value: "8000"
+              - name: DYN_NAMESPACE
+                value: my-model-vllm-agg
+              - name: DYN_COMPONENT
+                value: frontend
+              - name: DYN_DISCOVERY_BACKEND
+                value: kubernetes
+              - name: NATS_SERVER
+                value: nats://dynamo-platform-nats.my-model.svc.cluster.local:4222
+              - name: DYN_PARENT_DGD_K8S_NAME
+                value: vllm-agg
+              - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                value: my-model
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: POD_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_UID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.uid
             livenessProbe:
               httpGet:
                 path: /live
