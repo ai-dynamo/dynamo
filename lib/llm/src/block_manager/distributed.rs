@@ -13,11 +13,11 @@ mod worker;
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 #[cfg(feature = "nccl")]
 pub use nccl_bootstrap::{NcclBootstrap, NcclCommOwned};
-pub use transfer::{BlockTransferHandler, NcclConfig};
+pub use transfer::{BlockTransferHandler, CacheGroup, NcclConfig};
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
 };
-pub use worker::{KvbmWorker, KvbmWorkerConfig};
+pub use worker::{AdditionalCacheGroupConfig, KvbmWorker, KvbmWorkerConfig};
 pub use zmq::Handler;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
