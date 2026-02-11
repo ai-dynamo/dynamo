@@ -456,11 +456,41 @@ class GitHubAnnotator:
             try:
                 with open(event_path) as f:
                     event = json.load(f)
+
+                    # Direct PR event
                     pr_number = event.get("pull_request", {}).get("number")
                     if pr_number:
                         return int(pr_number)
-            except Exception:
-                pass
+
+                    # workflow_run event - check if triggered by a PR
+                    workflow_run = event.get("workflow_run", {})
+                    pull_requests = workflow_run.get("pull_requests", [])
+                    if pull_requests and len(pull_requests) > 0:
+                        return int(pull_requests[0].get("number"))
+
+                    # workflow_run event - use API to find PR by head_sha
+                    head_sha = workflow_run.get("head_sha")
+                    if head_sha and self.github_token:
+                        pr_num = self._find_pr_by_commit(head_sha)
+                        if pr_num:
+                            return pr_num
+            except Exception as e:
+                print(f"⚠️  Error reading event file: {e}")
+
+        return None
+
+    def _find_pr_by_commit(self, commit_sha: str) -> Optional[int]:
+        """Find PR number associated with a commit using GitHub API."""
+        try:
+            url = f"https://api.github.com/repos/{self.repo}/commits/{commit_sha}/pulls"
+            response = requests.get(url, headers=self.headers, timeout=10)
+
+            if response.status_code == 200:
+                pulls = response.json()
+                if pulls and len(pulls) > 0:
+                    return pulls[0].get("number")
+        except Exception as e:
+            print(f"⚠️  Error finding PR by commit: {e}")
 
         return None
 
