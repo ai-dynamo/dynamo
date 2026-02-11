@@ -362,7 +362,9 @@ class BasePlanner:
                         "Cannot set profile_results_dir to 'use-pre-swept-results' in non-dryrun mode"
                     )
             else:
-                self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
+                self.prefill_interpolator = PrefillInterpolator(
+                    args.profile_results_dir
+                )
                 self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
 
         self.prefill_component_name = WORKER_COMPONENT_NAMES[
@@ -421,7 +423,9 @@ class BasePlanner:
                             "Please provide --loadbased-router-metrics-url explicitly."
                         )
                     else:
-                        logger.info(f"Auto-discovered frontend metrics URL: {args.loadbased_router_metrics_url}")
+                        logger.info(
+                            f"Auto-discovered frontend metrics URL: {args.loadbased_router_metrics_url}"
+                        )
 
                 self.prometheus_engine_client = DirectRouterMetricsClient(
                     args.loadbased_router_metrics_url, args.namespace
@@ -597,9 +601,11 @@ class BasePlanner:
             )
             * 1000
         )
-        self.last_metrics.num_req = self.prometheus_traffic_client.get_avg_request_count(
-            f"{self.args.adjustment_interval}s",
-            self.model_name,
+        self.last_metrics.num_req = (
+            self.prometheus_traffic_client.get_avg_request_count(
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
+            )
         )
         self.last_metrics.request_duration = (
             self.prometheus_traffic_client.get_avg_request_duration(
@@ -781,7 +787,9 @@ class BasePlanner:
                     x = active_prefill + last_isl
                     # last_ttft is in seconds from Prometheus, convert to ms
                     y = last_ttft * 1000
-                    logger.info(f"{SubComponentType.PREFILL.value} Worker {wid} observed status: TTFT {y:.2f}ms @ prefill tokens {x:.2f}")
+                    logger.info(
+                        f"{SubComponentType.PREFILL.value} Worker {wid} observed status: TTFT {y:.2f}ms @ prefill tokens {x:.2f}"
+                    )
                     self.ttft_regression.add_observation(x, y)
 
         elif self.component_type == SubComponentType.DECODE:
@@ -792,7 +800,9 @@ class BasePlanner:
                     x = active_decode
                     # last_itl is in seconds from Prometheus, convert to ms
                     y = last_itl * 1000
-                    logger.info(f"{SubComponentType.DECODE.value} Worker {wid} observed status: ITL {y:.2f}ms @ decode blocks {x:.2f}")
+                    logger.info(
+                        f"{SubComponentType.DECODE.value} Worker {wid} observed status: ITL {y:.2f}ms @ decode blocks {x:.2f}"
+                    )
                     self.itl_regression.add_observation(x, y)
 
     def loadbased_plan_adjustment(self) -> Optional[int]:

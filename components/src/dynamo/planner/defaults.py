@@ -78,7 +78,9 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     enable_loadbased_scaling = False
 
     # Load-based scaling settings
-    loadbased_router_metrics_url: Optional[str] = None  # will be auto-discovered from the DGD in kubernetes mode if not provided
+    loadbased_router_metrics_url: Optional[
+        str
+    ] = None  # will be auto-discovered from the DGD in kubernetes mode if not provided
     loadbased_adjustment_interval = 5  # in seconds, must be < adjustment_interval
     loadbased_learning_window = 50  # sliding window size for regression
     loadbased_scaling_down_sensitivity = 80  # 0-100

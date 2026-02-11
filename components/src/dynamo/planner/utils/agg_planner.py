@@ -52,9 +52,7 @@ class AggPlanner:
                 "Please use --disable-throughput-scaling or do not set --enable-throughput-scaling."
             )
         if not getattr(args, "enable_loadbased_scaling", False):
-            raise ValueError(
-                "Aggregated planner requires --enable-loadbased-scaling."
-            )
+            raise ValueError("Aggregated planner requires --enable-loadbased-scaling.")
 
         prometheus_metrics = PlannerPrometheusMetrics()
 
@@ -189,9 +187,7 @@ class AggPlanner:
         )
 
         # Scale up: ALL workers above target
-        if all(
-            m.get("active_prefill_tokens", 0.0) > target for m in recent.values()
-        ):
+        if all(m.get("active_prefill_tokens", 0.0) > target for m in recent.values()):
             return "up"
 
         # Scale down: ALL workers below boundary
@@ -199,8 +195,7 @@ class AggPlanner:
             sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
             boundary = target * (num_workers - 1) / num_workers * sensitivity
             if all(
-                m.get("active_prefill_tokens", 0.0) < boundary
-                for m in recent.values()
+                m.get("active_prefill_tokens", 0.0) < boundary for m in recent.values()
             ):
                 return "down"
 
@@ -221,14 +216,10 @@ class AggPlanner:
 
         recent = self.cached_load_metrics.recent
 
-        logger.info(
-            f"Agg decode: x_sla={x_sla:.1f}, workers={num_workers}"
-        )
+        logger.info(f"Agg decode: x_sla={x_sla:.1f}, workers={num_workers}")
 
         # Scale up: ALL workers above target
-        if all(
-            m.get("active_decode_blocks", 0.0) > x_sla for m in recent.values()
-        ):
+        if all(m.get("active_decode_blocks", 0.0) > x_sla for m in recent.values()):
             return "up"
 
         # Scale down: ALL workers below boundary
@@ -236,8 +227,7 @@ class AggPlanner:
             sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             if all(
-                m.get("active_decode_blocks", 0.0) < boundary
-                for m in recent.values()
+                m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
             ):
                 return "down"
 
@@ -294,11 +284,12 @@ class AggPlanner:
                 desired, self.args.decode_engine_num_gpu, self.args
             )
 
-            logger.info(
-                f"Agg load-based scaling: {num_workers} -> {desired}"
-            )
+            logger.info(f"Agg load-based scaling: {num_workers} -> {desired}")
 
-            if self.planner.prometheus_port != 0 and self.planner.prometheus_metrics is not None:
+            if (
+                self.planner.prometheus_port != 0
+                and self.planner.prometheus_metrics is not None
+            ):
                 self.planner.prometheus_metrics.predicted_num_d.set(desired)
 
             if not self.args.no_operation:

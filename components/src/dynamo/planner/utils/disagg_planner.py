@@ -197,10 +197,17 @@ class DisaggPlanner:
             p_desired = self.prefill_planner.loadbased_plan_adjustment()
             d_desired = self.decode_planner.loadbased_plan_adjustment()
 
-            final_p = p_desired if p_desired is not None else self.shared_state.num_p_workers
-            final_d = d_desired if d_desired is not None else self.shared_state.num_d_workers
+            final_p = (
+                p_desired if p_desired is not None else self.shared_state.num_p_workers
+            )
+            final_d = (
+                d_desired if d_desired is not None else self.shared_state.num_d_workers
+            )
 
-            if final_p == self.shared_state.num_p_workers and final_d == self.shared_state.num_d_workers:
+            if (
+                final_p == self.shared_state.num_p_workers
+                and final_d == self.shared_state.num_d_workers
+            ):
                 logger.info("Load-based scaling: no scaling needed")
                 continue
 

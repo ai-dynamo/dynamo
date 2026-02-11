@@ -308,9 +308,7 @@ class DirectRouterMetricsClient:
             logger.warning(f"Failed to fetch router metrics: {e}")
             return {}
 
-    async def run_sampling_loop(
-        self, num_samples: int, interval: float
-    ) -> None:
+    async def run_sampling_loop(self, num_samples: int, interval: float) -> None:
         """Background coroutine: continuously sample at evenly-spaced intervals.
 
         Runs alongside the load-based loop via asyncio.gather().
@@ -386,8 +384,7 @@ class DirectRouterMetricsClient:
             per_worker_averaged[worker_id] = {}
             for metric_name in pw_sums[worker_id]:
                 per_worker_averaged[worker_id][metric_name] = (
-                    pw_sums[worker_id][metric_name]
-                    / pw_counts[worker_id][metric_name]
+                    pw_sums[worker_id][metric_name] / pw_counts[worker_id][metric_name]
                 )
 
         # --- Cluster averaged: across time AND worker_id ---
@@ -396,8 +393,7 @@ class DirectRouterMetricsClient:
         for worker_id in pw_sums:
             for metric_name in pw_sums[worker_id]:
                 cluster_sums[metric_name] = (
-                    cluster_sums.get(metric_name, 0.0)
-                    + pw_sums[worker_id][metric_name]
+                    cluster_sums.get(metric_name, 0.0) + pw_sums[worker_id][metric_name]
                 )
                 cluster_counts[metric_name] = (
                     cluster_counts.get(metric_name, 0)

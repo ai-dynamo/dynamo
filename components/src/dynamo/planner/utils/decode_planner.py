@@ -45,8 +45,7 @@ class DecodePlanner(BasePlanner):
 
         # Scale up: ALL workers above target (use recent metrics)
         all_above = all(
-            m.get("active_decode_blocks", 0.0) > x_sla
-            for m in recent.values()
+            m.get("active_decode_blocks", 0.0) > x_sla for m in recent.values()
         )
         if all_above:
             logger.info(
@@ -60,8 +59,7 @@ class DecodePlanner(BasePlanner):
             sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             all_below = all(
-                m.get("active_decode_blocks", 0.0) < boundary
-                for m in recent.values()
+                m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
             )
             if all_below:
                 logger.info(

@@ -68,8 +68,7 @@ class PrefillPlanner(BasePlanner):
                 target_active_tokens * (num_workers - 1) / num_workers * sensitivity
             )
             all_below = all(
-                m.get("active_prefill_tokens", 0.0) < boundary
-                for m in recent.values()
+                m.get("active_prefill_tokens", 0.0) < boundary for m in recent.values()
             )
             if all_below:
                 logger.info(
