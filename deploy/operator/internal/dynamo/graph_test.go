@@ -6327,6 +6327,25 @@ func TestDetermineGroveRestartState(t *testing.T) {
 			wantSvcs:      []string{"Frontend", "Worker"},
 			wantTimestamp: ptr.To(restartID),
 		},
+		{
+			name: "superseded restart returns nil - preserves existing annotations via fallback",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID,
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: restartID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+			wantNil: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -457,7 +457,8 @@ func isRestartAlreadyProcessed(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) boo
 
 	if dgd.Spec.Restart.ID == dgd.Status.Restart.ObservedID &&
 		(dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted ||
-			dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed) {
+			dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed ||
+			dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseSuperseded) {
 		return true
 	}
 
@@ -880,15 +881,25 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 	// No restart requested
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
 		// Preserve existing terminal status
-		if dgd.Status.Restart != nil && (dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted || dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed) {
+		if dgd.Status.Restart != nil && (dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted || dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed || dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseSuperseded) {
 			return dgd.Status.Restart
 		}
 		return nil
 	}
 
-	// If restart was already processed (completed or failed), return existing status
+	// If restart was already processed (completed, failed, or superseded), return existing status
 	if isRestartAlreadyProcessed(dgd) {
 		return dgd.Status.Restart
+	}
+
+	// Supersede restart if a rolling update is in progress
+	if r.isRollingUpdateInProgress(dgd) {
+		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "RestartSuperseded",
+			"Restart %s superseded by rolling update", dgd.Spec.Restart.ID)
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedID: dgd.Spec.Restart.ID,
+			Phase:      nvidiacomv1alpha1.RestartPhaseSuperseded,
+		}
 	}
 
 	order := dynamo.GetRestartOrder(dgd)
@@ -902,7 +913,14 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 
 // checkComponentServiceFullyUpdated checks if a DynamoComponentDeployment is fully updated.
 func (r *DynamoGraphDeploymentReconciler) checkComponentServiceFullyUpdated(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) (bool, string) {
-	resourceName := dynamo.GetDynamoComponentName(dgd, serviceName)
+	var resourceName string
+	spec := dgd.Spec.Services[serviceName]
+	workerHash := r.getCurrentWorkerHash(dgd)
+	if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) && workerHash != "" {
+		resourceName = dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, workerHash)
+	} else {
+		resourceName = dynamo.GetDynamoComponentName(dgd, serviceName)
+	}
 	return checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
 }
 
@@ -1015,15 +1033,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment)
+	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
+
+	rollingUpdateCtx := r.buildRollingUpdateContext(ctx, dynamoDeployment)
+
+	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment, rollingUpdateCtx)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
-
-	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
-
-	rollingUpdateCtx := r.buildRollingUpdateContext(ctx, dynamoDeployment)
 	if rollingUpdateCtx.InProgress() {
 		logger.Info("Rolling update in progress",
 			"oldWorkerHash", rollingUpdateCtx.OldWorkerHash,
@@ -1174,12 +1192,17 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	}
 }
 
-func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
+func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, rollingUpdateCtx dynamo.RollingUpdateContext) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 
 	restartAnnotations := make(map[string]string)
-	for serviceName := range dgd.Spec.Services {
-		dcdName := dynamo.GetDynamoComponentName(dgd, serviceName)
+	for serviceName, spec := range dgd.Spec.Services {
+		var dcdName string
+		if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) && rollingUpdateCtx.NewWorkerHash != "" {
+			dcdName = dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, rollingUpdateCtx.NewWorkerHash)
+		} else {
+			dcdName = dynamo.GetDynamoComponentName(dgd, serviceName)
+		}
 		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
 

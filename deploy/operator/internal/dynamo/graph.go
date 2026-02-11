@@ -84,6 +84,12 @@ func DetermineRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v
 	isNewRestart := restartStatus.ObservedID == "" ||
 		dgd.Spec.Restart.ID != restartStatus.ObservedID
 
+	if !isNewRestart && restartStatus.Phase == v1alpha1.RestartPhaseSuperseded {
+		// Superseded: don't push any new annotations. Existing annotations
+		// are preserved via the existingRestartAnnotations fallback path.
+		return nil
+	}
+
 	if !isNewRestart && restartStatus.Phase == v1alpha1.RestartPhaseCompleted {
 		return &RestartState{
 			Timestamp:          specID,

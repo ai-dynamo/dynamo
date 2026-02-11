@@ -1100,3 +1100,238 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		assert.Empty(t, statuses)
 	})
 }
+
+func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
+	t.Run("worker DCD with hash suffix - finds annotation", func(t *testing.T) {
+		workerHash := "abc12345"
+		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"frontend": {
+				ComponentType: consts.ComponentTypeFrontend,
+			},
+			"worker": {
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		})
+
+		frontendDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-dgd-frontend",
+				Namespace: "default",
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					Annotations: map[string]string{
+						consts.RestartAnnotation: "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+		}
+
+		workerDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-dgd-worker-" + workerHash,
+				Namespace: "default",
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					Annotations: map[string]string{
+						consts.RestartAnnotation: "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+		}
+
+		r := createTestReconciler(dgd, frontendDCD, workerDCD)
+		ctx := context.Background()
+
+		rollingUpdateCtx := dynamo.RollingUpdateContext{
+			OldWorkerHash: workerHash,
+			NewWorkerHash: workerHash,
+		}
+
+		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+
+		assert.Equal(t, "2025-01-01T00:00:00Z", annotations["frontend"])
+		assert.Equal(t, "2025-01-01T00:00:00Z", annotations["worker"])
+	})
+
+	t.Run("worker DCD not found during rolling update - gracefully skips", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"frontend": {
+				ComponentType: consts.ComponentTypeFrontend,
+			},
+			"worker": {
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		})
+
+		frontendDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-dgd-frontend",
+				Namespace: "default",
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					Annotations: map[string]string{
+						consts.RestartAnnotation: "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+		}
+
+		r := createTestReconciler(dgd, frontendDCD)
+		ctx := context.Background()
+
+		// New worker hash - DCD doesn't exist yet
+		rollingUpdateCtx := dynamo.RollingUpdateContext{
+			OldWorkerHash: "oldhash1",
+			NewWorkerHash: "newhash2",
+		}
+
+		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+
+		assert.Equal(t, "2025-01-01T00:00:00Z", annotations["frontend"])
+		_, hasWorker := annotations["worker"]
+		assert.False(t, hasWorker, "worker annotation should not be present when DCD doesn't exist")
+	})
+
+	t.Run("non-worker without hash suffix - found normally", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"frontend": {
+				ComponentType: consts.ComponentTypeFrontend,
+			},
+		})
+
+		frontendDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-dgd-frontend",
+				Namespace: "default",
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					Annotations: map[string]string{
+						consts.RestartAnnotation: "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+		}
+
+		r := createTestReconciler(dgd, frontendDCD)
+		ctx := context.Background()
+
+		rollingUpdateCtx := dynamo.RollingUpdateContext{
+			OldWorkerHash: "oldhash1",
+			NewWorkerHash: "newhash2",
+		}
+
+		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+
+		assert.Equal(t, "2025-01-01T00:00:00Z", annotations["frontend"])
+	})
+}
+
+func TestCheckComponentServiceFullyUpdated(t *testing.T) {
+	t.Run("worker with hash suffix - finds DCD", func(t *testing.T) {
+		workerHash := "abc12345"
+		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		})
+		dgd.Annotations = map[string]string{
+			consts.AnnotationCurrentWorkerHash: workerHash + "fullhashextra",
+		}
+
+		workerDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-dgd-worker-" + workerHash + "fullhashextra",
+				Namespace:  "default",
+				Generation: 1,
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				ObservedGeneration: 1,
+				Conditions: []metav1.Condition{
+					{
+						Type:   nvidiacomv1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+						Status: metav1.ConditionTrue,
+					},
+				},
+			},
+		}
+
+		r := createTestReconciler(dgd, workerDCD)
+		ctx := context.Background()
+
+		isReady, reason := r.checkComponentServiceFullyUpdated(ctx, dgd, "worker")
+		assert.True(t, isReady, "worker DCD should be ready")
+		assert.Empty(t, reason)
+	})
+
+	t.Run("non-worker without hash suffix - finds DCD", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"frontend": {
+				ComponentType: consts.ComponentTypeFrontend,
+			},
+		})
+
+		frontendDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-dgd-frontend",
+				Namespace:  "default",
+				Generation: 1,
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				ObservedGeneration: 1,
+				Conditions: []metav1.Condition{
+					{
+						Type:   nvidiacomv1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+						Status: metav1.ConditionTrue,
+					},
+				},
+			},
+		}
+
+		r := createTestReconciler(dgd, frontendDCD)
+		ctx := context.Background()
+
+		isReady, reason := r.checkComponentServiceFullyUpdated(ctx, dgd, "frontend")
+		assert.True(t, isReady, "frontend DCD should be ready")
+		assert.Empty(t, reason)
+	})
+
+	t.Run("worker without hash annotation - falls back to non-hash name", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		})
+		// No worker hash annotation
+
+		workerDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-dgd-worker",
+				Namespace:  "default",
+				Generation: 1,
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				ObservedGeneration: 1,
+				Conditions: []metav1.Condition{
+					{
+						Type:   nvidiacomv1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+						Status: metav1.ConditionTrue,
+					},
+				},
+			},
+		}
+
+		r := createTestReconciler(dgd, workerDCD)
+		ctx := context.Background()
+
+		isReady, reason := r.checkComponentServiceFullyUpdated(ctx, dgd, "worker")
+		assert.True(t, isReady, "worker DCD should be ready via fallback")
+		assert.Empty(t, reason)
+	})
+}

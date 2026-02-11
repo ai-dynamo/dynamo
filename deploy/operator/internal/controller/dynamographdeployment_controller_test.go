@@ -1343,6 +1343,114 @@ func Test_computeRestartStatus(t *testing.T) {
 				InProgress: []string{"frontend"}, // Reset to FIRST service
 			},
 		},
+		{
+			name: "rolling update in progress + new restart request - superseded",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhaseInProgress,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "rolling update pending + restart already in progress - superseded",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhasePending,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "rolling update completed + restart request - normal processing",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhaseCompleted,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
+			name: "restart already processed as superseded - returns existing status",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseSuperseded,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "no restart requested but has superseded status - preserves status",
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseSuperseded,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: oldID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
 	}
 
 	for _, tt := range tests {
