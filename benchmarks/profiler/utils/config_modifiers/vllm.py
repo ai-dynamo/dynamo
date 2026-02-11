@@ -19,11 +19,7 @@ from benchmarks.profiler.utils.config import (
     validate_and_get_worker_args,
 )
 from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
-from benchmarks.profiler.utils.defaults import (
-    DEFAULT_MODEL_NAME,
-    DYNAMO_RUN_DEFAULT_PORT,
-    EngineType,
-)
+from benchmarks.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
 from dynamo.planner.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
@@ -282,17 +278,10 @@ class VllmV1ConfigModifier(BaseConfigModifier):
     @classmethod
     def get_model_name(cls, config: dict) -> Tuple[str, str]:
         cfg = Config.model_validate(config)
-        try:
-            worker_service = get_worker_service_from_config(cfg, backend="vllm")
-            args = validate_and_get_worker_args(worker_service, backend="vllm")
-        except (ValueError, KeyError):
-            logger.warning(
-                f"Worker service missing or invalid, using default model name: {DEFAULT_MODEL_NAME}"
-            )
-            return DEFAULT_MODEL_NAME, DEFAULT_MODEL_NAME
-
+        worker_service = get_worker_service_from_config(cfg, backend="vllm")
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
         args = break_arguments(args)
-        return cls._get_model_name_and_path_from_args(args, DEFAULT_MODEL_NAME, logger)
+        return cls._get_model_name_and_path_from_args(args)
 
     @classmethod
     def get_port(cls, config: dict) -> int:
@@ -333,23 +322,30 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
                     if "Maximum concurrency for" in line:
-                        line = line.strip().split("Maximum concurrency for ")[1]
-                        token_count = int(
-                            line.split(" tokens per request: ")[0].replace(",", "")
-                        )
-                        concurrency = float(line.split(" tokens per request: ")[1][:-1])
+                        try:
+                            line = line.strip().split("Maximum concurrency for ")[1]
+                            token_count = int(
+                                line.split(" tokens per request: ")[0].replace(",", "")
+                            )
+                            concurrency = float(
+                                line.split(" tokens per request: ")[1][:-1]
+                            )
 
-                        # Log shows per-rank KV cache; multiply by attention_dp_size for total
-                        kv_cache_per_rank = int(token_count * concurrency)
-                        total_kv_cache = kv_cache_per_rank * attention_dp_size
-                        logger.info(
-                            f"Found KV cache: {kv_cache_per_rank} per rank x {attention_dp_size} = {total_kv_cache} total"
-                        )
-                        return total_kv_cache
+                            # Log shows per-rank KV cache; multiply by attention_dp_size for total
+                            kv_cache_per_rank = int(token_count * concurrency)
+                            total_kv_cache = kv_cache_per_rank * attention_dp_size
+                            logger.info(
+                                f"Found KV cache: {kv_cache_per_rank} per rank x {attention_dp_size} = {total_kv_cache} total"
+                            )
+                            return total_kv_cache
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to parse KV cache size from line: {line}. Error: {e}"
+                            )
+        except FileNotFoundError:
+            logger.warning(f"Log file not found: {dynamo_log_fn}")
         except Exception as e:
-            logger.warning(
-                f"Failed to parse KV cache size from line: {line}. Error: {e}"
-            )
+            logger.warning(f"Failed to read log file {dynamo_log_fn}: {e}")
         return 0
 
     @classmethod

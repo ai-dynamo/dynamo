@@ -7,15 +7,18 @@ import logging
 import os
 import signal
 import sys
+import time
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, DefaultDict
 
 import sglang as sgl
 import uvloop
 
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -25,11 +28,7 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import (
-    DynamoSglangPublisher,
-    setup_prometheus_registry,
-    setup_sgl_metrics,
-)
+from dynamo.sglang.publisher import DynamoSglangPublisher, setup_sgl_metrics
 from dynamo.sglang.register import (
     register_image_diffusion_model,
     register_llm_with_readiness_gate,
@@ -199,23 +198,12 @@ async def worker():
 
         config.server_args.load_format = setup_gms(config.server_args)
 
-    loop = asyncio.get_running_loop()
-
-    # Set DYN_EVENT_PLANE environment variable based on config
-    os.environ["DYN_EVENT_PLANE"] = config.dynamo_args.event_plane
-
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND use_kv_events is True
-    enable_nats = config.dynamo_args.request_plane == "nats" or (
-        config.dynamo_args.event_plane == "nats" and config.dynamo_args.use_kv_events
-    )
-
-    runtime = DistributedRuntime(
-        loop,
-        config.dynamo_args.store_kv,
-        config.dynamo_args.request_plane,
-        enable_nats,
+    dynamo_args = config.dynamo_args
+    runtime, loop = create_runtime(
+        store_kv=dynamo_args.store_kv,
+        request_plane=dynamo_args.request_plane,
+        event_plane=dynamo_args.event_plane,
+        use_kv_events=dynamo_args.use_kv_events,
     )
 
     # Set up signal handlers using signal module to allow chaining
@@ -253,7 +241,10 @@ async def init(
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    # Time model loading
+    start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
+    load_time = time.time() - start_time
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -267,9 +258,9 @@ async def init(
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+    # Record model load time immediately after publisher setup (which creates the gauges)
+    publisher.component_gauges.set_model_load_time(load_time)
+    logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
@@ -359,10 +350,6 @@ async def init_prefill(
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
     if server_args.node_rank >= 1:
@@ -451,10 +438,6 @@ async def init_diffusion(
         engine, config, component, generate_endpoint
     )
 
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
-
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes run schedulers and publish KV events, but don't serve requests
     if server_args.node_rank >= 1:
@@ -529,10 +512,6 @@ async def init_embedding(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
-
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -693,11 +672,14 @@ async def init_multimodal_processor(
     await encode_worker_client.wait_for_instances()
 
     try:
-        await asyncio.gather(
+        _ = await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, server_args.served_model_name),
+                    (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+                ],
             ),
             register_llm_with_readiness_gate(
                 None,  # engine
@@ -751,7 +733,10 @@ async def init_multimodal_encode_worker(
         await generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
+            metrics_labels=[
+                (prometheus_names.labels.MODEL, server_args.served_model_name),
+                (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+            ],
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -766,7 +751,12 @@ async def init_multimodal_encode_worker(
 async def init_multimodal_worker(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
-    """Initialize multimodal worker component for aggregated or decode mode"""
+    """Initialize multimodal worker component.
+
+    This worker is always an internal component that should not register with
+    the Frontend. Public registration is handled by the Processor component
+    (--multimodal-processor). For standalone serving, use init() (default).
+    """
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     component = runtime.namespace(dynamo_args.namespace).component(
@@ -796,35 +786,16 @@ async def init_multimodal_worker(
     await handler.async_init()
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
-    ready_event = asyncio.Event()
 
     try:
-        if config.serving_mode == DisaggregationMode.DECODE:
-            # Decode Worker is an internal component, should not register with Frontend
-            # Only needs to provide internal service endpoint for Processor to call
-            await generate_endpoint.serve_endpoint(
-                handler.generate,
-                metrics_labels=[("model", server_args.served_model_name)],
-                graceful_shutdown=True,
-                health_check_payload=health_check_payload,
-            )
-        else:
-            # In aggregated mode, need to register with Frontend
-            await asyncio.gather(
-                generate_endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=[("model", server_args.served_model_name)],
-                    graceful_shutdown=True,
-                    health_check_payload=health_check_payload,
-                ),
-                register_llm_with_readiness_gate(
-                    engine,
-                    generate_endpoint,
-                    server_args,
-                    dynamo_args,
-                    readiness_gate=ready_event,
-                ),
-            )
+        # Multimodal Worker is an internal component, should not register with Frontend.
+        # Only needs to provide internal service endpoint for Processor to call.
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            metrics_labels=[("model", server_args.served_model_name)],
+            graceful_shutdown=True,
+            health_check_payload=health_check_payload,
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise

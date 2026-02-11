@@ -16,6 +16,11 @@ from tests.utils.payloads import check_models_api, completions_response_handler
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.fault_tolerance,
+    pytest.mark.vllm,
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend"""
@@ -32,8 +37,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "--enforce-eager",
             "--max-model-len",
             "8192",
-            "--migration-limit",
-            "3",
         ]
 
         # Set debug logging environment
@@ -63,7 +66,7 @@ class DynamoWorkerProcess(ManagedProcess):
             ],
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
@@ -125,7 +128,6 @@ def send_completion_request(
         raise
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -183,7 +185,6 @@ def test_vllm_health_check_active(request, runtime_services):
                 )
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)

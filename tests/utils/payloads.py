@@ -540,13 +540,16 @@ class MetricCheck:
 
 @dataclass
 class MetricsPayload(BasePayload):
+    """Base class for Prometheus metrics validation payloads.
+
+    Validates common dynamo_component_* metrics shared across all backends.
+    Backend-specific subclasses handle engine-specific metrics.
+    """
+
     endpoint: str = "/metrics"
     method: str = "GET"
     port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
-    backend: Optional[
-        str
-    ] = None  # Backend identifier for metrics validation (e.g., 'vllm', 'sglang', 'trtllm')
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -556,16 +559,14 @@ class MetricsPayload(BasePayload):
         response.raise_for_status()
         return response.text
 
-    def validate(self, response: Any, content: str) -> None:
-        # Use backend from payload configuration
-        backend = self.backend
-
-        # Filter out _bucket metrics from content (histogram buckets inflate counts)
+    def _filter_bucket_metrics(self, content: str) -> str:
+        """Filter out histogram bucket metrics to avoid count inflation"""
         content_lines = content.split("\n")
         filtered_lines = [line for line in content_lines if "_bucket{" not in line]
-        content = "\n".join(filtered_lines)
+        return "\n".join(filtered_lines)
 
-        # Build full metric names with prefix
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        """Get common dynamo_component_* metric checks shared across all backends"""
         prefix = prometheus_names.name_prefix.COMPONENT
 
         # Define metrics to check
@@ -573,10 +574,11 @@ class MetricsPayload(BasePayload):
         # Examples:
         #   - dynamo_component_requests_total{model="Qwen/Qwen3-0.6B"} 6
         #   - dynamo_component_uptime_seconds 150.390999059
+        # Note: Supports scientific notation (e.g., 8.34e-05)
         def metric_pattern(name):
-            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.]+)"
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
 
-        metrics_to_check = [
+        return [
             MetricCheck(
                 # Check: Minimum count of unique dynamo_component_* metrics
                 name=f"{prefix}_*",
@@ -601,63 +603,37 @@ class MetricsPayload(BasePayload):
                 error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}s",
             ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.kvstats.GPU_CACHE_USAGE_PERCENT}",
+                pattern=metric_pattern,
+                validator=lambda value: 0.0 <= float(value) <= 1.0,
+                error_msg=lambda name, value: f"{name} should be between 0.0 and 1.0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.model_info.LOAD_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) > 0,
+                error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {float(value):.2f}s",
+            ),
         ]
 
-        # Add backend-specific metric checks
-        if backend == "vllm":
-            metrics_to_check.append(
-                MetricCheck(
-                    # Check: Minimum count of unique vllm:* metrics
-                    name="vllm:*",
-                    pattern=lambda name: r"^vllm:\w+",
-                    validator=lambda value: len(set(value))
-                    >= 52,  # 80% of typical ~65 vllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                    error_msg=lambda name, value: f"Expected at least 52 unique vllm:* metrics, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique vllm:* metrics (minimum required: 52)",
-                    multiline=True,
-                )
-            )
-        elif backend == "lmcache":
-            metrics_to_check.append(
-                MetricCheck(
-                    # Check: Minimum count of unique lmcache:* metrics
-                    name="lmcache:*",
-                    pattern=lambda name: r"^lmcache:\w+",
-                    validator=lambda value: len(set(value))
-                    >= 1,  # At least 1 lmcache metric
-                    error_msg=lambda name, value: f"Expected at least 1 lmcache:* metric, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} lmcache:* metrics",
-                    multiline=True,
-                )
-            )
-        elif backend == "sglang":
-            metrics_to_check.append(
-                MetricCheck(
-                    # Check: Minimum count of unique sglang:* metrics
-                    name="sglang:*",
-                    pattern=lambda name: r"^sglang:\w+",
-                    validator=lambda value: len(set(value))
-                    >= 20,  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                    error_msg=lambda name, value: f"Expected at least 20 unique sglang:* metrics, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 20)",
-                    multiline=True,
-                )
-            )
-        elif backend == "trtllm":
-            metrics_to_check.append(
-                MetricCheck(
-                    # Check: Minimum count of unique trtllm_* metrics
-                    name="trtllm_*",
-                    pattern=lambda name: r"^trtllm_\w+",
-                    validator=lambda value: len(set(value))
-                    >= 4,  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                    error_msg=lambda name, value: f"Expected at least 4 unique trtllm_* metrics, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)",
-                    multiline=True,
-                )
-            )
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """Get backend-specific metric checks. Override in subclasses."""
+        return []
 
-        # Check all metrics
+    def _validate_metric_checks(
+        self, metrics_to_check: list[MetricCheck], content: str
+    ) -> None:
+        """Run all metric checks and raise AssertionError if any fail"""
         for metric in metrics_to_check:
             # Special handling for multiline patterns (like counting unique metrics)
             if metric.multiline:
@@ -704,6 +680,163 @@ class MetricsPayload(BasePayload):
                             metric.name, last_value if last_value else "N/A"
                         )
                     )
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate Prometheus metrics output"""
+        content = self._filter_bucket_metrics(content)
+
+        # Collect all checks: common + backend-specific
+        metrics_to_check = self._get_common_metric_checks()
+        metrics_to_check.extend(self._get_backend_specific_checks())
+
+        # Run all validations
+        self._validate_metric_checks(metrics_to_check, content)
+
+
+@dataclass
+class VLLMMetricsPayload(MetricsPayload):
+    """Metrics validation for vLLM backend with auto-label checks"""
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """vLLM-specific metric checks"""
+        checks = [
+            MetricCheck(
+                # Check: Minimum count of unique vllm:* metrics
+                name="vllm:*",
+                pattern=lambda name: r"^vllm:\w+",
+                validator=lambda value: len(set(value))
+                >= 56,  # 80% of typical ~70 vllm metrics (excluding _bucket) as of 2026-02-05 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 56 unique vllm:* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique vllm:* metrics (minimum required: 56)",
+                multiline=True,
+            )
+        ]
+
+        # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
+        required_labels = [
+            prometheus_names.labels.NAMESPACE,
+            prometheus_names.labels.COMPONENT,
+            prometheus_names.labels.ENDPOINT,
+            prometheus_names.labels.MODEL,  # OpenAI standard (injected by all backends)
+            prometheus_names.labels.MODEL_NAME,  # Alternative label (injected for compatibility)
+        ]
+        for label_name in required_labels:
+            checks.append(
+                MetricCheck(
+                    name=f"vllm:* with {label_name}",
+                    pattern=lambda name, lbl=label_name: rf'vllm:\w+\{{[^}}]*{lbl}="[^"]+"',
+                    validator=lambda value: len(value) > 0,
+                    error_msg=lambda name, value, lbl=label_name: f"vLLM metrics missing label: {lbl}",
+                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: vLLM metrics include {lbl} label (found {len(value)} metrics)",
+                    multiline=True,
+                )
+            )
+
+        return checks
+
+
+@dataclass
+class LMCacheMetricsPayload(MetricsPayload):
+    """Metrics validation for lmcache"""
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """lmcache-specific metric checks"""
+        return [
+            MetricCheck(
+                # Check: Minimum count of unique lmcache:* metrics
+                name="lmcache:*",
+                pattern=lambda name: r"^lmcache:\w+",
+                validator=lambda value: len(set(value))
+                >= 26,  # 80% of typical ~33 lmcache metrics (excluding _bucket) as of 2026-02-05 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 26 unique lmcache:* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} lmcache:* metrics (minimum required: 26)",
+                multiline=True,
+            )
+        ]
+
+
+@dataclass
+class SGLangMetricsPayload(MetricsPayload):
+    """Metrics validation for SGLang backend with auto-label checks"""
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """SGLang-specific metric checks"""
+        checks = [
+            MetricCheck(
+                # Check: Minimum count of unique sglang:* metrics
+                name="sglang:*",
+                pattern=lambda name: r"^sglang:\w+",
+                validator=lambda value: len(set(value))
+                >= 20,  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 20 unique sglang:* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 20)",
+                multiline=True,
+            )
+        ]
+
+        # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
+        required_labels = [
+            prometheus_names.labels.NAMESPACE,
+            prometheus_names.labels.COMPONENT,
+            prometheus_names.labels.ENDPOINT,
+            prometheus_names.labels.MODEL,  # OpenAI standard (injected by all backends)
+            prometheus_names.labels.MODEL_NAME,  # Alternative label (injected for compatibility)
+        ]
+        for label_name in required_labels:
+            checks.append(
+                MetricCheck(
+                    name=f"sglang:* with {label_name}",
+                    pattern=lambda name, lbl=label_name: rf'sglang:\w+\{{[^}}]*{lbl}="[^"]+"',
+                    validator=lambda value: len(value) > 0,
+                    error_msg=lambda name, value, lbl=label_name: f"sglang metrics missing label: {lbl}",
+                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: sglang metrics include {lbl} label (found {len(value)} metrics)",
+                    multiline=True,
+                )
+            )
+
+        return checks
+
+
+@dataclass
+class TRTLLMMetricsPayload(MetricsPayload):
+    """Metrics validation for TensorRT-LLM backend"""
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """TRT-LLM-specific metric checks"""
+        checks = [
+            MetricCheck(
+                # Check: Minimum count of unique trtllm_* metrics
+                name="trtllm_*",
+                pattern=lambda name: r"^trtllm_\w+",
+                validator=lambda value: len(set(value))
+                >= 4,  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 4 unique trtllm_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)",
+                multiline=True,
+            )
+        ]
+
+        # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
+        required_labels = [
+            prometheus_names.labels.NAMESPACE,
+            prometheus_names.labels.COMPONENT,
+            prometheus_names.labels.ENDPOINT,
+            prometheus_names.labels.MODEL,  # OpenAI standard (injected by all backends)
+            prometheus_names.labels.MODEL_NAME,  # Alternative label (injected for compatibility)
+        ]
+        for label_name in required_labels:
+            checks.append(
+                MetricCheck(
+                    name=f"trtllm_* with {label_name}",
+                    pattern=lambda name, lbl=label_name: rf'trtllm_\w+\{{[^}}]*{lbl}="[^"]+"',
+                    validator=lambda value: len(value) > 0,
+                    error_msg=lambda name, value, lbl=label_name: f"TRT-LLM metrics missing label: {lbl}",
+                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: TRT-LLM metrics include {lbl} label (found {len(value)} metrics)",
+                    multiline=True,
+                )
+            )
+
+        return checks
 
 
 def check_models_api(response):

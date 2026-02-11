@@ -5,20 +5,18 @@
 
 import logging
 
-from dynamo._core import ApproxKvIndexer as ApproxKvIndexer
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KserveGrpcService as KserveGrpcService
 from dynamo._core import KvEventPublisher as KvEventPublisher
-from dynamo._core import KvIndexer as KvIndexer
 from dynamo._core import KvPushRouter as KvPushRouter
-from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher
+from dynamo._core import ModelCardInstanceId as ModelCardInstanceId
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
@@ -30,7 +28,6 @@ from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
-from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher
 from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for_seq_py
 from dynamo._core import fetch_llm as fetch_llm

@@ -54,7 +54,7 @@ import (
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
@@ -67,7 +67,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	//+kubebuilder:scaffold:imports
@@ -256,6 +258,14 @@ func main() {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
 		os.Exit(1)
 	}
+
+	// Validate and normalize operator version to semver
+	if _, err := semver.NewVersion(operatorVersion); err != nil {
+		setupLog.Info("WARNING: operator-version is not valid semver, falling back to 0.0.0-unknown",
+			"provided", operatorVersion, "error", err.Error())
+		operatorVersion = "0.0.0-unknown"
+	}
+	setupLog.Info("Operator version configured", "version", operatorVersion)
 
 	// Validate discoveryBackend value
 	if discoveryBackend != "kubernetes" && discoveryBackend != "etcd" {
@@ -739,6 +749,17 @@ func main() {
 		}
 
 		setupLog.Info("Validation webhooks registered successfully")
+
+		// Register defaulting (mutating) webhook handlers
+		setupLog.Info("Registering defaulting webhooks")
+
+		dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
+		if err = dgdDefaulter.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment-defaulting")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Defaulting webhooks registered successfully")
 	}
 	//+kubebuilder:scaffold:builder
 

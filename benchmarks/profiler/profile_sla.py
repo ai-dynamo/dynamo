@@ -26,6 +26,7 @@ from benchmarks.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
     get_prefill_ttft,
 )
+from benchmarks.profiler.utils.config import Config, get_service_name_by_type
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
@@ -50,6 +51,10 @@ from benchmarks.profiler.utils.profile_prefill import (
     profile_prefill_aiconfigurator,
 )
 from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
+from benchmarks.profiler.utils.profiler_status import (
+    ProfilerStatus,
+    write_profiler_status,
+)
 from benchmarks.profiler.webui.select_config import (
     add_profiling_error,
     clear_profiling_errors,
@@ -59,7 +64,7 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
+from dynamo.planner.defaults import SubComponentType
 
 
 @dataclass
@@ -141,6 +146,14 @@ async def run_profile(args):
     # Inherit aic_backend from backend if not explicitly set
     if not args.aic_backend:
         args.aic_backend = args.backend
+
+    # Write initial status for external jobs to monitor
+    os.makedirs(args.output_dir, exist_ok=True)
+    write_profiler_status(
+        args.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Profiler job started",
+    )
 
     try:
         config_modifier = CONFIG_MODIFIERS[args.backend]
@@ -231,7 +244,8 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling prefill with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, EngineType.PREFILL
+                num_gpus,
+                args.model_info,
             )
 
             for mapping in candidate_mappings:
@@ -284,9 +298,23 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(prefill_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready(
-                        timeout=getattr(args, "deployment_timeout", 1800)
-                    )
+                    try:
+                        await client.wait_for_deployment_ready(
+                            timeout=getattr(args, "deployment_timeout", 1800)
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            f"Deployment for mapping {mapping.label()} with {num_gpus} GPUs "
+                            f"failed to become ready within timeout during prefill profiling, skipping"
+                        )
+                        add_profiling_error(
+                            f"Mapping {mapping.label()} with {num_gpus} GPUs timed out "
+                            f"during prefill profiling"
+                        )
+                        logger.info("Cleaning up timed-out deployment...")
+                        await client.delete_deployment()
+                        deployment_clients.remove(client)
+                        continue
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -338,7 +366,8 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling decode with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, EngineType.DECODE
+                num_gpus,
+                args.model_info,
             )
 
             for mapping in candidate_mappings:
@@ -389,9 +418,23 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(decode_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready(
-                        timeout=getattr(args, "deployment_timeout", 1800)
-                    )
+                    try:
+                        await client.wait_for_deployment_ready(
+                            timeout=getattr(args, "deployment_timeout", 1800)
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            f"Deployment for mapping {mapping.label()} with {num_gpus} GPUs "
+                            f"failed to become ready within timeout during decode profiling, skipping"
+                        )
+                        add_profiling_error(
+                            f"Mapping {mapping.label()} with {num_gpus} GPUs timed out "
+                            f"during decode profiling"
+                        )
+                        logger.info("Cleaning up timed-out deployment...")
+                        await client.delete_deployment()
+                        deployment_clients.remove(client)
+                        continue
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -403,8 +446,13 @@ async def run_profile(args):
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
                     attention_dp_size = mapping.get_attn_dp_size()
+                    # Get the actual decode service name from the config
+                    decode_cfg = Config.model_validate(decode_config)
+                    decode_service_name = get_service_name_by_type(
+                        decode_cfg, args.backend, SubComponentType.DECODE
+                    ).lower()
                     max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                        f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
+                        f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
                         attention_dp_size=attention_dp_size,
                     )
                     max_concurrency = max_kv_tokens // (args.isl + args.osl)
@@ -490,6 +538,12 @@ async def run_profile(args):
                 error_msg = "No prefill results produced; skipping recommendations."
                 logger.error(error_msg)
                 add_profiling_error(error_msg)
+                write_profiler_status(
+                    args.output_dir,
+                    status=ProfilerStatus.FAILED,
+                    error=error_msg,
+                    message="Profiler failed: no prefill results produced",
+                )
                 return
 
             if args.pick_with_webui:
@@ -527,6 +581,12 @@ async def run_profile(args):
                     error_msg = "No decode results produced; skipping recommendations."
                     logger.error(error_msg)
                     add_profiling_error(error_msg)
+                    write_profiler_status(
+                        args.output_dir,
+                        status=ProfilerStatus.FAILED,
+                        error=error_msg,
+                        message="Profiler failed: no decode results produced",
+                    )
                     return
                 if min(decode_data.itl) > args.itl:
                     warning_msg = "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
@@ -708,8 +768,13 @@ async def run_profile(args):
             )
 
             attention_dp_size = best_decode_mapping.get_attn_dp_size()
+            # Get the actual decode service name from the config
+            decode_cfg = Config.model_validate(decode_config)
+            decode_service_name = get_service_name_by_type(
+                decode_cfg, args.backend, SubComponentType.DECODE
+            ).lower()
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
+                f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
                 attention_dp_size=attention_dp_size,
             )
 
@@ -759,8 +824,26 @@ async def run_profile(args):
             else:
                 yaml.safe_dump(mocker_config, f, sort_keys=False)
 
+        # Write success status with output files
+        write_profiler_status(
+            args.output_dir,
+            status=ProfilerStatus.SUCCESS,
+            message="Profiler completed successfully",
+            outputs={
+                "config_with_planner": "config_with_planner.yaml",
+                "mocker_config_with_planner": "mocker_config_with_planner.yaml",
+                "disagg_config": "disagg_config.yaml",
+            },
+        )
+
     except Exception as e:
-        logger.error(f"Profile job failed with error: {e}")
+        logger.exception("Profile job failed with error")
+        write_profiler_status(
+            args.output_dir,
+            status=ProfilerStatus.FAILED,
+            error=str(e),
+            message=f"Profiler failed with exception: {type(e).__name__}",
+        )
         raise
     finally:
         # Always clean up any remaining deployments, even if the job failed

@@ -102,14 +102,15 @@ Before using these templates, ensure you have:
 We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd prefer to use your own registry, build and push your own image:
 
 ```bash
-./container/build.sh --framework VLLM
+python container/render.py --framework=vllm --output-short-filename
+docker build -f container/rendered.Dockerfile .
 # Tag and push to your container registry
 # Update the image references in the YAML files
 ```
 
 ### Pre-Deployment Profiling (SLA Planner Only)
 
-If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/benchmarks/sla_driven_profiling.md) to run pre-deployment profiling.
+If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler_guide.md) to run pre-deployment profiling.
 
 ## Usage
 
@@ -247,9 +248,9 @@ args:
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation_guide.md)
-- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/planner/sla_planner_quickstart.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
 
 ## Troubleshooting
 

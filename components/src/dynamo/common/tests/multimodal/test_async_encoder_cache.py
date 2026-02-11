@@ -8,7 +8,9 @@ import asyncio
 import pytest
 import torch
 
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
 
 
@@ -18,7 +20,7 @@ class TestAsyncEncoderCacheBasicOperations:
     @pytest.fixture
     def cache(self):
         """Create a cache for testing."""
-        ecm = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        ecm = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         return AsyncEncoderCache(ecm)
 
     def test_sync_get_returns_none_for_missing_key(self, cache):
@@ -74,7 +76,7 @@ class TestAsyncEncoderCacheRequestCoalescing:
     @pytest.fixture
     def cache(self):
         """Create a cache for testing."""
-        ecm = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        ecm = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         return AsyncEncoderCache(ecm)
 
     @pytest.mark.asyncio
@@ -137,7 +139,7 @@ class TestAsyncEncoderCacheExceptionHandling:
     @pytest.fixture
     def cache(self):
         """Create a cache for testing."""
-        ecm = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        ecm = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         return AsyncEncoderCache(ecm)
 
     @pytest.mark.asyncio
@@ -209,7 +211,7 @@ class TestAsyncEncoderCacheStats:
     @pytest.fixture
     def cache(self):
         """Create a cache for testing."""
-        ecm = EncoderCacheManager(capacity_bytes=1024 * 1024)
+        ecm = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
         return AsyncEncoderCache(ecm)
 
     def test_stats_includes_in_flight(self, cache):

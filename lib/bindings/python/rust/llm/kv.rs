@@ -10,10 +10,8 @@ use tokio_stream::StreamExt;
 
 use super::*;
 use crate::Component;
-use llm_rs::kv_router::indexer::KvIndexerInterface;
 use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
-use rs::transports::event_plane::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
@@ -127,7 +125,7 @@ impl ZmqKvEventPublisherConfig {
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
         zmq_topic = "".to_string(),
-        enable_local_indexer = false,
+        enable_local_indexer = true,
         dp_rank = 0
     ))]
     pub fn new(
@@ -146,34 +144,6 @@ impl ZmqKvEventPublisherConfig {
             enable_local_indexer,
             dp_rank,
         }
-    }
-}
-
-#[pyclass]
-pub(crate) struct ZmqKvEventPublisher {
-    inner: llm_rs::kv_router::publisher::KvEventPublisher,
-}
-
-#[pymethods]
-impl ZmqKvEventPublisher {
-    #[new]
-    fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component.inner,
-            config.kv_block_size as u32,
-            Some(KvEventSourceConfig::Zmq {
-                endpoint: config.zmq_endpoint,
-                topic: config.zmq_topic,
-            }),
-            config.enable_local_indexer,
-            config.dp_rank,
-        )
-        .map_err(to_pyerr)?;
-        Ok(Self { inner })
-    }
-
-    fn shutdown(&mut self) {
-        self.inner.shutdown()
     }
 }
 
@@ -261,26 +231,42 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0, enable_local_indexer=false))]
+    #[pyo3(signature = (component, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_config=None))]
     fn new(
         component: Component,
         worker_id: WorkerId,
         kv_block_size: usize,
         dp_rank: DpRank,
         enable_local_indexer: bool,
+        zmq_config: Option<ZmqKvEventPublisherConfig>,
     ) -> PyResult<Self> {
+        // worker_id is not used; connection_id is inferred from the component.
+        let _ = worker_id;
+
+        // When zmq_config is provided, use its fields for kv_block_size/dp_rank/enable_local_indexer
+        let (kv_block_size, dp_rank, enable_local_indexer, source_config) =
+            if let Some(ref cfg) = zmq_config {
+                (
+                    cfg.kv_block_size,
+                    cfg.dp_rank,
+                    cfg.enable_local_indexer,
+                    Some(KvEventSourceConfig::Zmq {
+                        endpoint: cfg.zmq_endpoint.clone(),
+                        topic: cfg.zmq_topic.clone(),
+                    }),
+                )
+            } else {
+                (kv_block_size, dp_rank, enable_local_indexer, None)
+            };
+
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
-        // Note: worker_id parameter matches the Python stub (_core.pyi) signature but is not used.
-        // The actual worker_id is inferred from component's connection_id in the Rust implementation.
-        let _ = worker_id;
-
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
             component.inner,
             kv_block_size as u32,
-            None,
+            source_config,
             enable_local_indexer,
             dp_rank,
         )
@@ -370,6 +356,14 @@ impl KvEventPublisher {
 
             inner.publish(event).map_err(to_pyerr)
         })
+    }
+
+    fn shutdown(&mut self) {
+        // If no other Arc clones exist, shut down eagerly.
+        // Otherwise the Drop impl handles cleanup when the last reference is freed.
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.shutdown();
+        }
     }
 }
 
@@ -683,315 +677,12 @@ impl Drop for RadixTree {
     }
 }
 
-#[pyclass]
-pub(crate) struct KvIndexer {
-    inner: Arc<llm_rs::kv_router::indexer::KvIndexer>,
-}
-
-#[pymethods]
-impl KvIndexer {
-    #[new]
-    #[pyo3(signature = (component, kv_block_size, consumer_uuid=None))]
-    fn new(
-        component: Component,
-        kv_block_size: usize,
-        consumer_uuid: Option<String>,
-    ) -> PyResult<Self> {
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let cancellation_token = component.inner.drt().runtime().child_token();
-            let kv_indexer_metrics =
-                llm_rs::kv_router::indexer::KvIndexerMetrics::from_component(&component.inner);
-            let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
-                llm_rs::kv_router::indexer::KvIndexer::new(
-                    cancellation_token.clone(),
-                    kv_block_size as u32,
-                    kv_indexer_metrics,
-                )
-                .into();
-
-            // Use the shared start_kv_router_background function for event consumption
-            // Pass None for snapshot_tx and get_workers_tx to skip snapshot handling in Python bindings
-            llm_rs::kv_router::subscriber::start_kv_router_background(
-                component.inner.clone(),
-                consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                inner.event_sender(),
-                inner.remove_worker_sender(),
-                None,
-                None,
-                cancellation_token,
-                None,
-                true,
-            )
-            .await
-            .map_err(to_pyerr)?;
-
-            Ok(Self { inner })
-        })
-    }
-
-    fn block_size(&self) -> usize {
-        self.inner.block_size() as usize
-    }
-
-    fn find_matches<'p>(&self, py: Python<'p>, sequence: Vec<u64>) -> PyResult<Bound<'p, PyAny>> {
-        let indexer = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = sequence
-                .into_iter()
-                .map(llm_rs::kv_router::protocols::LocalBlockHash)
-                .collect();
-
-            let rs_overlap_scores = indexer
-                .find_matches(local_block_hashes)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(OverlapScores {
-                inner: rs_overlap_scores,
-            })
-        })
-    }
-
-    fn find_matches_for_request<'p>(
-        &self,
-        py: Python<'p>,
-        token_ids: Vec<u32>,
-        _lora_id: u64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let indexer = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let rs_overlap_scores = indexer
-                .find_matches_for_request(token_ids.as_slice())
-                .await
-                .map_err(to_pyerr)?;
-            Ok(OverlapScores {
-                inner: rs_overlap_scores,
-            })
-        })
-    }
-}
-
-/// Bindings for the approximate KV indexer. This is a wrapper around KvIndexer
-/// that uses TTL-based expiration and pruning instead of receiving KV events from workers.
-#[pyclass]
-pub(crate) struct ApproxKvIndexer {
-    inner: Arc<llm_rs::kv_router::indexer::KvIndexer>,
-}
-
-#[pymethods]
-impl ApproxKvIndexer {
-    #[new]
-    #[pyo3(signature = (component, kv_block_size, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8))]
-    fn new(
-        component: Component,
-        kv_block_size: usize,
-        router_ttl_secs: f64,
-        router_max_tree_size: usize,
-        router_prune_target_ratio: f64,
-    ) -> PyResult<Self> {
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let cancellation_token = component.inner.drt().runtime().child_token();
-            let kv_indexer_metrics =
-                llm_rs::kv_router::indexer::KvIndexerMetrics::from_component(&component.inner);
-
-            // Build PruneConfig with the provided parameters
-            let prune_config = llm_rs::kv_router::approx::PruneConfig {
-                ttl: std::time::Duration::from_secs_f64(router_ttl_secs),
-                max_tree_size: router_max_tree_size,
-                prune_target_ratio: router_prune_target_ratio,
-            };
-
-            // Create KvIndexer with pruning enabled, but DO NOT subscribe to events
-            let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
-                llm_rs::kv_router::indexer::KvIndexer::new_with_frequency(
-                    cancellation_token.clone(),
-                    None, // expiration_duration - not used with prune_config
-                    kv_block_size as u32,
-                    kv_indexer_metrics,
-                    Some(prune_config),
-                )
-                .into();
-
-            // Note: We deliberately do NOT call start_kv_router_background here
-            // because ApproxKvIndexer doesn't use KV events from workers
-
-            Ok(Self { inner })
-        })
-    }
-
-    fn block_size(&self) -> usize {
-        self.inner.block_size() as usize
-    }
-
-    fn find_matches_for_request<'p>(
-        &self,
-        py: Python<'p>,
-        token_ids: Vec<u32>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let indexer = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let rs_overlap_scores = indexer
-                .find_matches_for_request(token_ids.as_slice())
-                .await
-                .map_err(to_pyerr)?;
-            Ok(OverlapScores {
-                inner: rs_overlap_scores,
-            })
-        })
-    }
-
-    #[pyo3(signature = (tokens, worker_id, dp_rank=0))]
-    fn process_routing_decision_for_request<'p>(
-        &self,
-        py: Python<'p>,
-        tokens: Vec<u32>,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let indexer = self.inner.clone();
-        let block_size = self.inner.block_size();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let worker = llm_rs::kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank);
-            let mut tokens_with_hashes = TokensWithHashes::new(tokens, block_size);
-            indexer
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-}
-
-#[pyclass]
-pub(crate) struct KvRecorder {
-    inner: Arc<llm_rs::kv_router::recorder::KvRecorder>,
-}
-
-#[pymethods]
-impl KvRecorder {
-    #[new]
-    #[pyo3(signature = (component, output_path=None, max_lines_per_file=None, max_count=None, max_time=None))]
-    fn new(
-        component: Component,
-        output_path: Option<String>,
-        max_lines_per_file: Option<usize>,
-        max_count: Option<usize>,
-        max_time: Option<f64>,
-    ) -> PyResult<Self> {
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let token = component.inner.drt().runtime().child_token();
-
-            // Create a temp path if none provided
-            let path = match output_path {
-                Some(p) => p,
-                None => {
-                    let temp_dir = std::env::temp_dir();
-                    temp_dir
-                        .join("kv_events.jsonl")
-                        .to_string_lossy()
-                        .to_string()
-                }
-            };
-
-            let inner = llm_rs::kv_router::recorder::KvRecorder::new(
-                token.clone(),
-                path,
-                max_lines_per_file,
-                max_count,
-                max_time,
-            )
-            .await
-            .map_err(to_pyerr)?;
-
-            // Subscribe to KV events
-            let mut kv_events_rx = EventSubscriber::for_component(
-                &component.inner,
-                llm_rs::kv_router::KV_EVENT_SUBJECT,
-            )
-            .await
-            .map_err(to_pyerr)?
-            .typed::<llm_rs::kv_router::protocols::RouterEvent>();
-            let event_tx = inner.event_sender();
-
-            // Spawn a task to forward events to the recorder
-            tokio::spawn(async move {
-                while let Some(result) = kv_events_rx.next().await {
-                    let event = match result {
-                        Ok((_envelope, event)) => event,
-                        Err(e) => {
-                            tracing::warn!("KvRecorder failed to decode kv event: {:?}", e);
-                            continue;
-                        }
-                    };
-                    tracing::debug!("KvRecorder received kv event: {:?}", event);
-                    if let Err(e) = event_tx.send(event).await {
-                        tracing::trace!(
-                            "KvRecorder failed to send kv event; shutting down: {:?}",
-                            e
-                        );
-                        break;
-                    }
-                }
-            });
-
-            Ok(Self {
-                inner: Arc::new(inner),
-            })
-        })
-    }
-
-    fn event_count<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let recorder = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let count = recorder.event_count().await;
-            Ok(count)
-        })
-    }
-
-    fn elapsed_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let recorder = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            match recorder.elapsed_time().await {
-                Ok(elapsed) => Ok(elapsed.as_secs_f64()),
-                Err(_) => Ok(0.0), // Return 0.0 when no events have been received yet
-            }
-        })
-    }
-
-    #[pyo3(signature = (indexer, timed=false, max_count=None, max_time=None))]
-    fn replay_events<'py>(
-        &self,
-        py: Python<'py>,
-        indexer: &KvIndexer,
-        timed: bool,
-        max_count: Option<usize>,
-        max_time: Option<f64>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let event_tx = indexer.inner.event_sender();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let count = llm_rs::kv_router::recorder::KvRecorder::send_events(
-                "dummy_path", // This doesn't matter as we'll use the provided event_tx
-                &event_tx,
-                timed,
-                max_count,
-                max_time,
-            )
-            .await
-            .map_err(to_pyerr)?;
-            Ok(count)
-        })
-    }
-
-    fn shutdown(&self) -> PyResult<()> {
-        self.inner.shutdown();
-        Ok(())
-    }
-}
-
 /// Helper function to create a KV router from an endpoint using the ModelManager
-/// to ensure proper etcd registration
+/// to ensure proper etcd registration.
+/// Infers worker type using endpoint naming and router config:
+/// - If endpoint name/component contains "prefill", treat as prefill
+/// - If router_track_active_blocks is disabled, treat as prefill
+/// - Otherwise, default to decode
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
@@ -999,8 +690,28 @@ async fn create_kv_router_from_endpoint(
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
+    let endpoint_id = endpoint.inner.id();
+    let namespace = endpoint_id.namespace.to_lowercase();
+    let component = endpoint_id.component.to_lowercase();
+    let name = endpoint_id.name.to_lowercase();
+    let endpoint_is_prefill =
+        namespace.contains("prefill") || component.contains("prefill") || name.contains("prefill");
+    let track_active_blocks = kv_router_config
+        .as_ref()
+        .map(|cfg| cfg.router_track_active_blocks)
+        .unwrap_or(true);
+    let worker_type = if endpoint_is_prefill || !track_active_blocks {
+        llm_rs::discovery::WORKER_TYPE_PREFILL
+    } else {
+        llm_rs::discovery::WORKER_TYPE_DECODE
+    };
     let kv_router = model_manager
-        .kv_chooser_for(&endpoint.inner, block_size as u32, kv_router_config)
+        .kv_chooser_for(
+            &endpoint.inner,
+            block_size as u32,
+            kv_router_config,
+            worker_type,
+        )
         .await
         .map_err(to_pyerr)?;
 
@@ -1055,6 +766,7 @@ impl KvPushRouter {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut first_item = true;
+                let mut first_token_gauges_observed = false;
 
                 while let Some(mut response) = stream.next().await {
                     // Inject worker_id into first response if tracker is available
@@ -1062,6 +774,21 @@ impl KvPushRouter {
                         first_item = false;
                         if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
                             inject_worker_id_from_tracker(data, tracker);
+                        }
+                    }
+
+                    // Observe per-worker TTFT/ISL gauges on first response with actual tokens
+                    if !first_token_gauges_observed {
+                        let has_tokens = response
+                            .data
+                            .as_ref()
+                            .map(|d| !d.token_ids.is_empty())
+                            .unwrap_or(false);
+                        if has_tokens {
+                            if let Some(ref tracker) = tracker {
+                                tracker.observe_first_token_gauges();
+                            }
+                            first_token_gauges_observed = true;
                         }
                     }
 
@@ -1084,6 +811,11 @@ impl KvPushRouter {
                         }
                     }
                 }
+
+                // Observe per-worker ITL gauge at stream end
+                if let Some(ref tracker) = tracker {
+                    tracker.observe_finish_gauges();
+                }
             });
 
             // Return a Python async generator wrapper
@@ -1096,7 +828,17 @@ impl KvPushRouter {
 
 #[pymethods]
 impl KvPushRouter {
+    /// Create a new KvPushRouter for KV-aware routing to workers.
+    ///
+    /// # Arguments
+    /// * `endpoint` - The endpoint to route requests to
+    /// * `block_size` - KV cache block size for routing decisions
+    /// * `kv_router_config` - Configuration for the KV router
+    ///
+    /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
+    /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,

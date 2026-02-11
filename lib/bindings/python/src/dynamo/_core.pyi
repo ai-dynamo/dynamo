@@ -164,9 +164,11 @@ class Endpoint:
         """
         ...
 
-    async def client(self) -> Client:
+    async def client(self, router_mode: Optional[RouterMode] = None) -> Client:
         """
-        Create a `Client` capable of calling served instances of this endpoint
+        Create a `Client` capable of calling served instances of this endpoint.
+
+        By default this uses round-robin routing when `router_mode` is not provided.
         """
         ...
 
@@ -247,6 +249,18 @@ class Client:
     async def direct(self, request: JsonLike, instance: str) -> AsyncIterator[JsonLike]:
         """
         Pick a specific instance of the endpoint
+        """
+        ...
+
+
+class ModelCardInstanceId:
+    """
+    Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
+    The instance_id is not currently exposed in the Python bindings.
+    """
+    def triple(self) -> Tuple[str, str, str]:
+        """
+        Triple of namespace, component and endpoint this worker is serving.
         """
         ...
 
@@ -418,6 +432,15 @@ class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information
     """
+
+    def to_json_str(self) -> str:
+        """Serialize the model deployment card to a JSON string."""
+        ...
+
+    @staticmethod
+    def from_json_str(json: str) -> "ModelDeploymentCard":
+        """Deserialize a model deployment card from a JSON string."""
+        ...
 
     ...
 
@@ -657,79 +680,6 @@ class ApproxKvIndexer:
         ...
 
 
-class KvRecorder:
-    """
-    A recorder for KV Router events.
-    """
-
-    ...
-
-    def __init__(
-        self,
-        component: Component,
-        output_path: Optional[str] = None,
-        max_lines_per_file: Optional[int] = None,
-        max_count: Optional[int] = None,
-        max_time: Optional[float] = None,
-    ) -> None:
-        """
-        Create a new KvRecorder instance.
-
-        Args:
-            component: The component to associate with this recorder
-            output_path: Path to the JSONL file to write events to
-            max_lines_per_file: Maximum number of lines per file before rotating to a new file
-            max_count: Maximum number of events to record before shutting down
-            max_time: Maximum duration in seconds to record before shutting down
-        """
-        ...
-
-    def event_count(self) -> int:
-        """
-        Get the count of recorded events.
-
-        Returns:
-            The number of events recorded
-        """
-        ...
-
-    def elapsed_time(self) -> float:
-        """
-        Get the elapsed time since the recorder was started.
-
-        Returns:
-            The elapsed time in seconds as a float
-        """
-        ...
-
-    def replay_events(
-        self,
-        indexer: KvIndexer,
-        timed: bool = False,
-        max_count: Optional[int] = None,
-        max_time: Optional[float] = None,
-    ) -> int:
-        """
-        Populate an indexer with the recorded events.
-
-        Args:
-            indexer: The KvIndexer to populate with events
-            timed: If true, events will be sent according to their recorded timestamps.
-                If false, events will be sent without any delay in between.
-            max_count: Maximum number of events to send before stopping
-            max_time: Maximum duration in seconds to send events before stopping
-
-        Returns:
-            The number of events sent to the indexer
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """
-        Shutdown the recorder.
-        """
-        ...
-
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -738,17 +688,30 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
+        self,
+        component: Component,
+        worker_id: int = 0,
+        kv_block_size: int = 0,
+        dp_rank: int = 0,
+        enable_local_indexer: bool = False,
+        zmq_config: Optional[ZmqKvEventPublisherConfig] = None,
     ) -> None:
         """
-        Create a `KvEventPublisher` object
+        Create a `KvEventPublisher` object.
+
+        When zmq_config is provided, the publisher subscribes to a ZMQ socket for
+        incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
+        The zmq_config fields override kv_block_size, dp_rank, and enable_local_indexer.
+
+        When zmq_config is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
             component: The component to publish events for
-            worker_id: The worker ID
-            kv_block_size: The KV block size (must be > 0)
-            dp_rank: The data parallel rank (defaults to 0)
-            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
+            worker_id: The worker ID (unused, inferred from component)
+            kv_block_size: The KV block size (must be > 0; ignored if zmq_config is set)
+            dp_rank: The data parallel rank (defaults to 0; ignored if zmq_config is set)
+            enable_local_indexer: Enable worker-local KV indexer (ignored if zmq_config is set)
+            zmq_config: Optional ZMQ configuration for relay mode
         """
 
     def publish_stored(
@@ -784,6 +747,12 @@ class KvEventPublisher:
         """
         ...
 
+    def shutdown(self) -> None:
+        """
+        Shuts down the event publisher, stopping any background tasks.
+        """
+        ...
+
 class ZmqKvEventPublisherConfig:
     def __init__(
         self,
@@ -791,34 +760,18 @@ class ZmqKvEventPublisherConfig:
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
         zmq_topic: str = "",
-        enable_local_indexer: bool = False,
+        enable_local_indexer: bool = True,
         dp_rank: int = 0
     ) -> None:
         """
-        Configuration for the ZmqKvEventPublisher.
+        ZMQ configuration for KvEventPublisher relay mode.
 
         :param worker_id: The worker ID.
         :param kv_block_size: The block size for the key-value store.
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
-        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
+        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to True.
         :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
-        """
-        ...
-
-class ZmqKvEventPublisher:
-    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
-        """
-        Initializes a new ZmqKvEventPublisher instance.
-
-        :param component: The component to be used.
-        :param config: Configuration for the event publisher.
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """
-        Shuts down the event publisher, stopping any background tasks.
         """
         ...
 
@@ -994,11 +947,35 @@ class ModelType:
 
 class RouterMode:
     """Router mode for load balancing requests across workers"""
+    RoundRobin: "RouterMode"
+    Random: "RouterMode"
+    KV: "RouterMode"
     ...
 
 class RouterConfig:
     """How to route the request"""
-    ...
+
+    def __init__(
+        self,
+        mode: RouterMode,
+        config: Optional[KvRouterConfig] = None,
+        active_decode_blocks_threshold: Optional[float] = None,
+        active_prefill_tokens_threshold: Optional[int] = None,
+        active_prefill_tokens_threshold_frac: Optional[float] = None,
+        enforce_disagg: bool = False,
+    ) -> None:
+        """
+        Create a RouterConfig.
+
+        Args:
+            mode: The router mode (RoundRobin, Random, or KV)
+            config: Optional KV router configuration (used when mode is KV)
+            active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
+            active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
+            active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
+            enforce_disagg: Enforce disaggregated prefill-decode mode
+        """
+        ...
 
 class KvRouterConfig:
     """Values for KV router"""
@@ -1008,6 +985,7 @@ class KvRouterConfig:
         overlap_score_weight: float = 1.0,
         router_temperature: float = 0.0,
         use_kv_events: bool = True,
+        durable_kv_events: bool = False,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
@@ -1025,6 +1003,9 @@ class KvRouterConfig:
             overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
             router_temperature: Temperature for worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
+            durable_kv_events: Enable durable KV events using NATS JetStream (default: False).
+                When False, uses NATS Core / generic event plane with local_indexer mode.
+                When True, uses JetStream for durability and multi-replica consistency.
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
@@ -1049,7 +1030,6 @@ async def register_llm(
     context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
     router_mode: Optional[RouterMode] = None,
-    migration_limit: int = 0,
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
@@ -1097,7 +1077,7 @@ class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
     ...
 
-async def make_engine(args: EntrypointArgs) -> EngineConfig:
+async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> EngineConfig:
     """Make an engine matching the args"""
     ...
 
@@ -1506,13 +1486,64 @@ class KvPushRouter:
         """
         ...
 
+class EngineType:
+    """Engine type for Dynamo workers"""
+    Echo: "EngineType"
+    Dynamic: "EngineType"
+    Mocker: "EngineType"
+    ...
+
 class EntrypointArgs:
     """
     Settings to connect an input to a worker and run them.
     Use by `dynamo run`.
     """
 
-    ...
+    def __init__(
+        self,
+        engine_type: "EngineType",
+        model_path: Optional[str] = None,
+        model_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
+        context_length: Optional[int] = None,
+        template_file: Optional[str] = None,
+        router_config: Optional[RouterConfig] = None,
+        kv_cache_block_size: Optional[int] = None,
+        http_host: Optional[str] = None,
+        http_port: Optional[int] = None,
+        http_metrics_port: Optional[int] = None,
+        tls_cert_path: Optional[str] = None,
+        tls_key_path: Optional[str] = None,
+        extra_engine_args: Optional[str] = None,
+        namespace: Optional[str] = None,
+        is_prefill: bool = False,
+        migration_limit: int = 0,
+        chat_engine_factory: Optional[Callable] = None,
+    ) -> None:
+        """
+        Create EntrypointArgs.
+
+        Args:
+            engine_type: The type of engine to use
+            model_path: Path to the model directory on disk
+            model_name: Model name or dynamo endpoint (e.g. 'dyn://namespace.component.endpoint')
+            endpoint_id: Optional endpoint ID
+            context_length: Optional context length override
+            template_file: Optional path to a prompt template file
+            router_config: Optional router configuration
+            kv_cache_block_size: Optional KV cache block size
+            http_host: HTTP host to bind to
+            http_port: HTTP port to bind to
+            http_metrics_port: HTTP metrics port (for gRPC service)
+            tls_cert_path: TLS certificate path (PEM format)
+            tls_key_path: TLS key path (PEM format)
+            extra_engine_args: Path to extra engine arguments file
+            namespace: Dynamo namespace for model discovery scoping
+            is_prefill: Whether this is a prefill worker
+            migration_limit: Maximum number of request migrations (0=disabled)
+            chat_engine_factory: Optional Python chat completions engine factory callback
+        """
+        ...
 
 class PlannerDecision:
     """A request from planner to client to perform a scaling action.
@@ -1566,4 +1597,5 @@ __all__ = [
     "ModelDeploymentCard",
     "PythonAsyncEngine",
     "prometheus_names",
+    "ModelCardInstanceId",
 ]
