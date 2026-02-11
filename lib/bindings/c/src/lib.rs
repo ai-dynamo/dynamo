@@ -928,6 +928,115 @@ pub unsafe extern "C" fn free_request(
     }
 }
 
+/// Worker configuration passed from external sources (e.g. EPP pods) via FFI.
+///
+/// This is a C-compatible struct that maps to a subset of `ModelRuntimeConfig`.
+/// Fields set to 0 use defaults.
+#[repr(C)]
+pub struct CWorkerConfig {
+    /// The Dynamo worker instance ID (u64)
+    pub worker_id: u64,
+    /// Total KV cache blocks available on this worker (0 = unknown/default)
+    pub total_kv_blocks: u64,
+    /// Maximum number of concurrent sequences (0 = unknown/default)
+    pub max_num_seqs: u64,
+    /// Data-parallel size for this worker (0 = default to 1)
+    pub data_parallel_size: u32,
+}
+
+/// Update the router's known workers from an external source (EPP pods).
+///
+/// This pushes a set of worker configurations into the KvRouter, which will
+/// merge them with (taking precedence over) discovery-based workers.
+/// The router's scheduling loop will immediately start considering these workers.
+///
+/// Call with `count=0` to clear overrides and revert to discovery-only mode.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `workers` must point to at least `count` valid CWorkerConfig entries (or be null if count=0)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn update_worker_configs(
+    handle: RouterHandlesPtr,
+    workers: *const CWorkerConfig,
+    count: usize,
+) -> QueryRouterResult {
+    if handle.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+
+    if count == 0 {
+        handles.decode_router.clear_worker_overrides();
+        tracing::info!("Worker overrides cleared via FFI");
+        return QueryRouterResult::Ok;
+    }
+
+    if workers.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let worker_slice = unsafe { std::slice::from_raw_parts(workers, count) };
+
+    let mut worker_map = std::collections::HashMap::with_capacity(count);
+    for cw in worker_slice {
+        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+        let mut config = ModelRuntimeConfig::default();
+        if cw.total_kv_blocks > 0 {
+            config.total_kv_blocks = Some(cw.total_kv_blocks);
+        }
+        if cw.max_num_seqs > 0 {
+            config.max_num_seqs = Some(cw.max_num_seqs);
+        }
+        if cw.data_parallel_size > 0 {
+            config.data_parallel_size = cw.data_parallel_size;
+        }
+        worker_map.insert(cw.worker_id, config);
+    }
+
+    tracing::info!(
+        worker_count = count,
+        worker_ids = ?worker_map.keys().collect::<Vec<_>>(),
+        "Updating router workers from EPP via FFI"
+    );
+
+    handles.decode_router.override_workers(worker_map);
+    QueryRouterResult::Ok
+}
+
+/// Compute the Dynamo worker instance ID from a Kubernetes pod name.
+///
+/// This replicates the exact same deterministic hash used by the Dynamo runtime
+/// (`KubeDiscoveryClient::new` → `hash_pod_name`) to derive a worker's instance
+/// ID from its pod name. The EPP can use this to map InferencePool pods to
+/// Dynamo worker IDs without needing labels or annotations.
+///
+/// # Safety
+/// - `pod_name` must be a valid null-terminated C string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hash_pod_name_ffi(pod_name: *const c_char) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    /// Exact replica of `dynamo_runtime::discovery::kube::utils::hash_pod_name`.
+    /// Kept in sync — the mask clears top 11 bits for safe IEEE-754 f64 round-tripping.
+    fn hash_pod_name(pod_name: &str) -> u64 {
+        const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
+        let mut hasher = DefaultHasher::new();
+        pod_name.hash(&mut hasher);
+        hasher.finish() & INSTANCE_ID_MASK
+    }
+
+    if pod_name.is_null() {
+        return 0;
+    }
+    match unsafe { CStr::from_ptr(pod_name) }.to_str() {
+        Ok(name) => hash_pod_name(name),
+        Err(_) => 0,
+    }
+}
+
 /// Destroy router handles
 ///
 /// # Safety

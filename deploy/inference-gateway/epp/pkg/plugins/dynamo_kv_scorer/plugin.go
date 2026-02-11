@@ -51,6 +51,14 @@ typedef struct {
     size_t token_count;
 } CRoutingResult;
 
+// Worker configuration for EPP pod overrides
+typedef struct {
+    uint64_t worker_id;
+    uint64_t total_kv_blocks;
+    uint64_t max_num_seqs;
+    uint32_t data_parallel_size;
+} CWorkerConfig;
+
 // Router bindings API (replaces Pipeline API)
 query_router_result_t create_routers(const char *namespace_c_str,
                                      const char *component_c_str,
@@ -75,6 +83,14 @@ query_router_result_t free_request(RouterHandles *handle,
                                    const char *request_id);
 
 void free_routing_result(CRoutingResult *result);
+
+query_router_result_t update_worker_configs(RouterHandles *handle,
+                                            const CWorkerConfig *workers,
+                                            size_t count);
+
+// Compute Dynamo worker instance ID from a Kubernetes pod name.
+// Uses the same hash as the Dynamo runtime (KubeDiscoveryClient).
+uint64_t hash_pod_name_ffi(const char *pod_name);
 
 void destroy(RouterHandles *handle);
 */
@@ -279,6 +295,15 @@ func (k *KVAwareScorer) Score(
 			"pod", pod,
 			"metrics", metrics,
 		)
+	}
+
+	// Push EPP pod information to the Dynamo router so it considers these workers.
+	// This feeds the InferencePool-discovered pods into the KV router's worker set.
+	workerConfigs := buildWorkerConfigsFromPods(pods)
+	if len(workerConfigs) > 0 {
+		if updateErr := UpdateWorkerConfigs(workerConfigs); updateErr != nil {
+			logger.V(logutil.DEFAULT).Error(updateErr, "Failed to update router worker configs from EPP pods")
+		}
 	}
 
 	workerID, prefillWorkerID, tokenData, err := k.callDynamoRouter(ctx, req)
@@ -563,6 +588,93 @@ func buildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 		requestBody["model"] = "default"
 	}
 	return requestBody, nil
+}
+
+// --------------------------- worker config overrides ---------------------------
+
+// UpdateWorkerConfigs pushes EPP-discovered pod/worker information into the Dynamo router.
+// The router will use these workers (taking precedence) alongside discovery-based workers.
+// Call with an empty slice to clear overrides and revert to discovery-only.
+func UpdateWorkerConfigs(workers []CWorkerConfigGo) error {
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	if len(workers) == 0 {
+		rc := C.update_worker_configs(router, nil, 0)
+		if rc != C.QUERY_ROUTER_OK {
+			return fmt.Errorf("update_worker_configs (clear) failed with code %d", rc)
+		}
+		return nil
+	}
+
+	cWorkers := make([]C.CWorkerConfig, len(workers))
+	for i, w := range workers {
+		cWorkers[i] = C.CWorkerConfig{
+			worker_id:          C.uint64_t(w.WorkerID),
+			total_kv_blocks:    C.uint64_t(w.TotalKvBlocks),
+			max_num_seqs:       C.uint64_t(w.MaxNumSeqs),
+			data_parallel_size: C.uint32_t(w.DataParallelSize),
+		}
+	}
+
+	rc := C.update_worker_configs(
+		router,
+		(*C.CWorkerConfig)(unsafe.Pointer(&cWorkers[0])),
+		C.size_t(len(cWorkers)),
+	)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("update_worker_configs failed with code %d", rc)
+	}
+	return nil
+}
+
+// CWorkerConfigGo is the Go-side representation of a worker config for the FFI.
+type CWorkerConfigGo struct {
+	WorkerID         uint64
+	TotalKvBlocks    uint64
+	MaxNumSeqs       uint64
+	DataParallelSize uint32
+}
+
+// HashPodName computes the Dynamo worker instance ID from a Kubernetes pod name.
+// This calls the same hash function the Dynamo runtime uses (KubeDiscoveryClient),
+// so the result matches the worker_id the router knows about.
+func HashPodName(podName string) uint64 {
+	cName := C.CString(podName)
+	defer C.free(unsafe.Pointer(cName))
+	return uint64(C.hash_pod_name_ffi(cName))
+}
+
+// buildWorkerConfigsFromPods converts EPP pod information into worker configs
+// for the Dynamo router. Maps each pod to its Dynamo worker instance ID by
+// hashing the pod name (same algorithm as the Dynamo runtime).
+func buildWorkerConfigsFromPods(pods []schedtypes.Pod) []CWorkerConfigGo {
+	configs := make([]CWorkerConfigGo, 0, len(pods))
+	for _, p := range pods {
+		pod := p.GetPod()
+		podName := pod.NamespacedName.Name
+		if podName == "" {
+			continue
+		}
+
+		workerID := HashPodName(podName)
+		configs = append(configs, CWorkerConfigGo{
+			WorkerID:         workerID,
+			TotalKvBlocks:    0, // filled from discovery
+			MaxNumSeqs:       0, // filled from discovery
+			DataParallelSize: 0, // filled from discovery
+		})
+	}
+	return configs
 }
 
 // --------------------------- router bookkeeping ---------------------------

@@ -201,6 +201,11 @@ impl Indexer {
     }
 }
 
+/// Type alias for the worker override watch.
+/// When `Some(map)`, the provided workers take precedence over discovery.
+/// When `None`, discovery-based workers are used exclusively.
+pub type WorkerOverrideWatch = tokio::sync::watch::Receiver<Option<HashMap<u64, ModelRuntimeConfig>>>;
+
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
@@ -210,6 +215,9 @@ pub struct KvRouter {
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
+    /// Channel to push worker config overrides from external sources (e.g. EPP pods).
+    /// When the value is `Some`, those workers take precedence over discovery.
+    override_workers_tx: tokio::sync::watch::Sender<Option<HashMap<u64, ModelRuntimeConfig>>>,
 }
 
 impl KvRouter {
@@ -244,10 +252,15 @@ impl KvRouter {
                 anyhow::anyhow!("runtime config watch closed before any workers appeared")
             })?;
 
+        // Create the worker override channel (initially None = use discovery only)
+        let (override_workers_tx, override_workers_rx) =
+            tokio::sync::watch::channel::<Option<HashMap<u64, ModelRuntimeConfig>>>(None);
+
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
             workers_with_configs.clone(),
+            override_workers_rx,
             selector,
             kv_router_config.router_replica_sync,
             router_id,
@@ -288,7 +301,33 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            override_workers_tx,
         })
+    }
+
+    /// Override the set of workers the router considers.
+    ///
+    /// When called with a non-empty map, the router will use these workers
+    /// instead of (taking precedence over) the discovery-based workers.
+    /// Discovery workers whose IDs also appear in the override are enriched
+    /// with the override's config. Workers only in discovery are still included
+    /// as a fallback.
+    ///
+    /// This is the entry point for EPP to feed pod-based worker information
+    /// into the KV router.
+    pub fn override_workers(&self, workers: HashMap<u64, ModelRuntimeConfig>) {
+        tracing::info!(
+            worker_count = workers.len(),
+            worker_ids = ?workers.keys().collect::<Vec<_>>(),
+            "Worker override set from external source"
+        );
+        let _ = self.override_workers_tx.send(Some(workers));
+    }
+
+    /// Clear worker overrides, reverting to discovery-only mode.
+    pub fn clear_worker_overrides(&self) {
+        tracing::info!("Worker overrides cleared, reverting to discovery-only");
+        let _ = self.override_workers_tx.send(None);
     }
 
     /// Get a reference to the client used by this KvRouter

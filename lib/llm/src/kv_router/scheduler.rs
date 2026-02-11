@@ -96,10 +96,12 @@ pub struct KvScheduler {
 }
 
 impl KvScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
         workers_with_configs: RuntimeConfigWatch,
+        override_workers_rx: super::WorkerOverrideWatch,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_id: u64,
@@ -126,12 +128,15 @@ impl KvScheduler {
         );
 
         // Spawn background task to sync slots when the watch value changes.
+        // This task monitors both the discovery-based worker watch AND the
+        // external override watch, merging them to produce the effective worker set.
         let slots_monitor = slots.clone();
         let mut monitor_rx = workers_with_configs.clone();
+        let mut monitor_override_rx = override_workers_rx.clone();
         let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("KvScheduler workers monitoring task started");
-            let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
+            let mut last_effective: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
 
             loop {
                 tokio::select! {
@@ -145,19 +150,30 @@ impl KvScheduler {
                             break;
                         }
                     }
+                    result = monitor_override_rx.changed() => {
+                        if result.is_err() {
+                            tracing::debug!("KvScheduler: override watch sender dropped (expected on cleanup)");
+                            // Don't break - discovery still works
+                        }
+                    }
                 }
 
-                let current_workers = monitor_rx.borrow_and_update().clone();
+                let discovery_workers = monitor_rx.borrow_and_update().clone();
+                let override_opt = monitor_override_rx.borrow_and_update().clone();
 
-                if current_workers != last_workers {
-                    slots_monitor.update_workers(current_workers.clone());
-                    last_workers = current_workers;
+                let effective_workers =
+                    filter_workers(discovery_workers, override_opt.as_ref());
+
+                if effective_workers != last_effective {
+                    slots_monitor.update_workers(effective_workers.clone());
+                    last_effective = effective_workers;
                 }
             }
         });
 
         let slots_clone = slots.clone();
         let scheduler_rx = workers_with_configs.clone();
+        let scheduler_override_rx = override_workers_rx.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
         let hit_rate_publisher =
@@ -194,8 +210,12 @@ impl KvScheduler {
                 request.decode_blocks = decode_blocks;
                 request.prefill_tokens = prefill_tokens;
 
-                // Read the current workers configuration from watch receiver
-                let workers: HashMap<WorkerId, ModelRuntimeConfig> = scheduler_rx.borrow().clone();
+                // Read the current workers configuration, merging discovery with overrides
+                let discovery_workers: HashMap<WorkerId, ModelRuntimeConfig> =
+                    scheduler_rx.borrow().clone();
+                let override_opt = scheduler_override_rx.borrow().clone();
+                let workers =
+                    filter_workers(discovery_workers, override_opt.as_ref());
 
                 match selector.select_worker(&workers, &request, block_size) {
                     Ok(selection) => {
@@ -616,6 +636,59 @@ impl WorkerSelector for DefaultWorkerSelector {
             required_blocks: request_blocks as u64,
             overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
         })
+    }
+}
+
+/// Resolve the effective worker set given discovery and an optional external override.
+///
+/// When `override_workers` is `Some` and non-empty, **only** those workers are used.
+/// For each override worker ID, the config is taken from the override; if the override
+/// config is minimal (e.g. `total_kv_blocks` is None), discovery can still fill gaps
+/// for the **same** worker ID, but workers not in the override are excluded entirely.
+///
+/// When `override_workers` is `None` or empty, discovery workers are used as-is.
+fn filter_workers(
+    discovery: HashMap<WorkerId, ModelRuntimeConfig>,
+    override_workers: Option<&HashMap<WorkerId, ModelRuntimeConfig>>,
+) -> HashMap<WorkerId, ModelRuntimeConfig> {
+    match override_workers {
+        None => discovery,
+        Some(overrides) if overrides.is_empty() => discovery,
+        Some(overrides) => {
+            // Only keep workers present in the override set.
+            // Use the override config, but enrich missing fields from discovery
+            // if the same worker ID exists there.
+            let mut result = HashMap::with_capacity(overrides.len());
+            for (id, override_cfg) in overrides {
+                let effective_cfg = if let Some(disc_cfg) = discovery.get(id) {
+                    // Enrich: use override values when present, fall back to discovery
+                    ModelRuntimeConfig {
+                        total_kv_blocks: override_cfg.total_kv_blocks.or(disc_cfg.total_kv_blocks),
+                        max_num_seqs: override_cfg.max_num_seqs.or(disc_cfg.max_num_seqs),
+                        max_num_batched_tokens: override_cfg
+                            .max_num_batched_tokens
+                            .or(disc_cfg.max_num_batched_tokens),
+                        data_parallel_size: if override_cfg.data_parallel_size > 1 {
+                            override_cfg.data_parallel_size
+                        } else {
+                            disc_cfg.data_parallel_size
+                        },
+                        // Take remaining fields from discovery
+                        tool_call_parser: disc_cfg.tool_call_parser.clone(),
+                        reasoning_parser: disc_cfg.reasoning_parser.clone(),
+                        enable_local_indexer: disc_cfg.enable_local_indexer,
+                        runtime_data: disc_cfg.runtime_data.clone(),
+                        tensor_model_config: disc_cfg.tensor_model_config.clone(),
+                        disaggregated_endpoint: disc_cfg.disaggregated_endpoint.clone(),
+                    }
+                } else {
+                    // Worker only in override (not yet in discovery) — use as-is
+                    override_cfg.clone()
+                };
+                result.insert(*id, effective_cfg);
+            }
+            result
+        }
     }
 }
 
