@@ -315,16 +315,9 @@ func generateSingleDCD(
 	existingRestartAnnotations map[string]string,
 	rollingUpdateCtx RollingUpdateContext,
 ) (*v1alpha1.DynamoComponentDeployment, error) {
-	// always use NewWorkerHash for the hash suffix as old worker DCDs are not generated
-	workerHashSuffix := rollingUpdateCtx.NewWorkerHash
-
 	deployment := &v1alpha1.DynamoComponentDeployment{}
 	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
-	if IsWorkerComponent(component.ComponentType) {
-		deployment.Name = GetDynamoComponentNameWithHashSuffix(parentDGD, componentName, workerHashSuffix)
-	} else {
-		deployment.Name = GetDynamoComponentName(parentDGD, componentName)
-	}
+	deployment.Name = GetDCDResourceName(parentDGD, componentName, rollingUpdateCtx.NewWorkerHash)
 	deployment.Spec.BackendFramework = parentDGD.Spec.BackendFramework
 	deployment.Namespace = parentDGD.Namespace
 	deployment.Spec.ServiceName = componentName
@@ -339,7 +332,7 @@ func generateSingleDCD(
 
 	// only label worker DCDs with their hash for cleanup during rolling updates
 	if IsWorkerComponent(component.ComponentType) {
-		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHashSuffix
+		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
 	}
 
 	// Propagate metrics annotation from parent deployment if present
@@ -513,12 +506,14 @@ func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 	return merged
 }
 
-func GetDynamoComponentName(dynamoDeployment *v1alpha1.DynamoGraphDeployment, component string) string {
-	return fmt.Sprintf("%s-%s", dynamoDeployment.Name, strings.ToLower(component))
-}
-
-func GetDynamoComponentNameWithHashSuffix(dynamoDeployment *v1alpha1.DynamoGraphDeployment, component string, hashSuffix string) string {
-	return fmt.Sprintf("%s-%s-%s", dynamoDeployment.Name, strings.ToLower(component), hashSuffix)
+// GetDCDResourceName returns the Kubernetes resource name for a DynamoComponentDeployment.
+// Worker components include the workerHash suffix; for non-workers, workerHash is ignored.
+func GetDCDResourceName(dgd *v1alpha1.DynamoGraphDeployment, serviceName string, workerHash string) string {
+	baseName := fmt.Sprintf("%s-%s", dgd.Name, strings.ToLower(serviceName))
+	if spec := dgd.Spec.Services[serviceName]; spec != nil && IsWorkerComponent(spec.ComponentType) && workerHash != "" {
+		return baseName + "-" + workerHash
+	}
+	return baseName
 }
 
 type SecretsRetriever interface {
@@ -623,7 +618,7 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
 	}
 	// DNS-safe service resource name: "{dgd-name}-{lowercase(componentName)}"
-	kubeServiceName := GetDynamoComponentName(dynamoDeployment, componentName)
+	kubeServiceName := GetDCDResourceName(dynamoDeployment, componentName, "")
 
 	var servicePort corev1.ServicePort
 	switch component.ComponentType {
@@ -1390,7 +1385,7 @@ func GenerateGrovePodCliqueSet(
 
 func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
 	labels := make(map[string]string)
-	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
+	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	if component.DynamoNamespace != nil {

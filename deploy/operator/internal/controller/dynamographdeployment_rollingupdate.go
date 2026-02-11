@@ -445,7 +445,7 @@ func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 
 	for serviceName, desiredReplicas := range rollingUpdateCtx.OldWorkerReplicas {
 		// Construct the old DCD name using the hash-based naming convention
-		oldDCDName := dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
+		oldDCDName := dynamo.GetDCDResourceName(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
 
 		// Get the existing DCD
 		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
@@ -553,7 +553,7 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerServiceStatuses(
 	oldStatuses := make(map[string]nvidiacomv1alpha1.ServiceReplicaStatus)
 
 	for serviceName := range rollingUpdateCtx.OldWorkerReplicas {
-		oldDCDName := dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
+		oldDCDName := dynamo.GetDCDResourceName(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
 
 		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, client.ObjectKey{Name: oldDCDName, Namespace: dgd.Namespace}, existingDCD)
