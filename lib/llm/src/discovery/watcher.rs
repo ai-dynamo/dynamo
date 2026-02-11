@@ -290,7 +290,6 @@ impl ModelWatcher {
         let images_model_remove_err = self.manager.remove_images_model(&model_name);
         let videos_model_remove_err = self.manager.remove_videos_model(&model_name);
         let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
-        let images_model_remove_err = self.manager.remove_images_model(&model_name);
         let prefill_model_remove_err = self.manager.remove_prefill_model(&model_name);
 
         let mut chat_model_removed = false;
@@ -299,7 +298,6 @@ impl ModelWatcher {
         let mut images_model_removed = false;
         let mut videos_model_removed = false;
         let mut tensor_model_removed = false;
-        let mut images_model_removed = false;
         let mut prefill_model_removed = false;
 
         if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
@@ -321,9 +319,6 @@ impl ModelWatcher {
         if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
             tensor_model_removed = true;
         }
-        if images_model_remove_err.is_ok() && self.manager.list_images_models().is_empty() {
-            images_model_removed = true;
-        }
         if prefill_model_remove_err.is_ok() && self.manager.list_prefill_models().is_empty() {
             prefill_model_removed = true;
         }
@@ -334,7 +329,6 @@ impl ModelWatcher {
             && !images_model_removed
             && !videos_model_removed
             && !tensor_model_removed
-            && !images_model_removed
             && !prefill_model_removed
         {
             tracing::debug!(
@@ -346,7 +340,6 @@ impl ModelWatcher {
                 images_model_removed,
                 videos_model_removed,
                 tensor_model_removed,
-                images_model_removed,
                 prefill_model_removed
             );
         } else {
@@ -357,7 +350,6 @@ impl ModelWatcher {
                     || (images_model_removed && *model_type == ModelType::Images)
                     || (videos_model_removed && *model_type == ModelType::Videos)
                     || (tensor_model_removed && *model_type == ModelType::TensorBased)
-                    || (images_model_removed && *model_type == ModelType::Images)
                     || (prefill_model_removed && *model_type == ModelType::Prefill))
                     && let Some(tx) = &self.model_update_tx
                 {

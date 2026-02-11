@@ -545,6 +545,7 @@ async def parse_args(args: list[str]) -> Config:
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
+        server_args.load_format = None
         logging.info(
             f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )

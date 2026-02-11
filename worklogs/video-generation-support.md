@@ -301,6 +301,43 @@ curl http://localhost:8000/v1/videos/generations \
   }'
 ```
 
+## Test Results (2026-02-11)
+
+Rebased branch `ishan/video` onto `main` (post-PR #5609 merge), fixed build issues, and ran end-to-end test.
+
+**Setup**: 2x NVIDIA L40S (46 GB each), Wan-AI/Wan2.1-T2V-1.3B-Diffusers (1.3B model), TP=1
+
+**Bugs found and fixed during testing**:
+1. **Rust compile error**: Duplicate `images_model_removed` entries in `watcher.rs` from rebase merge -- duplicate variable declarations, duplicate condition checks, and mismatched format string arguments. Cleaned up all duplicates.
+2. **`load_format` AttributeError**: The `SimpleNamespace` stub for `ServerArgs` (used by diffusion/video workers) was missing `load_format`. The `worker()` function in `main.py` checks `config.server_args.load_format == "gms"` before dispatching to the worker type. Added `load_format = None` to the stub.
+
+**Test request**:
+```bash
+curl http://localhost:8000/v1/videos/generations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "A curious raccoon exploring a garden",
+    "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "num_frames": 17, "size": "832x480",
+    "num_inference_steps": 10, "response_format": "url"
+  }'
+```
+
+**Result**: Success
+```
+status: completed, progress: 100
+output: file:///tmp/dynamo_videos/3ee4004b-fcb2-4ad7-ac00-d2233c7fc685.mp4 (667 KB)
+inference_time_s: 10.17
+```
+
+**Pipeline breakdown** (from worker logs):
+- Text encoding: 2.85s
+- Denoising (10 steps): 3.71s (0.37s/step)
+- Decoding (VAE): 1.92s
+- Peak GPU memory: 8.33 GB (out of 45 GB available)
+
+Full pipeline stages executed correctly: InputValidation -> TextEncoding -> Conditioning -> TimestepPreparation -> LatentPreparation -> Denoising -> Decoding
+
 ## Known Limitations
 
 - **No streaming**: The client blocks until the full video is generated (~15s for 1.3B, longer for 14B). DiffGenerator doesn't expose progress callbacks.
