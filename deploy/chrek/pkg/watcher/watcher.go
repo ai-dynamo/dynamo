@@ -112,7 +112,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			httpServer.Shutdown(shutdownCtx)
+			_ = httpServer.Shutdown(shutdownCtx)
 		}()
 	}
 
@@ -144,7 +144,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 	podInformer := factory.Core().V1().Pods().Informer()
 
 	// Add event handlers
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*corev1.Pod)
 			w.handlePodEvent(ctx, pod)
@@ -187,7 +187,7 @@ func (w *Watcher) startHealthServer(ctx context.Context) *http.Server {
 			return
 		}
 		rw.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(rw).Encode(HealthResponse{
+		_ = json.NewEncoder(rw).Encode(HealthResponse{
 			Status:   "healthy",
 			NodeName: w.config.NodeName,
 		})

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,7 +21,20 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
 	checkpointk8s "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint/k8s"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/restore"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/watcher"
+	"github.com/sirupsen/logrus"
+)
+
+const (
+	maxPID                   = 4194304
+	maxCheckpointIDLength    = 255
+	defaultReadTimeout       = 30 * time.Second
+	defaultWriteTimeout      = 300 * time.Second
+	defaultIdleTimeout       = 120 * time.Second
+	defaultShutdownTimeout   = 30 * time.Second
+	defaultTriggerFilePerm   = 0644
+	defaultCheckpointDirPerm = 0700
 )
 
 // CheckpointSignalSource determines how checkpoint operations are triggered
@@ -71,7 +85,7 @@ type CheckpointRequest struct {
 	DisableCUDA  bool   `json:"disable_cuda,omitempty"` // Disable CUDA plugin for non-GPU workloads
 }
 
-// TriggerRestoreRequest is the request body for Option A self-restoring trigger
+// TriggerRestoreRequest is the request body for self-restoring trigger
 type TriggerRestoreRequest struct {
 	CheckpointID           string `json:"checkpoint_id"`
 	PlaceholderContainerID string `json:"placeholder_container_id"`
@@ -84,6 +98,23 @@ type TriggerRestoreResponse struct {
 	Message          string `json:"message,omitempty"`
 	Error            string `json:"error,omitempty"`
 	TriggerPath      string `json:"trigger_path,omitempty"`
+	CheckpointImage  string `json:"checkpoint_image,omitempty"`
+	PlaceholderImage string `json:"placeholder_image,omitempty"`
+}
+
+// ExternalRestoreRequest is the request body for external restore operations
+type ExternalRestoreRequest struct {
+	CheckpointID           string `json:"checkpoint_id"`
+	PlaceholderContainerID string `json:"placeholder_container_id"`
+	SkipImageValidation    bool   `json:"skip_image_validation,omitempty"` // Skip image matching check
+}
+
+// ExternalRestoreResponse is the response for external restore operations
+type ExternalRestoreResponse struct {
+	Success          bool   `json:"success"`
+	Message          string `json:"message,omitempty"`
+	Error            string `json:"error,omitempty"`
+	RestoredPID      int    `json:"restored_pid,omitempty"`
 	CheckpointImage  string `json:"checkpoint_image,omitempty"`
 	PlaceholderImage string `json:"placeholder_image,omitempty"`
 }
@@ -116,6 +147,67 @@ type ListCheckpointsResponse struct {
 type HealthResponse struct {
 	Status   string `json:"status"`
 	NodeName string `json:"node_name"`
+}
+
+// Common HTTP handler helpers
+
+type errorResponse interface {
+	setError(msg string)
+}
+
+// Implementations for error response interface
+func (r *TriggerRestoreResponse) setError(msg string)  { r.Success = false; r.Error = msg }
+func (r *ExternalRestoreResponse) setError(msg string) { r.Success = false; r.Error = msg }
+func (r *CheckpointResponse) setError(msg string)      { r.Success = false; r.Error = msg }
+
+// validateRestoreRequest validates common restore request fields and loads checkpoint metadata.
+// Returns checkpoint path, metadata, and container info, or writes error response and returns empty string.
+func (s *Server) validateRestoreRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	checkpointID, placeholderContainerID string,
+	respTemplate errorResponse,
+) (string, *common.CheckpointMetadata, *checkpointk8s.ContainerInfo, bool) {
+
+	// Validate checkpoint ID
+	if checkpointID == "" {
+		respTemplate.setError("checkpoint_id is required")
+		writeJSON(w, http.StatusBadRequest, respTemplate)
+		return "", nil, nil, false
+	}
+
+	if err := validateCheckpointID(checkpointID); err != nil {
+		respTemplate.setError(fmt.Sprintf("Invalid checkpoint_id: %v", err))
+		writeJSON(w, http.StatusBadRequest, respTemplate)
+		return "", nil, nil, false
+	}
+
+	// Validate placeholder container ID
+	if placeholderContainerID == "" {
+		respTemplate.setError("placeholder_container_id is required")
+		writeJSON(w, http.StatusBadRequest, respTemplate)
+		return "", nil, nil, false
+	}
+
+	// Load checkpoint metadata
+	checkpointPath := common.GetCheckpointDir(s.config.CheckpointDir, checkpointID)
+	checkpointMeta, err := common.LoadMetadata(checkpointPath)
+	if err != nil {
+		respTemplate.setError(fmt.Sprintf("Checkpoint not found: %v", err))
+		writeJSON(w, http.StatusNotFound, respTemplate)
+		return "", nil, nil, false
+	}
+
+	// Resolve placeholder container
+	ctx := r.Context()
+	containerInfo, err := s.discoveryClient.ResolveContainer(ctx, placeholderContainerID)
+	if err != nil {
+		respTemplate.setError(fmt.Sprintf("Failed to resolve placeholder container: %v", err))
+		writeJSON(w, http.StatusInternalServerError, respTemplate)
+		return "", nil, nil, false
+	}
+
+	return checkpointPath, checkpointMeta, containerInfo, true
 }
 
 func main() {
@@ -200,21 +292,22 @@ func main() {
 		mux.HandleFunc("/health", server.handleHealth)
 		mux.HandleFunc("/checkpoint", server.handleCheckpoint)
 		mux.HandleFunc("/restore/trigger", server.handleTriggerRestore)
+		mux.HandleFunc("/restore/external", server.handleExternalRestore)
 		mux.HandleFunc("/checkpoints", server.handleListCheckpoints)
 
 		httpServer := &http.Server{
 			Addr:         config.ListenAddr,
 			Handler:      loggingMiddleware(mux),
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 300 * time.Second,
-			IdleTimeout:  120 * time.Second,
+			ReadTimeout:  defaultReadTimeout,
+			WriteTimeout: defaultWriteTimeout,
+			IdleTimeout:  defaultIdleTimeout,
 		}
 
 		// Handle graceful shutdown
 		go func() {
 			<-sigChan
 			log.Println("Shutting down HTTP server...")
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
 			defer shutdownCancel()
 			if err := httpServer.Shutdown(shutdownCtx); err != nil {
 				log.Printf("HTTP server shutdown error: %v", err)
@@ -275,6 +368,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleCheckpoint creates a CRIU checkpoint of a running container.
+// It validates the request, resolves the container, and performs the checkpoint operation
+// using the configured checkpointer.
+//
+// Request body: CheckpointRequest with container_id and optional checkpoint_id
+// Response: CheckpointResponse with success status and checkpoint_id
 func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -300,6 +399,14 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 
 	if req.CheckpointID == "" {
 		req.CheckpointID = fmt.Sprintf("ckpt-%d", time.Now().UnixNano())
+	}
+
+	if err := validateCheckpointID(req.CheckpointID); err != nil {
+		writeJSON(w, http.StatusBadRequest, CheckpointResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid checkpoint_id: %v", err),
+		})
+		return
 	}
 
 	// Determine CUDA plugin directory - only use if not explicitly disabled
@@ -352,10 +459,13 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleTriggerRestore implements Option A from RESTORE_ANALYSIS.md
-// It triggers a self-restoring placeholder container to start CRIU restore.
-// The agent writes a trigger file to the placeholder's filesystem, which
-// the placeholder's entrypoint script detects and uses to start restoration.
+// handleTriggerRestore implements Option A self-restore mechanism.
+// It triggers a self-restoring placeholder container to start CRIU restore by writing
+// a trigger file to the placeholder's filesystem.
+// The placeholder's entrypoint script detects this file and starts restoration.
+//
+// Request body: TriggerRestoreRequest with checkpoint_id and placeholder_container_id
+// Response: TriggerRestoreResponse with success status and trigger file path
 func (s *Server) handleTriggerRestore(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -371,41 +481,11 @@ func (s *Server) handleTriggerRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.CheckpointID == "" {
-		writeJSON(w, http.StatusBadRequest, TriggerRestoreResponse{
-			Success: false,
-			Error:   "checkpoint_id is required",
-		})
-		return
-	}
-
-	if req.PlaceholderContainerID == "" {
-		writeJSON(w, http.StatusBadRequest, TriggerRestoreResponse{
-			Success: false,
-			Error:   "placeholder_container_id is required",
-		})
-		return
-	}
-
-	// Verify checkpoint exists and load metadata
-	checkpointPath := common.GetCheckpointDir(s.config.CheckpointDir, req.CheckpointID)
-	checkpointMeta, err := common.LoadMetadata(checkpointPath)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, TriggerRestoreResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Checkpoint not found: %v", err),
-		})
-		return
-	}
-
-	// Resolve placeholder container to get PID and image
-	ctx := r.Context()
-	containerInfo, err := s.discoveryClient.ResolveContainer(ctx, req.PlaceholderContainerID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, TriggerRestoreResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to resolve placeholder container: %v", err),
-		})
+	// Validate request and load checkpoint/container info
+	checkpointPath, checkpointMeta, containerInfo, ok := s.validateRestoreRequest(
+		w, r, req.CheckpointID, req.PlaceholderContainerID, &TriggerRestoreResponse{},
+	)
+	if !ok {
 		return
 	}
 
@@ -425,12 +505,18 @@ func (s *Server) handleTriggerRestore(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Image validation passed: checkpoint=%s, placeholder=%s", checkpointMeta.Image, containerInfo.Image)
 	}
 
+	if containerInfo.PID <= 0 || containerInfo.PID > maxPID {
+		writeJSON(w, http.StatusBadRequest, TriggerRestoreResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid container PID: %d", containerInfo.PID),
+		})
+		return
+	}
+
 	// Write trigger file to placeholder's filesystem via /proc/<pid>/root
-	// The trigger file contains the checkpoint path
 	triggerPath := fmt.Sprintf("%s/%d/root/tmp/restore-trigger", s.config.HostProc, containerInfo.PID)
 
-	// Write the checkpoint path to the trigger file
-	if err := os.WriteFile(triggerPath, []byte(checkpointPath), 0644); err != nil {
+	if err := os.WriteFile(triggerPath, []byte(checkpointPath), defaultTriggerFilePerm); err != nil {
 		writeJSON(w, http.StatusInternalServerError, TriggerRestoreResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Failed to write trigger file: %v", err),
@@ -448,6 +534,130 @@ func (s *Server) handleTriggerRestore(w http.ResponseWriter, r *http.Request) {
 		CheckpointImage:  checkpointMeta.Image,
 		PlaceholderImage: containerInfo.Image,
 	})
+}
+
+// handleExternalRestore restores a checkpoint into a placeholder pod via nsenter.
+// POST /restore/external with checkpoint_id and placeholder_container_id.
+func (s *Server) handleExternalRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ExternalRestoreRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ExternalRestoreResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid request body: %v", err),
+		})
+		return
+	}
+
+	checkpointPath, checkpointMeta, containerInfo, ok := s.validateRestoreRequest(
+		w, r, req.CheckpointID, req.PlaceholderContainerID, &ExternalRestoreResponse{},
+	)
+	if !ok {
+		return
+	}
+
+	if !s.validateImages(w, req.SkipImageValidation, checkpointMeta, containerInfo) {
+		return
+	}
+
+	if !s.validatePID(w, containerInfo.PID) {
+		return
+	}
+
+	log.Printf("Starting external restore for placeholder %s (PID %d) from checkpoint %s",
+		req.PlaceholderContainerID, containerInfo.PID, req.CheckpointID)
+
+	rootfsPath := fmt.Sprintf("%s/%d/root", s.config.HostProc, containerInfo.PID)
+	s.prepareFilesystem(checkpointPath, rootfsPath)
+
+	opts := s.buildExternalRestoreOpts(checkpointPath, containerInfo.PID)
+
+	restoredPID, err := restore.Restore(r.Context(), opts, logrus.NewEntry(logrus.StandardLogger()))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ExternalRestoreResponse{
+			Success:          false,
+			Error:            fmt.Sprintf("External restore failed: %v", err),
+			CheckpointImage:  checkpointMeta.Image,
+			PlaceholderImage: containerInfo.Image,
+		})
+		return
+	}
+
+	log.Printf("External restore completed successfully: placeholder=%s, restored_pid=%d",
+		req.PlaceholderContainerID, restoredPID)
+
+	writeJSON(w, http.StatusOK, ExternalRestoreResponse{
+		Success:          true,
+		Message:          fmt.Sprintf("External restore completed for checkpoint %s", req.CheckpointID),
+		RestoredPID:      restoredPID,
+		CheckpointImage:  checkpointMeta.Image,
+		PlaceholderImage: containerInfo.Image,
+	})
+}
+
+func (s *Server) validateImages(w http.ResponseWriter, skipValidation bool, checkpointMeta *common.CheckpointMetadata, containerInfo *checkpointk8s.ContainerInfo) bool {
+	if skipValidation || checkpointMeta.Image == "" {
+		return true
+	}
+
+	if !imagesCompatible(checkpointMeta.Image, containerInfo.Image) {
+		writeJSON(w, http.StatusBadRequest, ExternalRestoreResponse{
+			Success:          false,
+			Error:            fmt.Sprintf("Image mismatch: checkpoint was from '%s' but placeholder uses '%s'. The placeholder must use the same base image. Use skip_image_validation=true to override.", checkpointMeta.Image, containerInfo.Image),
+			CheckpointImage:  checkpointMeta.Image,
+			PlaceholderImage: containerInfo.Image,
+		})
+		return false
+	}
+
+	log.Printf("Image validation passed: checkpoint=%s, placeholder=%s", checkpointMeta.Image, containerInfo.Image)
+	return true
+}
+
+func (s *Server) validatePID(w http.ResponseWriter, pid uint32) bool {
+	if pid <= 0 || pid > maxPID {
+		writeJSON(w, http.StatusBadRequest, ExternalRestoreResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid container PID: %d", pid),
+		})
+		return false
+	}
+	return true
+}
+
+func (s *Server) prepareFilesystem(checkpointPath, rootfsPath string) {
+	logger := logrus.NewEntry(logrus.StandardLogger())
+
+	if err := restore.ApplyRootfsDiff(checkpointPath, rootfsPath, logger); err != nil {
+		log.Printf("Warning: Failed to apply rootfs diff: %v", err)
+	}
+
+	if err := restore.ApplyDeletedFiles(checkpointPath, rootfsPath, logger); err != nil {
+		log.Printf("Warning: Failed to apply deleted files: %v", err)
+	}
+}
+
+func (s *Server) buildExternalRestoreOpts(checkpointPath string, containerPID uint32) *restore.RestoreOptions {
+	opts, err := restore.LoadRestoreOptions(checkpointPath, 4)
+	if err != nil {
+		log.Printf("Warning: Could not load restore options from metadata, using defaults: %v", err)
+		opts = restore.DefaultRestoreOptions(checkpointPath)
+		opts.LogLevel = 4
+	}
+
+	opts.ExternalRestore = true
+	opts.TargetPID = int(containerPID)
+
+	if s.config.CUDAPluginDir != "" {
+		opts.LibDir = s.config.CUDAPluginDir
+		opts.Timeout = s.config.Timeout
+	}
+
+	return opts
 }
 
 func (s *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
@@ -489,7 +699,7 @@ func (s *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -506,6 +716,23 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// validateCheckpointID validates that a checkpoint ID is safe for filesystem operations.
+// It prevents path traversal by ensuring the ID is a simple filename without path separators.
+func validateCheckpointID(id string) error {
+	if id == "" {
+		return fmt.Errorf("checkpoint ID cannot be empty")
+	}
+	if len(id) > maxCheckpointIDLength {
+		return fmt.Errorf("checkpoint ID too long (max %d characters)", maxCheckpointIDLength)
+	}
+	// filepath.Base returns the last element of the path.
+	// If id contains path separators or traversal (..), Base(id) != id
+	if filepath.Base(id) != id {
+		return fmt.Errorf("checkpoint ID must be a simple filename without path separators")
+	}
+	return nil
 }
 
 // imagesCompatible checks if two container images are compatible for CRIU restore.

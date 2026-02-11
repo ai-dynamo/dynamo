@@ -68,6 +68,7 @@ ARG TARGETARCH=amd64
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /chrek-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /restore-entrypoint ./cmd/restore-entrypoint
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /criu-helper ./cmd/criu-helper
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -138,6 +139,7 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint
 # Copy the built binaries
 COPY --from=builder /chrek-agent /usr/local/bin/chrek-agent
 COPY --from=builder /restore-entrypoint /restore-entrypoint
+COPY --from=builder /criu-helper /usr/local/bin/criu-helper
 
 # Create checkpoint directory
 RUN mkdir -p /checkpoints
@@ -196,6 +198,9 @@ RUN mkdir -p /checkpoints /var/run/criu /tmp /var/criu-work
 # Copy restore binaries
 COPY --from=builder /restore-entrypoint /restore-entrypoint
 RUN chmod +x /restore-entrypoint
+
+COPY --from=builder /criu-helper /usr/local/bin/criu-helper
+RUN chmod +x /usr/local/bin/criu-helper
 
 COPY scripts/smart-entrypoint.sh /smart-entrypoint.sh
 RUN chmod +x /smart-entrypoint.sh

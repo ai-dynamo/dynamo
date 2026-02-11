@@ -108,11 +108,11 @@ func forwardFD(fdPath string, dst io.Writer, name string, log *logrus.Entry, don
 			return
 		default:
 			// Set a read deadline to allow checking done channel periodically
-			src.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			_ = src.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 
 			n, err := src.Read(buf)
 			if n > 0 {
-				dst.Write(buf[:n])
+				_, _ = dst.Write(buf[:n])
 			}
 			if err != nil {
 				if os.IsTimeout(err) {
@@ -200,7 +200,7 @@ func SetupSignalForwarding(pid int, log *logrus.Entry) func() {
 
 			proc, err := os.FindProcess(pid)
 			if err == nil {
-				proc.Signal(sig)
+				_ = proc.Signal(sig)
 			}
 		case <-done:
 			return
