@@ -21,7 +21,7 @@
 #    - Triggers on pull requests when docs/** files change
 #    - Runs `fern check` and `fern docs broken-links`
 #
-# 2. SYNC vNEXT (push to main): Syncs docs/ from main to docs-website branch
+# 2. SYNC dev (push to main): Syncs docs/ from main to docs-website branch
 #    - Triggers on push to main when docs/** files change
 #    - Preserves versioned documentation snapshots on docs-website branch
 #    - Publishes docs to Fern after syncing
@@ -49,7 +49,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag to release (e.g., v0.9.0). Leave empty to sync vNext.'
+        description: 'Version tag to release (e.g., v0.9.0). Leave empty to sync dev docs.'
         required: false
         type: string
 
@@ -138,11 +138,11 @@ jobs:
         run: fern docs broken-links
 
   #############################################################################
-  # SYNC vNEXT - Run on push to main when docs/** files change
+  # SYNC dev - Run on push to main when docs/** files change
   #############################################################################
 
-  sync-vnext:
-    name: Sync vNext to docs-website
+  sync-dev:
+    name: Sync dev to docs-website
     needs: changed-files
     if: |
       github.ref == 'refs/heads/main' &&
@@ -171,16 +171,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Sync vNext content from main
+      - name: Sync dev content from main
         run: |
-          # Sync pages/ directory (vNext content)
+          # Sync pages/ directory (dev content)
           echo "Syncing pages/ from main to docs-website branch..."
           rm -rf docs-checkout/docs/pages
           cp -r main-checkout/docs/pages docs-checkout/docs/pages
 
-          # Sync versions/next.yml (vNext navigation)
-          echo "Syncing versions/next.yml from main to docs-website branch..."
-          cp main-checkout/docs/versions/next.yml docs-checkout/docs/versions/next.yml
+          # Sync versions/dev.yml (dev navigation)
+          echo "Syncing versions/dev.yml from main to docs-website branch..."
+          cp main-checkout/docs/versions/dev.yml docs-checkout/docs/versions/dev.yml
 
           # Sync assets/ directory
           echo "Syncing assets/ from main to docs-website branch..."
@@ -229,8 +229,8 @@ jobs:
         run: |
           cd docs-checkout/docs
 
-          # Extract released version entries (non-"Next") from current docs-website docs.yml
-          yq '.products[0].versions | map(select(.display-name != "Next"))' docs.yml > /tmp/preserved_versions.yml
+          # Extract released version entries (non-"dev") from current docs-website docs.yml
+          yq '.products[0].versions | map(select(.display-name != "dev"))' docs.yml > /tmp/preserved_versions.yml
 
           echo "Preserved version entries:"
           cat /tmp/preserved_versions.yml
@@ -238,9 +238,16 @@ jobs:
           # Copy docs.yml from main as base
           cp ../../main-checkout/docs/docs.yml docs.yml
 
-          # Append preserved version entries under products[0].versions
+          # Insert preserved version entries after the first entry (Latest)
+          # This ensures "dev" from main stays at index 1, right after Latest
           if [ "$(yq 'length' /tmp/preserved_versions.yml)" -gt 0 ]; then
-            yq -i '.products[0].versions += load("/tmp/preserved_versions.yml")' docs.yml
+            yq -i '
+              .products[0].versions |= (
+                .[0:1] +
+                load("/tmp/preserved_versions.yml") +
+                .[1:]
+              )
+            ' docs.yml
           fi
 
           echo "Updated docs.yml:"
@@ -265,7 +272,7 @@ jobs:
           cd docs-checkout
 
           git add -A
-          git commit -m "docs(fern): sync vNext from main
+          git commit -m "docs(fern): sync dev from main
 
           Automated sync of docs/ directory from main branch.
           Preserves versioned documentation snapshots.
@@ -274,7 +281,7 @@ jobs:
 
           git push origin docs-website
 
-          echo "Successfully synced vNext docs to docs-website branch"
+          echo "Successfully synced dev docs to docs-website branch"
 
       - name: Setup Node.js
         if: steps.changes.outputs.has_changes == 'true'
@@ -417,8 +424,8 @@ jobs:
 
           echo "Creating version config: $VERSION_FILE"
 
-          # Copy next.yml as template
-          cp docs/versions/next.yml "$VERSION_FILE"
+          # Copy dev.yml as template
+          cp docs/versions/dev.yml "$VERSION_FILE"
 
           # Update the comment at the top
           sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
