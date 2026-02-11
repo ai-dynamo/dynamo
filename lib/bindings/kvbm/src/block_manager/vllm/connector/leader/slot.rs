@@ -556,6 +556,7 @@ impl Slot for VllmConnectorSlot {
             self.offload_terminated_at_block
         );
 
+
         // Validate contract: priorities must match block_ids length when provided
         if let Some(prios) = priorities {
             assert_eq!(
@@ -583,10 +584,20 @@ impl Slot for VllmConnectorSlot {
         self.current_position = max(self.current_position, num_computed_tokens);
         self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
 
-        // apply new block_ids
+        // apply new block_ids — but skip if already added by update_state_after_alloc
+        // (which calls append_mutable_device_blocks before apply_scheduler_output)
         if !block_ids.is_empty() {
-            tracing::debug!("assigning {} new device blocks slot", block_ids.len());
-            self.device_blocks.extend(block_ids);
+            let already_present = block_ids.len() <= self.device_blocks.len()
+                && self.device_blocks[self.device_blocks.len() - block_ids.len()..] == *block_ids;
+            if already_present {
+                tracing::debug!(
+                    "skipping extend of {} device blocks (already added by update_state_after_alloc)",
+                    block_ids.len()
+                );
+            } else {
+                tracing::debug!("assigning {} new device blocks slot", block_ids.len());
+                self.device_blocks.extend(block_ids);
+            }
         }
 
         // Early exit if offload has been permanently terminated.
