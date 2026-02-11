@@ -440,57 +440,92 @@ class GitHubAnnotator:
 
     def _get_pr_number(self) -> Optional[int]:
         """Extract PR number from environment."""
+        print("🔍 Attempting to detect PR number...")
+
         # Try GITHUB_REF (refs/pull/123/merge)
         pr_ref = os.getenv("GITHUB_REF")
+        print(f"  GITHUB_REF: {pr_ref}")
         if pr_ref and "pull" in pr_ref:
             parts = pr_ref.split("/")
             if len(parts) >= 3 and parts[1] == "pull":
                 try:
-                    return int(parts[2])
+                    pr_num = int(parts[2])
+                    print(f"  ✅ Found PR #{pr_num} from GITHUB_REF")
+                    return pr_num
                 except (ValueError, IndexError):
                     pass
 
         # Try GITHUB_EVENT_PATH
         event_path = os.getenv("GITHUB_EVENT_PATH")
+        print(f"  GITHUB_EVENT_PATH: {event_path}")
         if event_path and os.path.exists(event_path):
             try:
                 with open(event_path) as f:
                     event = json.load(f)
 
-                    # Direct PR event
-                    pr_number = event.get("pull_request", {}).get("number")
-                    if pr_number:
-                        return int(pr_number)
+                event_name = os.getenv("GITHUB_EVENT_NAME")
+                print(f"  GITHUB_EVENT_NAME: {event_name}")
 
-                    # workflow_run event - check if triggered by a PR
-                    workflow_run = event.get("workflow_run", {})
+                # Direct PR event
+                pr_number = event.get("pull_request", {}).get("number")
+                if pr_number:
+                    print(f"  ✅ Found PR #{pr_number} from pull_request event")
+                    return int(pr_number)
+
+                # workflow_run event - check if triggered by a PR
+                workflow_run = event.get("workflow_run", {})
+                if workflow_run:
+                    print(f"  workflow_run event detected")
+                    print(f"    head_branch: {workflow_run.get('head_branch')}")
+                    print(f"    head_sha: {workflow_run.get('head_sha')}")
+
                     pull_requests = workflow_run.get("pull_requests", [])
+                    print(f"    pull_requests array length: {len(pull_requests)}")
+
                     if pull_requests and len(pull_requests) > 0:
-                        return int(pull_requests[0].get("number"))
+                        pr_num = int(pull_requests[0].get("number"))
+                        print(f"  ✅ Found PR #{pr_num} from workflow_run.pull_requests")
+                        return pr_num
 
                     # workflow_run event - use API to find PR by head_sha
                     head_sha = workflow_run.get("head_sha")
                     if head_sha and self.github_token:
+                        print(f"  Trying API lookup for commit {head_sha[:8]}...")
                         pr_num = self._find_pr_by_commit(head_sha)
                         if pr_num:
+                            print(f"  ✅ Found PR #{pr_num} from API")
                             return pr_num
+                        else:
+                            print(f"  ❌ No PR found via API for commit {head_sha[:8]}")
             except Exception as e:
                 print(f"⚠️  Error reading event file: {e}")
+                import traceback
+                traceback.print_exc()
 
+        print("  ❌ No PR number found")
         return None
 
     def _find_pr_by_commit(self, commit_sha: str) -> Optional[int]:
         """Find PR number associated with a commit using GitHub API."""
         try:
             url = f"https://api.github.com/repos/{self.repo}/commits/{commit_sha}/pulls"
+            print(f"    API request: {url}")
             response = requests.get(url, headers=self.headers, timeout=10)
+            print(f"    API response status: {response.status_code}")
 
             if response.status_code == 200:
                 pulls = response.json()
+                print(f"    API returned {len(pulls)} PR(s)")
                 if pulls and len(pulls) > 0:
-                    return pulls[0].get("number")
+                    pr_num = pulls[0].get("number")
+                    print(f"    First PR: #{pr_num}")
+                    return pr_num
+            else:
+                print(f"    API error: {response.text[:200]}")
         except Exception as e:
             print(f"⚠️  Error finding PR by commit: {e}")
+            import traceback
+            traceback.print_exc()
 
         return None
 
