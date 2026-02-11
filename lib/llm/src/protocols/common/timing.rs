@@ -62,19 +62,27 @@ impl std::fmt::Display for RequestPhase {
 /// Captures information throughout the request lifecycle:
 /// - `request_received`: When the request was received
 /// - `prefill_start_time`: When prefill started (for disaggregated serving)
-/// - `first_token_time`: When the first token was generated (set once via OnceLock)
-/// - `request_finish_time`: When the request finished (Mutex-protected, last-write-wins)
+/// - `first_token_time`: When the first token was generated
+/// - `request_finish_time`: When the last token was generated (updated incrementally)
 /// - KV cache hit rate information
 /// - Worker IDs and types for per-worker Prometheus metrics
 ///
-/// `first_token_time` uses `OnceLock` (first-write-wins) so that in disaggregated serving
-/// the prefill phase's first token time is preserved even when the decode phase also
-/// calls `record_first_token`. `request_finish_time` uses `Mutex` (last-write-wins) so
-/// the decode phase's finish overwrites the prefill phase's earlier finish.
+/// ## Concurrency primitives
 ///
-/// Worker IDs use `AtomicU64` instead of `OnceLock<u64>` for lower overhead since
-/// the tracker is created for every request. The sentinel value `NO_WORKER_ID` (0)
-/// indicates no worker has been recorded yet.
+/// **`OnceLock` (first-write-wins):** Used for values that must capture the earliest
+/// observation and ignore later writes. In disaggregated serving, both prefill and decode
+/// phases may call `record_first_token`; `OnceLock` ensures the prefill phase's TTFT is
+/// preserved. Also used for one-shot metadata: `prefill_start_time`, KV hit info,
+/// ISL/cached tokens, worker types, and tokenizer latency.
+///
+/// **`Mutex` (last-write-wins):** Used for values where later phases should overwrite
+/// earlier ones. `request_finish_time` is updated incrementally at each output block
+/// boundary so that `avg_itl_ms()` stays current during streaming, and the decode
+/// phase's final finish naturally overwrites the prefill phase's earlier finish.
+/// `phase` also uses a Mutex since it transitions across phases.
+///
+/// **`AtomicU64`/`AtomicU32`:** Used for frequently updated counters (`osl_tokens`)
+/// and worker IDs/ranks where `OnceLock`'s heap overhead is unnecessary.
 #[derive(Debug)]
 pub struct RequestTracker {
     /// When the request was received (monotonic clock for duration calculations)
@@ -214,7 +222,7 @@ impl RequestTracker {
         self.cached_tokens.get().copied()
     }
 
-    /// Record final output sequence length in tokens. Called once at stream end.
+    /// Record current output sequence length in tokens. Updated at each output block boundary.
     pub fn record_osl(&self, osl: usize) {
         self.osl_tokens.store(osl as u64, Ordering::Relaxed);
     }
@@ -415,7 +423,7 @@ impl RequestTracker {
     }
 
     /// Write avg ITL to per-worker last gauge using decode worker labels.
-    /// Called from the Python binding path at stream end.
+    /// Called at each output block boundary and from the Python binding path.
     pub fn observe_finish_gauges(&self) {
         let Some(worker_id) = self.decode_worker_id() else {
             return;
