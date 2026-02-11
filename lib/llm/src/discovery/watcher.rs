@@ -49,6 +49,16 @@ use crate::{
 use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
+/// Constructs the WorkerSet storage key. Prefill and decode workers in the same
+/// namespace get different keys so they don't block each other's registration.
+fn worker_set_key(namespace: &str, model_type: ModelType) -> String {
+    if model_type.supports_prefill() {
+        format!("{}:prefill", namespace)
+    } else {
+        namespace.to_string()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
     Added(ModelDeploymentCard),
@@ -180,9 +190,10 @@ impl ModelWatcher {
                     // If we already have a WorkerSet for this (model, namespace) and the
                     // checksums don't match, reject the new worker. Different namespaces
                     // may legitimately have different checksums.
+                    let ws_key = worker_set_key(&mcid.namespace, card.model_type);
                     let can_add = self.manager.is_valid_checksum(
                         card.name(),
-                        &mcid.namespace,
+                        &ws_key,
                         card.mdcsum(),
                     );
                     if can_add.is_some_and(|is_valid| !is_valid) {
@@ -268,6 +279,8 @@ impl ModelWatcher {
         };
         let model_name = card.name().to_string();
         let worker_namespace = &mcid.namespace;
+        let worker_component = &mcid.component;
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type);
 
         // Query discovery for all remaining instances of this model
         let active_instances = self
@@ -275,14 +288,18 @@ impl ModelWatcher {
             .await
             .with_context(|| model_name.clone())?;
 
-        // Check if any instances remain in this worker's specific namespace
-        let ns_has_instances = active_instances
+        // Check if instances of the SAME component remain in this namespace.
+        // In disaggregated deployments, prefill and decode are different components
+        // in the same namespace, so we must check at the component level to avoid
+        // removing one type's WorkerSet while the other still has workers.
+        let component_has_instances = active_instances
             .iter()
-            .any(|(eid, _)| eid.namespace == *worker_namespace);
+            .any(|(eid, _)| eid.namespace == *worker_namespace && eid.component == *worker_component);
 
-        if !ns_has_instances {
-            // No more workers in this namespace — remove its WorkerSet and associated state
-            if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, worker_namespace) {
+        if !component_has_instances {
+            // No more workers of this component in this namespace — remove its WorkerSet
+            if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, &ws_key) {
+                // remove_prefill_activator uses deployment namespace (not ws_key)
                 self.manager.remove_prefill_activator(&model_name, worker_namespace);
                 tracing::info!(
                     model_name,
@@ -323,13 +340,14 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
-        // Check if this specific (model, namespace) WorkerSet already exists.
+        // Check if this specific (model, namespace, type) WorkerSet already exists.
         // If so, this is just another worker joining an existing set — no pipeline build needed.
         let model_name = card.name().to_string();
         let namespace = mcid.namespace.clone();
+        let ws_key = worker_set_key(&namespace, card.model_type);
 
         if let Some(model) = self.manager.get_model(&model_name) {
-            if model.has_worker_set(&namespace) {
+            if model.has_worker_set(&ws_key) {
                 self.manager
                     .save_model_card(&mcid.to_path(), card.clone())?;
                 tracing::debug!(
@@ -341,8 +359,8 @@ impl ModelWatcher {
             }
         }
 
-        // Guard against concurrent pipeline construction for the same (model, namespace)
-        let registration_key = ModelManager::model_namespace_key(&model_name, &namespace);
+        // Guard against concurrent pipeline construction for the same (model, namespace, type)
+        let registration_key = ModelManager::model_namespace_key(&model_name, &ws_key);
         if !self.registering_worker_sets.insert(registration_key.clone()) {
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
@@ -388,6 +406,7 @@ impl ModelWatcher {
 
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
+        let ws_key = worker_set_key(&namespace, card.model_type);
 
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(
@@ -674,7 +693,7 @@ impl ModelWatcher {
 
             // Prefill sets have no engines — we add the WorkerSet first for tracking,
             // then activate the prefill router.
-            self.manager.add_worker_set(card.name(), &namespace, worker_set);
+            self.manager.add_worker_set(card.name(), &ws_key, worker_set);
 
             let Ok(()) = self.manager.activate_prefill_router(card.name(), &namespace, endpoint) else {
                 tracing::warn!(
@@ -701,7 +720,7 @@ impl ModelWatcher {
         }
 
         // Add the completed WorkerSet to the Model
-        self.manager.add_worker_set(card.name(), &namespace, worker_set);
+        self.manager.add_worker_set(card.name(), &ws_key, worker_set);
 
         Ok(())
     }
