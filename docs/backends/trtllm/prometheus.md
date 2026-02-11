@@ -173,7 +173,7 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 ## Implementation Details
 
 - **Prometheus Integration**: Uses the `MetricsCollector` class from `tensorrt_llm.metrics` (see [collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py))
-- **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `add_prefix="trtllm_"`
+- **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `metric_prefix_filter=["trtllm_"]`
 - **Engine Configuration**: `return_perf_metrics` set to `True` when `--publish-events-and-metrics` is enabled
 - **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
 - **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)
