@@ -33,7 +33,8 @@ from dynamo.vllm.omni.base_handler import BaseOmniHandler
 
 logger = logging.getLogger(__name__)
 
-# TODO: Migrate to fs_url based approach in another PR
+
+
 DEFAULT_VIDEO_FPS = 16
 DEFAULT_VIDEO_OUTPUT_DIR = "/tmp/dynamo_videos"  # noqa: S108
 
@@ -69,9 +70,6 @@ def prepare_image_output(images: list, response_format: str | None = None):
     Returns:
         List of image URLs or base64 strings.
     """
-    ## This is a temporary function to prepare image output for response.
-    ## Right now, there are different utilities across components that uploads image/video outputs to urls or b64_json.
-    ## (ayushag) TODO: follow up, move all the utilities to common
     outlist = []
 
     for img in images:
@@ -82,7 +80,6 @@ def prepare_image_output(images: list, response_format: str | None = None):
             img.save(img_path)
             outlist.append(img_path)
         elif response_format == "b64_json" or response_format is None:
-            # convert image to base64
             buffer = BytesIO()
             img.save(buffer, format="PNG")
             img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -124,6 +121,8 @@ class OmniHandler(BaseOmniHandler):
             shutdown_event=shutdown_event,
         )
 
+
+
     async def generate(
         self, request: Dict[str, Any], context
     ) -> AsyncGenerator[Dict, None]:
@@ -152,14 +151,14 @@ class OmniHandler(BaseOmniHandler):
         )
         inputs = self.build_engine_inputs(parsed_request, request_type)
 
+        previous_text = ""
+
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
             "request_id": request_id,
         }
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
-
-        previous_text = ""
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -184,9 +183,6 @@ class OmniHandler(BaseOmniHandler):
                         stage_output.final_output_type == "image"
                         and stage_output.images
                     ):
-                        # vllm-omni uses final_output_type="image" for both
-                        # image and video diffusion outputs. Use the parsed
-                        # request type to route to the correct formatter.
                         if inputs.request_type == RequestType.VIDEO_GENERATION:
                             chunk = await self._format_video_chunk(
                                 stage_output.images,
@@ -233,7 +229,6 @@ class OmniHandler(BaseOmniHandler):
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
             return self._engine_inputs_from_video(parsed_request)
-
         elif request_type == RequestType.AUDIO_GENERATION:
             raise NotImplementedError("Audio generation is not yet supported")
 
@@ -241,21 +236,15 @@ class OmniHandler(BaseOmniHandler):
 
     def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
-
-        # Chat completions request does not support extra_body passthrough
-        # So, we can't extract any diffusion related params from the raw_request
-        # It falls back to default sampling params
         text_prompt = self._extract_text_prompt(request)
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
 
         prompt = OmniTextPrompt(prompt=text_prompt)
 
-        sampling_params_list = None
-
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=sampling_params_list,
+            sampling_params_list=None,
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
         )
@@ -357,15 +346,12 @@ class OmniHandler(BaseOmniHandler):
         Returns:
             Dict[str, Any] | None: Formatted chunk, or None if no images generated.
         """
-
         if not images:
             return self._error_chunk(request_id, "No images generated")
 
         data_urls = prepare_image_output(images, response_format)
 
         if request_type == RequestType.CHAT_COMPLETION:
-            # This branch is used when user send request via /v1/chat/completions endpoint.
-            # We need to return chat completion chunk with image_url content part.
             chunk = {
                 "id": request_id,
                 "created": int(time.time()),
@@ -387,14 +373,11 @@ class OmniHandler(BaseOmniHandler):
             }
             return chunk
         elif request_type == RequestType.IMAGE_GENERATION:
-            # This branch is used when user send request via /v1/images/generations endpoint.
-            # This will return NvImagesResponse with list of ImageData objects.
             image_data_list = []
             for data_url in data_urls:
                 if response_format == "url":
                     image_data_list.append(ImageData(url=data_url))
                 elif response_format == "b64_json" or response_format is None:
-                    # strip explicit prefix if present
                     if data_url.startswith("data:image"):
                         _, b64_part = data_url.split(",", 1)
                         image_data_list.append(ImageData(b64_json=b64_part))
@@ -420,7 +403,7 @@ class OmniHandler(BaseOmniHandler):
             fps: Frames per second for the output video.
 
         Returns:
-            ``NvVideosResponse.model_dump()`` dict, or ``None`` if no frames.
+            NvVideosResponse.model_dump() dict, or None if no frames.
         """
         if not images:
             return None
@@ -476,43 +459,3 @@ class OmniHandler(BaseOmniHandler):
                 error=str(e),
             )
             return error_response.model_dump()
-
-    def _format_text_chunk(
-        self,
-        request_output,
-        request_id: str,
-        previous_text: str,
-    ) -> Dict[str, Any] | None:
-        """Format text output as OpenAI chat completion chunk."""
-        if not request_output.outputs:
-            return self._error_chunk(request_id, "No outputs from engine")
-
-        output = request_output.outputs[0]
-
-        # Calculate delta text (new text since last chunk)
-        delta_text = output.text[len(previous_text) :]
-
-        chunk = {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self.config.served_model_name or self.config.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": delta_text,
-                    },
-                    "finish_reason": self._normalize_finish_reason(output.finish_reason)
-                    if output.finish_reason
-                    else None,
-                }
-            ],
-        }
-
-        # Add usage on final chunk
-        if output.finish_reason:
-            chunk["usage"] = self._build_completion_usage(request_output)
-
-        return chunk
