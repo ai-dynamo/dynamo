@@ -454,7 +454,8 @@ impl PositionalIndexer {
 
     /// Scan positions sequentially, updating active set and recording drain scores.
     ///
-    /// Returns the highest position where workers remain active (or lo-1 if none match at lo).
+    /// Inlines the DashMap lookup so the guard lives for each iteration,
+    /// avoiding a per-position `HashSet` clone.
     #[allow(clippy::too_many_arguments)]
     fn linear_scan_drain(
         &self,
@@ -471,22 +472,28 @@ impl PositionalIndexer {
                 break;
             }
 
-            let workers_at_pos = self.get_workers_lazy(pos, sequence[pos], seq_hashes, sequence);
+            let Some(entry) = self.index.get(&(pos, sequence[pos])) else {
+                for worker in active.iter() {
+                    scores.scores.insert(*worker, pos as u32);
+                }
+                active.clear();
+                break;
+            };
 
-            match workers_at_pos {
+            Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
+            let seq_hash = seq_hashes[pos];
+
+            match entry.get(seq_hash) {
                 Some(workers) => {
                     active.retain(|w| {
                         if workers.contains(w) {
                             true
                         } else {
-                            // Score is the position where they stopped matching (i.e., pos)
-                            // which represents they matched positions 0..pos
                             scores.scores.insert(*w, pos as u32);
                             false
                         }
                     });
                     if early_exit && !active.is_empty() {
-                        // Found at least one match, can exit early
                         break;
                     }
                 }
