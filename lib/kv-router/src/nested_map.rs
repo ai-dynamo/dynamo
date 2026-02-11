@@ -376,6 +376,14 @@ impl PositionalIndexer {
         Self::remove_or_clear_worker_blocks_impl(index, worker_blocks, worker_id, true);
     }
 
+    /// Get total number of blocks across all workers.
+    pub fn current_size(&self) -> usize {
+        self.worker_blocks
+            .iter()
+            .map(|entry| entry.value().read().unwrap().len())
+            .sum()
+    }
+
     /// Remove a worker and all their blocks completely from the index.
     #[allow(dead_code)]
     fn remove_worker_blocks(&self, worker_id: WorkerId) {
