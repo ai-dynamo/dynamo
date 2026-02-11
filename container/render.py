@@ -85,8 +85,11 @@ def parse_args(context):
 
 def apply_overrides(context, args, flat_context_keys):
     for key in flat_context_keys:
-        arg_value = getattr(args, key, None)
+        # Normalize the key for attribute lookup: argparse converts hyphens to underscores
+        lookup_key = key.replace("-", "_")
+        arg_value = getattr(args, lookup_key, None)
         if arg_value is not None:
+            # Navigate through nested dict and set the value using original key (preserves dots)
             keys = key.split(".")
             current = context
             for k in keys[:-1]:
