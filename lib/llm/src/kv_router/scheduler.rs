@@ -129,7 +129,7 @@ impl KvScheduler {
 
         // Spawn background task to sync slots when the watch value changes.
         // This task monitors both the discovery-based worker watch AND the
-        // external override watch, merging them to produce the effective worker set.
+        // external override watch, the external override watch overrides the effective worker set.
         let slots_monitor = slots.clone();
         let mut monitor_rx = workers_with_configs.clone();
         let mut monitor_override_rx = override_workers_rx.clone();
