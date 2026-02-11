@@ -80,37 +80,28 @@ struct WorkerSelection {
 }
 
 impl KvPushRouter {
-    pub fn new(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        chooser: Arc<KvRouter>,
-    ) -> Self {
-        KvPushRouter {
-            inner,
-            chooser,
-            cache_control_client: None,
-        }
-    }
-
-    /// Create a KvPushRouter with a cache_control client for PIN operations.
-    /// The cache_control client connects to the worker's `cache_control` service mesh endpoint,
-    /// enabling post-generation pin/unpin of prefix blocks.
-    pub async fn new_with_cache_control(
+    pub async fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Result<Self> {
-        let component = chooser.client().endpoint.component().clone();
-        let cc_endpoint = component.endpoint("cache_control");
-        let cc_client = cc_endpoint.client().await?;
-        let cc_push_router =
-            PushRouter::<serde_json::Value, Annotated<CacheControlResponse>>::from_client(
-                cc_client,
-                RouterMode::KV,
-            )
-            .await?;
+        let cc_client = if chooser.kv_router_config().router_enable_agentic_cache_control {
+            let component = chooser.client().endpoint.component().clone();
+            let cc_endpoint = component.endpoint("cache_control");
+            let client = cc_endpoint.client().await?;
+            let push_router =
+                PushRouter::<serde_json::Value, Annotated<CacheControlResponse>>::from_client(
+                    client,
+                    RouterMode::KV,
+                )
+                .await?;
+            Some(push_router)
+        } else {
+            None
+        };
         Ok(KvPushRouter {
             inner,
             chooser,
-            cache_control_client: Some(cc_push_router),
+            cache_control_client: cc_client,
         })
     }
 

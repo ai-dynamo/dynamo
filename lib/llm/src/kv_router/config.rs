@@ -76,6 +76,12 @@ pub struct KvRouterConfig {
     /// Must be > 0.
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
+
+    /// Enable agentic cache control (PIN/UNPIN) via the worker's cache_control service mesh endpoint.
+    /// When true, the router creates a cache_control client and honors agent_hints.pin on requests,
+    /// firing a pin_prefix call to the worker after generation completes.
+    /// When false (default), agent_hints.pin is ignored and no cache_control client is created.
+    pub router_enable_agentic_cache_control: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -95,6 +101,7 @@ impl Default for KvRouterConfig {
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
             router_queue_threshold: None,
+            router_enable_agentic_cache_control: false,
         }
     }
 }
