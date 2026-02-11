@@ -250,6 +250,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .as_ref()
             .and_then(|r| r.expected_output_tokens);
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
+        let tracker = request.tracker.clone();
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
