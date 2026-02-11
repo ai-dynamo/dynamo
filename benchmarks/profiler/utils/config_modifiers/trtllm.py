@@ -22,7 +22,11 @@ from benchmarks.profiler.utils.config import (
     validate_and_get_worker_args,
 )
 from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
-from benchmarks.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
+from benchmarks.profiler.utils.defaults import (
+    DYNAMO_RUN_DEFAULT_PORT,
+    PREFILL_MAX_NUM_TOKENS,
+    EngineType,
+)
 from dynamo.planner.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
@@ -522,9 +526,14 @@ class TrtllmConfigModifier(BaseConfigModifier):
         """
         Configure decode batch limits for decode profiling runs.
 
-        Removes any explicit max_batch_size / max_num_tokens overrides so
-        TRT-LLM falls back to its built-in default (2048), which is large
-        enough for the profiler's decode concurrency sweep.
+        Removes explicit max_batch_size so TRT-LLM auto-tunes (default 2048),
+        which is large enough for the profiler's decode concurrency sweep.
+
+        Sets max_num_tokens to PREFILL_MAX_NUM_TOKENS with WIDEEP allgather
+        correction (same as set_prefill_config) so that decode benchmarks can
+        accept prompts up to the configured ISL (default 3000 tokens).
+        Without this, TRT-LLM auto-tunes max_num_tokens to a small value
+        (e.g. 256) which rejects all decode benchmark prompts.
         """
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
@@ -535,8 +544,29 @@ class TrtllmConfigModifier(BaseConfigModifier):
 
         override_dict, args = parse_override_engine_args(args)
 
+        # Remove max_batch_size to let TRT-LLM auto-tune (default 2048).
         override_dict.pop("max_batch_size", None)
-        override_dict.pop("max_num_tokens", None)
+
+        # Set max_num_tokens large enough for decode benchmark ISL (default
+        # 3000).  Apply the same WIDEEP allgather correction as
+        # set_prefill_config: DeepGemmMoEOp workspace is sized by
+        # max_num_tokens × dep_size, so divide by dep_size to keep the
+        # effective workspace manageable.
+        per_rank_max_num_tokens = PREFILL_MAX_NUM_TOKENS
+        moe_backend = override_dict.get("moe_config", {}).get("backend", "")
+        if moe_backend == "WIDEEP":
+            dep_size = override_dict.get("moe_expert_parallel_size", 1)
+            if dep_size > 1:
+                per_rank_max_num_tokens = max(
+                    1, per_rank_max_num_tokens // dep_size
+                )
+                logger.info(
+                    f"WIDEEP allgather correction for decode: max_num_tokens "
+                    f"per rank set to {per_rank_max_num_tokens} (effective "
+                    f"after allgather: {per_rank_max_num_tokens * dep_size})"
+                )
+
+        override_dict["max_num_tokens"] = per_rank_max_num_tokens
 
         override_str = json.dumps(override_dict)
         args = append_argument(args, ["--override-engine-args", override_str])
