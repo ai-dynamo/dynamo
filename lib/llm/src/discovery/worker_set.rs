@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use crate::{
     discovery::KvWorkerMonitor,
-    kv_router::{KvRouter},
+    kv_router::KvRouter,
     model_card::ModelDeploymentCard,
     types::{
         generic::tensor::TensorStreamingEngine,
