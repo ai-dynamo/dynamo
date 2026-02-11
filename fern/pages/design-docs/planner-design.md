@@ -13,7 +13,7 @@ The Planner is Dynamo's autoscaling controller. It observes system metrics, pred
 
 ## Architecture
 
-![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](../assets/img/planner-architecture.svg)
+![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](../../assets/img/planner-architecture.svg)
 
 ## Scaling Algorithm
 
