@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Navigation structure matching https://docs.nvidia.com/dynamo/dev/
-# Rebuilt to exactly replicate the rendered Sphinx sidebar
+# Navigation structure for dev (main branch) version
+# Tracks the latest development content from main
 
 navigation:
   # ==================== Getting Started ====================
