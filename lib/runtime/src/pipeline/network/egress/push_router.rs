@@ -27,6 +27,7 @@ use std::{
     },
 };
 use tokio_stream::StreamExt;
+use tracing::Instrument;
 
 /// Trait for monitoring worker load and determining busy state.
 /// Implementations can define custom load metrics and busy thresholds.
@@ -307,6 +308,18 @@ where
         instance_id: u64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
+        let request_id = request.id().to_string();
+        let route_span = if matches!(self.router_mode, RouterMode::KV) {
+            tracing::Span::none()
+        } else {
+            tracing::info_span!(
+                "router.route_request",
+                request_id = %request_id,
+                worker_id = instance_id,
+                router_mode = ?self.router_mode,
+            )
+        };
+
         // Check if all workers are busy (only if busy threshold is set and fault detection enabled)
         if self.fault_detection_enabled && self.busy_threshold.is_some() {
             let free_instances = self.client.instance_ids_free();
@@ -365,7 +378,11 @@ where
 
         let request = request.map(|req| AddressedRequest::new(req, address));
 
-        let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
+        let stream: anyhow::Result<ManyOut<U>> = self
+            .addressed
+            .generate(request)
+            .instrument(route_span)
+            .await;
         match stream {
             Ok(stream) => {
                 if !self.fault_detection_enabled {

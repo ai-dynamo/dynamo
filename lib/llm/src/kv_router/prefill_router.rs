@@ -292,14 +292,10 @@ impl PrefillRouter {
             };
             // Extract LORA name from routing hints
             let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
-            match async {
-                kv_router
-                    .chooser
-                    .find_best_match(None, &req.token_ids, None, false, lora_name)
-                    .await
-            }
-            .instrument(tracing::info_span!("kv_find_best_match"))
-            .await
+            match kv_router
+                .chooser
+                .find_best_match(None, &req.token_ids, None, false, lora_name)
+                .await
             {
                 Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
                 Err(_) => return None,
@@ -587,7 +583,6 @@ impl
                 })
             }
         }
-        .instrument(tracing::info_span!("prefill_routing"))
         .await;
 
         // Abort if cancelled during prefill
