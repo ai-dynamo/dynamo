@@ -23,7 +23,9 @@ class ErrorClassification:
     # Source references
     workflow_id: Optional[str] = None
     job_id: Optional[str] = None
+    job_name: Optional[str] = None
     step_id: Optional[str] = None
+    step_name: Optional[str] = None
     test_name: Optional[str] = None
 
     # Error source
@@ -77,7 +79,9 @@ class ErrorClassification:
             # Source references
             "s_workflow_id": self.workflow_id,
             "s_job_id": self.job_id,
+            "s_job_name": self.job_name,
             "s_step_id": self.step_id,
+            "s_step_name": self.step_name,
             "s_test_name": self.test_name,
 
             # Error source

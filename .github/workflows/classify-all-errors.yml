@@ -1,0 +1,82 @@
+name: Classify All Workflow Errors
+
+# Trigger after specific workflows complete
+on:
+  workflow_run:
+    workflows:
+      - "CI Test Suite"
+      - "Copyright Checks"
+      - "Container Validation (Dynamo)"
+      - "Pre Merge"
+      - "Nightly CI Pipeline"
+      - "Post-Merge CI Pipeline"
+      - "NVIDIA Test Lab Validation"
+    types: [completed]
+
+permissions:
+  actions: read
+  checks: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  classify-errors:
+    name: Classify Workflow Errors
+    runs-on: ubuntu-latest
+    # Only run if the triggering workflow failed
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python3 -m venv /tmp/error-classification-venv
+          . /tmp/error-classification-venv/bin/activate
+          pip install -r opensearch_upload/requirements.txt
+
+      - name: Classify All Workflow Errors
+        env:
+          # NVIDIA API Configuration (Claude via NVIDIA inference API)
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          API_FORMAT: "openai"
+          API_BASE_URL: "https://inference-api.nvidia.com/v1"
+          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
+
+          # Feature flags
+          ENABLE_ERROR_CLASSIFICATION: "true"
+          ENABLE_GITHUB_ANNOTATIONS: "true"
+          ENABLE_PR_COMMENTS: "true"
+
+          # GitHub context
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # OpenSearch (optional)
+          ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
+          OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
+          OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+
+          # Performance tuning
+          MAX_PARALLEL_JOBS: "5"
+        run: |
+          . /tmp/error-classification-venv/bin/activate
+          python3 .github/workflows/classify_workflow_errors.py || echo "⚠️  Classification failed but continuing"
+
+      - name: Upload Classification Results (if available)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-classification-results
+          path: |
+            /tmp/error-classification-*.json
+          retention-days: 7
+          if-no-files-found: ignore
