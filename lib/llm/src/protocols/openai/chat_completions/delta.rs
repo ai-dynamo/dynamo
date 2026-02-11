@@ -440,9 +440,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
-            self.tracker
-                .as_ref()
-                .map(|tracker| tracker.get_timing_info())
+            self.tracker.as_ref().map(|tracker| {
+                tracker.record_finish();
+                tracker.get_timing_info()
+            })
         } else {
             None
         };

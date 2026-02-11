@@ -62,14 +62,15 @@ impl std::fmt::Display for RequestPhase {
 /// Captures information throughout the request lifecycle:
 /// - `request_received`: When the request was received
 /// - `prefill_start_time`: When prefill started (for disaggregated serving)
-/// - `first_token_time`: When the first token was generated (Mutex-protected, may be updated across phases)
-/// - `request_finish_time`: When the request finished (Mutex-protected, may be updated across phases)
+/// - `first_token_time`: When the first token was generated (set once via OnceLock)
+/// - `request_finish_time`: When the request finished (Mutex-protected, last-write-wins)
 /// - KV cache hit rate information
 /// - Worker IDs and types for per-worker Prometheus metrics
 ///
-/// The `Mutex`-protected time fields allow updates from multiple router phases
-/// (prefill/decode) in disaggregated serving, where timing events may be
-/// recorded by different pipeline stages.
+/// `first_token_time` uses `OnceLock` (first-write-wins) so that in disaggregated serving
+/// the prefill phase's first token time is preserved even when the decode phase also
+/// calls `record_first_token`. `request_finish_time` uses `Mutex` (last-write-wins) so
+/// the decode phase's finish overwrites the prefill phase's earlier finish.
 ///
 /// Worker IDs use `AtomicU64` instead of `OnceLock<u64>` for lower overhead since
 /// the tracker is created for every request. The sentinel value `NO_WORKER_ID` (0)
@@ -85,9 +86,10 @@ pub struct RequestTracker {
     /// When prefill started (for disaggregated serving) - set once via OnceLock
     prefill_start_time: OnceLock<Instant>,
 
-    /// When the first token was generated. Mutex allows updates from multiple
-    /// router phases (prefill/decode) in disaggregated serving.
-    first_token_time: Mutex<Option<Instant>>,
+    /// When the first token was generated (set once via OnceLock).
+    /// In disaggregated serving, the prefill phase records this first and the
+    /// decode phase's attempt is silently ignored, preserving the real TTFT.
+    first_token_time: OnceLock<Instant>,
 
     /// When the request finished. Mutex allows the last router phase to
     /// record the final finish time.
@@ -159,7 +161,7 @@ impl RequestTracker {
             request_received: now,
             request_received_epoch_ms: epoch_ms,
             prefill_start_time: OnceLock::new(),
-            first_token_time: Mutex::new(None),
+            first_token_time: OnceLock::new(),
             request_finish_time: Mutex::new(None),
             kv_overlap_blocks: OnceLock::new(),
             isl_blocks: OnceLock::new(),
@@ -184,7 +186,7 @@ impl RequestTracker {
     }
 
     pub fn record_first_token(&self) {
-        *self.first_token_time.lock() = Some(Instant::now());
+        let _ = self.first_token_time.set(Instant::now());
     }
 
     pub fn record_finish(&self) {
@@ -231,12 +233,12 @@ impl RequestTracker {
     /// Time from prefill start to first token (prefill execution time) in milliseconds.
     pub fn prefill_time_ms(&self) -> Option<f64> {
         let prefill_start = self.prefill_start_time.get()?;
-        let first_token = (*self.first_token_time.lock())?;
+        let first_token = self.first_token_time.get()?;
         Some(first_token.duration_since(*prefill_start).as_secs_f64() * 1000.0)
     }
 
     pub fn ttft_ms(&self) -> Option<f64> {
-        let first_token = (*self.first_token_time.lock())?;
+        let first_token = self.first_token_time.get()?;
         Some(
             first_token
                 .duration_since(self.request_received)
@@ -254,7 +256,7 @@ impl RequestTracker {
     /// Computed as (finish_time - first_token_time) / (osl - 1).
     /// Returns None if fewer than 2 output tokens or times not recorded.
     pub fn avg_itl_ms(&self) -> Option<f64> {
-        let first_token = (*self.first_token_time.lock())?;
+        let first_token = *self.first_token_time.get()?;
         let finish = (*self.request_finish_time.lock())?;
         let osl = self.osl_tokens.load(Ordering::Relaxed);
         if osl < 2 {
