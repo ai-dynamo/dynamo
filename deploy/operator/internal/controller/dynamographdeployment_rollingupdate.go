@@ -53,6 +53,8 @@ func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 }
 
 // initializeWorkerHashIfNeeded sets the current worker hash annotation on first deployment.
+// For existing DGDs being upgraded from a pre-rolling-update operator version, this handles
+// patching the legacy DCDs with the new worker hash label and then triggering a rolling update on the next reconcile.
 func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
@@ -63,6 +65,43 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 		return nil // Already initialized
 	}
 
+	// Check for legacy (pre-rolling-update) worker DCDs
+	legacyDCDs, err := r.findLegacyWorkerDCDs(ctx, dgd)
+	if err != nil {
+		return fmt.Errorf("failed to check for legacy worker DCDs: %w", err)
+	}
+
+	if len(legacyDCDs) > 0 {
+		logger.Info("Found legacy worker DCDs without hash label, initiating migration",
+			"count", len(legacyDCDs))
+
+		// Backfill hash label on legacy DCDs so they're manageable by the rolling update machinery
+		for i := range legacyDCDs {
+			dcd := &legacyDCDs[i]
+			patch := client.MergeFrom(dcd.DeepCopy())
+			if dcd.Labels == nil {
+				dcd.Labels = make(map[string]string)
+			}
+			dcd.Labels[consts.KubeLabelDynamoWorkerHash] = consts.LegacyWorkerHash
+			if err := r.Patch(ctx, dcd, patch); err != nil {
+				return fmt.Errorf("failed to backfill hash label on legacy DCD %s: %w", dcd.Name, err)
+			}
+			logger.Info("Backfilled worker hash label on legacy DCD",
+				"dcdName", dcd.Name, "hash", consts.LegacyWorkerHash)
+		}
+
+		// Set sentinel hash — next reconcile triggers a real rolling update from "legacy" -> computed hash
+		r.setCurrentWorkerHash(dgd, consts.LegacyWorkerHash)
+		if err := r.Update(ctx, dgd); err != nil {
+			return fmt.Errorf("failed to set legacy worker hash: %w", err)
+		}
+
+		r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "LegacyMigrationStarted",
+			"Detected %d legacy worker DCDs, initiating rolling update migration", len(legacyDCDs))
+		return nil
+	}
+
+	// Normal first deploy — set the actual computed hash
 	hash := dynamo.ComputeWorkerSpecHash(dgd)
 	r.setCurrentWorkerHash(dgd, hash)
 
@@ -70,11 +109,42 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 		return fmt.Errorf("failed to initialize worker hash: %w", err)
 	}
 
-	logger.Info("Initialized current worker hash",
-		"hash", hash,
-		"workerSuffix", hash[:8])
+	logger.Info("Initialized current worker hash", "hash", hash)
 
 	return nil
+}
+
+// findLegacyWorkerDCDs returns worker DCDs owned by this DGD that lack the worker hash label.
+// These are DCDs created by a pre-rolling-update operator version.
+func (r *DynamoGraphDeploymentReconciler) findLegacyWorkerDCDs(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) ([]nvidiacomv1alpha1.DynamoComponentDeployment, error) {
+	// List all DCDs for this DGD
+	dcdList := &nvidiacomv1alpha1.DynamoComponentDeploymentList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		},
+	}
+
+	if err := r.List(ctx, dcdList, listOpts...); err != nil {
+		return nil, fmt.Errorf("failed to list DCDs for DGD %s: %w", dgd.Name, err)
+	}
+
+	var legacyDCDs []nvidiacomv1alpha1.DynamoComponentDeployment
+	for _, dcd := range dcdList.Items {
+		if !dynamo.IsWorkerComponent(dcd.Spec.ComponentType) {
+			continue
+		}
+		// Legacy DCDs lack the worker hash label
+		if dcd.Labels[consts.KubeLabelDynamoWorkerHash] == "" {
+			legacyDCDs = append(legacyDCDs, dcd)
+		}
+	}
+
+	return legacyDCDs, nil
 }
 
 // supportsManagedRollingUpdate checks if DGD pathway supports operator managed rolling updates.
@@ -460,54 +530,75 @@ func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 		return nil
 	}
 
-	for serviceName, desiredReplicas := range rollingUpdateCtx.OldWorkerReplicas {
-		// Construct the old DCD name using the hash-based naming convention
-		oldDCDName := dynamo.GetDCDResourceName(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
+	// Resolve old worker DCDs by label so we handle both hash-named and legacy-named DCDs.
+	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, rollingUpdateCtx.OldWorkerHash)
+	if err != nil {
+		return fmt.Errorf("failed to list old worker DCDs: %w", err)
+	}
 
-		// Get the existing DCD
-		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
-		err := r.Get(ctx, client.ObjectKey{Name: oldDCDName, Namespace: dgd.Namespace}, existingDCD)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				// Old DCD doesn't exist yet (first reconcile of rolling update)
-				// This is expected - the old DCD was created before rolling update started
-				logger.V(1).Info("Old worker DCD not found, skipping scale",
-					"dcdName", oldDCDName,
-					"service", serviceName)
-				continue
-			}
-			return fmt.Errorf("failed to get old worker DCD %s: %w", oldDCDName, err)
+	for i := range oldDCDs {
+		dcd := &oldDCDs[i]
+		serviceName := dcd.Spec.ServiceName
+
+		desiredReplicas, ok := rollingUpdateCtx.OldWorkerReplicas[serviceName]
+		if !ok {
+			continue
 		}
 
-		// Check if replicas need to be updated
 		currentReplicas := int32(1)
-		if existingDCD.Spec.Replicas != nil {
-			currentReplicas = *existingDCD.Spec.Replicas
+		if dcd.Spec.Replicas != nil {
+			currentReplicas = *dcd.Spec.Replicas
 		}
 
 		if currentReplicas == desiredReplicas {
 			logger.V(1).Info("Old worker DCD replicas already at desired value",
-				"dcdName", oldDCDName,
-				"replicas", desiredReplicas)
+				"dcdName", dcd.Name, "replicas", desiredReplicas)
 			continue
 		}
 
-		// Patch only the replicas field
-		patch := client.MergeFrom(existingDCD.DeepCopy())
-		existingDCD.Spec.Replicas = &desiredReplicas
+		patch := client.MergeFrom(dcd.DeepCopy())
+		dcd.Spec.Replicas = &desiredReplicas
 
-		if err := r.Patch(ctx, existingDCD, patch); err != nil {
-			return fmt.Errorf("failed to patch old worker DCD %s replicas: %w", oldDCDName, err)
+		if err := r.Patch(ctx, dcd, patch); err != nil {
+			return fmt.Errorf("failed to patch old worker DCD %s replicas: %w", dcd.Name, err)
 		}
 
 		logger.Info("Scaled old worker DCD",
-			"dcdName", oldDCDName,
+			"dcdName", dcd.Name,
 			"service", serviceName,
 			"oldReplicas", currentReplicas,
 			"newReplicas", desiredReplicas)
 	}
 
 	return nil
+}
+
+// listOldWorkerDCDs returns worker DCDs for this DGD matching the given worker hash label.
+func (r *DynamoGraphDeploymentReconciler) listOldWorkerDCDs(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	workerHash string,
+) ([]nvidiacomv1alpha1.DynamoComponentDeployment, error) {
+	dcdList := &nvidiacomv1alpha1.DynamoComponentDeploymentList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoWorkerHash:          workerHash,
+		},
+	}
+
+	if err := r.List(ctx, dcdList, listOpts...); err != nil {
+		return nil, err
+	}
+
+	var workers []nvidiacomv1alpha1.DynamoComponentDeployment
+	for _, dcd := range dcdList.Items {
+		if dynamo.IsWorkerComponent(dcd.Spec.ComponentType) {
+			workers = append(workers, dcd)
+		}
+	}
+	return workers, nil
 }
 
 // deleteOldDCDs deletes all worker DCDs belonging to this DGD that have the old worker hash.
@@ -559,33 +650,25 @@ func (r *DynamoGraphDeploymentReconciler) deleteOldDCDs(
 }
 
 // aggregateOldWorkerServiceStatuses fetches old worker DCDs and returns their service statuses
-// keyed by service name. This allows merging old worker replica counts into the aggregated
-// service status during rolling updates.
+// keyed by service name. Uses label-based lookup to handle both hash-named and legacy-named DCDs.
 func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerServiceStatuses(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
 ) (map[string]nvidiacomv1alpha1.ServiceReplicaStatus, error) {
-	logger := log.FromContext(ctx)
 	oldStatuses := make(map[string]nvidiacomv1alpha1.ServiceReplicaStatus)
 
-	for serviceName := range rollingUpdateCtx.OldWorkerReplicas {
-		oldDCDName := dynamo.GetDCDResourceName(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
+	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, rollingUpdateCtx.OldWorkerHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list old worker DCDs for status aggregation: %w", err)
+	}
 
-		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
-		err := r.Get(ctx, client.ObjectKey{Name: oldDCDName, Namespace: dgd.Namespace}, existingDCD)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.V(1).Info("Old worker DCD not found, skipping status aggregation",
-					"dcdName", oldDCDName,
-					"service", serviceName)
-				continue
-			}
-			return nil, fmt.Errorf("failed to get old worker DCD %s: %w", oldDCDName, err)
+	for _, dcd := range oldDCDs {
+		if _, inRollout := rollingUpdateCtx.OldWorkerReplicas[dcd.Spec.ServiceName]; !inRollout {
+			continue
 		}
-
-		if existingDCD.Status.Service != nil {
-			oldStatuses[serviceName] = *existingDCD.Status.Service
+		if dcd.Status.Service != nil {
+			oldStatuses[dcd.Spec.ServiceName] = *dcd.Status.Service
 		}
 	}
 

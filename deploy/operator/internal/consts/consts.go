@@ -180,6 +180,11 @@ const (
 
 	// Rolling update annotations
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
+
+	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
+	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged
+	// with this value so the existing rolling update machinery can manage the transition.
+	LegacyWorkerHash = "legacy"
 )
 
 type MultinodeDeploymentType string
