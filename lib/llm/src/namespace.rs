@@ -78,7 +78,7 @@ mod tests {
             NamespaceFilter::Global
         );
         assert_eq!(
-            NamespaceFilter::from_namespace_and_prefix(Some("default"), None),
+            NamespaceFilter::from_namespace_and_prefix(Some(GLOBAL_NAMESPACE), None),
             NamespaceFilter::Global
         );
     }
