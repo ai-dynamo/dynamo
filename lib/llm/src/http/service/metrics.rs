@@ -111,7 +111,7 @@ pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometh
 /// # Note
 /// With 2 significant figures, there are roughly 90 unique values per order of magnitude.
 /// Requesting more buckets than can be uniquely represented will result in deduplication.
-fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
+pub fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
     if count == 0 {
         return vec![];
     }
@@ -153,7 +153,7 @@ fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
 }
 
 /// Round a number to a specified number of significant figures
-fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
+pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
     if value == 0.0 {
         return 0.0;
     }
@@ -234,6 +234,7 @@ pub struct Metrics {
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
     cached_tokens: HistogramVec,
+    tokenizer_latency: HistogramVec,
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
@@ -327,6 +328,8 @@ pub struct ResponseMetricCollector {
     osl: usize,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
+    // we track if tokenizer latency has been observed to ensure we only increment once per request
+    tokenizer_latency_observed: bool,
     // Prefill worker info for TTFT attribution (set from LLMMetricAnnotation)
     prefill_worker_id: Option<u64>,
     prefill_dp_rank: Option<u32>,
@@ -356,6 +359,7 @@ impl Metrics {
     /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
     /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
     /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
+    /// - `{prefix}_tokenizer_latency_ms` - HistogramVec for tokenizer latency in milliseconds
     /// - `{prefix}_output_tokens_total` - IntCounterVec for total output tokens generated (real-time updates)
     /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
@@ -531,6 +535,18 @@ impl Metrics {
         )
         .unwrap();
 
+        let tokenizer_latency = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::TOKENIZER_LATENCY_MS),
+                "Tokenizer latency in milliseconds",
+            )
+            .buckets(vec![
+                0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0,
+            ]),
+            &[frontend_service::OPERATION_LABEL],
+        )
+        .unwrap();
+
         // Runtime configuration metrics
         // Note: Some of these metrics represent counter-like values from source systems,
         // but are implemented as gauges because they are copied/synchronized from upstream
@@ -607,6 +623,7 @@ impl Metrics {
             input_sequence_length,
             output_sequence_length,
             cached_tokens,
+            tokenizer_latency,
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
@@ -704,6 +721,7 @@ impl Metrics {
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
         registry.register(Box::new(self.cached_tokens.clone()))?;
+        registry.register(Box::new(self.tokenizer_latency.clone()))?;
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
@@ -969,6 +987,7 @@ impl ResponseMetricCollector {
             start_time: Instant::now(),
             osl: 0,
             cached_tokens_observed: false,
+            tokenizer_latency_observed: false,
             prefill_worker_id: None,
             prefill_dp_rank: None,
             prefill_worker_type: None,
@@ -1030,6 +1049,19 @@ impl ResponseMetricCollector {
                 .cached_tokens
                 .with_label_values(&[&self.model])
                 .observe(tokens as f64);
+        }
+    }
+
+    /// Observe tokenizer latency in milliseconds, once per request.
+    pub fn observe_tokenizer_latency(&mut self, tokenizer_latency: Option<Duration>) {
+        if let Some(latency) = tokenizer_latency
+            && !self.tokenizer_latency_observed
+        {
+            self.tokenizer_latency_observed = true;
+            self.metrics
+                .tokenizer_latency
+                .with_label_values(&[frontend_service::operation::TOKENIZE])
+                .observe(latency.as_secs_f64() * 1000.0);
         }
     }
 
@@ -1147,6 +1179,7 @@ pub fn process_response_and_observe_metrics<T>(
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_cached_tokens(metrics.cached_tokens);
+        response_collector.observe_tokenizer_latency(metrics.tokenizer_latency);
         response_collector.set_worker_info(
             metrics.prefill_worker_id,
             metrics.prefill_dp_rank,
@@ -1196,6 +1229,7 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_cached_tokens(metrics.cached_tokens);
+        response_collector.observe_tokenizer_latency(metrics.tokenizer_latency);
         response_collector.set_worker_info(
             metrics.prefill_worker_id,
             metrics.prefill_dp_rank,
@@ -1676,6 +1710,7 @@ mod tests {
 
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
         let mut collector = metrics.clone().create_response_collector(model);
 
         // Create a metrics annotation event (event without SSE data payload)
@@ -1700,6 +1735,7 @@ mod tests {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
+            tokenizer_latency: Some(Duration::from_millis(8)),
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -1729,6 +1765,17 @@ mod tests {
                 .get_sample_count(),
             1
         );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
     }
 
     #[test]
@@ -1742,6 +1789,7 @@ mod tests {
 
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
         let mut collector = metrics.clone().create_response_collector(model);
 
         // Create a metrics annotation event
@@ -1765,6 +1813,7 @@ mod tests {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
+            tokenizer_latency: Some(Duration::from_millis(8)),
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -1780,6 +1829,17 @@ mod tests {
         let histogram_family = metric_families
             .iter()
             .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
             .expect("histogram should be registered");
         assert_eq!(
             histogram_family.get_metric()[0]

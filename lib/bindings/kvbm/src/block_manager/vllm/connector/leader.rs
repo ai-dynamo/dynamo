@@ -21,7 +21,7 @@ use dynamo_llm::block_manager::{
         data::logical::distributed_leader_worker::DistributedLeaderWorkerResources,
         locality::Logical,
     },
-    connector::{*, protocol::RequestType},
+    connector::{protocol::RequestType, *},
     kv_consolidator::EventSource,
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
@@ -221,7 +221,7 @@ impl Leader for KvConnectorLeader {
         );
 
         // the number of device matched tokens should be less than or equal to the number of tokens in the request
-        debug_assert!(num_computed_tokens % self.block_size == 0);
+        debug_assert!(num_computed_tokens.is_multiple_of(self.block_size));
 
         let shared_slot = self.slot_manager().get_slot(&request_id)?;
         let mut slot = shared_slot
@@ -262,7 +262,9 @@ impl Leader for KvConnectorLeader {
         // return the number of external tokens that are ready for onboarding
         // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
-            debug_assert!((num_computed_tokens + num_external_tokens) % self.block_size == 0);
+            debug_assert!(
+                (num_computed_tokens + num_external_tokens).is_multiple_of(self.block_size)
+            );
             tracing::debug!(
                 request_id = request_id,
                 "scheduling onboarding for {} external tokens",
@@ -427,7 +429,13 @@ impl Leader for KvConnectorLeader {
                 .get(request_id)
                 .unwrap_or(&0);
 
-            slot.apply_scheduler_output(&[], &[], new_req.num_computed_tokens, scheduled_tokens, None)?;
+            slot.apply_scheduler_output(
+                &[],
+                &[],
+                new_req.num_computed_tokens,
+                scheduled_tokens,
+                None,
+            )?;
 
             let pending_ops_opt = slot.take_pending_operations();
 

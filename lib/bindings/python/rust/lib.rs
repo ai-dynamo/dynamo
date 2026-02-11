@@ -149,6 +149,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Namespace>()?;
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
+    m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
@@ -311,7 +312,7 @@ fn register_llm<'p>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // For TensorBased and Images models, skip HuggingFace downloads and register directly
-        // These model types don't require tokenizers
+        // Images models (vLLM-Omni) handle model loading internally, no tokenizer extraction needed
         if is_tensor_based || is_images {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
@@ -483,6 +484,12 @@ struct Endpoint {
 
 #[pyclass]
 #[derive(Clone)]
+struct ModelCardInstanceId {
+    inner: rs::discovery::ModelCardInstanceId,
+}
+
+#[pyclass]
+#[derive(Clone)]
 struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
 }
@@ -520,6 +527,10 @@ impl ModelType {
     const Images: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Images,
     };
+
+    fn supports_chat(&self) -> bool {
+        self.inner.supports_chat()
+    }
 
     fn __or__(&self, other: &Self) -> Self {
         ModelType {
@@ -824,14 +835,20 @@ impl Endpoint {
         })
     }
 
-    fn client<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    #[pyo3(signature = (router_mode = None))]
+    fn client<'p>(
+        &self,
+        py: Python<'p>,
+        router_mode: Option<RouterMode>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
             let push_router = rs::pipeline::PushRouter::<
                 serde_json::Value,
                 RsAnnotated<serde_json::Value>,
-            >::from_client(client, Default::default())
+            >::from_client(client, router_mode.into())
             .await
             .map_err(to_pyerr)?;
             Ok(Client {
@@ -889,6 +906,19 @@ impl Namespace {
             inner,
             event_loop: self.event_loop.clone(),
         })
+    }
+}
+
+#[pymethods]
+impl ModelCardInstanceId {
+    // (namespace, component, endpoint)
+    // TODO: Can these be borrowed as &str?
+    fn triple(&self) -> (String, String, String) {
+        (
+            self.inner.namespace.clone(),
+            self.inner.component.clone(),
+            self.inner.endpoint.clone(),
+        )
     }
 }
 

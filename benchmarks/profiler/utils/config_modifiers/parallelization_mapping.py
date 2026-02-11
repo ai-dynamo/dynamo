@@ -169,10 +169,11 @@ def _validate_intermediate_size(
 
 
 def get_candidate_parallel_mappings(
-    num_gpus: int, model_info: ModelInfo, phase: str
+    num_gpus: int,
+    model_info: ModelInfo,
 ) -> list[ParallelizationMapping]:
     """
-    Return a list of candidate parallelization mappings for a given GPU count and phase,
+    Return a list of candidate parallelization mappings for a given GPU count,
     verified against model properties.
 
     Verification rules:
