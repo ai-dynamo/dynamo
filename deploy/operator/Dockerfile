@@ -5,13 +5,13 @@
 ARG DOCKER_PROXY
 ARG BASE_IMAGE="golang"
 ARG BASE_IMAGE_TAG="1.25"
-FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
+FROM --platform=$BUILDPLATFORM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these
 ARG TARGETOS=linux
 ARG TARGETARCH
 
-RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
+RUN echo "Building for ${TARGETOS}/${TARGETARCH} on build platform ${BUILDPLATFORM}"
 
 # Install common dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends git && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -50,7 +50,7 @@ FROM base AS builder
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v3.1.13
+FROM --platform=$TARGETPLATFORM nvcr.io/nvidia/distroless/go:v3.1.13
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
