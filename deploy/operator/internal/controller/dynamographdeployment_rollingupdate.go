@@ -26,6 +26,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -573,6 +575,135 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerServiceStatuses(
 	}
 
 	return oldStatuses, nil
+}
+
+// resolveRollingUpdateParams reads the deployment strategy annotations from a service spec
+// and resolves maxSurge and maxUnavailable to concrete replica counts.
+// Defaults: maxSurge=25%, maxUnavailable=25% (matches Kubernetes Deployment defaults).
+// TODO: support the recreate strategy
+func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas int32) (maxSurge int32, maxUnavailable int32) {
+	surgeValue := intstr.FromString("25%")
+	unavailValue := intstr.FromString("25%")
+
+	if v := annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge]; v != "" {
+		surgeValue = intstr.Parse(v)
+	}
+	if v := annotations[KubeAnnotationDeploymentRollingUpdateMaxUnavailable]; v != "" {
+		unavailValue = intstr.Parse(v)
+	}
+
+	// Resolve percentages against desiredReplicas. Round up for surge (more aggressive scale-up),
+	// round down for unavailable (more conservative, matches Kubernetes deployment controller behavior).
+	// https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#max-unavailable
+	surge, _ := intstr.GetScaledValueFromIntOrPercent(&surgeValue, int(desiredReplicas), true)
+	unavail, _ := intstr.GetScaledValueFromIntOrPercent(&unavailValue, int(desiredReplicas), false)
+
+	// Ensure at least one of surge/unavailable is > 0 to guarantee progress
+	if surge == 0 && unavail == 0 {
+		surge = 1
+	}
+
+	return int32(surge), int32(unavail)
+}
+
+// buildRollingUpdateContext creates a RollingUpdateContext.
+// It computes namespaces and pre-calculates old and new worker replica counts.
+//
+// Replica calculation:
+//   - oldReplicas = max(0, desiredReplicas - newReadyReplicas - maxUnavailable)
+//   - newReplicas = min(desiredReplicas, desiredReplicas + maxSurge - oldReplicas)
+func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) dynamo.RollingUpdateContext {
+	logger := log.FromContext(ctx)
+
+	// Compute hashes
+	newWorkerHashFull := dynamo.ComputeWorkerSpecHash(dgd)
+	oldWorkerHashFull := r.getCurrentWorkerHash(dgd)
+
+	// Use first 8 chars of hash for DCD naming (short but unique enough)
+	newWorkerHash := newWorkerHashFull
+	if len(newWorkerHashFull) > 8 {
+		newWorkerHash = newWorkerHashFull[:8]
+	}
+	oldWorkerHash := oldWorkerHashFull
+	if len(oldWorkerHashFull) > 8 {
+		oldWorkerHash = oldWorkerHashFull[:8]
+	}
+
+	if oldWorkerHash == newWorkerHash {
+		return dynamo.RollingUpdateContext{
+			OldWorkerHash:     oldWorkerHash,
+			NewWorkerHash:     newWorkerHash,
+			OldWorkerReplicas: make(map[string]int32),
+			NewWorkerReplicas: make(map[string]int32),
+		}
+	}
+
+	// Pre-calculate old and new worker replicas based on new worker readiness
+	oldWorkerReplicas := make(map[string]int32)
+	newWorkerReplicas := make(map[string]int32)
+
+	for serviceName, spec := range dgd.Spec.Services {
+		if spec == nil || !dynamo.IsWorkerComponent(spec.ComponentType) {
+			continue
+		}
+
+		// Get desired replicas from spec
+		desiredReplicas := int32(1)
+		if spec.Replicas != nil {
+			desiredReplicas = *spec.Replicas
+		}
+
+		maxSurge, maxUnavailable := resolveRollingUpdateParams(spec.Annotations, desiredReplicas)
+
+		// Query new DCD to get ready replicas (using hash-based naming)
+		newDCDName := dynamo.GetDCDResourceName(dgd, serviceName, newWorkerHash)
+		newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD)
+
+		newReadyReplicas := int32(0)
+		if err == nil && newDCD.Status.Service != nil && newDCD.Status.Service.ReadyReplicas != nil {
+			newReadyReplicas = *newDCD.Status.Service.ReadyReplicas
+		}
+
+		// Calculate old replicas: allow scaling down by maxUnavailable
+		// oldReplicas = max(0, desiredReplicas - newReadyReplicas - maxUnavailable)
+		oldNeeded := desiredReplicas - newReadyReplicas - maxUnavailable
+		if oldNeeded < 0 {
+			oldNeeded = 0
+		}
+
+		// Calculate new replicas: stay within surge budget
+		// newReplicas = min(desiredReplicas, desiredReplicas + maxSurge - oldNeeded)
+		newNeeded := desiredReplicas + maxSurge - oldNeeded
+		if newNeeded > desiredReplicas {
+			newNeeded = desiredReplicas
+		}
+		if newNeeded < 0 {
+			newNeeded = 0
+		}
+
+		newWorkerReplicas[serviceName] = newNeeded
+		oldWorkerReplicas[serviceName] = oldNeeded
+
+		logger.V(1).Info("Calculated worker replicas for rollingUpdate",
+			"service", serviceName,
+			"desired", desiredReplicas,
+			"newReady", newReadyReplicas,
+			"maxSurge", maxSurge,
+			"maxUnavailable", maxUnavailable,
+			"newNeeded", newNeeded,
+			"oldNeeded", oldNeeded)
+	}
+
+	return dynamo.RollingUpdateContext{
+		OldWorkerHash:     oldWorkerHash,
+		NewWorkerHash:     newWorkerHash,
+		OldWorkerReplicas: oldWorkerReplicas,
+		NewWorkerReplicas: newWorkerReplicas,
+	}
 }
 
 // mergeWorkerServiceStatuses merges old worker service statuses into the existing service statuses.

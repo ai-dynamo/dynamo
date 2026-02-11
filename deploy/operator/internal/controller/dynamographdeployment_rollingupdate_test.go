@@ -1335,3 +1335,113 @@ func TestCheckComponentServiceFullyUpdated(t *testing.T) {
 		assert.Empty(t, reason)
 	})
 }
+
+func TestResolveRollingUpdateParams(t *testing.T) {
+	tests := []struct {
+		name               string
+		annotations        map[string]string
+		desiredReplicas    int32
+		expectedSurge      int32
+		expectedUnavail    int32
+	}{
+		{
+			name:            "defaults - no annotations - 25%/25% of 4 = 1/1",
+			annotations:     nil,
+			desiredReplicas: 4,
+			expectedSurge:   1,
+			expectedUnavail: 1,
+		},
+		{
+			name: "absolute maxSurge overrides default",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxSurge: "2",
+			},
+			desiredReplicas: 4,
+			expectedSurge:   2,
+			expectedUnavail: 1,
+		},
+		{
+			name: "absolute maxUnavailable overrides default",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+			},
+			desiredReplicas: 4,
+			expectedSurge:   1,
+			expectedUnavail: 0,
+		},
+		{
+			name: "percentage maxSurge - 50% of 4 = 2",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxSurge: "50%",
+			},
+			desiredReplicas: 4,
+			expectedSurge:   2,
+			expectedUnavail: 1,
+		},
+		{
+			name: "percentage maxUnavailable - 50% of 4 = 2",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "50%",
+			},
+			desiredReplicas: 4,
+			expectedSurge:   1,
+			expectedUnavail: 2,
+		},
+		{
+			name: "both annotations set with percentages",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxSurge:       "50%",
+				KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "25%",
+			},
+			desiredReplicas: 4,
+			expectedSurge:   2,
+			expectedUnavail: 1,
+		},
+		{
+			name: "both zero - force surge to 1 for progress",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxSurge:       "0",
+				KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+			},
+			desiredReplicas: 4,
+			expectedSurge:   1,
+			expectedUnavail: 0,
+		},
+		{
+			name: "maxSurge 0 with maxUnavailable 1 - allowed",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxSurge:       "0",
+				KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "1",
+			},
+			desiredReplicas: 4,
+			expectedSurge:   0,
+			expectedUnavail: 1,
+		},
+		{
+			name: "percentage surge rounds up - 34% of 3 rounds up to 2",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxSurge: "34%",
+			},
+			desiredReplicas: 3,
+			expectedSurge:   2,
+			expectedUnavail: 0,
+		},
+		{
+			name: "percentage unavailable rounds down - 34% of 3 rounds down to 1",
+			annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "34%",
+			},
+			desiredReplicas: 3,
+			expectedSurge:   1,
+			expectedUnavail: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			surge, unavail := resolveRollingUpdateParams(tt.annotations, tt.desiredReplicas)
+			assert.Equal(t, tt.expectedSurge, surge, "maxSurge")
+			assert.Equal(t, tt.expectedUnavail, unavail, "maxUnavailable")
+		})
+	}
+}
