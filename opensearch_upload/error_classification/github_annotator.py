@@ -442,15 +442,26 @@ class GitHubAnnotator:
         """Extract PR number from environment."""
         print("🔍 Attempting to detect PR number...")
 
-        # Try GITHUB_REF (refs/pull/123/merge)
+        # Try GITHUB_REF (refs/pull/123/merge or refs/heads/pull-request/123)
         pr_ref = os.getenv("GITHUB_REF")
         print(f"  GITHUB_REF: {pr_ref}")
         if pr_ref and "pull" in pr_ref:
             parts = pr_ref.split("/")
+
+            # Standard PR format: refs/pull/123/merge
             if len(parts) >= 3 and parts[1] == "pull":
                 try:
                     pr_num = int(parts[2])
-                    print(f"  ✅ Found PR #{pr_num} from GITHUB_REF")
+                    print(f"  ✅ Found PR #{pr_num} from GITHUB_REF (standard format)")
+                    return pr_num
+                except (ValueError, IndexError):
+                    pass
+
+            # Branch name format: refs/heads/pull-request/123
+            if len(parts) >= 4 and parts[2] == "pull-request":
+                try:
+                    pr_num = int(parts[3])
+                    print(f"  ✅ Found PR #{pr_num} from GITHUB_REF (branch name format)")
                     return pr_num
                 except (ValueError, IndexError):
                     pass
