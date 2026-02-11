@@ -19,27 +19,37 @@ limitations under the License.
 
 The Planner monitors system performance and automatically scales prefill/decode workers to meet latency SLAs. It runs as a component inside the Dynamo inference graph on Kubernetes.
 
+The SLA Planner supports two scaling modes:
+
+- **Throughput-based scaling**: Uses pre-deployment profiling data and traffic prediction to compute the number of replicas needed to meet TTFT and ITL SLA targets. This is the primary scaling mode for production deployments.
+- **Load-based scaling (Experimental)**: Uses real-time per-worker load metrics (active prefill tokens, active KV blocks) from the router to make SLA-aware scaling decisions via online linear regression. Does not require profiling data. Responds quickly to traffic bursts.
+
+When both modes are enabled, throughput-based scaling provides a lower bound on replicas (long-term capacity planning) while load-based scaling handles real-time adjustments (burst response).
+
 > **New to the Planner?** Start with the [SLA Planner Quick Start Guide](planner_guide.md) for a complete workflow including profiling and deployment.
 
 ## Feature Matrix
 
-| Category | Feature | Status |
-|----------|---------|--------|
-| **Backend** | Local (bare metal) | Deprecated |
-| | Kubernetes | Supported |
-| **LLM Framework** | vLLM | Supported |
-| | TensorRT-LLM | Supported |
-| | SGLang | Supported |
-| **Serving Type** | Aggregated | Unsupported |
-| | Disaggregated | Supported |
-| **Scaling Mode** | SLA-based (TTFT/ITL targets) | Supported (primary) |
-| | Load-based (KV cache/queue thresholds) | Deprecated |
-| **Load Predictors** | ARIMA | Supported |
-| | Prophet | Supported |
-| | Kalman filter | Supported |
-| | Constant (current = next) | Supported |
-| **Connectors** | KubernetesConnector (native DGD scaling) | Supported |
-| | VirtualConnector (external environments) | Supported |
+| Feature | Throughput-Based | Load-Based (Experimental) |
+|---------|:----------------:|:-------------------------:|
+| **Deployment** | | |
+| Disaggregated | Supported | Supported |
+| Aggregated | Unsupported | Supported |
+| **LLM Framework** | | |
+| vLLM | Supported | Supported |
+| TensorRT-LLM | Supported | Supported |
+| SGLang | Supported | Supported |
+| **Requires Profiling Data** | Yes | No |
+| **Load Predictors** | ARIMA, Prophet, Kalman, Constant | N/A |
+| **Connectors** | | |
+| KubernetesConnector | Supported | Supported |
+| VirtualConnector | Supported | Supported |
+
+## When to Use Which Mode
+
+- **Throughput-based scaling** should be enabled whenever engine profiling data is available (through pre-deployment profiling). It provides stable, prediction-based capacity planning.
+- **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring profiling data.
+- **Both modes together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `--adjustment-interval` for throughput-based scaling.
 
 ## Quick Start
 
@@ -47,21 +57,35 @@ The Planner monitors system performance and automatically scales prefill/decode 
 
 - Dynamo platform installed on Kubernetes ([Installation Guide](/docs/kubernetes/installation_guide.md))
 - kube-prometheus-stack installed ([Metrics Setup](/docs/kubernetes/observability/metrics.md))
-- Pre-deployment profiling completed ([Profiling Guide](/docs/components/profiler/profiler_guide.md))
 
-### Deploy with DGDR (Recommended)
+For throughput-based scaling, pre-deployment profiling is also required ([Profiling Guide](/docs/components/profiler/profiler_guide.md)).
 
-The fastest path to a planner-enabled deployment is through a DynamoGraphDeploymentRequest:
+### Throughput-Based Scaling (with DGDR)
+
+The fastest path to a throughput-based planner deployment is through a DynamoGraphDeploymentRequest, which automatically profiles your model:
 
 ```bash
 kubectl apply -f benchmarks/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
 ```
 
-This automatically profiles your model and deploys with the SLA planner. See [SLA Planner Guide](planner_guide.md) for the full workflow.
+See [Planner Guide](planner_guide.md) for the full workflow.
 
-### Deploy with DGD (Manual)
+### Load-Based Scaling (without profiling)
 
-For manual control, use the disaggregated planner templates:
+To deploy with load-based scaling only (no profiling required), add these arguments to the planner service in your DGD:
+
+```yaml
+args:
+  - --enable-loadbased-scaling
+  - --disable-throughput-scaling
+  - --loadbased-adjustment-interval=5
+```
+
+The planner will auto-discover the frontend metrics endpoint from the DGD.
+
+### Manual DGD Deployment
+
+For manual control with throughput-based scaling, use the disaggregated planner templates:
 
 ```bash
 # After profiling is complete
@@ -74,9 +98,6 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 |----------|-------------|
 | [Planner Guide](planner_guide.md) | Deployment, configuration, integration, troubleshooting |
 | [Planner Examples](planner_examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
-| [SLA Planner Guide](planner_guide.md) | End-to-end DGDR workflow: define SLAs, profile, deploy, monitor |
-| [SLA-based Planner](planner_guide.md) | Scaling algorithm, correction factors, load prediction details |
-| [Load-based Planner](README.md) | Legacy load-based scaling (deprecated) |
 | [SLA-Driven Profiling](/docs/components/profiler/profiler_guide.md) | Pre-deployment profiling process and configuration |
 | [Planner Design](/docs/design_docs/planner_design.md) | Architecture deep-dive for contributors |
 
@@ -86,22 +107,33 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 
 | Argument | Default | Description |
 |----------|---------|-------------|
+| **Common** | | |
 | `--namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
 | `--backend` | `vllm` | Backend framework (`vllm`, `sglang`, `trtllm`) |
+| `--mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
 | `--environment` | `kubernetes` | Deployment environment |
-| `--adjustment-interval` | `180` | Seconds between scaling decisions |
 | `--ttft` | `500.0` | Target Time To First Token (ms) |
 | `--itl` | `50.0` | Target Inter-Token Latency (ms) |
-| `--isl` | `3000` | Expected average input sequence length |
-| `--osl` | `150` | Expected average output sequence length |
-| `--load-predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
 | `--max-gpu-budget` | `8` | Maximum GPUs across all workers |
 | `--min-endpoint` | `1` | Minimum replicas per worker type |
 | `--decode-engine-num-gpu` | `1` | GPUs per decode engine |
 | `--prefill-engine-num-gpu` | `1` | GPUs per prefill engine |
 | `--no-operation` | `false` | Observation mode (no actual scaling) |
-| `--no-correction` | `false` | Disable correction factors |
+| **Throughput-based scaling** | | |
+| `--enable-throughput-scaling` | `true` | Enable throughput-based scaling |
+| `--adjustment-interval` | `180` | Seconds between throughput-based scaling decisions |
 | `--profile-results-dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
+| `--load-predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
+| `--no-correction` | `false` | Disable correction factors |
+| **Load-based scaling (Experimental)** | | |
+| `--enable-loadbased-scaling` | `false` | Enable load-based scaling |
+| `--disable-throughput-scaling` | `false` | Disable throughput-based scaling (required for `agg` mode) |
+| `--loadbased-router-metrics-url` | auto-discovered | URL to router's `/metrics` endpoint |
+| `--loadbased-adjustment-interval` | `5` | Seconds between load-based scaling decisions |
+| `--loadbased-learning-window` | `50` | Sliding window size for regression model |
+| `--loadbased-scaling-down-sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
+| `--loadbased-metric-samples` | `10` | Number of metric samples per adjustment interval |
+| `--loadbased-min-observations` | `5` | Minimum observations before regression activates |
 
 ### Environment Variables
 
@@ -130,10 +162,15 @@ The dashboard shows:
 
 ### Prometheus Metrics
 
-The planner queries the frontend's `/metrics` endpoint via Prometheus. Required metrics:
+**Throughput-based scaling** pulls traffic metrics from the cluster-wide Prometheus server:
 - Request count and duration
 - TTFT and ITL distributions
 - Input/output sequence lengths
+
+**Load-based scaling** pulls per-engine status directly from the frontend's `/metrics` endpoint:
+- Active prefill tokens per worker
+- Active decode blocks per worker
+- Last observed TTFT, ITL, and ISL per worker
 
 ```{toctree}
 :hidden:

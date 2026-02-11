@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Planner Examples
+# Planner Examples: Throughput-Based Scaling
 
-Practical examples for deploying the SLA Planner with different configurations. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
+Practical examples for deploying the SLA Planner with throughput-based scaling. All examples below use the DGDR workflow with pre-deployment profiling. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
 
 ## Basic Examples
 
