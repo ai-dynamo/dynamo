@@ -36,10 +36,6 @@ pub struct CacheControlResponse {
     pub pinned_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unpinned_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evicted_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skipped_count: Option<u32>,
 }
 
 impl MaybeError for CacheControlResponse {
@@ -49,8 +45,6 @@ impl MaybeError for CacheControlResponse {
             message: Some(err.to_string()),
             pinned_count: None,
             unpinned_count: None,
-            evicted_count: None,
-            skipped_count: None,
         }
     }
 
