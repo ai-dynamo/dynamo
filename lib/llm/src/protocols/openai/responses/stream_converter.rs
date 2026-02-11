@@ -24,6 +24,8 @@ use dynamo_async_openai::types::responses::{
 };
 use uuid::Uuid;
 
+use dynamo_async_openai::types::ChatCompletionMessageContent;
+
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
 /// State machine that converts a chat completion stream into Responses API events.
@@ -165,8 +167,16 @@ impl ResponseStreamConverter {
         for choice in &chunk.choices {
             let delta = &choice.delta;
 
-            // Handle text content deltas
-            if let Some(content) = &delta.content
+            // Handle text content deltas — extract text from the enum
+            let content_text = match &delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                Some(ChatCompletionMessageContent::Parts(_)) => {
+                    // Multimodal streaming not yet supported
+                    None
+                }
+                None => None,
+            };
+            if let Some(content) = content_text
                 && !content.is_empty()
             {
                 // Emit output_item.added + content_part.added on first text
@@ -214,7 +224,7 @@ impl ResponseStreamConverter {
                         item_id: self.message_item_id.clone(),
                         output_index: self.message_output_index,
                         content_index: 0,
-                        delta: content.clone(),
+                        delta: content.to_string(),
                         logprobs: Some(vec![]),
                     });
                 events.push(make_sse_event(&text_delta));
