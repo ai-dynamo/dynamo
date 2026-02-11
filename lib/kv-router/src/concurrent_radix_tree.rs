@@ -26,8 +26,10 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
+
+use parking_lot::RwLock;
 
 use crate::indexer::SyncIndexer;
 use crate::protocols::*;
@@ -114,24 +116,23 @@ impl Drop for ConcurrentRadixTree {
         let mut stack: Vec<SharedBlock> = Vec::new();
 
         // Break root -> children edge up front
-        if let Ok(mut root) = self.root.write() {
+        {
+            let mut root = self.root.write();
             stack.extend(root.children.drain().map(|(_, v)| v));
         }
 
         // Remove all lookup references (they may include blocks not reachable from root).
         // &mut self lets us bypass the outer RwLock; drain() gives us owned inner locks.
-        let lookup = self.lookup.get_mut().unwrap();
+        let lookup = self.lookup.get_mut();
         for (_, inner_lock) in lookup.drain() {
-            if let Ok(inner) = inner_lock.into_inner() {
-                stack.extend(inner.into_values());
-            }
+            let inner = inner_lock.into_inner();
+            stack.extend(inner.into_values());
         }
 
         // Iteratively free any uniquely-owned blocks without recursion
         while let Some(block) = stack.pop() {
-            if let Ok(rwlock) = Arc::try_unwrap(block)
-                && let Ok(mut inner) = rwlock.into_inner()
-            {
+            if let Ok(rwlock) = Arc::try_unwrap(block) {
+                let mut inner = rwlock.into_inner();
                 stack.extend(inner.children.drain().map(|(_, v)| v));
             }
         }
@@ -174,7 +175,7 @@ impl ConcurrentRadixTree {
 
         // Get first child from root.
         let first_child = {
-            let guard = self.root.read().unwrap();
+            let guard = self.root.read();
             guard.children.get(&sequence[0]).cloned()
         };
 
@@ -184,7 +185,7 @@ impl ConcurrentRadixTree {
 
         // Initialize active worker set from first child.
         let (mut active, mut active_count) = {
-            let guard = first_child.read().unwrap();
+            let guard = first_child.read();
             (guard.workers.clone(), guard.workers.len())
         };
 
@@ -196,12 +197,10 @@ impl ConcurrentRadixTree {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
             }
-            let lookup = self.lookup.read().unwrap();
+            let lookup = self.lookup.read();
             for worker in scores.scores.keys() {
                 if let Some(inner_lock) = lookup.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, inner_lock.read().unwrap().len());
+                    scores.tree_sizes.insert(*worker, inner_lock.read().len());
                 }
             }
             return scores;
@@ -210,18 +209,20 @@ impl ConcurrentRadixTree {
         let mut current = first_child;
         let mut matched_depth = 1u32;
 
-        // Traverse remaining levels. Workers at a child node are always a subset
-        // of workers at the parent (along the same path), so:
+        // Traverse remaining levels. In a clean tree, workers at a child node
+        // are always a subset of the parent (along the same path), so:
         //   - workers can only drop out, never join, as we descend
         //   - if child.workers.len() == active_count, the sets are identical
         //
-        // This lets us replace O(W) update_scores work at every level with an
-        // O(1) length check. Per-worker iteration only happens at dropout
-        // boundaries, where the count decreases.
-        for (idx, item) in sequence.iter().enumerate().skip(1) {
+        // However, because apply_removed does NOT cascade to descendants, a
+        // child may transiently have MORE workers than its parent (stale
+        // entries from an ancestor remove whose descendant remove events
+        // haven't arrived yet). We detect this via child_count > active_count
+        // and fall back to a full membership check.
+        for idx in 1..sequence.len() {
             let next_block = {
-                let guard = current.read().unwrap();
-                guard.children.get(item).cloned()
+                let guard = current.read();
+                guard.children.get(&sequence[idx]).cloned()
             };
 
             let Some(block) = next_block else {
@@ -229,7 +230,7 @@ impl ConcurrentRadixTree {
             };
 
             {
-                let guard = block.read().unwrap();
+                let guard = block.read();
                 let child_count = guard.workers.len();
 
                 if child_count < active_count {
@@ -246,7 +247,29 @@ impl ConcurrentRadixTree {
                     if active_count == 0 {
                         break;
                     }
+                } else if child_count > active_count {
+                    // child_count > active_count means stale entries exist
+                    // (child retains workers already removed from an ancestor).
+                    // Fall back to full membership check: keep only workers
+                    // present in both active and this child, scoring dropouts.
+                    active.retain(|w| {
+                        if guard.workers.contains(w) {
+                            true
+                        } else {
+                            scores.scores.insert(*w, matched_depth);
+                            false
+                        }
+                    });
+                    active_count = active.len();
+
+                    if active_count == 0 {
+                        break;
+                    }
                 }
+                // child_count == active_count: fast path, sets are identical
+                // (or, in the rare edge case, different membership with same
+                // cardinality -- accepted as a transient routing quality
+                // degradation that resolves once pending remove events arrive).
 
                 if early_exit && active_count == 1 {
                     matched_depth = (idx + 1) as u32;
@@ -265,12 +288,10 @@ impl ConcurrentRadixTree {
 
         // Get tree sizes from lookup.
         {
-            let lookup = self.lookup.read().unwrap();
+            let lookup = self.lookup.read();
             for worker in scores.scores.keys() {
                 if let Some(inner_lock) = lookup.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, inner_lock.read().unwrap().len());
+                    scores.tree_sizes.insert(*worker, inner_lock.read().len());
                 }
             }
         }
@@ -313,12 +334,11 @@ impl ConcurrentRadixTree {
         // Ensure this worker has an entry in the outer map.
         // Double-checked locking: try read first, promote to write only if needed.
         {
-            let lookup = self.lookup.read().unwrap();
+            let lookup = self.lookup.read();
             if !lookup.contains_key(&worker) {
                 drop(lookup);
                 self.lookup
                     .write()
-                    .unwrap()
                     .entry(worker)
                     .or_insert_with(|| RwLock::new(HashMap::new()));
             }
@@ -327,9 +347,9 @@ impl ConcurrentRadixTree {
         // Hold the outer read lock for the remainder.  Other workers can still
         // be looked up / mutated concurrently because we only write-lock the
         // inner map for *this* worker.
-        let lookup = self.lookup.read().unwrap();
+        let lookup = self.lookup.read();
         let inner_lock = lookup.get(&worker).unwrap();
-        let mut worker_lookup = inner_lock.write().unwrap();
+        let mut worker_lookup = inner_lock.write();
 
         // Find parent block
         let mut current = match op.parent_hash {
@@ -356,7 +376,7 @@ impl ConcurrentRadixTree {
         // the previous iteration. This avoids locking a block twice.
         for block_data in op.blocks {
             let child = {
-                let mut parent_guard = current.write().unwrap();
+                let mut parent_guard = current.write();
 
                 // Insert worker into this node if it was the child from the
                 // previous iteration (skip for the initial parent, which is
@@ -370,14 +390,15 @@ impl ConcurrentRadixTree {
                 match parent_guard.children.get(&block_data.tokens_hash) {
                     Some(existing) => {
                         // Verify our simplifying assumption: block_hash is uniform across workers
-                        if let Ok(existing_guard) = existing.read()
-                            && existing_guard.block_hash != Some(block_data.block_hash)
                         {
-                            tracing::warn!(
-                                expected = ?block_data.block_hash,
-                                actual = ?existing_guard.block_hash,
-                                "block_hash mismatch: sequence hashes should be uniform across workers"
-                            );
+                            let existing_guard = existing.read();
+                            if existing_guard.block_hash != Some(block_data.block_hash) {
+                                tracing::warn!(
+                                    expected = ?block_data.block_hash,
+                                    actual = ?existing_guard.block_hash,
+                                    "block_hash mismatch: sequence hashes should be uniform across workers"
+                                );
+                            }
                         }
                         existing.clone()
                     }
@@ -407,98 +428,59 @@ impl ConcurrentRadixTree {
         // Insert worker into the last child (not yet handled since there is
         // no subsequent iteration to pick it up).
         if needs_worker_insert {
-            current.write().unwrap().workers.insert(worker);
+            current.write().workers.insert(worker);
         }
 
         Ok(())
     }
 
     /// Apply a remove operation.
+    ///
+    /// This method does NOT cascade to descendants. Each block hash in the event
+    /// is removed individually in O(1). Descendant blocks may transiently retain
+    /// the worker in their `workers` set until their own explicit remove events
+    /// arrive. `find_matches_impl` handles this by detecting stale entries when
+    /// `child_count > active_count`.
     fn apply_removed(
         &self,
         worker: WorkerWithDpRank,
         op: KvCacheRemoveData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let lookup = self.lookup.read().unwrap();
+        let lookup = self.lookup.read();
         let Some(inner_lock) = lookup.get(&worker) else {
             return Err(KvCacheEventError::BlockNotFound);
         };
-        let mut worker_lookup = inner_lock.write().unwrap();
+        let mut worker_lookup = inner_lock.write();
 
         for block_hash in op.block_hashes {
-            let Some(block) = worker_lookup.get(&block_hash).cloned() else {
-                // Block not found - this is expected if:
-                // 1. A parent block was removed earlier in this batch, cascade-removing this block
-                // 2. Events arrived out of order
-                // 3. Block was never stored for this worker
-                // In all cases, we skip silently since the end state is correct.
+            let Some(block) = worker_lookup.remove(&block_hash) else {
                 tracing::debug!(
                     worker_id = worker.worker_id.to_string(),
                     dp_rank = worker.dp_rank,
                     id,
                     block_hash = ?block_hash,
-                    "Block not found during remove; likely already cascade-removed"
+                    "Block not found during remove; skipping"
                 );
                 continue;
             };
 
-            // Collect descendant hashes before modifying anything.
-            let descendants = self.collect_descendant_hashes(&block);
-
-            // Write-lock block to remove worker
-            {
-                let mut guard = block.write().unwrap();
-                guard.workers.remove(&worker);
-                if guard.workers.is_empty() {
-                    // Clear children from tree structure
-                    guard.children.clear();
-                }
-            }
-
-            // Remove the block from the worker's lookup table
-            worker_lookup.remove(&block_hash);
-
-            // Cascade: remove all descendants from this worker's lookup table.
-            for descendant_hash in descendants {
-                if let Some(desc_block) = worker_lookup.remove(&descendant_hash) {
-                    let mut desc_guard = desc_block.write().unwrap();
-                    desc_guard.workers.remove(&worker);
-                    if desc_guard.workers.is_empty() {
-                        desc_guard.children.clear();
-                    }
-                }
+            // Remove the worker from this block's worker set.
+            let mut guard = block.write();
+            guard.workers.remove(&worker);
+            if guard.workers.is_empty() {
+                guard.children.clear();
             }
         }
 
         Ok(())
     }
 
-    /// Collect all descendant block hashes from a given block.
-    /// Uses iterative DFS to avoid stack overflow on deep trees.
-    fn collect_descendant_hashes(&self, block: &SharedBlock) -> Vec<ExternalSequenceBlockHash> {
-        let mut result = Vec::new();
-        let mut stack = vec![block.clone()];
-
-        while let Some(current) = stack.pop() {
-            let guard = current.read().unwrap();
-            for child in guard.children.values() {
-                if let Ok(child_guard) = child.read()
-                    && let Some(hash) = child_guard.block_hash
-                {
-                    result.push(hash);
-                    stack.push(child.clone());
-                }
-            }
-        }
-        result
-    }
-
     /// Helper function to remove or clear blocks for a worker.
     /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
     /// If `keep_worker` is false, the worker is completely removed from lookup.
     fn remove_or_clear_worker_blocks(&self, worker_id: WorkerId, keep_worker: bool) {
-        let mut lookup = self.lookup.write().unwrap();
+        let mut lookup = self.lookup.write();
 
         // Collect all WorkerWithDpRank keys that match this worker_id
         let workers: Vec<WorkerWithDpRank> = lookup
@@ -510,9 +492,9 @@ impl ConcurrentRadixTree {
         for worker in workers {
             if let Some(inner_lock) = lookup.remove(&worker) {
                 // We now own the inner RwLock; extract the HashMap.
-                let blocks = inner_lock.into_inner().unwrap();
+                let blocks = inner_lock.into_inner();
                 for (_, block) in blocks {
-                    let mut guard = block.write().unwrap();
+                    let mut guard = block.write();
                     guard.workers.remove(&worker);
                     // If no workers are using this block, that is true for all children
                     if guard.workers.is_empty() {
@@ -541,7 +523,7 @@ impl ConcurrentRadixTree {
     /// Get all worker IDs currently tracked in the radix tree.
     /// Returns unique worker_ids (ignoring dp_rank differences).
     pub fn get_workers(&self) -> Vec<WorkerId> {
-        let lookup = self.lookup.read().unwrap();
+        let lookup = self.lookup.read();
         let mut worker_ids: Vec<WorkerId> = lookup
             .keys()
             .map(|k| k.worker_id)
@@ -558,7 +540,7 @@ impl ConcurrentRadixTree {
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
         tracing::debug!(
             "Dumping concurrent radix tree as events (contains information about {:?} workers)",
-            self.lookup.read().unwrap().len()
+            self.lookup.read().len()
         );
 
         let mut events = Vec::new();
@@ -569,14 +551,14 @@ impl ConcurrentRadixTree {
 
         // Process root's children first
         {
-            let root_guard = self.root.read().unwrap();
+            let root_guard = self.root.read();
             for (tokens_hash, child_block) in &root_guard.children {
                 queue.push_back((child_block.clone(), None, *tokens_hash));
             }
         }
 
         while let Some((current_block, parent_hash, tokens_hash)) = queue.pop_front() {
-            let current_guard = current_block.read().unwrap();
+            let current_guard = current_block.read();
 
             // Get this block's hash (same for all workers)
             let block_hash = current_guard
@@ -616,10 +598,10 @@ impl ConcurrentRadixTree {
 
     /// Get total number of blocks across all workers.
     pub fn current_size(&self) -> usize {
-        let lookup = self.lookup.read().unwrap();
+        let lookup = self.lookup.read();
         lookup
             .values()
-            .map(|inner_lock| inner_lock.read().unwrap().len())
+            .map(|inner_lock| inner_lock.read().len())
             .sum()
     }
 }
@@ -676,15 +658,13 @@ mod tests {
             &3
         );
 
-        assert_eq!(trie.lookup.read().unwrap().len(), 1);
+        assert_eq!(trie.lookup.read().len(), 1);
         assert_eq!(
             trie.lookup
                 .read()
-                .unwrap()
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .read()
-                .unwrap()
                 .len(),
             3
         );
@@ -711,7 +691,7 @@ mod tests {
             &1
         );
 
-        assert_eq!(trie.lookup.read().unwrap().len(), 2);
+        assert_eq!(trie.lookup.read().len(), 2);
     }
 
     #[test]
@@ -732,11 +712,9 @@ mod tests {
         assert_eq!(
             trie.lookup
                 .read()
-                .unwrap()
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
                 .read()
-                .unwrap()
                 .len(),
             2
         );
@@ -747,11 +725,9 @@ mod tests {
         assert_eq!(
             trie.lookup
                 .read()
-                .unwrap()
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
                 .read()
-                .unwrap()
                 .len(),
             1
         );
@@ -796,17 +772,14 @@ mod tests {
         assert!(
             trie.lookup
                 .read()
-                .unwrap()
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
         assert!(
             trie.lookup
                 .read()
-                .unwrap()
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
                 .unwrap()
                 .read()
-                .unwrap()
                 .is_empty()
         );
 
@@ -829,7 +802,7 @@ mod tests {
         trie.apply_event(create_store_event(worker_1, 0, vec![1, 2, 3], None))
             .unwrap();
 
-        assert_eq!(trie.lookup.read().unwrap().len(), 2);
+        assert_eq!(trie.lookup.read().len(), 2);
 
         trie.remove_worker(worker_0);
 
@@ -837,10 +810,9 @@ mod tests {
             !trie
                 .lookup
                 .read()
-                .unwrap()
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
-        assert_eq!(trie.lookup.read().unwrap().len(), 1);
+        assert_eq!(trie.lookup.read().len(), 1);
 
         let result = trie
             .find_matches_impl(
@@ -856,9 +828,9 @@ mod tests {
     #[test]
     fn test_concurrent_radix_tree_default() {
         let trie: ConcurrentRadixTree = Default::default();
-        assert!(trie.root.read().unwrap().children.is_empty());
-        assert!(trie.root.read().unwrap().workers.is_empty());
-        assert!(trie.lookup.read().unwrap().is_empty());
+        assert!(trie.root.read().children.is_empty());
+        assert!(trie.root.read().workers.is_empty());
+        assert!(trie.lookup.read().is_empty());
     }
 
     #[test]
@@ -962,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_parent_cascades_to_children() {
+    fn test_remove_parent_does_not_cascade() {
         let trie = ConcurrentRadixTree::new();
         let worker_1 = 0;
 
@@ -972,27 +944,99 @@ mod tests {
 
         let worker_key = WorkerWithDpRank::from_worker_id(worker_1);
         {
-            let lookup = trie.lookup.read().unwrap();
-            assert_eq!(lookup.get(&worker_key).unwrap().read().unwrap().len(), 3);
+            let lookup = trie.lookup.read();
+            assert_eq!(lookup.get(&worker_key).unwrap().read().len(), 3);
         }
 
-        // Remove ONLY block1 - children should be cascade-removed
+        // Remove ONLY block1 -- descendants should NOT be cascade-removed
         trie.apply_event(create_remove_event(worker_1, 2, vec![1]))
             .unwrap();
 
-        // All blocks should be removed (cascade cleanup)
-        let lookup = trie.lookup.read().unwrap();
-        let worker_lookup = lookup.get(&worker_key).unwrap().read().unwrap();
-        assert!(!worker_lookup.contains_key(&ExternalSequenceBlockHash(100)));
+        let lookup = trie.lookup.read();
+        let worker_lookup = lookup.get(&worker_key).unwrap().read();
         assert!(
-            !worker_lookup.contains_key(&ExternalSequenceBlockHash(200)),
-            "block2 should be cascade-removed with parent"
+            !worker_lookup.contains_key(&ExternalSequenceBlockHash(100)),
+            "block1 should be removed"
         );
         assert!(
-            !worker_lookup.contains_key(&ExternalSequenceBlockHash(300)),
-            "block3 should be cascade-removed with parent"
+            worker_lookup.contains_key(&ExternalSequenceBlockHash(200)),
+            "block2 should remain (no cascade)"
         );
-        assert_eq!(worker_lookup.len(), 0);
+        assert!(
+            worker_lookup.contains_key(&ExternalSequenceBlockHash(300)),
+            "block3 should remain (no cascade)"
+        );
+        assert_eq!(worker_lookup.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_all_blocks_individually() {
+        // Verifies that explicitly removing all blocks (as the engine would)
+        // cleans up fully, even without cascade.
+        let trie = ConcurrentRadixTree::new();
+        let worker_1 = 0;
+
+        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
+            .unwrap();
+
+        let worker_key = WorkerWithDpRank::from_worker_id(worker_1);
+
+        // Remove all three blocks explicitly in one event
+        trie.apply_event(create_remove_event(worker_1, 2, vec![1, 2, 3]))
+            .unwrap();
+
+        let lookup = trie.lookup.read();
+        let worker_lookup = lookup.get(&worker_key).unwrap().read();
+        assert_eq!(worker_lookup.len(), 0, "all blocks should be removed");
+    }
+
+    #[test]
+    fn test_find_matches_with_stale_entries() {
+        // Two workers share a full path. Remove worker_1 from the root block
+        // only (simulating a partial remove). find_matches should still
+        // produce correct scores for worker_2, and worker_1 should score at
+        // the stale descendant depth (transiently inflated but not a crash).
+        let trie = ConcurrentRadixTree::new();
+        let worker_1 = 0;
+        let worker_2 = 1;
+
+        // Both workers have blocks 1 -> 2 -> 3
+        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_2, 2, vec![1, 2, 3], None))
+            .unwrap();
+
+        // Remove worker_1 from block 1 only (no cascade to 2,3)
+        trie.apply_event(create_remove_event(worker_1, 3, vec![1]))
+            .unwrap();
+
+        let scores = trie.find_matches_impl(
+            &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+            false,
+        );
+
+        // worker_2 was never removed, should have full depth
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_2)),
+            Some(&3),
+            "worker_2 should score 3 (fully present)"
+        );
+
+        // worker_1 was removed from block 1 so it drops out at depth 1.
+        // But because blocks 2 and 3 still have worker_1 (stale), the
+        // child_count > active_count path fires and detects the dropout.
+        // The exact score depends on the detection logic: worker_1 is absent
+        // from block 1's workers, so it should be scored at depth 0 from the
+        // first child initialization (it won't appear in `active` at all).
+        // So worker_1 should NOT appear in scores (it was never in active).
+        assert!(
+            !scores
+                .scores
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1)),
+            "worker_1 should not appear in scores (removed from root-level block)"
+        );
     }
 
     // ========================================================================
