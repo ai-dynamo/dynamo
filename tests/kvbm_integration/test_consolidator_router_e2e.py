@@ -508,6 +508,7 @@ class TestConsolidatorRouterE2E:
         logger.info(f"Concurrent requests: {successes}/{num_requests} succeeded")
         return successes, results
 
+    @pytest.mark.timeout(150)  # 4x measured (~37s), rounded up
     def test_basic_consolidator_flow(self, tester, llm_worker, frontend_server):
         """
         Test basic consolidator flow:
@@ -551,6 +552,7 @@ class TestConsolidatorRouterE2E:
 
         logger.info(f"Basic consolidator flow test passed ({engine.upper()})")
 
+    @pytest.mark.timeout(170)  # 4x measured (~41s), rounded up
     def test_consolidator_handles_concurrent_requests(
         self, tester, llm_worker, frontend_server
     ):
@@ -591,6 +593,7 @@ class TestConsolidatorRouterE2E:
 
         logger.info(f"Concurrent request handling test passed ({engine.upper()})")
 
+    @pytest.mark.timeout(180)  # 4x measured (~44s), rounded up
     def test_store_deduplication_across_sources(
         self, tester, llm_worker, frontend_server
     ):
@@ -686,6 +689,7 @@ class TestConsolidatorRouterE2E:
 
         logger.info(f"STORE deduplication test passed ({engine.upper()})")
 
+    @pytest.mark.timeout(340)  # 4x measured (~85s), rounded up
     @pytest.mark.parametrize("engine_type", AVAILABLE_ENGINES)
     def test_remove_deduplication_across_sources(
         self, test_directory, runtime_services, engine_type

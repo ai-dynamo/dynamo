@@ -24,11 +24,17 @@
 # 2. SYNC vNEXT (push to main): Syncs fern/ from main to docs-website branch
 #    - Triggers on push to main when fern/** files change
 #    - Preserves versioned documentation snapshots on docs-website branch
+#    - Publishes docs to Fern after syncing
 #
 # 3. VERSION RELEASE (tags): Creates versioned documentation snapshot
 #    - Triggers on new version tags (vX.Y.Z format)
 #    - Creates pages-vX.Y.Z/ directory on docs-website branch
 #    - Updates docs.yml with new version entry
+#    - Publishes docs to Fern after releasing
+#
+# Note: The publish step is included inline because pushes made with GITHUB_TOKEN
+# do not trigger other workflows (GitHub's anti-recursion guard), so we cannot
+# rely on a separate publish-fern-docs.yml workflow for bot-initiated pushes.
 
 name: Fern Docs
 
@@ -250,6 +256,23 @@ jobs:
 
           echo "Successfully synced vNext docs to docs-website branch"
 
+      - name: Setup Node.js
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Fern CLI
+        if: steps.changes.outputs.has_changes == 'true'
+        run: npm install -g fern-api
+
+      - name: Publish Docs
+        if: steps.changes.outputs.has_changes == 'true'
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+        working-directory: fern-checkout/fern
+        run: fern generate --docs
+
   #############################################################################
   # VERSION RELEASE - Run on new version tags (vX.Y.Z)
   #############################################################################
@@ -426,3 +449,17 @@ jobs:
           git push origin docs-website
 
           echo "Successfully released documentation for $TAG on docs-website branch"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api
+
+      - name: Publish Docs
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+        working-directory: ./fern
+        run: fern generate --docs
