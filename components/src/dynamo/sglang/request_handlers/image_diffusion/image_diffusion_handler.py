@@ -5,7 +5,6 @@ import asyncio
 import base64
 import io
 import logging
-import os
 import random
 import time
 import uuid
@@ -16,18 +15,20 @@ from PIL import Image
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
+from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
+
+MAX_NUM_INFERENCE_STEPS = 50
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
     """Handler for diffusion image generation.
 
     Inherits from BaseGenerativeHandler for common infrastructure like
-    tracing, metrics publishing, and cancellation support.
+    tracing, metrics publishing
     """
 
     def __init__(
@@ -47,23 +48,15 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             publisher: Optional metrics publisher (not used for diffusion currently).
             fs: Optional fsspec filesystem for primary image storage.
         """
-        # Call parent constructor for common setup
         super().__init__(component, config, publisher)
 
-        # Image diffusion-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
         self.fs_url = config.dynamo_args.image_diffusion_fs_url
-
-        fs_url_parts = self.fs_url.split("://")
-        self.protocol = fs_url_parts[0] if "://" in self.fs_url else "file"
-
-        self.root_path = ""  # s3 uses bucket
-        if self.protocol == "file":
-            self.root_path = fs_url_parts[1] if len(fs_url_parts) > 1 else "/"
+        self.base_url = config.dynamo_args.image_diffusion_base_url
 
         logger.info(
-            f"Image diffusion worker handler initialized with fs_url={self.fs_url}"
+            f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.base_url}"
         )
 
     def cleanup(self) -> None:
@@ -72,7 +65,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             del self.generator
         torch.cuda.empty_cache()
         logger.info("Image diffusion generator cleanup complete")
-        # Call parent cleanup for any base class cleanup
         super().cleanup()
 
     async def generate(
@@ -98,50 +90,35 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 
         try:
-            # # Check for cancellation before starting generation
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled before generation: {context.id()}")
-            #     return
-
-            # Default to 50 steps if not provided
-            request["num_inference_steps"] = request.get("num_inference_steps", 50)
-
             req = CreateImageRequest(**request)
 
-            # Parse size
-            width, height = self._parse_size(req.size)
-
-            # Check for cancellation after parsing
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled during setup: {context.id()}")
-            #     return
-
-            # Generate images (may batch multiple requests at same step)
-            images = await self._generate_images(
-                prompt=req.prompt,
-                negative_prompt=req.negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=req.num_inference_steps,
-                guidance_scale=req.guidance_scale,
-                seed=req.seed,
+            # get extra parameters
+            nvext = req.nvext or NvExt()
+            nvext.num_inference_steps = min(
+                nvext.num_inference_steps or 50, MAX_NUM_INFERENCE_STEPS
             )
 
-            # # Check for cancellation after generation
-            # if await self._check_cancellation(context):
-            #     logger.info(f"Request cancelled after generation: {context.id()}")
-            #     return
+            width, height = self._parse_size(req.size)
 
-            # Upload to filesystem and get URLs
-            # Use user ID from request if available, otherwise fallback to context ID
+            images = await self._generate_images(
+                prompt=req.prompt,
+                negative_prompt=nvext.negative_prompt,
+                width=width,
+                height=height,
+                num_inference_steps=nvext.num_inference_steps,
+                guidance_scale=nvext.guidance_scale,
+                seed=nvext.seed,
+            )
+
             user_id = req.user if req.user else context.id()
 
             image_data = []
             for img in images:
+                # uploading or encoding the image
                 if req.response_format == "url":
                     url = await self._upload_to_fs(img, user_id, context.id())
                     image_data.append(ImageData(url=url))
-                else:  # b64_json
+                else:
                     b64 = self._encode_base64(img)
                     image_data.append(ImageData(b64_json=b64))
 
@@ -151,7 +128,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         except Exception as e:
             logger.error(f"Error in diffusion generation: {e}", exc_info=True)
-            # Return error response
             error_response = {
                 "created": int(time.time()),
                 "data": [],
@@ -170,8 +146,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         negative_prompt: Optional[str] = None,
     ) -> list[bytes]:
         """Generate images using SGLang DiffGenerator"""
-        # DiffGenerator handles batching internally if multiple images
-        # Run in thread pool to avoid blocking event loop
         args = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -187,12 +161,14 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             sampling_params_kwargs=args,
         )
 
+        if result is None:
+            raise RuntimeError("No result from generator")
+
         images = result["frames"] if "frames" in result else []
 
         # Convert images to bytes (handle PIL Images, numpy arrays, or bytes)
         image_bytes_list = []
         for img in images:
-            # TODO: checkdoes sglang return only int arrays?
             if isinstance(img, bytes):
                 image_bytes_list.append(img)
             elif Image is not None and isinstance(img, Image.Image):
@@ -201,7 +177,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 img.save(buf, format="PNG")
                 image_bytes_list.append(buf.getvalue())
             else:
-                # Try to convert numpy array or other formats
                 try:
                     import numpy as np
 
@@ -220,10 +195,12 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         return image_bytes_list
 
-    def _parse_size(self, size_str: str) -> tuple[int, int]:
+    def _parse_size(self, size_str: Optional[str]) -> tuple[int, int]:
         """Parse '1024x1024' -> (1024, 1024)"""
+        if size_str is None:
+            return 1024, 1024
+
         w, h = size_str.split("x")
-        # TODO: allowed sizes, max 1024? configurable?
         return int(w), int(h)
 
     async def _upload_to_fs(
@@ -247,66 +224,11 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
-        full_path = f"{self.root_path}/{storage_path}"
 
-        # Ensure parent directories exist for local filesystem
-        if self.protocol == "file":
-            parent_dir = os.path.dirname(full_path)
-            os.makedirs(parent_dir, exist_ok=True)
+        # send image to filesystem
+        await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
 
-        # Use pipe() for writing bytes (standard fsspec API)
-        await asyncio.to_thread(self.fs.pipe, full_path, image_bytes)
-
-        return self._generate_url(full_path, storage_path)
-
-    def _generate_url(self, full_path: str, storage_path: str) -> str:
-        """Generate public URL based on filesystem type.
-
-        Args:
-            full_path: Full filesystem path.
-            storage_path: Relative storage path (users/{user_id}/...).
-
-        Returns:
-            Public URL string.
-        """
-        # If no fs_url configured, return fallback path
-        if not self.fs_url:
-            return f"file://{full_path}"
-
-        # Parse filesystem type from URL
-        if self.fs_url.startswith("s3://"):
-            # Extract bucket and construct S3 URL
-            # s3://bucket/path -> https://bucket.s3.amazonaws.com/path
-            parts = self.fs_url.replace("s3://", "").split("/", 1)
-            bucket = parts[0]
-            base_path = parts[1] if len(parts) > 1 else ""
-            # Try to get region from environment or use default
-            region = os.environ.get("AWS_REGION", "us-east-1")
-            if region != "us-east-1":
-                return f"https://{bucket}.s3.{region}.amazonaws.com/{base_path}/{storage_path}"
-            return f"https://{bucket}.s3.amazonaws.com/{base_path}/{storage_path}"
-        elif self.fs_url.startswith("gs://"):
-            # GCS URL format: gs://bucket/path -> https://storage.googleapis.com/bucket/path
-            bucket_path = self.fs_url.replace("gs://", "")
-            return f"https://storage.googleapis.com/{bucket_path}/{storage_path}"
-        elif self.fs_url.startswith("az://") or self.fs_url.startswith("abfss://"):
-            # Azure Blob Storage
-            # az://container@account/path -> https://account.blob.core.windows.net/container/path
-            if self.fs_url.startswith("az://"):
-                # az://container@account/path format
-                az_path = self.fs_url.replace("az://", "")
-                if "@" in az_path:
-                    container_account, path = az_path.split("/", 1)
-                    container, account = container_account.split("@")
-                    return f"https://{account}.blob.core.windows.net/{container}/{path}/{storage_path}"
-            return full_path  # Return as-is if format unclear
-        elif self.fs_url.startswith("file://"):
-            # Local filesystem
-            return f"file://{full_path}"
-        else:
-            # Unknown filesystem type, return path as-is
-            logger.warning(f"Unknown filesystem type for URL generation: {self.fs_url}")
-            return full_path
+        return f"{self.base_url}/{storage_path}"
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""

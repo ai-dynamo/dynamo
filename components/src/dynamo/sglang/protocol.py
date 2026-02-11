@@ -138,20 +138,29 @@ class DisaggSglangMultimodalRequest(BaseModel):
 # ============================================================================
 
 
+class NvExt(BaseModel):
+    """NVIDIA extensions for image generation"""
+
+    negative_prompt: Optional[str] = None
+    num_inference_steps: Optional[int] = 50
+    guidance_scale: float = 7.5
+    seed: Optional[int] = None
+    annotations: Optional[list[str]] = None
+
+
 class CreateImageRequest(BaseModel):
     """OpenAI /v1/images/generations compatible request"""
 
     prompt: str
     model: str  # e.g. "stabilityai/stable-diffusion-3.5-medium"
     n: int = 1  # Number of images
-    negative_prompt: Optional[str] = None
     size: Optional[str] = "1024x1024"  # "WxH" format
     quality: Optional[str] = "standard"  # standard, hd
     response_format: Optional[str] = "url"  # url or b64_json
-    num_inference_steps: Optional[int] = 50  # Denoising steps
-    guidance_scale: float = 7.5  # CFG scale
-    seed: Optional[int] = None
     user: Optional[str] = None
+
+    # NVIDIA extensions nested under nvext
+    nvext: Optional[NvExt] = None
 
 
 class ImageData(BaseModel):
