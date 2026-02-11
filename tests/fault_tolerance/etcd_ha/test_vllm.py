@@ -26,6 +26,7 @@ pytestmark = [
     pytest.mark.vllm,
 ]
 
+
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend and ETCD HA support"""
 

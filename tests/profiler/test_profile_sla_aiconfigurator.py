@@ -20,10 +20,10 @@ sys.path.insert(0, str(project_root))
 from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
 from benchmarks.profiler.utils.model_info import ModelInfo  # noqa: E402
 
-
 pytestmark = [
     pytest.mark.aiconfigurator,
 ]
+
 
 # Override the logger fixture from conftest.py to prevent directory creation
 @pytest.fixture(autouse=True)
@@ -129,6 +129,7 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.gpu_1
     @pytest.mark.integration
     @pytest.mark.nightly
+    # fmt: off
     @pytest.mark.parametrize(
         "backend, aic_backend_version",
         [
@@ -140,6 +141,7 @@ class TestProfileSlaAiconfigurator:
             pytest.param("sglang", "0.5.6.post2", marks=pytest.mark.sglang),
         ],
     )
+    # fmt: on
     @pytest.mark.parametrize(
         "hf_model_id",
         [

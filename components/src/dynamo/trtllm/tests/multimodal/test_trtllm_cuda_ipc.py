@@ -15,14 +15,14 @@ if not torch.cuda.is_available():
     pytest.skip(
         "Skipping to avoid errors during collection with '-m gpu_0'. "
         "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
-        allow_module_level=True
+        allow_module_level=True,
     )
 from tensorrt_llm._torch.shared_tensor.shared_tensor import (  # noqa: E402
     SharedTensorContainer,
     _SharedTensorRebuildMethodRegistry,
 )
 
-from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles  # noqa: E402
+from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
 
 pytestmark = [
     pytest.mark.pre_merge,

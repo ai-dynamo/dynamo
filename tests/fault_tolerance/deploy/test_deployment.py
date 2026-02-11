@@ -10,7 +10,6 @@ import signal
 from contextlib import contextmanager
 from multiprocessing.context import SpawnProcess
 from typing import Any, Optional
-from urllib import request
 
 import pytest
 
