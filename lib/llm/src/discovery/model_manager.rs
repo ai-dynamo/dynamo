@@ -209,7 +209,6 @@ impl ModelManager {
                 || model.has_embeddings_engine()
                 || model.has_images_engine()
                 || model.has_tensor_engine()
-                || model.has_images_engine()
                 || model.has_videos_engine()
                 || model.has_prefill()
             {
