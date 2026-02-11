@@ -19,10 +19,7 @@ from dynamo.vllm.multimodal_utils.model import (
     construct_mm_data,
     load_vision_model,
 )
-from dynamo.vllm.multimodal_utils.prefill_worker_utils import (
-    accumulate_embeddings,
-    load_embeddings,
-)
+from dynamo.vllm.multimodal_utils.prefill_worker_utils import accumulate_embeddings
 from dynamo.vllm.multimodal_utils.protocol import (
     MultiModalGroup,
     MultiModalInput,
@@ -56,5 +53,4 @@ __all__ = [
     "VLLMNativeEncoderRequest",
     "VLLMNativeEncoderResponse",
     "accumulate_embeddings",
-    "load_embeddings",
 ]

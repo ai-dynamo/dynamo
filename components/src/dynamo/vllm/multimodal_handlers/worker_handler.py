@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import copy
 import logging
 from collections import defaultdict
@@ -11,15 +12,13 @@ from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
+from dynamo.common.multimodal.embedding_transfer import NixlPersistentEmbeddingReceiver
 from dynamo.runtime import Client, Component, DistributedRuntime
 
 from ..handlers import BaseWorkerHandler
 from ..multimodal_utils import ImageLoader, MyRequestOutput, vLLMMultimodalRequest
 from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
-from ..multimodal_utils.prefill_worker_utils import (
-    accumulate_embeddings,
-    load_embeddings,
-)
+from ..multimodal_utils.prefill_worker_utils import accumulate_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +160,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             None  # Will be initialized in async_init
         )
         self.image_loader = ImageLoader()
+        # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
+        # to be at matching size, need to overwrite nixl connect library
+        self.embedding_receiver = NixlPersistentEmbeddingReceiver(max_items=0)
 
         logger.info("Multimodal PD Worker has been initialized")
 
@@ -179,8 +181,23 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        multi_modal_data: dict[str, Any] = defaultdict(list)
+        # Start receiving embeddings
+        receive_tasks = []
+        tensor_ids = []
         for mi in request.multimodal_inputs:
+            if mi.serialized_request is not None:
+                receive_tasks.append(
+                    asyncio.create_task(
+                        self.embedding_receiver.receive_embeddings(
+                            mi.serialized_request
+                        )
+                    )
+                )
+            else:
+                # Filler for zip with multimodal_inputs
+                receive_tasks.append(None)
+        multi_modal_data: dict[str, Any] = defaultdict(list)
+        for mi, receive_task in zip(request.multimodal_inputs, receive_tasks):
             if mi.multimodal_input.image_url:
                 # PIL image path — used by both EC consumer mode
                 # (vLLM looks up cached embeddings via mm_hash) and
@@ -190,12 +207,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 )
             else:
                 # Pre-computed embeddings via NIXL RDMA or local safetensors
-                embeddings = await load_embeddings(
-                    mi,
-                    self.EMBEDDINGS_DTYPE,
-                    self.EMBEDDINGS_DEVICE,
-                    self._connector,
-                )
+                tensor_id, embeddings = await receive_task
+                tensor_ids.append(tensor_id)
                 accumulate_embeddings(
                     multi_modal_data,
                     self.config.model,
@@ -253,6 +266,10 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             sampling_params=pd_request.sampling_params,
             request_id=pd_request.request_id,
         )
+
+        # after generation, we can instruct receiver that the embedding tensor is no longer in use
+        for tensor_id in tensor_ids:
+            self.embedding_receiver.release_tensor(tensor_id)
 
         if self.enable_disagg and self.decode_worker_client:
             decode_request = copy.deepcopy(request)

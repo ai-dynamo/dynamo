@@ -28,7 +28,7 @@ from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats
 
-import dynamo.nixl_connect as connect
+from dynamo.common.multimodal.embedding_transfer import TransferRequest
 
 
 class Request(BaseModel):
@@ -170,7 +170,7 @@ class MultiModalGroup(BaseModel):
     embeddings_shape: Optional[
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[connect.RdmaMetadata | str] = None
+    serialized_request: Optional[TransferRequest] = None
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):

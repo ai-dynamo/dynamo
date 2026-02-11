@@ -2,59 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import os
 from typing import Any, Dict
 
-import safetensors
 import torch
 
-import dynamo.nixl_connect as connect
-
 from .model import construct_mm_data
-from .protocol import MultiModalGroup
 
 logger = logging.getLogger(__name__)
-
-TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
-
-
-async def load_embeddings(
-    mi: MultiModalGroup,
-    embeddings_dtype: torch.dtype,
-    embeddings_device: str,
-    connector: connect.Connector | None,
-) -> torch.Tensor:
-    """Load pre-computed embedding tensor via local safetensors or NIXL RDMA.
-
-    Args:
-        mi: A single MultiModalGroup whose ``serialized_request`` field
-            contains either a local file path or NIXL RDMA metadata.
-        embeddings_dtype: Torch dtype for the tensor (used for RDMA path).
-        embeddings_device: Device string for the tensor (used for RDMA path).
-        connector: NIXL Connector for RDMA reads (required when TRANSFER_LOCAL=0).
-
-    Returns:
-        The embedding tensor loaded into CPU memory.
-    """
-    if TRANSFER_LOCAL:
-        logger.info("PD: Loading local safetensors file")
-        return safetensors.torch.load_file(mi.serialized_request)["ec_cache"]
-
-    embeddings = torch.empty(
-        mi.embeddings_shape,
-        dtype=embeddings_dtype,
-        device=embeddings_device,
-    )
-    descriptor = connect.Descriptor(embeddings)
-
-    if descriptor is None:
-        raise RuntimeError(
-            "Descriptor is None in PD worker - cannot process embeddings"
-        )
-
-    read_op = await connector.begin_read(mi.serialized_request, descriptor)
-    await read_op.wait_for_completion()
-    return embeddings
 
 
 def accumulate_embeddings(

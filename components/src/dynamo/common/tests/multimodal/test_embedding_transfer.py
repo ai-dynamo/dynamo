@@ -103,6 +103,23 @@ class TestNixlPersistentEmbeddingTransfer:
         receiver = NixlPersistentEmbeddingReceiver()
         await correctness(sender, receiver)
 
+    # async def test_correctness_staging(self):
+    #     sender = NixlPersistentEmbeddingSender()
+    #     receiver = NixlPersistentEmbeddingReceiver()
+    #     tensors = [torch.randn(256, 8 * 1024) for _ in range(3)]
+    #     expected_tensors = [tensor.clone().detach() for tensor in tensors]
+    #     sender_tasks = [
+    #         asyncio.create_task(sender.send_embeddings(tensor, stage_embeddings=True))
+    #         for tensor in tensors
+    #     ]
+    #     requests = await asyncio.gather(*sender_tasks)
+    #     tensors[0][0, 0] = 999.0  # Modify original tensor after sending to test staging
+    #     for idx, request in enumerate(requests):
+    #         tensor_id, received_tensor = await receiver.receive_embeddings(request[0])
+    #         assert torch.equal(received_tensor, expected_tensors[idx])
+    #         receiver.release_tensor(tensor_id)
+    #         await request[1]
+
     async def test_benchmark(self):
         sender = NixlPersistentEmbeddingSender()
         receiver = NixlPersistentEmbeddingReceiver()
