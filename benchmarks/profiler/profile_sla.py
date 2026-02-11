@@ -26,6 +26,7 @@ from benchmarks.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
     get_prefill_ttft,
 )
+from benchmarks.profiler.utils.config import Config, get_service_name_by_type
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
@@ -63,7 +64,7 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
+from dynamo.planner.defaults import SubComponentType
 
 
 @dataclass
@@ -445,8 +446,13 @@ async def run_profile(args):
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
                     attention_dp_size = mapping.get_attn_dp_size()
+                    # Get the actual decode service name from the config
+                    decode_cfg = Config.model_validate(decode_config)
+                    decode_service_name = get_service_name_by_type(
+                        decode_cfg, args.backend, SubComponentType.DECODE
+                    ).lower()
                     max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                        f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
+                        f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
                         attention_dp_size=attention_dp_size,
                     )
                     max_concurrency = max_kv_tokens // (args.isl + args.osl)
@@ -762,8 +768,13 @@ async def run_profile(args):
             )
 
             attention_dp_size = best_decode_mapping.get_attn_dp_size()
+            # Get the actual decode service name from the config
+            decode_cfg = Config.model_validate(decode_config)
+            decode_service_name = get_service_name_by_type(
+                decode_cfg, args.backend, SubComponentType.DECODE
+            ).lower()
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
+                f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
                 attention_dp_size=attention_dp_size,
             )
 
