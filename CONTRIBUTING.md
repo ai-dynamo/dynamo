@@ -148,9 +148,10 @@ Understanding Dynamo's architecture helps you find where to make changes. For th
 
 | Plane | Purpose | Documentation |
 |-------|---------|---------------|
-| **Discovery Plane** | Service registration and discovery across components | [docs/design_docs/distributed_runtime.md](docs/design_docs/distributed_runtime.md) |
+| **Distributed Runtime** | Service registration and discovery across components | [docs/design_docs/distributed_runtime.md](docs/design_docs/distributed_runtime.md) |
 | **Request Plane** | High-performance request routing between components | [docs/design_docs/request_plane.md](docs/design_docs/request_plane.md) |
-| **KV Event Plane** | KV cache event propagation for cache-aware routing | [docs/design_docs/event_plane.md](docs/design_docs/event_plane.md) |
+| **Event Plane** | KV cache event propagation for cache-aware routing | [docs/design_docs/event_plane.md](docs/design_docs/event_plane.md) |
+| **Discovery** | Service registration and discovery (etcd, Kubernetes) | [docs/design_docs/discovery.md](docs/design_docs/discovery.md) |
 
 ### Kubernetes Deployment
 

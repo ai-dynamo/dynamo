@@ -99,6 +99,7 @@ Quickstart
    Distributed Runtime <design_docs/distributed_runtime.md>
    Request Plane <design_docs/request_plane.md>
    Event Plane <design_docs/event_plane.md>
+   Discovery <design_docs/discovery.md>
    Router Design <design_docs/router_design.md>
    KVBM Design <design_docs/kvbm_design.md>
    Planner Design <design_docs/planner_design.md>
