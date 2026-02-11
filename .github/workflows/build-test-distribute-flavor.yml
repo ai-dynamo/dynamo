@@ -379,7 +379,6 @@ jobs:
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_2 or gpu_4 that require GPU hardware
       - name: Run GPU tests (sequential)
-        timeout-minutes: ${{ inputs.test_gpu_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
