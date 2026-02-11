@@ -580,6 +580,26 @@ pub struct ResponseParams {
     pub instructions: Option<String>,
 }
 
+/// Normalize tools so that `FunctionTool.strict` is always set.
+/// The upstream type uses `skip_serializing_if = "Option::is_none"` on `strict`,
+/// so `None` causes the field to be omitted during JSON serialization.
+/// Schema validators (Zod, etc.) expect `strict` to always be present.
+/// OpenAI defaults `strict` to `true`.
+pub(super) fn normalize_tools(tools: Vec<Tool>) -> Vec<Tool> {
+    tools
+        .into_iter()
+        .map(|tool| match tool {
+            Tool::Function(mut ft) => {
+                if ft.strict.is_none() {
+                    ft.strict = Some(true);
+                }
+                Tool::Function(ft)
+            }
+            other => other,
+        })
+        .collect()
+}
+
 /// Build an assistant text message output item.
 fn make_text_message(id: String, text: String) -> OutputItem {
     OutputItem::Message(OutputMessage {
@@ -690,8 +710,9 @@ pub fn chat_completion_to_response(
         metadata: Some(serde_json::Value::Object(Default::default())),
         parallel_tool_calls: Some(true),
         presence_penalty: Some(0.0),
-        // Echo actual request values, falling back to spec defaults
-        store: params.store,
+        // Echo actual request values, falling back to spec defaults.
+        // store: false because this branch does not persist responses.
+        store: params.store.or(Some(false)),
         temperature: params.temperature.or(Some(1.0)),
         text: Some(ResponseTextParam {
             format: TextResponseFormatConfiguration::Text,
@@ -701,7 +722,13 @@ pub fn chat_completion_to_response(
             .tool_choice
             .clone()
             .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto))),
-        tools: params.tools.clone().or(Some(vec![])),
+        tools: Some(
+            params
+                .tools
+                .clone()
+                .map(normalize_tools)
+                .unwrap_or_default(),
+        ),
         top_p: params.top_p.or(Some(1.0)),
         truncation: Some(Truncation::Disabled),
         // Nullable but required to be present (null is valid)

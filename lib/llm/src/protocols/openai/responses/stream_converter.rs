@@ -109,7 +109,8 @@ impl ResponseStreamConverter {
             metadata: Some(serde_json::Value::Object(Default::default())),
             parallel_tool_calls: Some(true),
             presence_penalty: Some(0.0),
-            store: self.params.store,
+            // store: false because this branch does not persist responses.
+            store: self.params.store.or(Some(false)),
             temperature: self.params.temperature.or(Some(1.0)),
             text: Some(ResponseTextParam {
                 format: TextResponseFormatConfiguration::Text,
@@ -120,7 +121,13 @@ impl ResponseStreamConverter {
                 .tool_choice
                 .clone()
                 .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto))),
-            tools: self.params.tools.clone().or(Some(vec![])),
+            tools: Some(
+                self.params
+                    .tools
+                    .clone()
+                    .map(super::normalize_tools)
+                    .unwrap_or_default(),
+            ),
             top_p: self.params.top_p.or(Some(1.0)),
             truncation: Some(Truncation::Disabled),
             // Nullable required fields
