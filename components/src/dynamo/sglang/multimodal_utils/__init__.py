@@ -5,10 +5,8 @@ from dynamo.sglang.multimodal_utils.multimodal_chat_processor import (
     multimodal_request_to_sglang,
     process_sglang_stream_response,
 )
-from dynamo.sglang.multimodal_utils.multimodal_image_loader import ImageLoader
 
 __all__ = [
     "multimodal_request_to_sglang",
     "process_sglang_stream_response",
-    "ImageLoader",
 ]
