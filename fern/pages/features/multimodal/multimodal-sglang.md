@@ -45,7 +45,7 @@ SGLang supports EPD, E/PD, and E/P/D patterns. See [Multimodal Architecture Patt
 
 ### SGLang-Specific Characteristics
 
-- **Vision Encoder in Python**: Encode worker loads vision model (AutoModel) and image processor (AutoImageProcessor)
+- **Vision Encoder in Python**: Encode worker uses SGLang's MMEncoder for model-agnostic vision encoding
 - **Token Expansion**: Single `<|image_pad|>` token replaced with N tokens based on embedding shape
 - **NIXL Transfer**: Embeddings transferred from Encoder → PD Worker using NIXL
 - **No Rust Processing**: All tokenization and image handling happens in Python
@@ -338,18 +338,19 @@ await read_op.wait_for_completion()
 
 ### Encode Worker Components
 
-The encode worker loads and runs the vision model in Python:
+The encode worker uses SGLang's `MMEncoder` for model-agnostic vision encoding. `MMEncoder` handles vision model loading, image preprocessing, and feature extraction internally:
 
 ```python
-self.image_processor = AutoImageProcessor.from_pretrained(
-    model_path, trust_remote_code=True
+from sglang.srt.disaggregation.encode_server import MMEncoder
+
+self.encoder = MMEncoder(
+    server_args=config.server_args,
+    dist_init_method="tcp://127.0.0.1:0",
+    rank=0,
 )
-self.vision_model = AutoModel.from_pretrained(
-    model_path,
-    device_map="auto",
-    torch_dtype=torch.float16,
-    trust_remote_code=True
-)
+
+# At request time:
+image_grid_dim, mm_embedding = await self.encoder._encode([image_url])
 ```
 
 ### Token Expansion Process
@@ -404,10 +405,9 @@ Supported templates: `qwen2-vl`, `llama-3`, `vicuna`, etc.
 
 SGLang multimodal **only supports image-based vision-language models**:
 
-- **Qwen2-VL** / **Qwen2.5-VL** - `Qwen/Qwen2.5-VL-7B-Instruct` (primary support)
-- **Qwen3-VL** - `Qwen/Qwen3-VL-8B-Instruct`
-- Models with `AutoImageProcessor` and vision tower
-- Models compatible with SGLang's image embedding format
+- **Qwen2-VL** / **Qwen2.5-VL** - `Qwen/Qwen2.5-VL-7B-Instruct`
+- **Qwen3-VL** - `Qwen/Qwen3-VL-30B-A3B-Instruct`
+- Models supported by SGLang's MMEncoder
 
 ## Key Files
 

@@ -6,14 +6,11 @@ from typing import AsyncIterator
 
 import torch
 
-# MMEncoder chain imports CUDA; will fail in CPU-only environments.
+# MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
 try:
     from sglang.srt.disaggregation.encode_server import MMEncoder
 except (ImportError, OSError):
     MMEncoder = None  # type: ignore[assignment]
-    logging.warning(
-        "SGLang's MMEncoder unavailable; multimodal encode worker requires a CUDA environment."
-    )
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
@@ -56,7 +53,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
 
-        # SGLang.MMEncoder handles vision model loading and encoding.
+        if MMEncoder is None:
+            raise RuntimeError(
+                "MMEncoder is not available. "
+                "Multimodal encode worker requires a CUDA environment."
+            )
+
         # torch.distributed requires a dist_init_method even for tp=1;
         # port 0 lets the OS assign a free port.
         self.encoder = MMEncoder(
