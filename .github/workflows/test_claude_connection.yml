@@ -33,9 +33,8 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Uncomment these lines if using NVIDIA API
-          # API_FORMAT: "openai"
-          # API_BASE_URL: "https://integrate.api.nvidia.com/v1"
-          # ANTHROPIC_MODEL: "meta/llama-3.1-70b-instruct"
+          API_FORMAT: "openai"
+          API_BASE_URL: "https://inference-api.nvidia.com/v1"
+          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
         run: |
           python3 .github/workflows/test_claude_simple.py

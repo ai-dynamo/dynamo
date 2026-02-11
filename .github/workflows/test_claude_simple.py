@@ -7,6 +7,7 @@ Tests with a hardcoded fake error to verify the classification system works.
 import os
 import sys
 import json
+import time
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -16,6 +17,7 @@ from opensearch_upload.error_classification.claude_client import ClaudeClient
 
 
 # Fake error logs to test with
+# NOTE: Testing with just 1 error to avoid NVIDIA API rate limits
 FAKE_ERRORS = {
     "infrastructure_error": """
 ERROR collecting tests/test_server.py
@@ -110,9 +112,16 @@ def test_claude_connection():
         return False
 
     # Test classification with each fake error
+    # NOTE: Only test first error to avoid rate limits
     results = []
+    test_count = 0
+    max_tests = 1  # Limit to 1 test to avoid NVIDIA API rate limits
 
     for error_type, error_text in FAKE_ERRORS.items():
+        if test_count >= max_tests:
+            print(f"⏭️  Skipping remaining tests to avoid rate limits")
+            break
+        test_count += 1
         print("-" * 70)
         print(f"🧪 Testing with fake {error_type}...")
         print("-" * 70)
@@ -164,6 +173,9 @@ def test_claude_connection():
                 "confidence": result.confidence_score,
                 "match": result.primary_category == error_type
             })
+
+            # Add delay to avoid rate limiting (NVIDIA API has strict limits)
+            time.sleep(2)
 
         except Exception as e:
             print(f"❌ Classification failed: {e}")
