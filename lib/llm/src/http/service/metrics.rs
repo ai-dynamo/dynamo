@@ -111,7 +111,7 @@ pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometh
 /// # Note
 /// With 2 significant figures, there are roughly 90 unique values per order of magnitude.
 /// Requesting more buckets than can be uniquely represented will result in deduplication.
-fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
+pub fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
     if count == 0 {
         return vec![];
     }
@@ -153,7 +153,7 @@ fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
 }
 
 /// Round a number to a specified number of significant figures
-fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
+pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
     if value == 0.0 {
         return 0.0;
     }
