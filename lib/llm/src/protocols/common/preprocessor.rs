@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
-#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -84,7 +83,6 @@ pub struct PrefillResult {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
-    #[cfg(feature = "media-nixl")]
     Decoded(RdmaMediaDataDescriptor),
 }
 
