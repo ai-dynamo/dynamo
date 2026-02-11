@@ -370,15 +370,19 @@ def test_sglang_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.skip(reason="Broken by sglang changes")
-# TODO: Re-enable this test once https://github.com/sgl-project/sglang/pull/14934 is merged
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "router_event_threads",
+    [1, 2],
+    ids=["single_thread", "multi_thread"],
+)
 def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
+    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting SGLang router prefix reuse test with two workers")
@@ -395,15 +399,18 @@ def test_router_decisions_sglang_multiple_workers(
         logger.info("Starting 2 SGLang worker processes on single GPU (mem_frac=0.4)")
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
-        # Initialize SGLang workers
-        # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         namespace = runtime.namespace(sglang_workers.namespace)
         component = namespace.component("backend")
         endpoint = component.endpoint("generate")
 
         _test_router_decisions(
-            sglang_workers, endpoint, MODEL_NAME, request, test_dp_rank=False
+            sglang_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=False,
+            router_event_threads=router_event_threads,
         )
 
 
