@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import base64
+import dataclasses
 
 from tensorrt_llm.llmapi import DisaggregatedParams
 
@@ -21,6 +22,10 @@ from tensorrt_llm.llmapi import DisaggregatedParams
 class DisaggregatedParamsCodec:
     """
     Codec for encoding and decoding disaggregated params for network transfer.
+
+    Uses dataclasses.replace() to preserve all fields from DisaggregatedParams,
+    only overriding opaque_state for base64 encoding/decoding. This ensures
+    forward compatibility when TRT-LLM adds new fields to DisaggregatedParams.
     """
 
     @staticmethod
@@ -35,12 +40,9 @@ class DisaggregatedParamsCodec:
             if disaggregated_params.opaque_state is not None
             else None
         )
-        return DisaggregatedParams(
-            request_type=disaggregated_params.request_type,
-            first_gen_tokens=disaggregated_params.first_gen_tokens,
-            ctx_request_id=disaggregated_params.ctx_request_id,
+        return dataclasses.replace(
+            disaggregated_params,
             opaque_state=opaque_state,
-            draft_tokens=disaggregated_params.draft_tokens,
         )
 
     @staticmethod
@@ -55,10 +57,7 @@ class DisaggregatedParamsCodec:
             if disaggregated_params.opaque_state is not None
             else None
         )
-        return DisaggregatedParams(
-            request_type=disaggregated_params.request_type,
-            first_gen_tokens=disaggregated_params.first_gen_tokens,
-            ctx_request_id=disaggregated_params.ctx_request_id,
+        return dataclasses.replace(
+            disaggregated_params,
             opaque_state=encoded_opaque_state,
-            draft_tokens=disaggregated_params.draft_tokens,
         )
