@@ -695,6 +695,9 @@ impl ModelWatcher {
             // then activate the prefill router.
             self.manager.add_worker_set(card.name(), &ws_key, worker_set);
 
+            // Note: activate_prefill_router is keyed by deployment namespace (not ws_key)
+            // because it coordinates between decode and prefill WorkerSets that share
+            // the same deployment namespace but have different ws_keys ("ns" vs "ns:prefill").
             let Ok(()) = self.manager.activate_prefill_router(card.name(), &namespace, endpoint) else {
                 tracing::warn!(
                     model_name = card.name(),
