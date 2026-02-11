@@ -16,11 +16,11 @@ The following table shows the backend framework versions included with each Dyna
 | **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
 | **main (ToT)** | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
-| **v1.0.0** *(planned)* | `0.15.1` | *Latest as of 2/17* | *Latest as of 2/17* | `0.10.0` |
-| **v0.9.0** | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
-| **v0.8.1.post3**\* | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post3` | `0.8.0` |
-| **v0.8.1.post2**\* | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post2` | `0.8.0` |
-| **v0.8.1.post1**\* | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
+| **v1.0.0** *(planned)* | `0.15.0` | *Latest as of 2/17* | *Latest as of 2/17* | `0.10.0` |
+| **v0.9.0** *(in progress)* | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
+| **v0.8.1.post3** *(in progress)* | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post3` | `0.8.0` |
+| **v0.8.1.post2** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post2` | `0.8.0` |
+| **v0.8.1.post1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
 | **v0.8.1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
 | **v0.8.0** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
 | **v0.7.1** | `0.11.0` | `0.5.4.post3` | `1.2.0rc3` | `0.8.0` |
@@ -30,13 +30,10 @@ The following table shows the backend framework versions included with each Dyna
 | **v0.6.1** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
 | **v0.6.0** | `0.11.0` | `0.5.3.post2` | `1.1.0rc5` | `0.6.0` |
 
-<sub>\* Limited experimental releases -- only TRT-LLM container and Dynamo PyPI wheels were published.</sub>
-
 ### Version Labels
 
 - **main (ToT)** reflects the current development branch.
-- **v0.9.0** is the current release.
-- Releases marked *(planned)* show target versions that may change before final release.
+- Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
 ### Version Compatibility
 
