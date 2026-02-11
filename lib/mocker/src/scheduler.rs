@@ -44,6 +44,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
+#[cfg(target_os = "linux")]
 use tokio_timerfd::Delay;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -419,8 +420,15 @@ async fn simulate_prefill(
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         let deadline = start_time + sleep_duration;
 
-        if let Ok(delay) = Delay::new(deadline) {
-            let _ = delay.await;
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(delay) = Delay::new(deadline) {
+                let _ = delay.await;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
         }
     }
 
@@ -506,8 +514,15 @@ async fn simulate_decode(
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         let deadline = start_time + sleep_duration;
 
-        if let Ok(delay) = Delay::new(deadline) {
-            let _ = delay.await;
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(delay) = Delay::new(deadline) {
+                let _ = delay.await;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
         }
     }
 
