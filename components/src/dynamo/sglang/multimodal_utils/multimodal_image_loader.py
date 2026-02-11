@@ -91,7 +91,7 @@ class ImageLoader:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
             # PIL is sync, so offload to a thread to avoid blocking the event loop
-            # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
+            # Restrict to supported formats to prevent PSD parsing 
             image = await asyncio.to_thread(
                 Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
             )
