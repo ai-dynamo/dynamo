@@ -62,14 +62,14 @@ impl std::fmt::Display for RequestPhase {
 /// Captures information throughout the request lifecycle:
 /// - `request_received`: When the request was received
 /// - `prefill_start_time`: When prefill started (for disaggregated serving)
-/// - `first_token_time`: When the first token was generated (set once via OnceLock)
-/// - `request_finish_time`: When the request finished (set once via OnceLock)
+/// - `first_token_time`: When the first token was generated (Mutex-protected, may be updated across phases)
+/// - `request_finish_time`: When the request finished (Mutex-protected, may be updated across phases)
 /// - KV cache hit rate information
 /// - Worker IDs and types for per-worker Prometheus metrics
 ///
-/// The `OnceLock` fields ensure that values are set exactly once,
-/// which is important for disaggregated serving where the "first token"
-/// might appear multiple times.
+/// The `Mutex`-protected time fields allow updates from multiple router phases
+/// (prefill/decode) in disaggregated serving, where timing events may be
+/// recorded by different pipeline stages.
 ///
 /// Worker IDs use `AtomicU64` instead of `OnceLock<u64>` for lower overhead since
 /// the tracker is created for every request. The sentinel value `NO_WORKER_ID` (0)

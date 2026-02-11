@@ -12,8 +12,12 @@ use std::time::Duration;
 
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
-use dynamo_runtime::metrics::prometheus_names::frontend_service;
+use dynamo_runtime::metrics::prometheus_names::{
+    frontend_service, labels, name_prefix, routing_overhead,
+};
 use prometheus::{IntGaugeVec, Opts};
+
+use crate::http::service::metrics::generate_log_buckets;
 
 // ---------------------------------------------------------------------------
 // Worker load metrics (gauges)
@@ -51,23 +55,25 @@ pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(|| W
     active_decode_blocks: IntGaugeVec::new(
         Opts::new(
             format!(
-                "dynamo_frontend_{}",
+                "{}_{}",
+                name_prefix::FRONTEND,
                 frontend_service::WORKER_ACTIVE_DECODE_BLOCKS
             ),
             "Active KV cache decode blocks per worker",
         ),
-        &["worker_id", "dp_rank", "worker_type"],
+        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
     )
     .expect("Failed to create worker_active_decode_blocks gauge"),
     active_prefill_tokens: IntGaugeVec::new(
         Opts::new(
             format!(
-                "dynamo_frontend_{}",
+                "{}_{}",
+                name_prefix::FRONTEND,
                 frontend_service::WORKER_ACTIVE_PREFILL_TOKENS
             ),
             "Active prefill tokens queued per worker",
         ),
-        &["worker_id", "dp_rank", "worker_type"],
+        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
     )
     .expect("Failed to create worker_active_prefill_tokens gauge"),
 });
@@ -99,7 +105,8 @@ pub static ROUTING_OVERHEAD_METRICS: LazyLock<RoutingOverheadMetrics> = LazyLock
     // Buckets from 0.0001ms (0.1μs) to ~10ms, exponential with factor 2
     let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18)
         .expect("exponential buckets should not fail");
-    let make = |name: &str, help: &str| {
+    let make = |suffix: &str, help: &str| {
+        let name = format!("{}_{}", name_prefix::ROUTING_OVERHEAD, suffix);
         prometheus::Histogram::with_opts(
             prometheus::HistogramOpts::new(name, help).buckets(buckets.clone()),
         )
@@ -107,23 +114,23 @@ pub static ROUTING_OVERHEAD_METRICS: LazyLock<RoutingOverheadMetrics> = LazyLock
     };
     RoutingOverheadMetrics {
         block_hashing: make(
-            "dynamo_routing_overhead_block_hashing_ms",
+            routing_overhead::BLOCK_HASHING_MS,
             "Time spent computing block hashes in milliseconds",
         ),
         indexer_find_matches: make(
-            "dynamo_routing_overhead_indexer_find_matches_ms",
+            routing_overhead::INDEXER_FIND_MATCHES_MS,
             "Time spent in indexer find_matches in milliseconds",
         ),
         seq_hashing: make(
-            "dynamo_routing_overhead_seq_hashing_ms",
+            routing_overhead::SEQ_HASHING_MS,
             "Time spent computing sequence hashes in milliseconds",
         ),
         scheduling: make(
-            "dynamo_routing_overhead_scheduling_ms",
+            routing_overhead::SCHEDULING_MS,
             "Time spent in scheduler worker selection in milliseconds",
         ),
         total: make(
-            "dynamo_routing_overhead_total_ms",
+            routing_overhead::TOTAL_MS,
             "Total routing overhead per request in milliseconds",
         ),
     }
@@ -140,12 +147,20 @@ impl RoutingOverheadMetrics {
     ) {
         self.block_hashing
             .observe(hash_elapsed.as_secs_f64() * 1000.0);
-        self.indexer_find_matches
-            .observe((find_matches_elapsed - hash_elapsed).as_secs_f64() * 1000.0);
-        self.seq_hashing
-            .observe((seq_hash_elapsed - find_matches_elapsed).as_secs_f64() * 1000.0);
+        self.indexer_find_matches.observe(
+            find_matches_elapsed
+                .saturating_sub(hash_elapsed)
+                .as_secs_f64()
+                * 1000.0,
+        );
+        self.seq_hashing.observe(
+            seq_hash_elapsed
+                .saturating_sub(find_matches_elapsed)
+                .as_secs_f64()
+                * 1000.0,
+        );
         self.scheduling
-            .observe((total_elapsed - seq_hash_elapsed).as_secs_f64() * 1000.0);
+            .observe(total_elapsed.saturating_sub(seq_hash_elapsed).as_secs_f64() * 1000.0);
         self.total.observe(total_elapsed.as_secs_f64() * 1000.0);
     }
 }
@@ -179,8 +194,6 @@ pub struct RouterRequestMetrics {
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
-
-use crate::http::service::metrics::generate_log_buckets;
 
 impl RouterRequestMetrics {
     fn new(
