@@ -619,7 +619,19 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
 
             // Handle text content -- also parse <tool_call> blocks from models
             // that emit tool calls as text (e.g. Qwen3)
-            if let Some(content_text) = choice.message.content
+            let content_text = match choice.message.content {
+                Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(text)) => {
+                    Some(text)
+                }
+                Some(dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_)) => {
+                    tracing::warn!(
+                        "Multimodal content in responses API not yet supported, using placeholder"
+                    );
+                    Some("[multimodal content]".to_string())
+                }
+                None => None,
+            };
+            if let Some(content_text) = content_text
                 && !content_text.is_empty()
             {
                 let parsed_calls = parse_tool_call_text(&content_text);
@@ -991,7 +1003,7 @@ mod tests {
             choices: vec![dynamo_async_openai::types::ChatChoice {
                 index: 0,
                 message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                    content: Some("This is a reply".into()),
+                    content: Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text("This is a reply".to_string())),
                     refusal: None,
                     tool_calls: None,
                     role: dynamo_async_openai::types::Role::Assistant,
