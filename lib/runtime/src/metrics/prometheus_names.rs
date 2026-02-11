@@ -68,6 +68,9 @@ pub mod name_prefix {
 
     /// Prefix for frontend service metrics
     pub const FRONTEND: &str = "dynamo_frontend";
+
+    /// Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
+    pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -92,6 +95,9 @@ pub mod labels {
     /// Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
     /// It is used by worker/load-style metrics that need to disambiguate per-worker series.
     pub const DP_RANK: &str = "dp_rank";
+
+    /// Label for worker instance ID (etcd lease ID).
+    pub const WORKER_ID: &str = "worker_id";
 
     /// Label for model name/path (OpenAI API standard, injected by Dynamo)
     /// This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
@@ -365,6 +371,27 @@ pub mod kvbm {
 
     /// Number of failed object storage write operations (blocks)
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
+}
+
+/// Routing overhead phase latency histogram names (raw Prometheus, not component-scoped).
+///
+/// These are combined with [`name_prefix::ROUTING_OVERHEAD`] to form full metric names,
+/// e.g. `dynamo_routing_overhead_block_hashing_ms`.
+pub mod routing_overhead {
+    /// Time spent computing block hashes
+    pub const BLOCK_HASHING_MS: &str = "block_hashing_ms";
+
+    /// Time spent in indexer find_matches
+    pub const INDEXER_FIND_MATCHES_MS: &str = "indexer_find_matches_ms";
+
+    /// Time spent computing sequence hashes
+    pub const SEQ_HASHING_MS: &str = "seq_hashing_ms";
+
+    /// Time spent in scheduler worker selection
+    pub const SCHEDULING_MS: &str = "scheduling_ms";
+
+    /// Total routing overhead per request
+    pub const TOTAL_MS: &str = "total_ms";
 }
 
 // KvRouter (including KvInexer) Prometheus metric names

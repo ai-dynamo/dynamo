@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::{
     kv_router::{
         KvRouter,
+        metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
     preprocessor::PreprocessedRequest,
@@ -219,20 +220,25 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         }
 
-        // Record metrics in tracker: KV hit rate, worker ID, and worker type based on phase.
-        // Worker type is stored at routing time to avoid expensive MDC lookups when
-        // updating Prometheus metrics (TTFT/ITL) later in the response stream.
+        // Record routing metrics on tracker and observe ISL + prefill start.
+        let request_metrics =
+            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
         if let Some(ref tracker) = request.tracker {
             let isl_blocks = request.token_ids.len().div_ceil(block_size);
             tracker.record_kv_hit(overlap_amount, isl_blocks);
+            tracker.record_isl(
+                request.token_ids.len(),
+                overlap_amount as usize * block_size,
+            );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
         }
+        request_metrics
+            .input_sequence_tokens
+            .observe(request.token_ids.len() as f64);
 
         // Handle query-only requests: early return with worker info
         if is_query_only {
             let stream_context = request.context().clone();
-            // Tracker is always created for query-only requests (delta generator enables tracking
-            // when query_instance_id annotation is present)
             let worker_id_info = request.tracker.as_ref().and_then(|t| t.get_worker_info());
 
             tracing::trace!(
@@ -262,10 +268,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .and_then(|r| r.expected_output_tokens);
         let track_output_blocks =
             self.chooser.kv_router_config().router_track_output_blocks && handle_local_updates;
+        let tracker = request.tracker.clone();
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
+
+        // Record prefill start right before pushing to backend (OnceLock: first call wins).
+        if let Some(ref tracker) = tracker {
+            tracker.record_prefill_start();
+        }
 
         let chooser = self.chooser.clone();
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
@@ -277,6 +289,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // When false, an external caller (e.g., GAIE sidecar) handles bookkeeping via C FFI.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
+            let mut first_token_recorded = false;
 
             // Output block tracking state
             let mut cumulative_osl: usize = 0;
@@ -310,13 +323,27 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             }
                         }
 
+                        let new_tokens = item.data.as_ref()
+                            .map(|d| d.token_ids.len())
+                            .unwrap_or(0);
+
+                        // Record first token time on tracker when actual tokens arrive
+                        if !first_token_recorded && new_tokens > 0 {
+                            if let Some(ref tracker) = tracker {
+                                tracker.record_first_token();
+                                if let Some(ttft) = tracker.ttft_ms() {
+                                    request_metrics
+                                        .time_to_first_token_seconds
+                                        .observe(ttft / 1000.0);
+                                }
+                            }
+                            first_token_recorded = true;
+                        }
+
+                        cumulative_osl += new_tokens;
+
                         // Track output blocks if enabled
                         if track_output_blocks {
-                            let new_tokens = item.data.as_ref()
-                                .map(|d| d.token_ids.len())
-                                .unwrap_or(0);
-                            cumulative_osl += new_tokens;
-
                             let new_total_blocks = (isl_tokens + cumulative_osl).div_ceil(block_size);
                             if new_total_blocks > current_total_blocks {
                                 // New block boundary crossed - add output block with decay
@@ -329,6 +356,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                         "Failed to add output block for request {context_id}: {e}"
                                     );
                                 }
+
+                                // Update tracker and observe avg ITL at each block boundary
+                                if let Some(ref tracker) = tracker {
+                                    tracker.record_osl(cumulative_osl);
+                                    tracker.record_finish();
+                                    if let Some(avg_itl) = tracker.avg_itl_ms() {
+                                        request_metrics
+                                            .inter_token_latency_seconds
+                                            .observe(avg_itl / 1000.0);
+                                    }
+                                }
+
                                 current_total_blocks = new_total_blocks;
                             }
                         }
@@ -337,6 +376,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     }
                 }
             }
+
+            // Record final aggregate metrics (histograms sampled once per request)
+            if let Some(ref tracker) = tracker {
+                tracker.record_finish();
+                tracker.record_osl(cumulative_osl);
+
+                request_metrics
+                    .output_sequence_tokens
+                    .observe(cumulative_osl as f64);
+            }
+            request_metrics.requests_total.inc();
 
             // Only call free() if we handle local updates.
             // When handle_local_updates=false, external caller handles cleanup via C FFI.
