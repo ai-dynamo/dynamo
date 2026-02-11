@@ -547,12 +547,6 @@ class ResponsesStreamPayload(BasePayload):
     endpoint: str = "/v1/responses"
     http_stream: bool = True
 
-    def with_model(self, model):
-        p = deepcopy(self)
-        if "model" not in p.body:
-            p.body = {**p.body, "model": model}
-        return p
-
     @staticmethod
     def extract_content(response):
         """Parse SSE stream and validate event structure."""

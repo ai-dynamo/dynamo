@@ -1164,7 +1164,7 @@ async fn handler_responses(
             .await
             .map_err(|e| {
                 ErrorMessage::internal_server_error(&format!(
-                    "Failed to await chat completions task: {:?}",
+                    "Failed to await responses task: {:?}",
                     e,
                 ))
             })?;
@@ -1181,7 +1181,7 @@ async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
-    stream_handle: ConnectionHandle,
+    mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -1267,6 +1267,11 @@ async fn responses(
             .create_inflight_guard(&model, Endpoint::Responses, streaming);
 
     if streaming {
+        // For streaming responses, we return HTTP 200 immediately without checking for errors.
+        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
+        // must be delivered as SSE events in the stream. This is standard SSE behavior.
+        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
         // inner stream response data and convert it to Responses API events.
@@ -1328,8 +1333,18 @@ async fn responses(
         Ok(sse_stream.into_response())
     } else {
         // Non-streaming path: aggregate stream into single response
+
+        // Check first event for backend errors before aggregating (non-streaming only)
+        let stream_with_check =
+            check_for_backend_error(engine_stream)
+                .await
+                .map_err(|error_response| {
+                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    error_response
+                })?;
+
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = engine_stream.inspect(move |response| {
+        let stream = stream_with_check.inspect(move |response| {
             process_response_and_observe_metrics(
                 response,
                 &mut response_collector,
@@ -1343,11 +1358,11 @@ async fn responses(
                 .map_err(|e| {
                     tracing::error!(
                         request_id,
-                        "Failed to fold chat completions stream for: {:?}",
+                        "Failed to fold responses stream: {:?}",
                         e
                     );
                     ErrorMessage::internal_server_error(&format!(
-                        "Failed to fold chat completions stream: {}",
+                        "Failed to fold responses stream: {}",
                         e
                     ))
                 })?;

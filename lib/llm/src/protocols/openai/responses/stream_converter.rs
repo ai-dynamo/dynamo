@@ -41,7 +41,6 @@ pub struct ResponseStreamConverter {
     accumulated_text: String,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
-    current_fc_index: Option<usize>,
     // Output index counter
     next_output_index: u32,
 }
@@ -72,7 +71,6 @@ impl ResponseStreamConverter {
             message_output_index: 0,
             accumulated_text: String::new(),
             function_call_items: Vec::new(),
-            current_fc_index: None,
             next_output_index: 0,
         }
     }
@@ -83,7 +81,7 @@ impl ResponseStreamConverter {
         seq
     }
 
-    fn make_response(&self, status: Status) -> Response {
+    fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
         let completed_at = if status == Status::Completed {
             Some(
                 SystemTime::now()
@@ -101,7 +99,7 @@ impl ResponseStreamConverter {
             completed_at,
             status,
             model: self.model.clone(),
-            output: vec![],
+            output,
             // Spec-required defaults
             background: Some(false),
             frequency_penalty: Some(0.0),
@@ -144,13 +142,13 @@ impl ResponseStreamConverter {
 
         let created = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::InProgress),
+            response: self.make_response(Status::InProgress, vec![]),
         });
         events.push(make_sse_event(&created));
 
         let in_progress = ResponseStreamEvent::ResponseInProgress(ResponseInProgressEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::InProgress),
+            response: self.make_response(Status::InProgress, vec![]),
         });
         events.push(make_sse_event(&in_progress));
 
@@ -301,7 +299,6 @@ impl ResponseStreamConverter {
                         }
                     }
 
-                    self.current_fc_index = Some(tc_index);
                 }
             }
         }
@@ -399,10 +396,36 @@ impl ResponseStreamConverter {
             events.push(make_sse_event(&item_done));
         }
 
+        // Build the final output vector from accumulated state
+        let mut output = Vec::new();
+        if self.message_started {
+            output.push(OutputItem::Message(OutputMessage {
+                id: self.message_item_id.clone(),
+                content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                })],
+                role: AssistantRole::Assistant,
+                status: OutputStatus::Completed,
+            }));
+        }
+        for fc in &self.function_call_items {
+            if fc.started {
+                output.push(OutputItem::FunctionCall(FunctionToolCall {
+                    id: Some(fc.item_id.clone()),
+                    call_id: fc.call_id.clone(),
+                    name: fc.name.clone(),
+                    arguments: fc.accumulated_args.clone(),
+                    status: Some(OutputStatus::Completed),
+                }));
+            }
+        }
+
         // Emit response.completed
         let completed = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::Completed),
+            response: self.make_response(Status::Completed, output),
         });
         events.push(make_sse_event(&completed));
 

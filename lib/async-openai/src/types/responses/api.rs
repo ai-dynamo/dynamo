@@ -30,16 +30,6 @@ pub struct ListConversationItemsQuery {
     pub include: Option<Vec<IncludeParam>>,
 }
 
-/// Sort order for listing input items.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum ListInputItemsOrder {
-    /// Ascending order
-    Asc,
-    /// Descending order
-    Desc,
-}
-
 /// Query parameters for getting a response.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq, ToSchema)]
 #[builder(name = "GetResponseQueryArgs")]
@@ -75,7 +65,7 @@ pub struct ListInputItemsQuery {
     pub limit: Option<u32>,
     /// The order to return the input items in. Default is `desc`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub order: Option<ListInputItemsOrder>,
+    pub order: Option<ListOrder>,
     /// An item ID to list items after, used in pagination.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,

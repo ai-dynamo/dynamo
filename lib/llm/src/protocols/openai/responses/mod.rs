@@ -319,8 +319,8 @@ fn convert_input_items_to_messages(
                         },
                     ));
                 }
-                _ => {
-                    // Skip other item types (file search, computer call, etc.)
+                other => {
+                    tracing::debug!("Skipping unsupported input item type during conversion: {:?}", std::mem::discriminant(other));
                 }
             },
             InputItem::EasyMessage(easy) => {
