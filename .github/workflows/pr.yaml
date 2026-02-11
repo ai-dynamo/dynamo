@@ -184,6 +184,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      test_gpu_timeout_minutes: 35
     secrets: inherit
 
   # ============================================================================
