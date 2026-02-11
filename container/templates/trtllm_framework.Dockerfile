@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #}
+# === BEGIN templates/trtllm_framework.Dockerfile ===
+
 # Copy artifacts from NGC PyTorch image
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS pytorch_base
 
