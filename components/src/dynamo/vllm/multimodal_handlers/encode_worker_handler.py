@@ -81,7 +81,7 @@ class EncodeWorkerHandler:
         self.vision_encoder, self.projector = get_encoder_components(
             self.model, self.vision_model
         )
-        self._connector = None
+        self._connector: connect.Connector | None = None
         self._accumulated_time = 0.0
         self._processed_requests = 0
         self.readables = []
@@ -253,6 +253,9 @@ class EncodeWorkerHandler:
                     request.multimodal_inputs[idx].serialized_request = cache_path
                 else:
                     descriptor = connect.Descriptor(embedding_item.embeddings_cpu)
+                    assert (
+                        self._connector is not None
+                    ), "Connector not initialized; call async_init() first"
                     self.readables.append(
                         await self._connector.create_readable(descriptor)
                     )

@@ -53,6 +53,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --custom-jinja-template "$CUSTOM_TEMPLATE" \
   --encode-endpoint "$ENCODE_ENDPOINT" \
+  --disaggregation-mode prefill_and_decode \
   --dyn-encoder-cache-capacity-gb "$DYN_ENCODER_CACHE_CAPACITY_GB" &
 PD_PID_1=$!
 
