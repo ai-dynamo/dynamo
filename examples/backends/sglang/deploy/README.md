@@ -147,7 +147,7 @@ All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/pages/kubernetes/deployment/create-deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/pages/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/pages/kubernetes/installation-guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
+- **Examples**: [Deployment Examples](../../../../docs/pages/getting-started/examples.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting

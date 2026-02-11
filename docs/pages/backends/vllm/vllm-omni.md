@@ -9,7 +9,7 @@ Dynamo supports omni (multimodal generation) models via the [vLLM-Omni](https://
 
 ## Prerequisites
 
-This guide assumes familiarity with deploying Dynamo with vLLM as described in [README.md](/docs/backends/vllm/README.md).
+This guide assumes familiarity with deploying Dynamo with vLLM as described in [README.md](/docs/pages/backends/vllm/README.md).
 
 ## Quick Start
 

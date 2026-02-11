@@ -267,10 +267,10 @@ Configure the `model` name and `host` based on your deployment.
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/pages/kubernetes/deployment/create-deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/pages/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/pages/kubernetes/installation-guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
+- **Examples**: [Deployment Examples](../../../../docs/pages/getting-started/examples.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/pages/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/pages/components/router/README.md)
 - **Multinode Deployment**: [Multinode Examples](../../../../docs/pages/backends/trtllm/multinode/multinode-examples.md)
-- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/pages/backends/trtllm/llama4_plus_eagle.md)
+- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/pages/backends/trtllm/llama4-plus-eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting
