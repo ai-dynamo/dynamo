@@ -7,14 +7,23 @@ from dataclasses import asdict
 from typing import Any, Dict, Optional, Union
 
 import torch
-from tensorrt_llm.inputs import default_multimodal_input_loader
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
 
 class EncodeHelper:
     """Utility class for encoding and serialization operations."""
+
+    # Shared ImageLoader for full EPD flow (async image loading)
+    _image_loader: Optional[ImageLoader] = None
+
+    @classmethod
+    def _get_image_loader(cls) -> ImageLoader:
+        if cls._image_loader is None:
+            cls._image_loader = ImageLoader()
+        return cls._image_loader
 
     @staticmethod
     def serialize_tensor_dict(tensor_dict: dict) -> dict:
@@ -285,32 +294,26 @@ class EncodeHelper:
         Args:
             text_prompt: Text portion of the prompt
             image_urls: List of image URLs to process
-            tokenizer: Tokenizer for encoding the processed prompt
-            model_dir: Path to model directory (required for AutoProcessor)
-            model_type: Model type string (required for placeholder retrieval)
+            tokenizer: Tokenizer for decoding prompt_token_ids from encoder output
+            model_dir: Path to model directory (unused; kept for API compatibility)
+            model_type: Model type string (unused; kept for API compatibility)
             engine: TensorRTLLMEngine with MultimodalEncoder
 
         Yields:
             Response with ep_disaggregated_params, processed_prompt, and prompt_token_ids
         """
-        # NOTE: `default_multimodal_input_loader` requires `model_dir` to load the
-        # HuggingFace AutoProcessor (for chat template application) and as a fallback
-        # for tokenizer loading. `model_type` is needed to retrieve the correct
-        # multimodal placeholders and apply model-specific preprocessing.
+        # Load images with shared ImageLoader (async, same as multimodal_processor PD flow).
+        image_items = [{"Url": u} for u in image_urls]
+        image_loader = EncodeHelper._get_image_loader()
+        pil_images = await image_loader.load_image_batch(image_items)
+        if not pil_images:
+            logging.error("ENCODE WORKER: no images loaded from image_urls")
+            yield {"ep_disaggregated_params": None}
+            return
 
-        # NOTE: default_multimodal_input_loader downloads images and preprocesses them
-        # synchronously. Wrap in asyncio.to_thread to allow concurrent image loading
-        # across multiple requests, improving throughput at high concurrency.
-        inputs = await asyncio.to_thread(
-            lambda: default_multimodal_input_loader(
-                tokenizer=tokenizer,
-                model_dir=model_dir,
-                model_type=model_type,
-                modality="image",
-                prompts=[text_prompt],
-                media=image_urls[0],
-            )
-        )
+        # TextPrompt: prompt + multi_modal_data (same shape as multimodal_processor PD flow).
+        processed_mm_data = {"image": pil_images}
+        inputs = [{"prompt": text_prompt, "multi_modal_data": processed_mm_data}]
 
         # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
         # blocking the encode worker's event loop under concurrency.
@@ -340,26 +343,23 @@ class EncodeHelper:
         encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
         params_dict = asdict(encoded_params)
 
-        # Extract processed prompt (includes <image> tokens) for prefill/decode consistency
+        # Extract processed prompt (includes <image> tokens) for prefill/decode consistency.
+        # Token IDs come from encoder output (input_processor ran inside generate).
+        # NOTE: processed_prompt will contain template/placeholder tokens
+        # (e.g. <image>, [INST], etc.). Adding special tokens here can change
+        # token alignment across EPD stages (prefill/decode), so we explicitly
+        # avoid adding them.
+        first_output = encoder_outputs[0]
+        prompt_token_ids = (
+            list(first_output.prompt_token_ids)
+            if first_output.prompt_token_ids
+            else None
+        )
         processed_prompt = None
-        prompt_token_ids = None
-        if isinstance(inputs, list) and len(inputs) > 0:
-            first_input = inputs[0]
-            if isinstance(first_input, dict):
-                processed_prompt = first_input.get("prompt")
-            else:
-                processed_prompt = getattr(first_input, "prompt", None)
-
-            # Tokenize the processed prompt for prefill worker
-            if processed_prompt and tokenizer is not None:
-                # NOTE: processed_prompt already contains template/placeholder tokens
-                # (e.g. <image>, [INST], etc.). Adding special tokens here can change
-                # token alignment across EPD stages (prefill/decode), so we explicitly
-                # avoid adding them.
-                prompt_token_ids = tokenizer.encode(
-                    processed_prompt, add_special_tokens=False
-                )
-
+        if prompt_token_ids and tokenizer is not None:
+            processed_prompt = tokenizer.decode(
+                first_output.prompt_token_ids, skip_special_tokens=False
+            )
         logging.debug(
             "ENCODE WORKER: Extracted processed_prompt (len=%s)",
             len(processed_prompt) if processed_prompt is not None else None,

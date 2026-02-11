@@ -23,7 +23,6 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.multimodal.image_batch_loader import load_image_batch
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -913,9 +912,8 @@ class BaseWorkerHandler(ABC):
                 await self._nixl_connector.initialize()
 
         # Process image_url entries
-        images = await load_image_batch(
+        images = await self.image_loader.load_image_batch(
             mm_map.get(IMAGE_URL_KEY, []),
-            self.image_loader,
             enable_frontend_decoding=self.enable_frontend_decoding,
             nixl_connector=self._nixl_connector,
         )

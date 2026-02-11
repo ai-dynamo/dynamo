@@ -24,7 +24,6 @@ from urllib.request import urlopen
 import torch
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.multimodal.image_batch_loader import load_image_batch
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -266,14 +265,16 @@ class MultimodalRequestProcessor:
                         embedding_paths.append(url)
                     else:
                         # Keep original item format for load_image_batch
-                        image_urls.append(item)
+                        image_urls.append(
+                            item if isinstance(item, dict) else {"Url": item}
+                        )
 
                 # Load regular images as PIL Images for TRT-LLM's input processor
                 # TRT-LLM will auto-detect this and compute mrope_config
                 if image_urls:
                     try:
-                        pil_images = await load_image_batch(
-                            image_urls, self.image_loader
+                        pil_images = await self.image_loader.load_image_batch(
+                            image_urls
                         )
                         if pil_images:
                             processed_mm_data["image"] = pil_images
