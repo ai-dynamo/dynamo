@@ -39,10 +39,10 @@ products:
         availability: stable
       - display-name: v0.8.1
         path: ./versions/v0.8.1.yml
-        availability: deprecated
+        availability: stable
       - display-name: v0.8.0
         path: ./versions/v0.8.0.yml
-        availability: deprecated
+        availability: stable
 
 # GitHub repository link in navbar
 navbar-links:
