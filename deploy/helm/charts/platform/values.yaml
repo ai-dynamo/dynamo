@@ -216,6 +216,15 @@ dynamo-operator:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
 
+    # -- Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
+    initContainerImage: "busybox:latest"
+
+    # -- Path written by worker when model is loaded and ready for checkpointing
+    readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
+
+    # -- Path written by restore-entrypoint after successful CRIU restore
+    restoreMarkerFilePath: "/tmp/dynamo-restored"
+
     # Storage configuration
     # These settings tell the operator where to find checkpoint storage
     # Must match the configuration in the chrek chart
@@ -246,12 +255,6 @@ dynamo-operator:
         uri: ""
         # -- Reference to a docker config secret for registry authentication
         credentialsSecretRef: ""
-
-    # CRIU timeout configuration (shared across checkpoint and restore)
-    criu:
-      # -- CRIU operation timeout in seconds. Default: 21600 (6 hours)
-      timeout: "21600"
-
 
 # Grove component - distributed inference orchestration
 grove:
