@@ -6,10 +6,10 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
-from benchmarks.profiler.utils.aiperf import get_decode_itl_and_thpt_per_gpu
-from benchmarks.profiler.utils.defaults import DECODE_MAX_CONCURRENCY
-from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.plot import plot_decode_3d_surface
+from dynamo.profiler.utils.aiperf import get_decode_itl_and_thpt_per_gpu
+from dynamo.profiler.utils.defaults import DECODE_MAX_CONCURRENCY
+from dynamo.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
+from dynamo.profiler.utils.plot import plot_decode_3d_surface
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
