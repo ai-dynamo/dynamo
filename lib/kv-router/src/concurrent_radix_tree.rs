@@ -455,9 +455,6 @@ impl ConcurrentRadixTree {
             // Remove the worker from this block's worker set.
             let mut guard = block.write();
             guard.workers.remove(&worker);
-            if guard.workers.is_empty() {
-                guard.children.clear();
-            }
         }
 
         Ok(())
