@@ -20,7 +20,7 @@ import random
 import subprocess
 from typing import Optional, Tuple
 
-from benchmarks.profiler.utils.defaults import (
+from dynamo.profiler.utils.defaults import (
     AIPERF_PREFILL_ATTN_DP_NUM_REQ_RATIO,
     AIPERF_PREFILL_BENCHMARK_OSL,
     AIPERF_WARMUP_REQUEST_PER_DP_RANK,
