@@ -72,6 +72,10 @@ def parse_args(context):
     flat_context = flatten_context(context)
     for key, value in flat_context.items():
         arg_name = f"--{key}"
+        # Check if this argument name is already registered
+        if arg_name in parser._option_string_actions:
+            # Skip conflicting arguments to avoid overwriting existing parser arguments
+            continue
         parser.add_argument(
             arg_name,
             type=str,
