@@ -22,8 +22,8 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import (
