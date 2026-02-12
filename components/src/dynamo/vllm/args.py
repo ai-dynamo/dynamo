@@ -18,6 +18,7 @@ except ImportError:
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
+from dynamo.common.utils.runtime import parse_endpoint, slugify_model_name
 
 from . import __version__, envs
 
@@ -123,6 +124,17 @@ def parse_args() -> Config:
     )
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Backend VLLM {__version__}"
+    )
+    parser.add_argument(
+        "--endpoint",
+        type=str,
+        default=None,
+        help=(
+            "Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. "
+            "If not provided, defaults to model-specific unique endpoint "
+            "(e.g., 'generate_qwen_qwen2_5-7b_a1b2c3d4') to prevent routing conflicts "
+            "when running multiple models. Use this to override the default."
+        ),
     )
     parser.add_argument(
         "--is-prefill-worker",
@@ -345,8 +357,6 @@ def parse_args() -> Config:
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
-    config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-
     # Check multimodal role exclusivity
     mm_flags = (
         int(bool(args.multimodal_processor))
@@ -385,35 +395,55 @@ def parse_args() -> Config:
         )
 
     # Set component and endpoint based on worker type
-    if args.multimodal_processor or args.ec_processor:
-        config.component = "processor"
-        config.endpoint = "generate"
-    elif (
-        args.vllm_native_encoder_worker
-        or args.multimodal_encode_worker
-        or args.multimodal_encode_prefill_worker
-    ):
-        config.component = "encoder"
-        config.endpoint = "generate"
-    elif args.multimodal_decode_worker:
-        # Uses "decoder" component name because prefill worker connects to "decoder"
-        # (prefill uses "backend" to receive from encoder)
-        config.component = "decoder"
-        config.endpoint = "generate"
-    elif args.multimodal_worker and args.is_prefill_worker:
-        # Multimodal prefill worker stays as "backend" to maintain encoder connection
-        config.component = "backend"
-        config.endpoint = "generate"
-    elif args.omni:
-        # Omni worker uses "backend" component for multi-stage pipeline orchestration
-        config.component = "backend"
-        config.endpoint = "generate"
-    elif args.is_prefill_worker:
-        config.component = "prefill"
-        config.endpoint = "generate"
+
+    # TODO Refactor planner to support model-specific endpoints for
+    # disaggregated workers (prefill/decode). Currently these must use hardcoded "generate"
+    # endpoint for planner compatibility. Once planner is updated, all workers can use
+    # unique endpoints, eliminating cross-model routing issues in disaggregated mode.
+
+    if args.endpoint:
+        # User provided explicit endpoint - parse it
+        config.namespace, config.component, config.endpoint = parse_endpoint(
+            args.endpoint
+        )
     else:
-        config.component = "backend"
-        config.endpoint = "generate"
+        # Auto-generate endpoint
+        config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+
+        # Determine component based on worker type
+        if args.multimodal_processor or args.ec_processor:
+            config.component = "processor"
+            config.endpoint = "generate"  # Internal wiring expects hardcoded "generate"
+        elif (
+            args.vllm_native_encoder_worker
+            or args.multimodal_encode_worker
+            or args.multimodal_encode_prefill_worker
+        ):
+            config.component = "encoder"
+            config.endpoint = "generate"  # Internal wiring expects hardcoded "generate"
+        elif args.multimodal_decode_worker:
+            config.component = "decoder"
+            config.endpoint = "generate"  # Internal wiring expects hardcoded "generate"
+        elif args.multimodal_worker and args.is_prefill_worker:
+            config.component = "backend"
+            config.endpoint = "generate"  # Internal wiring expects hardcoded "generate"
+        elif args.omni:
+            config.component = "backend"
+            config.endpoint = "generate"  # Internal wiring expects hardcoded "generate"
+        elif args.is_prefill_worker:
+            config.component = "prefill"
+            config.endpoint = "generate"  # Planner assumes hardcoded "generate"
+        elif args.is_decode_worker:
+            # Decode worker in disaggregated mode - planner assumes hardcoded "generate"
+            config.component = "backend"
+            config.endpoint = "generate"
+        else:
+            # Main backend (aggregated/model-serving path) - uniquify to fix issue #3665
+            config.component = "backend"
+            model_name = (
+                args.served_model_name[0] if args.served_model_name else args.model
+            )
+            config.endpoint = slugify_model_name(model_name)
 
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker

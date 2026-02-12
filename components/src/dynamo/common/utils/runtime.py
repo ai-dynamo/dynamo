@@ -6,11 +6,13 @@ Common runtime utilities shared across Dynamo engine backends.
 
 Provides:
     - parse_endpoint: Parse 'dyn://namespace.component.endpoint' strings
+    - slugify_model_name: Convert model name to URL-safe endpoint suffix with hash
     - graceful_shutdown: Shutdown DistributedRuntime with optional event signaling
     - create_runtime: Create DistributedRuntime with signal handlers
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import signal
@@ -41,6 +43,50 @@ def parse_endpoint(endpoint: str) -> Tuple[str, str, str]:
         )
     namespace, component, endpoint_name = endpoint_parts
     return namespace, component, endpoint_name
+
+
+def slugify_model_name(model_name: str) -> str:
+    """Convert model name to URL-safe endpoint suffix with hash for uniqueness.
+
+    Creates endpoint names in format: generate_{slug}_{hash8}
+    - slug: First 40 chars of slugified model name (lowercase, alphanumeric/-/_)
+    - hash8: First 8 chars of sha256 hash of original model name
+
+    If slug is empty (model name was all special chars), uses: generate_model_{hash8}
+
+    This ensures:
+    - Human-readable: "Qwen/Qwen2.5-7B-Instruct" → "generate_qwen_qwen2_5-7b-instruct_a1b2c3d4"
+    - Collision-resistant: Hash suffix prevents collisions
+    - Never empty: Always produces valid endpoint name
+
+    Args:
+        model_name: Model name or path (e.g., "Qwen/Qwen2.5-7B-Instruct")
+
+    Returns:
+        URL-safe endpoint name with hash suffix
+
+    Examples:
+        >>> slugify_model_name("Qwen/Qwen2.5-7B-Instruct")
+        "generate_qwen_qwen2_5-7b-instruct_1a2b3c4d"
+        >>> slugify_model_name("$%@#!")
+        "generate_model_1a2b3c4d"
+    """
+    # Compute hash first (on original name) - using sha256 from stdlib
+    hash_digest = hashlib.sha256(model_name.encode()).hexdigest()[:8]
+
+    # Slugify: lowercase, replace non-alphanumeric (except -_) with _
+    slug = model_name.lower()
+    slug = "".join(
+        c if (c.isascii() and (c.isalnum() or c in ("-", "_"))) else "_" for c in slug
+    )
+    # Remove leading underscores
+    slug = slug.lstrip("_")
+
+    # Truncate to 40 chars for readability
+    slug = slug[:40] if slug else "model"
+
+    # Combine: generate_{slug}_{hash}
+    return f"generate_{slug}_{hash_digest}"
 
 
 async def graceful_shutdown(

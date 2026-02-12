@@ -71,3 +71,106 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
         f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
         f"got {config.custom_jinja_template}"
     )
+
+
+def test_default_endpoint_from_model_name(mock_vllm_cli):
+    """Test that endpoint is auto-generated from model name."""
+    mock_vllm_cli("--model", "Qwen/Qwen2.5-7B-Instruct")
+
+    config = parse_args()
+
+    # Should generate unique endpoint from model name
+    assert config.endpoint.startswith("generate_qwen_qwen2_5-7b-instruct_")
+    assert config.namespace == "dynamo"
+    assert config.component == "backend"
+
+
+def test_explicit_endpoint_override(mock_vllm_cli):
+    """Test that --endpoint flag overrides default."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "--endpoint",
+        "dyn://custom.backend.myendpoint",
+    )
+
+    config = parse_args()
+
+    # Should use explicit endpoint
+    assert config.namespace == "custom"
+    assert config.component == "backend"
+    assert config.endpoint == "myendpoint"
+
+
+def test_different_models_different_endpoints(mock_vllm_cli):
+    """Test that different models get different endpoints."""
+    # Model 1
+    mock_vllm_cli("--model", "Qwen/Qwen2.5-7B-Instruct")
+    config1 = parse_args()
+    ep1 = config1.endpoint
+
+    # Model 2
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config2 = parse_args()
+    ep2 = config2.endpoint
+
+    # Endpoints should be different
+    assert ep1 != ep2
+
+
+def test_prefill_worker_keeps_generate_endpoint(mock_vllm_cli):
+    """Test that prefill workers keep hardcoded 'generate' endpoint."""
+    mock_vllm_cli("--model", "Qwen/Qwen2.5-7B-Instruct", "--is-prefill-worker")
+
+    config = parse_args()
+
+    # Prefill workers should keep "generate" endpoint
+    assert config.endpoint == "generate"
+    assert config.component == "prefill"
+    assert config.namespace == "dynamo"
+
+
+def test_multimodal_processor_keeps_generate_endpoint(mock_vllm_cli):
+    """Test that multimodal processor workers keep hardcoded 'generate' endpoint."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "--enable-multimodal",
+        "--multimodal-processor",
+    )
+
+    config = parse_args()
+
+    # Multimodal processor should keep "generate" endpoint
+    assert config.endpoint == "generate"
+    assert config.component == "processor"
+    assert config.namespace == "dynamo"
+
+
+def test_encoder_worker_keeps_generate_endpoint(mock_vllm_cli):
+    """Test that encoder workers keep hardcoded 'generate' endpoint."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "--enable-multimodal",
+        "--multimodal-encode-worker",
+    )
+
+    config = parse_args()
+
+    # Encoder worker should keep "generate" endpoint
+    assert config.endpoint == "generate"
+    assert config.component == "encoder"
+    assert config.namespace == "dynamo"
+
+
+def test_decode_worker_keeps_generate_endpoint(mock_vllm_cli):
+    """Test that decode workers keep hardcoded 'generate' endpoint for planner compatibility."""
+    mock_vllm_cli("--model", "Qwen/Qwen2.5-7B-Instruct", "--is-decode-worker")
+
+    config = parse_args()
+
+    # Decode workers should keep "generate" endpoint for planner compatibility
+    assert config.endpoint == "generate"
+    assert config.component == "backend"
+    assert config.namespace == "dynamo"
