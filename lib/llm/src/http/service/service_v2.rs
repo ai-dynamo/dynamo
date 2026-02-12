@@ -522,15 +522,12 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
-            tracing::warn!(
-                "Anthropic Messages API (/v1/messages) is experimental."
+            tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
+            let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
+                state.clone(),
+                request_template.clone(),
+                var(HTTP_SVC_ANTHROPIC_PATH_ENV).ok(),
             );
-            let (anthropic_docs, anthropic_route) =
-                super::anthropic::anthropic_messages_router(
-                    state.clone(),
-                    request_template.clone(),
-                    var(HTTP_SVC_ANTHROPIC_PATH_ENV).ok(),
-                );
             endpoint_routes.insert(
                 EndpointType::AnthropicMessages,
                 (anthropic_docs, anthropic_route),
