@@ -265,7 +265,7 @@ class ModelCardInstanceId:
         ...
 
 
-def compute_block_hash_for_seq_py(
+def compute_block_hash_for_seq(
     tokens: List[int],
     kv_block_size: int,
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
@@ -300,7 +300,7 @@ def compute_block_hash_for_seq_py(
         ...         "mm_hash": 0xDEADBEEF,
         ...     }]
         ... }
-        >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])
+        >>> hashes = compute_block_hash_for_seq(tokens, 32, [mm_info])
     """
 
     ...
