@@ -49,8 +49,7 @@ helm upgrade dynamo-platform nvidia-dynamo/dynamo-platform \
   --version "${DYNAMO_VERSION}" \
   --namespace dynamo \
   --reuse-values \
-  --set prometheusEndpoint="" \
-  --set dynamo-operator.discoveryBackend=""
+  --set prometheusEndpoint=""
 
 # Step 4: Uninstall kube-prometheus-stack
 echo ""

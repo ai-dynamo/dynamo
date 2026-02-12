@@ -61,8 +61,7 @@ helm upgrade dynamo-platform nvidia-dynamo/dynamo-platform \
   --version "${DYNAMO_VERSION}" \
   --namespace dynamo \
   --reuse-values \
-  --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090 \
-  --set dynamo-operator.discoveryBackend=""
+  --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
 
 # Step 7: Configure DCGM custom metrics for NVLink profiling
 echo ""
