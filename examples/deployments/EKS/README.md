@@ -1,4 +1,4 @@
-# Dynamo 0.6.0 Deployment on EKS
+# Dynamo 0.9.0 Deployment on EKS
 
 This guide covers steps of creating an Amazon EKS cluster, creating a shared storage Amazon EFS and deploying Dynamo Kubernetes Platform and run inference with both TRTLLM and vLLM backends.
 
@@ -63,9 +63,9 @@ managedNodeGroups:
 
   - name: p5en-ng
     instanceType: p5en.48xlarge
-    minSize: 1
-    desiredCapacity: 1
-    maxSize: 1
+    minSize: 2
+    desiredCapacity: 2
+    maxSize: 2
     volumeSize: 2048
     efaEnabled: true
     privateNetworking: true
@@ -75,14 +75,6 @@ managedNodeGroups:
         ebs: true
         efs: true
         fsx: true
-    preBootstrapCommands:
-      - |
-        set -ex
-        curl -O https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz
-        tar -xf aws-efa-installer-latest.tar.gz
-        cd aws-efa-installer
-        sudo ./efa_installer.sh -y --enable-gdr || true
-        insmod /lib/modules/$(uname -r)/extra/efa_nv_peermem.ko
 ```
 
 #### b) Create EKS cluster
@@ -146,12 +138,12 @@ kubectl create secret generic hf-token-secret \
 #### b) Run below to install Dynamo Kubernetes Platform
 ```
 # Install CRDs
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-0.6.0.tgz
-helm install dynamo-crds dynamo-crds-0.6.0.tgz --namespace default
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-0.9.0.tgz
+helm install dynamo-crds dynamo-crds-0.9.0.tgz --namespace default
 
 # Install Platform
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-0.6.0.tgz
-helm install dynamo-platform dynamo-platform-0.6.0.tgz --namespace dynamo-system --create-namespace
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-0.9.0.tgz
+helm install dynamo-platform dynamo-platform-0.9.0.tgz --namespace dynamo-system --create-namespace
 ```
 
 Check pods status
@@ -174,41 +166,35 @@ dynamo-platform-nats-0                                            2/2     Runnin
 
 #### a) Build Dynamo TRTLLM runtime image
 
-This step is optional. You can also use NGC image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0` from [here](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=0.6.0). To enable EFA, you need to build from source with latest UCX version as shown below.
+To enable EFA, you need to build from source as shown below.
 
 ```
 # Clone Dynamo Repo
-git clone https://github.com/ai-dynamo/dynamo.git -b v0.6.0
-cd dynamo/container
-
-# Change UCX version to master
-vim build.sh # Change line 119 to "NIXL_UCX_REF=master"
+git clone https://github.com/ai-dynamo/dynamo.git -b v0.9.0
+cd dynamo
 
 # Build image and this can take a few hours depending on your system
-./build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit --trtllm-use-nixl-kvcache-experimental
+python3 container/render.py --framework trtllm --target runtime --make-efa
+docker build -t dynamo:latest-trtllm-runtime -f container/<RENDERED_DOCKERFILE> .
 
 # Create an ECR repository
 aws ecr get-login-password | docker login --username AWS --password-stdin $DOCKER_SERVER/
 aws ecr create-repository --repository-name <ECR_REPOSITORY_NAME>
 
 # Push Image
-docker tag dynamo:latest-trtllm $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
-docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
+docker tag dynamo:latest-trtllm-runtime $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.9.0
+docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.9.0
 ```
 
 #### b) Create Dynamo Inference Graph (TRTLLM)
 
-Please change `<DYNAMO_TRTLLM_IMAGE>`. You can either use NGC image or built image. For this example, we'll deploy `Qwen/Qwen3-32B-FP8` in disaggregated mode with KV router. Specificaly, we'll use the [model receipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) from Dynamo repo. This creates 8 prefill workers with TP1 and 4 decode worker with TP2 for a total of 16 x H200 GPUs (p5en.48xlarge). Note that this p5en.48xlarge has 16 EFA devices so each GPU is given 2 as shown below.
+Please change `<DYNAMO_TRTLLM_IMAGE>`. For this example, we'll deploy `Qwen/Qwen3-32B-FP8` in disaggregated mode with KV router. Specificaly, we'll use the [model receipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) from Dynamo repo. This creates 8 prefill workers with TP1 and 4 decode worker with TP2 for a total of 16 x H200 GPUs (p5en.48xlarge). Note that this p5en.48xlarge has 16 EFA devices so each GPU is given 2 as shown below.
 
-| Optional Environment Variable | Description |
+| Instance Type | EFA Device Count |
 | :--- | :--- |
-| `DYN_LOG` | Dynamo log verbose level |
-| `TRTLLM_LOG_LEVEL` | TRTLLM log verbose level |
-| `UCX_LOG_LEVEL` | UCX log verbose level |
-| `UCX_PROTO_INFO` | enable or disable log of UCX protocal selection, select `n` or `y` |
-| `NCCL_DEBUG` | NCCL log verbose level |
-| `NCCL_LAUNCH_MODE` | control NCCL launch mode, select `PARALLEL`, `GROUP`, or `AUTO` |
-| `NCCL_NET_SHARED_COMMS` | enable or disable sharing network resources across NCCL communications, select `0` or `1` |
+| `p5en.48xlarge` | 16 |
+| `p5.48xlarge` | 32 |
+| `G6e.48xlarge` | 4 |
 
 ```
 apiVersion: v1
@@ -217,10 +203,9 @@ metadata:
   name: prefill-config
 data:
   prefill.yaml: |
-    build_config:
-      max_batch_size: 1
-      max_num_tokens: 7800
-      max_seq_len: 7800
+    max_batch_size: 1
+    max_num_tokens: 7800
+    max_seq_len: 7800
     tensor_parallel_size: 1
     enable_attention_dp: false
     trust_remote_code: true
@@ -238,7 +223,7 @@ data:
       dtype: fp8
 
     cache_transceiver_config:
-      backend: NIXL
+      backend: NIXL # EFA Libfabric Required
 
     print_iter_log: false
 
@@ -250,10 +235,9 @@ metadata:
   name: decode-config
 data:
   decode.yaml: |
-    build_config:
-      max_batch_size: 128
-      max_num_tokens: 7800
-      max_seq_len: 7800
+    max_batch_size: 128
+    max_num_tokens: 7800
+    max_seq_len: 7800
     tensor_parallel_size: 2
     enable_attention_dp: false
     trust_remote_code: true
@@ -271,7 +255,7 @@ data:
       dtype: fp8
 
     cache_transceiver_config:
-      backend: NIXL
+      backend: NIXL # EFA Libfabric Required
 
     print_iter_log: false
 
@@ -284,123 +268,112 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: trtllm-v1-disagg-router
       componentType: frontend
       replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: <DYNAMO_TRTLLM_IMAGE>
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
+      extraPodSpec:
+        mainContainer:
+          image: <DYNAMO_TRTLLM_IMAGE>
+          volumeMounts:
+            - name: modelcache-pvc
+              mountPath: /data
+        volumes:
+          - name: modelcache-pvc
+            persistentVolumeClaim:
+              claimName: modelcache-pvc
     TRTLLMPrefillWorker:
-      dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 8
       resources:
         limits:
           gpu: "1"
-      sharedMemory:
-        size: 80Gi
+          custom:
+            vpc.amazonaws.com/efa: "2" # EFA Libfabric Required
+        requests:
+          gpu: "1"
+          custom:
+            vpc.amazonaws.com/efa: "2" # EFA Libfabric Required
       envs:
-        - name: DYN_LOG
-          value: DEBUG
-        - name: TRTLLM_LOG_LEVEL
-          value: DEBUG
-        - name: UCX_LOG_LEVEL
-          value: debug
-        - name: UCX_PROTO_INFO
-          value: "y"
-        - name: NCCL_DEBUG
-          value: WARN
-        - name: NCCL_LAUNCH_MODE
-          value: PARALLEL
-        - name: NCCL_NET_SHARED_COMMS
-          value: "0"
+        - name: TRTLLM_NIXL_KVCACHE_BACKEND # EFA Libfabric Required
+          value: "LIBFABRIC"
+        - name: FI_LOG_PROV # EFA Libfabric Required
+          value: "efa"
+        - name: FI_PROVIDER # EFA Libfabric Required
+          value: "efa"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /live
-              port: system
-              scheme: HTTP
-            periodSeconds: 60
-            timeoutSeconds: 600
-            failureThreshold: 600
           image: <DYNAMO_TRTLLM_IMAGE>
           workingDir: /workspace/components/backends/trtllm
           command:
-            - /bin/sh
+            - /bin/bash
             - -c
-          args:
-            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-32B-FP8 --served-model-name Qwen/Qwen3-32B-FP8 --extra-engine-args /engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy prefill_first --publish-events-and-metrics"
-          resources:
-            requests:
-              vpc.amazonaws.com/efa: "2"
-            limits:
-              vpc.amazonaws.com/efa: "2"
+            - |
+              exec python3 -m dynamo.trtllm \
+                --model-path /data/Qwen/Qwen3-32B-FP8 \
+                --served-model-name Qwen/Qwen3-32B-FP8 \
+                --extra-engine-args /engine_configs/prefill.yaml \
+                --disaggregation-mode prefill \
+                --publish-events-and-metrics
           volumeMounts:
             - name: prefill-config
               mountPath: /engine_configs
+            - name: modelcache-pvc
+              mountPath: /data
         volumes:
           - name: prefill-config
             configMap:
               name: prefill-config
+          - name: modelcache-pvc
+            persistentVolumeClaim:
+              claimName: modelcache-pvc
     TRTLLMDecodeWorker:
-      dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 4
       resources:
         limits:
           gpu: "2"
-      sharedMemory:
-        size: 80Gi
+          custom:
+            vpc.amazonaws.com/efa: "4" # EFA Libfabric Required
+        requests:
+          gpu: "2"
+          custom:
+            vpc.amazonaws.com/efa: "4" # EFA Libfabric Required
       envs:
-        - name: DYN_LOG
-          value: DEBUG
-        - name: TRTLLM_LOG_LEVEL
-          value: DEBUG
-        - name: UCX_LOG_LEVEL
-          value: debug
-        - name: UCX_PROTO_INFO
-          value: "y"
-        - name: NCCL_DEBUG
-          value: WARN
-        - name: NCCL_LAUNCH_MODE
-          value: PARALLEL
-        - name: NCCL_NET_SHARED_COMMS
-          value: "0"
+        - name: TRTLLM_NIXL_KVCACHE_BACKEND # EFA Libfabric Required
+          value: "LIBFABRIC"
+        - name: FI_LOG_PROV # EFA Libfabric Required
+          value: "efa"
+        - name: FI_PROVIDER # EFA Libfabric Required
+          value: "efa"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /live
-              port: system
-              scheme: HTTP
-            periodSeconds: 60
-            timeoutSeconds: 600
-            failureThreshold: 600
           image: <DYNAMO_TRTLLM_IMAGE>
           workingDir: /workspace/components/backends/trtllm
           command:
-            - /bin/sh
+            - /bin/bash
             - -c
-          args:
-            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-32B-FP8 --served-model-name Qwen/Qwen3-32B-FP8 --extra-engine-args /engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy prefill_first"
-          resources:
-            requests:
-              vpc.amazonaws.com/efa: "4"
-            limits:
-              vpc.amazonaws.com/efa: "4"
+            - |
+              exec python3 -m dynamo.trtllm \
+              --model-path /data/Qwen/Qwen3-32B-FP8 \
+              --served-model-name Qwen/Qwen3-32B-FP8 \
+              --extra-engine-args /engine_configs/decode.yaml \
+              --disaggregation-mode decode \
           volumeMounts:
             - name: decode-config
               mountPath: /engine_configs
+            - name: modelcache-pvc
+              mountPath: /data
         volumes:
           - name: decode-config
             configMap:
               name: decode-config
+          - name: modelcache-pvc
+            persistentVolumeClaim:
+              claimName: modelcache-pvc
 ```
 
 #### c) Deploy Dynamo Inference Graph (TRTLLM)
@@ -477,15 +450,16 @@ kubectl delete -f <DYNAMO_INFERENCE_GRAPH>.yaml -n dynamo-system
 
 #### a) Build Dynamo vLLM runtime image
 
-This step is optional. You can also use NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0` from [here](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=0.6.0). To enable EFA, you need to build from source with latest UCX version as shown below.
+To enable EFA, you need to build from source as shown below.
 
 ```
 # Clone Dynamo Repo
-git clone https://github.com/ai-dynamo/dynamo.git -b v0.6.0
-cd dynamo/container
+git clone https://github.com/ai-dynamo/dynamo.git -b v0.9.0
+cd dynamo
 
-# Change UCX version to master
-vim build.sh # Change line 119 to "NIXL_UCX_REF=master"
+# Build image and this can take a few hours depending on your system
+python3 container/render.py --framework vllm --target runtime --make-efa
+docker build -t dynamo:latest-vllm-runtime -f container/<RENDERED_DOCKERFILE> .
 
 # Build image
 ./build.sh --framework vllm
@@ -495,22 +469,19 @@ aws ecr get-login-password | docker login --username AWS --password-stdin $DOCKE
 aws ecr create-repository --repository-name <ECR_REPOSITORY_NAME>
 
 # Push Image
-docker tag dynamo:latest-vllm $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
-docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
+docker tag dynamo:latest-vllm-runtime $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.9.0
+docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.9.0
 ```
 
 #### b) Create Dynamo Inference Graph (vLLM)
 
-Please change `<DYNAMO_VLLM_IMAGE>`. You can either use NGC image or built image. For this example, we'll deploy `Qwen/Qwen3-32B-FP8` in disaggregated mode with KV router. Specificaly, we'll use the [model receipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) from Dynamo repo. This creates 8 prefill workers with TP1 and 4 decode worker with TP2 for a total of 16 x H200 GPUs (p5en.48xlarge). Note that this p5en.48xlarge has 16 EFA devices so each GPU is given 2 as shown below.
+Please change `<DYNAMO_VLLM_IMAGE>`. For this example, we'll deploy `Qwen/Qwen3-32B-FP8` in disaggregated mode with KV router. Specificaly, we'll use the [model receipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) from Dynamo repo. This creates 8 prefill workers with TP1 and 4 decode worker with TP2 for a total of 16 x H200 GPUs (p5en.48xlarge). Note that this p5en.48xlarge has 16 EFA devices so each GPU is given 2 as shown below.
 
-| Optional Environment Variable | Description |
+| Instance Type | EFA Device Count |
 | :--- | :--- |
-| `DYN_LOG` | Dynamo log verbose level |
-| `UCX_LOG_LEVEL` | UCX log verbose level |
-| `UCX_PROTO_INFO` | enable or disable log of UCX protocal selection, select `n` or `y` |
-| `NCCL_DEBUG` | NCCL log verbose level |
-| `NCCL_LAUNCH_MODE` | control NCCL launch mode, select `PARALLEL`, `GROUP`, or `AUTO` |
-| `NCCL_NET_SHARED_COMMS` | enable or disable sharing network resources across NCCL communications, select `0` or `1` |
+| `p5en.48xlarge` | 16 |
+| `p5.48xlarge` | 32 |
+| `G6e.48xlarge` | 4 |
 
 ```
 apiVersion: nvidia.com/v1alpha1
@@ -520,105 +491,101 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-v1-disagg-router
       componentType: frontend
       replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: <DYNAMO_VLLM_IMAGE>
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
+      extraPodSpec:
+        mainContainer:
+          image: <DYNAMO_TRTLLM_IMAGE>
+          volumeMounts:
+            - name: modelcache-pvc
+              mountPath: /data
+        volumes:
+          - name: modelcache-pvc
+            persistentVolumeClaim:
+              claimName: modelcache-pvc
     VllmDecodeWorker:
-      dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 4
       resources:
         limits:
           gpu: "2"
-      sharedMemory:
-        size: 80Gi
+          custom:
+            vpc.amazonaws.com/efa: "4" # EFA Libfabric Required
+        requests:
+          gpu: "2"
+          custom:
+            vpc.amazonaws.com/efa: "4" # EFA Libfabric Required
       envs:
-        - name: DYN_LOG
-          value: DEBUG
-        - name: UCX_LOG_LEVEL
-          value: debug
-        - name: UCX_PROTO_INFO
-          value: "y"
-        - name: NCCL_DEBUG
-          value: WARN
-        - name: NCCL_LAUNCH_MODE
-          value: PARALLEL
-        - name: NCCL_NET_SHARED_COMMS
-          value: "0"
+      - name: FI_PROVIDER # EFA Libfabric Required
+        value: "efa"
+      - name: FI_LOG_PROV # EFA Libfabric Required
+        value: "efa"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /live
-              port: system
-              scheme: HTTP
-            periodSeconds: 60
-            timeoutSeconds: 600
-            failureThreshold: 600
-          image: <DYNAMO_VLLM_IMAGE>
+          image: <DYNAMO_TRTLLM_IMAGE>
           workingDir: /workspace/components/backends/vllm
           command:
-            - /bin/sh
+            - /bin/bash
             - -c
-          args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-32B-FP8 --served-model-name Qwen/Qwen3-32B-FP8 --tensor-parallel-size 2
-          resources:
-            requests:
-              vpc.amazonaws.com/efa: "4"
-            limits:
-              vpc.amazonaws.com/efa: "4"
+            - |
+              exec python3 -m dynamo.vllm \
+              --model /data/Qwen/Qwen3-32B-FP8 \
+              --served-model-name Qwen/Qwen3-32B-FP8 \
+              --tensor-parallel-size 1 \
+              --is-decode-worker \
+              --connector none \ # EFA Libfabric Required
+              --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}' # EFA Libfabric Required
+          volumeMounts:
+            - name: modelcache-pvc
+              mountPath: /data
+        volumes:
+          - name: modelcache-pvc
+            persistentVolumeClaim:
+              claimName: modelcache-pvc
     VllmPrefillWorker:
-      dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 8
       resources:
         limits:
           gpu: "1"
-      sharedMemory:
-        size: 80Gi
+          custom:
+            vpc.amazonaws.com/efa: "2" # EFA Libfabric Required
+        requests:
+          gpu: "1"
+          custom:
+            vpc.amazonaws.com/efa: "2" # EFA Libfabric Required
       envs:
-        - name: DYN_LOG
-          value: DEBUG
-        - name: UCX_LOG_LEVEL
-          value: debug
-        - name: UCX_PROTO_INFO
-          value: "y"
-        - name: NCCL_DEBUG
-          value: WARN
-        - name: NCCL_LAUNCH_MODE
-          value: PARALLEL
-        - name: NCCL_NET_SHARED_COMMS
-          value: "0"
+      - name: FI_PROVIDER # EFA Libfabric Required
+        value: "efa"
+      - name: FI_LOG_PROV # EFA Libfabric Required
+        value: "efa"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /live
-              port: system
-              scheme: HTTP
-            periodSeconds: 60
-            timeoutSeconds: 600
-            failureThreshold: 600
-          image: <DYNAMO_VLLM_IMAGE>
+          image: <DYNAMO_TRTLLM_IMAGE>
           workingDir: /workspace/components/backends/vllm
           command:
-            - /bin/sh
+            - /bin/bash
             - -c
-          args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-32B-FP8 --served-model-name Qwen/Qwen3-32B-FP8 --tensor-parallel-size 1 --is-prefill-worker
-          resources:
-            requests:
-              vpc.amazonaws.com/efa: "2"
-            limits:
-              vpc.amazonaws.com/efa: "2"
+            - |
+              exec python3 -m dynamo.vllm \
+              --model /data/Qwen/Qwen3-32B-FP8 \
+              --served-model-name Qwen/Qwen3-32B-FP8 \
+              --tensor-parallel-size 1 \
+              --is-prefill-worker \
+              --connector none \ # EFA Libfabric Required
+              --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}' # EFA Libfabric Required
+          volumeMounts:
+            - name: modelcache-pvc
+              mountPath: /data
+        volumes:
+          - name: modelcache-pvc
+            persistentVolumeClaim:
+              claimName: modelcache-pvc
 ```
 
 #### c) Deploy Dynamo Inference Graph (vLLM)
