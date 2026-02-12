@@ -407,12 +407,14 @@ impl KvRouter {
             .await?;
         let total_elapsed = start.elapsed();
 
-        metrics::ROUTING_OVERHEAD_METRICS.observe(
-            hash_elapsed,
-            find_matches_elapsed,
-            seq_hash_elapsed,
-            total_elapsed,
-        );
+        if let Some(m) = metrics::RoutingOverheadMetrics::get() {
+            m.observe(
+                hash_elapsed,
+                find_matches_elapsed,
+                seq_hash_elapsed,
+                total_elapsed,
+            );
+        }
 
         #[cfg(feature = "bench")]
         tracing::info!(
