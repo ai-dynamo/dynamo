@@ -412,9 +412,9 @@ pub async fn start_kv_router_background(
                             // Forward the RouterEvent to the indexer
                             if let Err(e) = kv_events_tx.send(event).await {
                                 tracing::warn!(
-                                    "failed to send kv event to indexer; shutting down: {e:?}"
+                                    "failed to send kv event to indexer; skipping event, continuing: {e:?}"
                                 );
-                                break;
+                                continue;
                             }
                         },
                         Ok(None) => {
@@ -613,9 +613,9 @@ pub async fn start_kv_router_background_event_plane(
                     // Forward the RouterEvent to the indexer
                     if let Err(e) = kv_events_tx.send(event).await {
                         tracing::warn!(
-                            "failed to send kv event to indexer; shutting down: {e:?}"
+                            "failed to send kv event to indexer; skipping event, continuing: {e:?}"
                         );
-                        break;
+                        continue;
                     }
                 }
             }
