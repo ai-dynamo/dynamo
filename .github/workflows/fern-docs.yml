@@ -202,16 +202,16 @@ jobs:
           fi
 
           # Sync components/ directory (e.g., CustomFooter.tsx)
-          if [ -d main-checkout/fern/components ]; then
+          if [ -d main-checkout/docs/components ]; then
             echo "Syncing components/ from main to docs-website branch..."
-            rm -rf fern-checkout/fern/components
-            cp -r main-checkout/fern/components fern-checkout/fern/components
+            rm -rf docs-checkout/docs/components
+            cp -r main-checkout/docs/components docs-checkout/docs/components
           fi
 
           # Sync main.css
-          if [ -f main-checkout/fern/main.css ]; then
+          if [ -f main-checkout/docs/main.css ]; then
             echo "Syncing main.css from main to docs-website branch..."
-            cp main-checkout/fern/main.css fern-checkout/fern/main.css
+            cp main-checkout/docs/main.css docs-checkout/docs/main.css
           fi
 
       - name: Convert GitHub callouts to Fern format
@@ -222,7 +222,7 @@ jobs:
 
       - name: Update docs.yml preserving versions
         run: |
-          cd fern-checkout/fern
+          cd docs-checkout/docs
 
           # Save the full versions array from docs-website
           yq '.products[0].versions' docs.yml > /tmp/preserved_versions.yml
@@ -231,7 +231,7 @@ jobs:
           cat /tmp/preserved_versions.yml
 
           # Copy docs.yml from main to get config updates
-          cp ../../main-checkout/fern/docs.yml docs.yml
+          cp ../../main-checkout/docs/docs.yml docs.yml
 
           # Restore the preserved versions array
           yq -i '.products[0].versions = load("/tmp/preserved_versions.yml")' docs.yml
