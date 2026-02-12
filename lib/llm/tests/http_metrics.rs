@@ -6,6 +6,7 @@ use async_stream::stream;
 use dynamo_llm::{
     http::service::{metrics::Endpoint, service_v2::HttpService},
     model_card::ModelDeploymentCard,
+    namespace::NamespaceFilter,
     protocols::{
         Annotated,
         openai::chat_completions::{
@@ -355,7 +356,7 @@ mod integration_tests {
 
         // Spawn watcher task to discover models
         let _watcher_task = tokio::spawn(async move {
-            model_watcher.watch(discovery_stream, None).await;
+            model_watcher.watch(discovery_stream, NamespaceFilter::Global).await;
         });
 
         let EngineConfig::InProcessText { engine, model, .. } = engine_config else {
