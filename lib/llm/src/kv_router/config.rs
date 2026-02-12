@@ -4,7 +4,7 @@
 use derive_builder::Builder;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use crate::kv_router::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 
@@ -21,6 +21,7 @@ pub struct RouterConfigOverride {
 
 /// KV Router configuration parameters
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub overlap_score_weight: f64,
@@ -76,6 +77,12 @@ pub struct KvRouterConfig {
     /// Must be > 0.
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
+
+    /// Number of event processing threads for the KV indexer.
+    /// When > 1, uses ConcurrentRadixTree with a thread pool instead of the
+    /// single-threaded RadixTree. Default: 1.
+    #[validate(range(min = 1))]
+    pub router_event_threads: u32,
 }
 
 impl Default for KvRouterConfig {
@@ -95,8 +102,28 @@ impl Default for KvRouterConfig {
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
             router_queue_threshold: None,
+            router_event_threads: 1,
         }
     }
+}
+
+fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationError> {
+    if config.durable_kv_events && !config.use_kv_events {
+        return Err(ValidationError::new(
+            "durable_kv_events requires use_kv_events=true",
+        ));
+    }
+    if !config.use_kv_events && config.router_event_threads > 1 {
+        return Err(ValidationError::new(
+            "router_event_threads > 1 requires use_kv_events=true",
+        ));
+    }
+    if config.router_track_output_blocks && !config.router_track_active_blocks {
+        return Err(ValidationError::new(
+            "router_track_output_blocks requires router_track_active_blocks=true",
+        ));
+    }
+    Ok(())
 }
 
 impl KvRouterConfig {

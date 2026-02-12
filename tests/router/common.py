@@ -1305,6 +1305,7 @@ def _test_router_indexers_sync(
     test_nats_interruption: bool = False,
     nats_server: Optional["NatsServer"] = None,
     durable_kv_events: bool = False,
+    router_event_threads: int = 1,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1349,6 +1350,7 @@ def _test_router_indexers_sync(
         kv_router_config = KvRouterConfig(
             router_snapshot_threshold=20,
             durable_kv_events=durable_kv_events,
+            router_event_threads=router_event_threads,
         )
 
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
@@ -1881,6 +1883,7 @@ def _test_router_decisions(
     block_size: int = BLOCK_SIZE,
     use_kv_events: bool = True,
     durable_kv_events: bool = False,
+    router_event_threads: int = 1,
 ):
     """Validate KV cache prefix reuse and worker routing by sending requests diverging prefixes.
 
@@ -1911,6 +1914,7 @@ def _test_router_decisions(
         router_snapshot_threshold=20,
         use_kv_events=use_kv_events,
         durable_kv_events=durable_kv_events,
+        router_event_threads=router_event_threads,
     )
     kv_push_router = KvPushRouter(
         endpoint=endpoint,

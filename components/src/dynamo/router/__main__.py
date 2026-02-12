@@ -15,6 +15,7 @@ routing decisions.
 import argparse
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import uvloop
@@ -256,6 +257,13 @@ def parse_args():
         help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-kv-events is set. Determines how aggressively to prune the tree (default: 0.8)",
     )
 
+    parser.add_argument(
+        "--router-event-threads",
+        type=int,
+        default=int(os.environ.get("DYN_ROUTER_EVENT_THREADS", "1")),
+        help="KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput. Can be set via DYN_ROUTER_EVENT_THREADS env var (default: 1).",
+    )
+
     return parser.parse_args()
 
 
@@ -302,6 +310,7 @@ async def worker(runtime: DistributedRuntime):
         router_ttl_secs=args.router_ttl_secs,
         router_max_tree_size=args.router_max_tree_size,
         router_prune_target_ratio=args.router_prune_target_ratio,
+        router_event_threads=args.router_event_threads,
     )
 
     # Create service component - use "router" as component name
