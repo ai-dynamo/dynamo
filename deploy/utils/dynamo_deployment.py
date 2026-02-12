@@ -594,6 +594,6 @@ async def main():
 
 
 # run with:
-# uv run benchmarks/profiler/utils/dynamo_deployment.py -n mo-dyn -f ./examples/vllm/deploy/agg.yaml -l ./client_logs
+# uv run components/src/dynamo/profiler/utils/dynamo_deployment.py -n mo-dyn -f ./examples/vllm/deploy/agg.yaml -l ./client_logs
 if __name__ == "__main__":
     asyncio.run(main())
