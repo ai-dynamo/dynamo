@@ -284,13 +284,15 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let cc_client =
-                if chooser.kv_router_config().router_enable_agentic_cache_control {
-                    let component = chooser.client().endpoint.component().clone();
-                    Some(create_cache_control_client(&component).await?)
-                } else {
-                    None
-                };
+            let cc_client = if chooser
+                .kv_router_config()
+                .router_enable_agentic_cache_control
+            {
+                let component = chooser.client().endpoint.component().clone();
+                Some(create_cache_control_client(&component).await?)
+            } else {
+                None
+            };
             let kv_push_router = KvPushRouter::new(router, chooser, cc_client);
             ServiceBackend::from_engine(Arc::new(kv_push_router))
         }

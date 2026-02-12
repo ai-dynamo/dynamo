@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::{
     kv_router::{
         CacheControlClient, KvRouter,
+        cache_control::spawn_pin_prefix,
         metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
@@ -284,16 +285,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .as_ref()
             .and_then(|r| r.pin)
             .unwrap_or(false);
-        let token_ids_for_pin = if pin_prefix {
-            Some(request.token_ids.clone())
-        } else {
-            None
-        };
-        let cc_client = if pin_prefix {
-            self.cache_control_client.clone()
-        } else {
-            None
-        };
+        let token_ids_for_pin = pin_prefix.then(|| request.token_ids.clone());
+        let cc_client = pin_prefix
+            .then(|| self.cache_control_client.clone())
+            .flatten();
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
@@ -428,41 +423,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             // because the prefix may be incomplete on the worker. Add a
             // `generation_completed` bool, set it on natural stream end, and gate
             // the PIN call on it.
-            if pin_prefix {
-                if let (Some(cc), Some(token_ids)) = (&cc_client, &token_ids_for_pin) {
-                    let pin_request = serde_json::json!({
-                        "action": "pin_prefix",
-                        "token_ids": token_ids,
-                    });
-                    let cc_clone = cc.clone();
-                    let pin_context_id = context_id.clone();
-                    tokio::spawn(async move {
-                        match cc_clone.direct(SingleIn::new(pin_request), instance_id).await {
-                            Ok(mut stream) => {
-                                if let Some(resp) = stream.next().await {
-                                    tracing::debug!(
-                                        request_id = %pin_context_id,
-                                        worker_id = instance_id,
-                                        ?resp,
-                                        "pin_prefix response"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    request_id = %pin_context_id,
-                                    worker_id = instance_id,
-                                    "Failed to pin prefix: {e}"
-                                );
-                            }
-                        }
-                    });
-                } else if cc_client.is_none() {
-                    tracing::warn!(
-                        request_id = %context_id,
-                        "pin=true but no cache_control_client configured"
-                    );
-                }
+            if let Some(ref token_ids) = token_ids_for_pin {
+                spawn_pin_prefix(cc_client.as_ref(), token_ids, instance_id, &context_id);
             }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
