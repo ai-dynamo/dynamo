@@ -276,6 +276,7 @@ fn convert_input_items_to_messages(
                                 content: Some(ChatCompletionRequestAssistantMessageContent::Text(
                                     text,
                                 )),
+                                reasoning_content: None,
                                 refusal: None,
                                 name: None,
                                 audio: None,
@@ -291,6 +292,7 @@ fn convert_input_items_to_messages(
                     messages.push(ChatCompletionRequestMessage::Assistant(
                         ChatCompletionRequestAssistantMessage {
                             content: None,
+                            reasoning_content: None,
                             refusal: None,
                             name: None,
                             audio: None,
@@ -355,6 +357,7 @@ fn convert_input_items_to_messages(
                             content: Some(ChatCompletionRequestAssistantMessageContent::Text(
                                 content_text,
                             )),
+                            reasoning_content: None,
                             refusal: None,
                             name: None,
                             audio: None,
