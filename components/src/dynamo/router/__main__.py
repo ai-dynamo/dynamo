@@ -219,11 +219,27 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--durable-kv-events",
+        action="store_true",
+        dest="durable_kv_events",
+        default=False,
+        help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
+    )
+
+    parser.add_argument(
         "--no-track-active-blocks",
         action="store_false",
         dest="router_track_active_blocks",
         default=True,
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing (default: True)",
+    )
+
+    parser.add_argument(
+        "--no-assume-kv-reuse",
+        action="store_false",
+        dest="router_assume_kv_reuse",
+        default=True,
+        help="KV Router: When tracking active blocks, do not assume KV cache reuse (generate random hashes instead of computing actual block hashes). Useful when KV cache reuse is not expected. By default, KV cache reuse is assumed.",
     )
 
     parser.add_argument(
@@ -286,10 +302,12 @@ async def worker(runtime: DistributedRuntime):
         f"overlap_score_weight={args.kv_overlap_score_weight}, "
         f"router_temperature={args.router_temperature}, "
         f"use_kv_events={args.use_kv_events}, "
+        f"durable_kv_events={args.durable_kv_events}, "
         f"router_replica_sync={args.router_replica_sync}, "
         f"router_reset_states={args.router_reset_states}, "
         f"router_track_active_blocks={args.router_track_active_blocks}, "
         f"router_track_output_blocks={args.router_track_output_blocks}, "
+        f"router_assume_kv_reuse={args.router_assume_kv_reuse}, "
         f"router_ttl_secs={args.router_ttl_secs}, "
         f"router_max_tree_size={args.router_max_tree_size}, "
         f"router_prune_target_ratio={args.router_prune_target_ratio}"
@@ -300,11 +318,13 @@ async def worker(runtime: DistributedRuntime):
         overlap_score_weight=args.kv_overlap_score_weight,
         router_temperature=args.router_temperature,
         use_kv_events=args.use_kv_events,
+        durable_kv_events=args.durable_kv_events,
         router_replica_sync=args.router_replica_sync,
-        router_snapshot_threshold=args.router_snapshot_threshold,
-        router_reset_states=args.router_reset_states,
         router_track_active_blocks=args.router_track_active_blocks,
         router_track_output_blocks=args.router_track_output_blocks,
+        router_assume_kv_reuse=args.router_assume_kv_reuse,
+        router_snapshot_threshold=args.router_snapshot_threshold,
+        router_reset_states=args.router_reset_states,
         router_ttl_secs=args.router_ttl_secs,
         router_max_tree_size=args.router_max_tree_size,
         router_prune_target_ratio=args.router_prune_target_ratio,
