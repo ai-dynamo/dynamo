@@ -121,18 +121,11 @@ class EmbeddingsProcessor:
         """
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
 
-        # SGLang expects 2D tensor for precomputed_embedding format
-        # Encoder outputs 3D (1, num_patches, hidden_dim) for internal consistency
-        # Squeeze batch dimension at SGLang boundary
-        if precomputed.dim() == 3 and precomputed.shape[0] == 1:
-            precomputed = precomputed.squeeze(0)
-
-        # Reconstruct processor output with tensors
+        # Convert list fields back to tensors (JSON roundtrip loses tensor type)
         processor_output = request.processor_output or {}
-        if "image_grid_thw" in processor_output:
-            processor_output["image_grid_thw"] = torch.tensor(
-                processor_output["image_grid_thw"]
-            )
+        for key, value in processor_output.items():
+            if isinstance(value, list):
+                processor_output[key] = torch.tensor(value)
 
         mm_item = dict(processor_output)
         mm_item.update(

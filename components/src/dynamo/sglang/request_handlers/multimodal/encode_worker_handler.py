@@ -127,9 +127,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 [request.multimodal_input.image_url]
             )
 
-            # Add batch dim for NIXL transfer: (n, d) -> (1, n, d)
-            precomputed_embeddings = mm_embedding.unsqueeze(0)
-
             image_grid_thw = (
                 image_grid_dim.tolist()
                 if isinstance(image_grid_dim, torch.Tensor)
@@ -139,7 +136,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             # Store the image data info in the request for downstream
             request.processor_output = {"image_grid_thw": image_grid_thw}
             request.image_grid_thw = image_grid_thw
-            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.embeddings_shape = tuple(mm_embedding.shape)
 
             # Replace the single image token with multiple image tokens based on embedding shape
             image_token_id_index = request.request.token_ids.index(self.image_token_id)
@@ -156,7 +153,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             )
 
             # Create descriptor for the multimodal data
-            descriptor = connect.Descriptor(precomputed_embeddings)
+            descriptor = connect.Descriptor(mm_embedding)
 
             with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
