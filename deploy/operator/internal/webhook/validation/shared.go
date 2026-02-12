@@ -108,7 +108,7 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 	if v.spec.Autoscaling != nil {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter "+
-				"with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
+				"with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md",
 			v.fieldPath))
 	}
 
