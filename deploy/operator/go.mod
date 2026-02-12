@@ -4,7 +4,8 @@ go 1.25.0
 
 require (
 	emperror.dev/errors v0.8.1
-	github.com/NVIDIA/grove/operator/api v0.1.0-alpha.3
+	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.6
 	github.com/bsm/gomega v1.27.10
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-cmp v0.7.0
@@ -21,7 +22,7 @@ require (
 	k8s.io/apiextensions-apiserver v0.34.3
 	k8s.io/apimachinery v0.34.3
 	k8s.io/client-go v0.34.3
-	k8s.io/utils v0.0.0-20250820121507-0af2bda4dd1d
+	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/controller-runtime v0.22.4
 	sigs.k8s.io/gateway-api-inference-extension v1.2.0
 	sigs.k8s.io/lws v0.6.1
@@ -30,7 +31,6 @@ require (
 )
 
 require (
-	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect

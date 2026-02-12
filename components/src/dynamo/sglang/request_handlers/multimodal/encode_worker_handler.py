@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import torch
 from sglang.srt.parser.conversation import chat_templates
@@ -45,8 +46,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         component: Component,
         config: Config,
         pd_worker_client: Client,
+        shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
-        super().__init__(component, engine=None, config=config)
+        super().__init__(
+            component, engine=None, config=config, shutdown_event=shutdown_event
+        )
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
         self.served_model_name = config.server_args.served_model_name

@@ -6,7 +6,7 @@ This directory contains utilities and manifests for Dynamo benchmarking and prof
 
 **Before using these utilities, you must first set up Dynamo Kubernetes Platform following the main installation guide:**
 
-👉 **[Follow the Dynamo Kubernetes Platform installation guide](/docs/kubernetes/installation_guide.md) to install the Dynamo Kubernetes Platform first.**
+👉 **[Follow the Dynamo Kubernetes Platform installation guide](/docs/pages/kubernetes/installation-guide.md) to install the Dynamo Kubernetes Platform first.**
 
 This includes:
 1. Installing the Dynamo CRDs
@@ -144,8 +144,8 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 #### Next Steps
 
 For complete benchmarking and profiling workflows:
-- **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
-- **Pre-Deployment Profiling**: See [docs/benchmarks/sla_driven_profiling.md](../../docs/benchmarks/sla_driven_profiling.md) for optimizing configurations before deployment
+- **Benchmarking Guide**: See [docs/pages/benchmarks/benchmarking.md](../../docs/pages/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
+- **Pre-Deployment Profiling**: See [docs/pages/components/profiler/profiler-guide.md](../../docs/pages/components/profiler/profiler-guide.md) for optimizing configurations before deployment
 
 ## Notes
 

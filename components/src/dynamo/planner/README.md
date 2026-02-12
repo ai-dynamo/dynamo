@@ -15,4 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-Please refer to [planner docs](../../../../docs/planner/planner_intro.rst) for planner documentation.
+# Planner
+
+SLA-driven autoscaling controller for Dynamo inference graphs.
+
+- **User docs**: [docs/planner/](/docs/pages/components/planner/) (deployment, configuration, examples)
+- **Design docs**: [docs/pages/design-docs/planner-design.md](/docs/pages/design-docs/planner-design.md) (architecture, algorithms)

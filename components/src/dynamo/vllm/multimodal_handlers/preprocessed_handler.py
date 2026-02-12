@@ -51,13 +51,32 @@ class PreprocessedHandler(ProcessMixIn):
         pd_worker_client: Client,
     ):
         self.encode_worker_client = encode_worker_client
+        self.encode_worker_count = 0
         self.pd_worker_client = pd_worker_client
         self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        self.stop = False
+        self._worker_count_task = asyncio.create_task(
+            self._update_encode_worker_count()
+        )
+
+    async def _update_encode_worker_count(self):
+        """
+        Periodically updates the count of available encode workers.
+        """
+        while self.stop is False:
+            try:
+                self.encode_worker_count = len(self.encode_worker_client.instance_ids())
+                logger.debug(f"Updated encode worker count: {self.encode_worker_count}")
+            except Exception as e:
+                logger.error(f"Failed to update encode worker count: {e}")
+            await asyncio.sleep(1)  # Update every 1 second
 
     def cleanup(self):
-        pass
+        self.stop = True
+        if hasattr(self, "_worker_count_task"):
+            self._worker_count_task.cancel()
 
     # Main method to parse the request and send the request to the vllm worker.
     async def _generate(
@@ -85,8 +104,17 @@ class PreprocessedHandler(ProcessMixIn):
             multimodal_inputs=[],
         )
 
-        # [gluo WIP] experiment with batching..
-        ENCODE_BATCH_SIZE = 1
+        # [gluo WIP] batching helps for encoding step to fully utilize GPU,
+        # should handle dispatch in a more intelligent way, i.e. splitting
+        # jobs based on availability of encode worker, rather than fixed mm
+        # mm item size per request. Also need to consider encoding load and
+        # balancing it between encoders.
+        if self.encode_worker_count == 0:
+            raise RuntimeError(
+                "No encode workers available to process multimodal input"
+            )
+        total_items = sum(len(urls) for urls in multimodal_inputs.values())
+        encode_batch_size = max(1, total_items // self.encode_worker_count)
         encode_res_gen = []
         for mm_type, urls in multimodal_inputs.items():
             for url in urls:
@@ -101,7 +129,7 @@ class PreprocessedHandler(ProcessMixIn):
                     MultiModalGroup(multimodal_input=multimodal_input)
                 )
 
-                if len(encode_request.multimodal_inputs) >= ENCODE_BATCH_SIZE:
+                if len(encode_request.multimodal_inputs) >= encode_batch_size:
                     # model_dump_json() serializes the request to JSON string
                     # This API could accept Pydantic class, but SamplingParams
                     # in vLLMMultimodalRequest is not a Pydantic class and will
@@ -130,10 +158,10 @@ class PreprocessedHandler(ProcessMixIn):
         for encode_res in encode_res_gen:
             async for response in encode_res:
                 logger.debug(f"Received response from encode worker: {response}")
-                output = vLLMMultimodalRequest.model_validate_json(response.data())
+                output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
                 worker_request.multimodal_inputs.extend(output.multimodal_inputs)
 
-        response_generator = await self.pd_worker_client.round_robin(
+        response_generator = await self.pd_worker_client.round_robin(  # type: ignore[call-arg]
             worker_request.model_dump_json(), context=context
         )
 
@@ -152,7 +180,7 @@ class PreprocessedHandler(ProcessMixIn):
             async for resp in response_generator:
                 # Deserialize the response from the engine
                 # Creates correct vLLM objects for each field
-                output = MyRequestOutput.model_validate_json(resp.data())
+                output = MyRequestOutput.model_validate_json(resp.data())  # type: ignore[attr-defined]
 
                 # OpenAIServingChat.chat_completion_stream_generator() method expects a RequestOutput object
                 res = RequestOutput(
@@ -259,7 +287,7 @@ class ECProcessorHandler(PreprocessedHandler):
         engine_args: AsyncEngineArgs,
         encoder_worker_client: Client,
         pd_worker_client: Client,
-        prompt_template: str = None,
+        prompt_template: str | None = None,
     ):
         """
         Initialize the ECConnector processor.
@@ -370,7 +398,7 @@ class ECProcessorHandler(PreprocessedHandler):
         )
 
         # Send single request to PD worker with ALL images
-        response_generator = await self.pd_worker_client.round_robin(
+        response_generator = await self.pd_worker_client.round_robin(  # type: ignore[call-arg]
             worker_request.model_dump_json(), context=context
         )
 

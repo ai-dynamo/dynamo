@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -506,6 +507,95 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				},
 			},
 			wantErr: false,
+		},
+		// Annotation validation test cases
+		{
+			name: "no annotations is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid annotation dynamo-operator-origin-version with semver",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid annotation dynamo-operator-origin-version with pre-release",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0-dev",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid annotation dynamo-operator-origin-version fallback version",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoOperatorOriginVersion: "0.0.0-unknown",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid annotation dynamo-operator-origin-version not semver",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoOperatorOriginVersion: "not-a-version",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  `annotation nvidia.com/dynamo-operator-origin-version has invalid value "not-a-version": must be valid semver`,
 		},
 	}
 

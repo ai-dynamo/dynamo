@@ -238,6 +238,13 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         }
     }
 
+    fn response_format(&self) -> Option<Value> {
+        self.inner
+            .response_format
+            .as_ref()
+            .map(Value::from_serialize)
+    }
+
     fn should_add_generation_prompt(&self) -> bool {
         // Using vLLM default behavior
         true

@@ -54,7 +54,7 @@ import (
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
@@ -67,7 +67,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	//+kubebuilder:scaffold:imports
@@ -159,7 +161,6 @@ func main() {
 	var checkpointEnabled bool
 	var checkpointStorageType string
 	var checkpointSignalHostPath string
-	var checkpointCRIUTimeout string
 	var checkpointPVCName string
 	var checkpointPVCBasePath string
 	var checkpointS3URI string
@@ -167,6 +168,8 @@ func main() {
 	var checkpointOCIURI string
 	var checkpointOCICredentialsSecret string
 	var checkpointInitContainerImage string
+	var checkpointReadyForCheckpointFilePath string
+	var checkpointRestoreMarkerFilePath string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -227,11 +230,9 @@ func main() {
 		"Enable checkpoint/restore functionality")
 	flag.StringVar(&checkpointStorageType, "checkpoint-storage-type", commonController.CheckpointStorageTypePVC,
 		"Checkpoint storage backend type: pvc, s3, or oci")
-	flag.StringVar(&checkpointSignalHostPath, "checkpoint-signal-host-path", "",
+	flag.StringVar(&checkpointSignalHostPath, "checkpoint-signal-host-path", "/var/lib/chrek/signals",
 		"Host path for signal files used for checkpoint job coordination")
-	flag.StringVar(&checkpointCRIUTimeout, "checkpoint-criu-timeout", "21600",
-		"CRIU timeout in seconds (required for CUDA checkpoints/restores, default: 21600 = 6 hours)")
-	flag.StringVar(&checkpointPVCName, "checkpoint-pvc-name", "checkpoint-storage",
+	flag.StringVar(&checkpointPVCName, "checkpoint-pvc-name", "chrek-pvc",
 		"Name of the PVC for checkpoint storage (used when storage-type=pvc)")
 	flag.StringVar(&checkpointPVCBasePath, "checkpoint-pvc-base-path", "/checkpoints",
 		"Base path within the PVC for storing checkpoints (used when storage-type=pvc)")
@@ -245,6 +246,11 @@ func main() {
 		"Docker config secret name for OCI registry auth (used when storage-type=oci)")
 	flag.StringVar(&checkpointInitContainerImage, "checkpoint-init-container-image", "busybox:latest",
 		"Image to use for checkpoint init containers (e.g., signal file cleanup)")
+	flag.StringVar(&checkpointReadyForCheckpointFilePath,
+		"checkpoint-ready-for-checkpoint-file-path", "/tmp/ready-for-checkpoint",
+		"Path written by the worker container when the model is loaded and ready for checkpointing")
+	flag.StringVar(&checkpointRestoreMarkerFilePath, "checkpoint-restore-marker-file-path", "/tmp/dynamo-restored",
+		"Path written by restore-entrypoint after successful CRIU restore")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -256,6 +262,14 @@ func main() {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
 		os.Exit(1)
 	}
+
+	// Validate and normalize operator version to semver
+	if _, err := semver.NewVersion(operatorVersion); err != nil {
+		setupLog.Info("WARNING: operator-version is not valid semver, falling back to 0.0.0-unknown",
+			"provided", operatorVersion, "error", err.Error())
+		operatorVersion = "0.0.0-unknown"
+	}
+	setupLog.Info("Operator version configured", "version", operatorVersion)
 
 	// Validate discoveryBackend value
 	if discoveryBackend != "kubernetes" && discoveryBackend != "etcd" {
@@ -315,9 +329,10 @@ func main() {
 		},
 		DiscoveryBackend: discoveryBackend,
 		Checkpoint: commonController.CheckpointConfig{
-			Enabled:            checkpointEnabled,
-			CRIUTimeout:        checkpointCRIUTimeout,
-			InitContainerImage: checkpointInitContainerImage,
+			Enabled:                    checkpointEnabled,
+			InitContainerImage:         checkpointInitContainerImage,
+			ReadyForCheckpointFilePath: checkpointReadyForCheckpointFilePath,
+			RestoreMarkerFilePath:      checkpointRestoreMarkerFilePath,
 			Storage: commonController.CheckpointStorageConfig{
 				Type:           checkpointStorageType,
 				SignalHostPath: checkpointSignalHostPath,
@@ -739,6 +754,17 @@ func main() {
 		}
 
 		setupLog.Info("Validation webhooks registered successfully")
+
+		// Register defaulting (mutating) webhook handlers
+		setupLog.Info("Registering defaulting webhooks")
+
+		dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
+		if err = dgdDefaulter.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment-defaulting")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Defaulting webhooks registered successfully")
 	}
 	//+kubebuilder:scaffold:builder
 

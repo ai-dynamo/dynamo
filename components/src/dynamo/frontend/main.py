@@ -21,6 +21,7 @@ import logging
 import os
 import pathlib
 import signal
+import sys
 
 import uvloop
 
@@ -30,8 +31,6 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
-    ModelDeploymentCard,
-    PythonAsyncEngine,
     RouterConfig,
     RouterMode,
     make_engine,
@@ -43,28 +42,23 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from . import __version__
 
 DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
-CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
-    "CUSTOM_BACKEND_METRICS_POLLING_INTERVAL"
-)
-CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def _dummy_generator(request):
-    """Minimal generator that yields nothing. Work in progress."""
-    return
-    yield  # Makes this an async generator
-
-
-async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+def setup_engine_factory(
+    runtime: DistributedRuntime,
+    router_config: RouterConfig,
+    flags: argparse.Namespace,
+):  # Returns EngineFactory:
     """
-    Called by Rust when a model is discovered.
+    When using vllm pre and post processor, create the EngineFactory that
+    creates the engines that run requests.
     """
-    loop = asyncio.get_running_loop()
-    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
-    return PythonAsyncEngine(_dummy_generator, loop)
+    from .vllm_processor import EngineFactory
+
+    return EngineFactory(runtime, router_config, flags)
 
 
 def validate_model_name(value):
@@ -91,10 +85,36 @@ def parse_args():
     Returns:
         argparse.Namespace: Parsed command-line arguments.
     """
-    parser = argparse.ArgumentParser(
-        description="Dynamo Frontend: HTTP+Pre-processor+Router",
-        formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+
+    # We need to know before we parse the arguments
+    full_args = " ".join(sys.argv)
+    is_vllm = (
+        "--chat-processor vllm" in full_args or "--chat-processor=vllm" in full_args
     )
+
+    if not is_vllm:
+        # Normal case, Dynamo processor
+        parser = argparse.ArgumentParser(
+            description="Dynamo Frontend: HTTP+Pre-processor+Router",
+            formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+        )
+    else:
+        # vllm processor
+        try:
+            from vllm.utils import FlexibleArgumentParser
+        except ImportError:
+            try:
+                from vllm.utils.argparse_utils import FlexibleArgumentParser
+            except ModuleNotFoundError:
+                logger.exception(
+                    "Flag '--chat-processor vllm' requires vllm be installed."
+                )
+                sys.exit(1)
+
+        parser = FlexibleArgumentParser(
+            description="Dynamo Frontend: HTTP+Pre-processor+Router",
+        )
+
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Frontend {__version__}"
     )
@@ -203,6 +223,13 @@ def parse_args():
         help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
     )
     parser.add_argument(
+        "--durable-kv-events",
+        action="store_true",
+        dest="durable_kv_events",
+        default=False,
+        help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
+    )
+    parser.add_argument(
         "--no-track-active-blocks",
         action="store_false",
         dest="router_track_active_blocks",
@@ -224,10 +251,22 @@ def parse_args():
         help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
     )
     parser.add_argument(
+        "--router-event-threads",
+        type=int,
+        default=int(os.environ.get("DYN_ROUTER_EVENT_THREADS", "1")),
+        help="KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput. Can be set via DYN_ROUTER_EVENT_THREADS env var (default: 1).",
+    )
+    parser.add_argument(
         "--enforce-disagg",
         action="store_true",
         default=False,
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
+    )
+    parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. When > 0, enables request migration on worker disconnect (default: 0).",
     )
     parser.add_argument(
         "--active-decode-blocks-threshold",
@@ -277,22 +316,6 @@ def parse_args():
     )
     add_config_dump_args(parser)
     parser.add_argument(
-        "--custom-backend-metrics-endpoint",
-        type=str,
-        default=os.environ.get(
-            CUSTOM_BACKEND_ENDPOINT_ENV_VAR, "nim.backend.runtime_stats"
-        ),
-        help=f"Custom backend endpoint to poll for metrics in format 'namespace.component.endpoint' (default: 'nim.backend.runtime_stats'). Required if --custom-backend-metrics-polling-interval is specified. All metrics will be prefixed with 'dynamo_component_' in Prometheus. Can be set via {CUSTOM_BACKEND_ENDPOINT_ENV_VAR} env var.",
-    )
-    parser.add_argument(
-        "--custom-backend-metrics-polling-interval",
-        type=float,
-        default=float(
-            os.environ.get(CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR, "0")
-        ),
-        help=f"Interval in seconds for polling custom backend metrics. Set to > 0 to enable polling (default: 0=disabled, suggested: 9.2s which is less than typical Prometheus scrape interval). Can be set via {CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR} env var.",
-    )
-    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -314,20 +337,30 @@ def parse_args():
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--exp-python-factory",
-        action="store_true",
-        default=False,
-        help="[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be created via a Python callback instead of the default Rust pipeline.",
+        "--chat-processor",
+        dest="chat_processor",
+        type=str,
+        choices=["dynamo", "vllm"],
+        default="dynamo",
+        help="[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post processor.",
     )
+    if is_vllm:
+        try:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            parser = FrontendArgs.add_cli_args(parser)
+            parser = AsyncEngineArgs.add_cli_args(parser)
+        except ModuleNotFoundError:
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            sys.exit(1)
 
     flags = parser.parse_args()
 
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
-    if flags.custom_backend_metrics_polling_interval < 0:
-        parser.error(
-            "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
-        )
+    if flags.migration_limit < 0 or flags.migration_limit > 4294967295:
+        parser.error("--migration-limit must be between 0 and 4294967295 (0=disabled)")
 
     return flags
 
@@ -348,6 +381,10 @@ async def async_main():
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
     os.environ["DYN_EVENT_PLANE"] = flags.event_plane
+    logger.info(
+        f"Request migration {'enabled' if flags.migration_limit > 0 else 'disabled'} "
+        f"(limit: {flags.migration_limit})"
+    )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
@@ -366,11 +403,18 @@ async def async_main():
 
     # NATS is needed when:
     # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    # 2. Durable KV events (JetStream) is explicitly requested, OR
+    # 3. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
+    # Note: NATS Core (without JetStream) is the default for KV events when durable_kv_events=False
     enable_nats = flags.request_plane == "nats" or (
-        flags.event_plane == "nats"
-        and flags.router_mode == "kv"
-        and (flags.use_kv_events or flags.router_replica_sync)
+        flags.router_mode == "kv"
+        and (
+            flags.durable_kv_events
+            or (
+                flags.event_plane == "nats"
+                and (flags.use_kv_events or flags.router_replica_sync)
+            )
+        )
     )
 
     loop = asyncio.get_running_loop()
@@ -388,6 +432,7 @@ async def async_main():
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
+            durable_kv_events=flags.durable_kv_events,
             router_replica_sync=flags.router_replica_sync,
             router_track_active_blocks=flags.router_track_active_blocks,
             router_track_output_blocks=flags.router_track_output_blocks,
@@ -397,6 +442,7 @@ async def async_main():
             router_ttl_secs=flags.router_ttl,
             router_max_tree_size=flags.router_max_tree_size,
             router_prune_target_ratio=flags.router_prune_target_ratio,
+            router_event_threads=flags.router_event_threads,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random
@@ -405,18 +451,19 @@ async def async_main():
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
+    router_config = RouterConfig(
+        router_mode,
+        kv_router_config,
+        active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
+        active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+        active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
+        enforce_disagg=flags.enforce_disagg,
+    )
     kwargs = {
         "http_host": flags.http_host,
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
-        "router_config": RouterConfig(
-            router_mode,
-            kv_router_config,
-            active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
-            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
-            enforce_disagg=flags.enforce_disagg,
-        ),
+        "router_config": router_config,
     }
 
     if flags.model_name:
@@ -431,17 +478,12 @@ async def async_main():
         kwargs["namespace"] = flags.namespace
     if flags.kserve_grpc_server and flags.grpc_metrics_port:
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
-    if flags.custom_backend_metrics_endpoint:
-        kwargs[
-            "custom_backend_metrics_endpoint"
-        ] = flags.custom_backend_metrics_endpoint
-    if flags.custom_backend_metrics_polling_interval:
-        kwargs[
-            "custom_backend_metrics_polling_interval"
-        ] = flags.custom_backend_metrics_polling_interval
 
-    if flags.exp_python_factory:
-        kwargs["engine_factory"] = engine_factory
+    if flags.chat_processor == "vllm":
+        chat_engine_factory = setup_engine_factory(
+            runtime, router_config, flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

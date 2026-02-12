@@ -23,7 +23,7 @@ Use the pre-configured test deployment with sample profiling data, we provide th
 
 ### Option B: Use Your Own Profiling Results
 
-1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/benchmarks/sla_driven_profiling.md) for detailed instructions.
+1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/pages/components/profiler/profiler-guide.md) for detailed instructions.
 
 ## Interpolator Testing
 
@@ -165,8 +165,8 @@ Test complete scaling behavior including Kubernetes deployment and load generati
 
 **Prerequisites:**
 
-- **[kube-prometheus-stack](../../docs/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
-- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/planner/sla_planner_quickstart.md#prerequisites) for details).
+- **[kube-prometheus-stack](../../docs/pages/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
+- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/pages/components/planner/planner-guide.md#prerequisites) for details).
 
 **Prepare the test deployment manifest:**
 
@@ -209,7 +209,7 @@ Remove `volumes` and `volumeMounts`:
           - name: planner-profile-data
             configMap:
               # Must be pre-created before deployment by the profiler
-              # See docs/planner/sla_planner_quickstart.md for more details
+              # See docs/pages/components/planner/planner-guide.md for more details
               name: planner-profile-data
 ```
 

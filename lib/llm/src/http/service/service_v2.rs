@@ -16,8 +16,9 @@ use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
 use super::metrics::register_worker_timing_metrics;
-use crate::discovery::{ModelManager, register_worker_load_metrics};
+use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
+use crate::kv_router::metrics::{register_routing_overhead_metrics, register_worker_load_metrics};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -25,7 +26,6 @@ use derive_builder::Builder;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::metrics::prometheus_names::name_prefix;
 use dynamo_runtime::storage::kv;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
@@ -162,12 +162,6 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
-
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    pub(crate) custom_backend_namespace_component_endpoint: Option<String>,
-    pub(crate) custom_backend_metrics_polling_interval: Option<f64>,
-    pub(crate) custom_backend_registry:
-        Option<Arc<super::custom_backend_metrics::CustomBackendMetricsRegistry>>,
 }
 
 #[derive(Clone, Builder)]
@@ -207,13 +201,6 @@ pub struct HttpServiceConfig {
 
     #[builder(default)]
     store: kv::Manager,
-
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    #[builder(default = "None")]
-    custom_backend_namespace_component_endpoint: Option<String>,
-
-    #[builder(default = "None")]
-    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl HttpService {
@@ -405,21 +392,11 @@ impl HttpServiceConfigBuilder {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
         }
 
-        // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-        // Setup custom backend metrics if configured
-        let custom_backend_registry =
-            if config.custom_backend_namespace_component_endpoint.is_some()
-                && config.custom_backend_metrics_polling_interval.is_some()
-            {
-                Some(Arc::new(
-                    super::custom_backend_metrics::CustomBackendMetricsRegistry::new(
-                        name_prefix::COMPONENT.to_string(),
-                        registry.clone(),
-                    ),
-                ))
-            } else {
-                None
-            };
+        // Register routing overhead metrics (block hashing, find matches, scheduling latencies)
+        // These are updated by KvRouter::find_best_match on every routing decision
+        if let Err(e) = register_routing_overhead_metrics(&registry) {
+            tracing::warn!("Failed to register routing overhead metrics: {}", e);
+        }
 
         let mut router = axum::Router::new();
 
@@ -490,26 +467,11 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
-            custom_backend_namespace_component_endpoint: config
-                .custom_backend_namespace_component_endpoint,
-            custom_backend_metrics_polling_interval: config.custom_backend_metrics_polling_interval,
-            custom_backend_registry,
         })
     }
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
-        self
-    }
-
-    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
-    pub fn with_custom_backend_config(
-        mut self,
-        namespace_component_endpoint: Option<String>,
-        polling_interval: Option<f64>,
-    ) -> Self {
-        self.custom_backend_namespace_component_endpoint = Some(namespace_component_endpoint);
-        self.custom_backend_metrics_polling_interval = Some(polling_interval);
         self
     }
 
