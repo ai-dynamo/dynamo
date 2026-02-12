@@ -129,9 +129,9 @@ Issues labeled `good-first-issue` are sized for new contributors. We provide ext
 
 <!-- We were given the feedback that having information on architecture, languages used, etc. would be helpful for external contributors -->
 
-Understanding Dynamo's architecture helps you find where to make changes. For the complete picture, see the [Architecture Documentation](docs/design_docs/architecture.md) and [Support Matrix](docs/reference/support-matrix.md).
+Understanding Dynamo's architecture helps you find where to make changes. For the complete picture, see the [Architecture Documentation](docs/pages/design-docs/architecture.md) and [Support Matrix](docs/pages/reference/support-matrix.md).
 
-![Dynamo Architecture](docs/images/architecture.png)
+![Dynamo Architecture](docs/assets/img/architecture.png)
 
 ### Core Components
 
@@ -148,9 +148,9 @@ Understanding Dynamo's architecture helps you find where to make changes. For th
 
 | Plane | Purpose | Documentation |
 |-------|---------|---------------|
-| **Discovery Plane** | Service registration and discovery across components | [docs/design_docs/distributed_runtime.md](docs/design_docs/distributed_runtime.md) |
-| **Request Plane** | High-performance request routing between components | [docs/design_docs/request_plane.md](docs/design_docs/request_plane.md) |
-| **KV Event Plane** | KV cache event propagation for cache-aware routing | [docs/design_docs/event_plane.md](docs/design_docs/event_plane.md) |
+| **Discovery Plane** | Service registration and discovery across components | [docs/pages/design-docs/distributed-runtime.md](docs/pages/design-docs/distributed-runtime.md) |
+| **Request Plane** | High-performance request routing between components | [docs/pages/design-docs/request-plane.md](docs/pages/design-docs/request-plane.md) |
+| **KV Event Plane** | KV cache event propagation for cache-aware routing | [docs/pages/design-docs/event-plane.md](docs/pages/design-docs/event-plane.md) |
 
 ### Kubernetes Deployment
 
@@ -319,6 +319,6 @@ By contributing, you agree that your contributions will be licensed under the [A
 
 - **Discord**: [Join our community](https://discord.gg/nvidia-dynamo)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/latest/index.html)
+- **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/)
 
 Thank you for contributing to Dynamo!
