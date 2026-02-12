@@ -122,7 +122,7 @@ class SglangMultimodalRequest(BaseModel):
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
-        Union[Tuple[int, int, int], Tuple[int, int, int, int]]
+        Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
     # Processor metadata (e.g. image_grid_thw) carried from encode worker

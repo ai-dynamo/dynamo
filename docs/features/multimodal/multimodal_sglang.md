@@ -403,6 +403,19 @@ Supported templates: `qwen2-vl`, `llama-3`, `vicuna`, etc.
 
 **Key Difference:** SGLang P/D uses bootstrap mechanism, not NIXL for KV cache like vLLM.
 
+## Environment Variables
+
+### `SGLANG_ENCODER_MM_LOAD_WORKERS`
+
+Controls how many threads the encoder uses to fetch and load images concurrently. When a request contains multiple images (URLs, file paths, or base64 data), each image is loaded in a separate thread. Default is 4. Increase if image loading (network fetch or disk I/O) is the bottleneck rather than GPU compute. Has no effect if the vision encoder itself is the bottleneck, since encoding is sequential on GPU after all images are loaded.
+
+```bash
+# Example: allow up to 16 concurrent image loads per encoder
+export SGLANG_ENCODER_MM_LOAD_WORKERS=16
+```
+
+Only applies to the EPD encode worker (which uses SGLang's [MMEncoder](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/encode_server.py) internally).
+
 ## Known Limitations
 
 - **No Data URL support** - Only HTTP/HTTPS URLs supported; `data:image/...` base64 URLs not supported
