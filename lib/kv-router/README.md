@@ -1,4 +1,4 @@
-# KV Router Index Data Structures
+# ⚡ FlashIndexer — KV Router Index Data Structures
 
 This document explains the KV cache index implementations: `RadixTree` (and its concurrent variant `ConcurrentRadixTree`) and `PositionalIndexer` (NestedMap).
 
