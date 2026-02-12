@@ -130,6 +130,12 @@ The KVIndexer builds and maintains a global view of cached blocks in a prefix tr
 
 The KVIndexer has a method `find_matches_for_request`, which takes in tokens and returns a dictionary with keys of worker id and values of the number of matched KV Blocks.
 
+The KVIndexer supports two backend implementations, selected via `--router-event-threads`:
+
+- **Single-threaded RadixTree** (default, `--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Supports TTL-based expiration and size-based pruning (for `--no-kv-events` approximate mode).
+
+- **ConcurrentRadixTree** (`--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing. Uses sticky worker routing (events for the same worker always go to the same thread) to ensure per-worker event serialization. Read operations (`find_matches`) execute concurrently with writes. Does not support TTL/pruning.
+
 ### Inter-Router Communication
 
 In distributed deployments with multiple routers, each router maintains visibility over only a portion of the total requests. To ensure consistent routing decisions, routers synchronize their states through three event types:

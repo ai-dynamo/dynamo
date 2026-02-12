@@ -216,7 +216,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
 	// ProfilingResults contains a reference to the ConfigMap holding profiling data.
-	// Format: "configmap/<name>"
+	// Format: "configmap/\<name\>"
 	// +kubebuilder:validation:Optional
 	ProfilingResults string `json:"profilingResults,omitempty"`
 

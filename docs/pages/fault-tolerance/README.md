@@ -128,4 +128,5 @@ See [Fault Tolerance Testing](testing.md) for details.
 
 - [Observability](../observability/README.md) - Metrics and monitoring
 - [Distributed Runtime](../design-docs/distributed-runtime.md) - Service discovery architecture
-- [Event Plane](../design-docs/event-plane.md) - etcd and NATS coordination
+- [Event Plane](../design-docs/event-plane.md) - Pub/sub for KV cache events and worker metrics
+- [Discovery Plane](../design-docs/discovery-plane.md) - Service discovery and coordination
