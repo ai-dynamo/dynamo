@@ -337,7 +337,7 @@ planner:
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](/docs/components/planner/planner_guide.md) for full list.
+> Planner arguments use `planner_` prefix. See the AI Configurator documentation for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -641,8 +641,6 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 
 ## See Also
 
-- [Profiler Examples](profiler_examples.md) - Complete DGDR YAML examples
-- [SLA Planner Guide](/docs/components/planner/planner_guide.md) - End-to-end deployment workflow
-- [SLA Planner Architecture](/docs/components/planner/planner_guide.md) - How the Planner uses profiling data
+- [DGDR Examples](../../profiler/deploy/) - Complete DGDR YAML examples
 - [DGDR API Reference](/docs/kubernetes/api_reference.md) - DGDR specification
-- [Profiler Arguments Reference](/benchmarks/profiler/utils/profiler_argparse.py) - Full CLI reference
+- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/profiler_argparse.py) - Full CLI reference

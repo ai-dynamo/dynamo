@@ -19,7 +19,6 @@ package gpu
 
 import (
 	"context"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,21 +38,6 @@ func newFakeClient(objs ...client.Object) client.Client {
 		WithScheme(scheme).
 		WithObjects(objs...).
 		Build()
-}
-
-// createNode creates a test node with GPU labels
-func createNode(name string, gpuCount int, gpuModel string, vramMiB int) *corev1.Node {
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				LabelGPUCount:   strconv.Itoa(gpuCount),
-				LabelGPUProduct: gpuModel,
-				LabelGPUMemory:  strconv.Itoa(vramMiB),
-			},
-		},
-	}
-	return node
 }
 
 func TestDiscoverGPUs_SingleNode(t *testing.T) {

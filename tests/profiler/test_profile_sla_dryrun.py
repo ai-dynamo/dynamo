@@ -72,6 +72,8 @@ class TestProfileSLADryRun:
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
+                self.search_strategy = SearchStrategy.THOROUGH
+                self.system = ""
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
                 self.model_cache_pvc_name = ""
@@ -118,6 +120,8 @@ class TestProfileSLADryRun:
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
+                self.search_strategy = SearchStrategy.THOROUGH
+                self.system = ""
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
                 self.model_cache_pvc_name = ""
@@ -185,6 +189,8 @@ class TestProfileSLADryRun:
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
+                self.search_strategy = SearchStrategy.THOROUGH
+                self.system = ""
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
                 self.model_cache_pvc_name = ""
@@ -241,6 +247,8 @@ class TestProfileSLADryRun:
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
+                self.search_strategy = SearchStrategy.THOROUGH
+                self.system = ""
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
                 # Added in newer profiler versions; keep Args compatible with search_space_autogen
