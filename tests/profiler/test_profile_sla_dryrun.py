@@ -19,6 +19,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
+from benchmarks.profiler.utils.defaults import SearchStrategy  # noqa: E402
 from benchmarks.profiler.utils.model_info import ModelInfo  # noqa: E402
 from benchmarks.profiler.utils.search_space_autogen import (  # noqa: E402
     auto_generate_search_space,
@@ -66,7 +67,6 @@ class TestProfileSLADryRun:
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
                 self.dry_run = True
-                self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_hf_id = None
                 self.aic_backend = ""
@@ -113,7 +113,6 @@ class TestProfileSLADryRun:
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
                 self.dry_run = True
-                self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_hf_id = None
                 self.aic_backend = ""
@@ -181,7 +180,6 @@ class TestProfileSLADryRun:
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
                 self.dry_run = True
-                self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_hf_id = None
                 self.aic_backend = ""
@@ -238,7 +236,6 @@ class TestProfileSLADryRun:
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
                 self.dry_run = True
-                self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_hf_id = None
                 self.aic_backend = ""
@@ -318,16 +315,16 @@ class TestProfileSLADryRun:
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
                 self.dry_run = True
-                self.use_ai_configurator = False
-                self.aic_system = None
-                self.aic_hf_id = None
-                self.aic_backend = ""
-                self.aic_backend_version = None
+                self.system = "h100_sxm"  # Renamed from aic_system, moved to hardware
+                self.search_strategy = SearchStrategy.RAPID  # New top-level arg
                 # Set to 0 to trigger auto-generation path
                 self.num_gpus_per_node = 0
+                # GPU discovery values (auto-populated by Operator)
+                self.num_gpus_per_node = 8
+                self.gpu_model = "H100-SXM5-80GB"
+                self.gpu_vram_mib = 81920
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
-                self.enable_gpu_discovery = True
                 self.model_cache_pvc_name = ""
                 self.model_cache_pvc_path = ""
                 self.model_cache_pvc_mount_path = "/opt/model-cache"
@@ -340,27 +337,24 @@ class TestProfileSLADryRun:
     @pytest.mark.integration
     @pytest.mark.gpu_0
     @pytest.mark.vllm
-    @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_profile_with_autogen_search_space_h100(
         self,
         mock_get_model_info,
-        mock_get_gpu_summary,
         vllm_args_with_model_autogen,
-        mock_h100_gpu_info,
         mock_model_info,
     ):
         """Test profile_sla with auto-generated search space on mocked H100 cluster.
 
         This test demonstrates how search space is auto-generated based on model
-        size and available GPU memory.
+        size and available GPU memory. GPU info is provided via command-line
+        arguments injected by the Operator into the profiling config (DYN-2135).
         """
-        # Configure the mocks to return the appropriate info
+        # Configure the mock to return the appropriate model info
         mock_get_model_info.return_value = mock_model_info
-        mock_get_gpu_summary.return_value = mock_h100_gpu_info
 
         # Run the profile - the search space will be auto-generated
-        # based on the model and mocked GPU info
+        # based on the model and GPU info from args
         auto_generate_search_space(vllm_args_with_model_autogen)
         await run_profile(vllm_args_with_model_autogen)
 
@@ -390,15 +384,15 @@ class TestProfileSLADryRun:
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
                 self.dry_run = True
-                self.use_ai_configurator = False
-                self.aic_system = None
-                self.aic_hf_id = None
-                self.aic_backend = ""
-                self.aic_backend_version = None
+                self.system = "h100_sxm"  # Renamed from aic_system, moved to hardware
+                self.search_strategy = SearchStrategy.RAPID  # New top-level arg
                 self.num_gpus_per_node = 0
+                # GPU discovery values (auto-populated by Operator)
+                self.num_gpus_per_node = 8
+                self.gpu_model = "H100-SXM5-80GB"
+                self.gpu_vram_mib = 81920
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
-                self.enable_gpu_discovery = True
                 self.model_cache_pvc_name = ""
                 self.model_cache_pvc_path = ""
                 self.model_cache_pvc_mount_path = "/opt/model-cache"
@@ -411,27 +405,24 @@ class TestProfileSLADryRun:
     @pytest.mark.gpu_0
     @pytest.mark.integration
     @pytest.mark.sglang
-    @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_sglang_profile_with_autogen_search_space_h100(
         self,
         mock_get_model_info,
-        mock_get_gpu_summary,
         sglang_args_with_model_autogen,
-        mock_h100_gpu_info,
         mock_model_info,
     ):
         """Test profile_sla with auto-generated search space for sglang on mocked H100 cluster.
 
         This test demonstrates how search space is auto-generated based on model
-        size and available GPU memory for sglang backend.
+        size and available GPU memory for sglang backend. GPU info is provided via
+        command-line arguments injected by the Operator into the profiling config (DYN-2135).
         """
-        # Configure the mocks to return the appropriate info
+        # Configure the mock to return the appropriate model info
         mock_get_model_info.return_value = mock_model_info
-        mock_get_gpu_summary.return_value = mock_h100_gpu_info
 
         # Run the profile - the search space will be auto-generated
-        # based on the model and mocked GPU info
+        # based on the model and GPU info from args
         auto_generate_search_space(sglang_args_with_model_autogen)
         await run_profile(sglang_args_with_model_autogen)
 
@@ -461,15 +452,15 @@ class TestProfileSLADryRun:
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
                 self.dry_run = True
-                self.use_ai_configurator = False
-                self.aic_system = None
-                self.aic_hf_id = None
-                self.aic_backend = ""
-                self.aic_backend_version = None
+                self.system = "h100_sxm"  # Renamed from aic_system, moved to hardware
+                self.search_strategy = SearchStrategy.RAPID  # New top-level arg
                 self.num_gpus_per_node = 0
+                # GPU discovery values (auto-populated by Operator)
+                self.num_gpus_per_node = 8
+                self.gpu_model = "H100-SXM5-80GB"
+                self.gpu_vram_mib = 81920
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
-                self.enable_gpu_discovery = True
                 self.model_cache_pvc_name = ""
                 self.model_cache_pvc_path = ""
                 self.model_cache_pvc_mount_path = "/opt/model-cache"
@@ -482,26 +473,23 @@ class TestProfileSLADryRun:
     @pytest.mark.gpu_0
     @pytest.mark.integration
     @pytest.mark.trtllm
-    @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_trtllm_profile_with_autogen_search_space_h100(
         self,
         mock_get_model_info,
-        mock_get_gpu_summary,
         trtllm_args_with_model_autogen,
-        mock_h100_gpu_info,
         mock_model_info,
     ):
         """Test profile_sla with auto-generated search space for trtllm on mocked H100 cluster.
 
         This test demonstrates how search space is auto-generated based on model
-        size and available GPU memory for trtllm backend.
+        size and available GPU memory for trtllm backend. GPU info is provided via
+        command-line arguments injected by the Operator into the profiling config (DYN-2135).
         """
-        # Configure the mocks to return the appropriate info
+        # Configure the mock to return the appropriate model info
         mock_get_model_info.return_value = mock_model_info
-        mock_get_gpu_summary.return_value = mock_h100_gpu_info
 
         # Run the profile - the search space will be auto-generated
-        # based on the model and mocked GPU info
+        # based on the model and GPU info from args
         auto_generate_search_space(trtllm_args_with_model_autogen)
         await run_profile(trtllm_args_with_model_autogen)
