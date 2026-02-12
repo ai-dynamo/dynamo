@@ -23,6 +23,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
 use dynamo_runtime::logging::make_request_span;
@@ -204,7 +205,7 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     enable_anthropic_endpoints: bool,
 
     #[builder(default = "None")]
@@ -513,22 +514,28 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
-        let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
-            state.clone(),
-            request_template.clone(),
-            var(HTTP_SVC_ANTHROPIC_PATH_ENV).ok(),
-        );
-
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
-        endpoint_routes.insert(
-            EndpointType::AnthropicMessages,
-            (anthropic_docs, anthropic_route),
-        );
+
+        if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+            tracing::warn!(
+                "Anthropic Messages API (/v1/messages) is experimental."
+            );
+            let (anthropic_docs, anthropic_route) =
+                super::anthropic::anthropic_messages_router(
+                    state.clone(),
+                    request_template.clone(),
+                    var(HTTP_SVC_ANTHROPIC_PATH_ENV).ok(),
+                );
+            endpoint_routes.insert(
+                EndpointType::AnthropicMessages,
+                (anthropic_docs, anthropic_route),
+            );
+        }
 
         for endpoint_type in EndpointType::all() {
             let state_route = state.clone();

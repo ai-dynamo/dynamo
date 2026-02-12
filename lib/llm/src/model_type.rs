@@ -121,7 +121,8 @@ impl ModelType {
             endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
             // Translation layers over chat completions
             endpoint_types.push(crate::endpoint_type::EndpointType::Responses);
-            endpoint_types.push(crate::endpoint_type::EndpointType::AnthropicMessages);
+            // AnthropicMessages is gated by DYN_ENABLE_ANTHROPIC_API env var,
+            // so it is not auto-enabled via model discovery.
         }
         if self.contains(Self::Completions) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Completion);
