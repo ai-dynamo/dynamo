@@ -230,7 +230,7 @@ Common Vars for Routing Configuration:
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
-- See the [KV cache routing design](../../docs/design_docs/router_design.md) for details.
+- See the [KV cache routing design](../../docs/pages/design-docs/router-design.md) for details.
 
 Stand-Alone installation only:
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
