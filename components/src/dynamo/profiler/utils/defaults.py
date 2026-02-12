@@ -18,13 +18,13 @@ from enum import Enum
 
 
 def resolve_deploy_path(rel_path: str) -> str:
-    """Resolve a deploy YAML path relative to the dynamo repo root.
+    """Resolve a deploy YAML path relative to the dynamo workspace root.
 
-    Walks up from dynamo/profiler/utils/ to the repo root directory.
+    Uses get_workspace_dir() which handles repo root, container, and env var cases.
     """
-    _utils_dir = os.path.dirname(os.path.abspath(__file__))
-    _repo_root = os.path.abspath(os.path.join(_utils_dir, "..", "..", "..", "..", ".."))
-    return os.path.join(_repo_root, rel_path)
+    from dynamo.common.utils.paths import get_workspace_dir
+
+    return os.path.join(get_workspace_dir(), rel_path)
 
 
 DYNAMO_RUN_DEFAULT_PORT = 8000
