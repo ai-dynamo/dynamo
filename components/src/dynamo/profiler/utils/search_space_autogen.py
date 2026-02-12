@@ -8,8 +8,8 @@ import os
 
 import yaml
 
-from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from benchmarks.profiler.utils.model_info import ModelInfo, get_model_info
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from dynamo.profiler.utils.model_info import ModelInfo, get_model_info
 from deploy.utils.gpu_inventory import get_gpu_summary
 
 logger = logging.getLogger(__name__)

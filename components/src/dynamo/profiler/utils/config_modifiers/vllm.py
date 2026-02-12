@@ -6,7 +6,7 @@ from typing import Tuple
 
 import yaml
 
-from benchmarks.profiler.utils.config import (
+from dynamo.profiler.utils.config import (
     Config,
     append_argument,
     break_arguments,
@@ -18,8 +18,8 @@ from benchmarks.profiler.utils.config import (
     update_image,
     validate_and_get_worker_args,
 )
-from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
-from benchmarks.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
+from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
+from dynamo.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
 from dynamo.planner.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,10 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-DEFAULT_VLLM_CONFIG_PATH = "examples/backends/vllm/deploy/disagg.yaml"
+from dynamo.profiler.utils.defaults import resolve_deploy_path
+
+DEFAULT_VLLM_DISAGG_CONFIG_PATH = resolve_deploy_path("examples/backends/vllm/deploy/disagg.yaml")
+DEFAULT_VLLM_AGG_CONFIG_PATH = resolve_deploy_path("examples/backends/vllm/deploy/agg.yaml")
 
 
 class VllmV1ConfigModifier(BaseConfigModifier):
@@ -42,8 +45,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
     WORKER_MODEL_PATH_ARG = "--model"
 
     @classmethod
-    def load_default_config(cls) -> dict:
-        with open(DEFAULT_VLLM_CONFIG_PATH, "r") as f:
+    def load_default_config(cls, mode: str = "disagg") -> dict:
+        path = DEFAULT_VLLM_AGG_CONFIG_PATH if mode == "agg" else DEFAULT_VLLM_DISAGG_CONFIG_PATH
+        with open(path, "r") as f:
             return yaml.safe_load(f)
 
     @classmethod

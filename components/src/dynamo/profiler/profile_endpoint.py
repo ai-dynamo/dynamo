@@ -5,9 +5,9 @@ import argparse
 import logging
 import os
 
-from benchmarks.profiler.utils.defaults import EngineType
-from benchmarks.profiler.utils.profile_decode import profile_decode
-from benchmarks.profiler.utils.profile_prefill import profile_prefill
+from dynamo.profiler.utils.defaults import EngineType
+from dynamo.profiler.utils.profile_decode import profile_decode
+from dynamo.profiler.utils.profile_prefill import profile_prefill
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

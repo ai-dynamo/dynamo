@@ -15,18 +15,23 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol, Tuple
 
-from benchmarks.profiler.utils.config import (
+from dynamo.profiler.utils.config import (
     Config,
     Container,
     PodSpec,
+    ServiceResources,
     break_arguments,
     get_service_name_by_type,
     set_argument_value,
+    update_image,
 )
-from benchmarks.profiler.utils.defaults import EngineType
+from dynamo.profiler.utils.defaults import EngineType
 from dynamo.planner.defaults import SubComponentType
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigModifierProtocol(Protocol):
@@ -93,7 +98,7 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def load_default_config(cls) -> dict:
+    def load_default_config(cls, mode: str = "disagg") -> dict:
         ...
 
     @classmethod
@@ -407,3 +412,177 @@ class BaseConfigModifier:
         )
 
         return cfg.model_dump()
+
+    @classmethod
+    def build_dgd_config(
+        cls,
+        mode: str,
+        model_name: str,
+        image: str,
+        # Disagg workers (used when mode=="disagg")
+        prefill_cli_args: list[str] | None = None,
+        prefill_replicas: int = 1,
+        prefill_gpus: int = 1,
+        decode_cli_args: list[str] | None = None,
+        decode_replicas: int = 1,
+        decode_gpus: int = 1,
+        # Agg worker (used when mode=="agg")
+        agg_cli_args: list[str] | None = None,
+        agg_replicas: int = 1,
+        agg_gpus: int = 1,
+        # Optional
+        namespace: str | None = None,
+        model_path: str | None = None,
+        pvc_name: str | None = None,
+        pvc_mount_path: str | None = None,
+    ) -> dict:
+        """
+        Build a complete DynamoGraphDeployment config by loading a base YAML
+        and injecting pre-computed CLI args, model, image, replicas, and GPU resources.
+
+        This is intended for use by external tools (e.g. AIConfigurator) that
+        have already computed the per-worker CLI arguments and just need them
+        placed into a valid DGD config structure.
+
+        Args:
+            mode: "agg" or "disagg"
+            model_name: Model name / HuggingFace ID (e.g. "Qwen/Qwen3-32B")
+            image: Container image for all services
+            prefill_cli_args: Pre-computed CLI args list for prefill worker
+            prefill_replicas: Number of prefill worker replicas
+            prefill_gpus: GPUs per prefill worker
+            decode_cli_args: Pre-computed CLI args list for decode worker
+            decode_replicas: Number of decode worker replicas
+            decode_gpus: GPUs per decode worker
+            agg_cli_args: Pre-computed CLI args list for agg worker
+            agg_replicas: Number of agg worker replicas
+            agg_gpus: GPUs per agg worker
+            namespace: K8s namespace (optional)
+            model_path: Model path if different from model_name (e.g. PVC path)
+            pvc_name: PVC claim name for model cache (optional)
+            pvc_mount_path: PVC mount path (optional)
+
+        Returns:
+            Complete DGD config dict ready for YAML serialization
+        """
+        config = cls.load_default_config(mode=mode)
+        cfg = Config.model_validate(config)
+
+        # Set metadata
+        cfg.metadata.name = f"{cls.BACKEND}-{mode}"
+        if namespace and hasattr(cfg.metadata, "namespace"):
+            cfg.metadata.namespace = namespace
+
+        # Update image for all services
+        config = update_image(cfg.model_dump(), image)
+        cfg = Config.model_validate(config)
+
+        if mode == "disagg":
+            cls._apply_disagg_workers(
+                cfg,
+                prefill_cli_args=prefill_cli_args or [],
+                prefill_replicas=prefill_replicas,
+                prefill_gpus=prefill_gpus,
+                decode_cli_args=decode_cli_args or [],
+                decode_replicas=decode_replicas,
+                decode_gpus=decode_gpus,
+            )
+        else:
+            cls._apply_agg_worker(
+                cfg,
+                agg_cli_args=agg_cli_args or [],
+                agg_replicas=agg_replicas,
+                agg_gpus=agg_gpus,
+            )
+
+        # Update model (handles worker args + frontend patching)
+        effective_model_path = model_path or model_name
+        if pvc_name and pvc_mount_path:
+            result = cls.update_model_from_pvc(
+                cfg.model_dump(),
+                model_name=model_name,
+                pvc_name=pvc_name,
+                pvc_mount_path=pvc_mount_path,
+                pvc_path="",
+            )
+        else:
+            result = cls.update_model(
+                cfg.model_dump(),
+                model_name=model_name,
+                model_path=effective_model_path,
+            )
+
+        return result
+
+    @classmethod
+    def _apply_disagg_workers(
+        cls,
+        cfg: Config,
+        prefill_cli_args: list[str],
+        prefill_replicas: int,
+        prefill_gpus: int,
+        decode_cli_args: list[str],
+        decode_replicas: int,
+        decode_gpus: int,
+    ) -> None:
+        """Apply CLI args, replicas, and GPU resources to disagg worker services."""
+        for sct, cli_args, replicas, gpus in [
+            (SubComponentType.PREFILL, prefill_cli_args, prefill_replicas, prefill_gpus),
+            (SubComponentType.DECODE, decode_cli_args, decode_replicas, decode_gpus),
+        ]:
+            try:
+                svc_name = get_service_name_by_type(cfg, cls.BACKEND, sct)
+            except Exception:
+                logger.warning(
+                    "Could not find %s service for backend %s, skipping",
+                    sct.value, cls.BACKEND,
+                )
+                continue
+
+            if svc_name not in cfg.spec.services:
+                continue
+
+            service = cfg.spec.services[svc_name]
+            service.replicas = replicas
+
+            if service.resources is None:
+                service.resources = ServiceResources()
+            if service.resources.limits is None:
+                service.resources.limits = {}
+            service.resources.limits["gpu"] = str(gpus)
+
+            if service.extraPodSpec and service.extraPodSpec.mainContainer:
+                service.extraPodSpec.mainContainer.args = list(cli_args)
+
+    @classmethod
+    def _apply_agg_worker(
+        cls,
+        cfg: Config,
+        agg_cli_args: list[str],
+        agg_replicas: int,
+        agg_gpus: int,
+    ) -> None:
+        """Apply CLI args, replicas, and GPU resources to the agg worker service."""
+        try:
+            svc_name = get_service_name_by_type(cfg, cls.BACKEND, SubComponentType.DECODE)
+        except Exception:
+            svc_name = None
+            for name, svc in cfg.spec.services.items():
+                if name != "Frontend":
+                    svc_name = name
+                    break
+            if svc_name is None:
+                logger.warning("Could not find worker service for agg mode")
+                return
+
+        service = cfg.spec.services[svc_name]
+        service.replicas = agg_replicas
+
+        if service.resources is None:
+            service.resources = ServiceResources()
+        if service.resources.limits is None:
+            service.resources.limits = {}
+        service.resources.limits["gpu"] = str(agg_gpus)
+
+        if service.extraPodSpec and service.extraPodSpec.mainContainer:
+            service.extraPodSpec.mainContainer.args = list(agg_cli_args)

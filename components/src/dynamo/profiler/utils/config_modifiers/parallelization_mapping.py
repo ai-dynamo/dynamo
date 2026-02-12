@@ -6,8 +6,8 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
-from benchmarks.profiler.utils.model_info import (
+from dynamo.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
+from dynamo.profiler.utils.model_info import (
     MOE_ADDITIONAL_TP_ARCHITECTURES,
     ModelInfo,
 )
