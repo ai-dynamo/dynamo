@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+pre-commit==4.5.0
 # Dev/lint tools for local development
 # Note: mypy and type stubs are in requirements.test.txt (used by CI with --mypy flag)
 pyright==1.1.407
-pre-commit==4.5.0
