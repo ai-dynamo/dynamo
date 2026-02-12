@@ -15,6 +15,7 @@ use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
+use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks, start_zmq_listener};
 use llm_rs::protocols::common::timing::RequestTracker;
@@ -660,9 +661,9 @@ async fn create_kv_router_from_endpoint(
     Ok(kv_router)
 }
 
-#[pyclass(name = "KvRouter")]
-pub(crate) struct KvPushRouter {
-    inner: Arc<llm_rs::kv_router::KvPushRouter>,
+#[pyclass]
+pub(crate) struct KvRouter {
+    inner: Arc<RsKvPushRouter>,
 }
 
 /// Inject worker_id info from tracker into response's disaggregated_params.
@@ -691,11 +692,11 @@ fn inject_worker_id_from_tracker(
 }
 
 // TODO: can this reuse the stream conversion method in Client bindings?
-impl KvPushRouter {
+impl KvRouter {
     /// Helper method to process a request and create a Python async generator
     fn process_request_to_stream<'p>(
         py: Python<'p>,
-        inner: Arc<llm_rs::kv_router::KvPushRouter>,
+        inner: Arc<RsKvPushRouter>,
         request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
         tracker: Option<Arc<RequestTracker>>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -761,7 +762,7 @@ impl KvPushRouter {
 }
 
 #[pymethods]
-impl KvPushRouter {
+impl KvRouter {
     /// Create a new KvRouter for KV-aware routing to workers.
     ///
     /// # Arguments
@@ -803,8 +804,7 @@ impl KvPushRouter {
             )
             .await?;
 
-            // Create KvPushRouter (kv_router is already Arc<KvRouter>)
-            let kv_push_router = llm_rs::kv_router::KvPushRouter::new(push_router, kv_router);
+            let kv_push_router = RsKvPushRouter::new(push_router, kv_router);
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),
