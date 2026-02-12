@@ -660,7 +660,7 @@ async fn create_kv_router_from_endpoint(
     Ok(kv_router)
 }
 
-#[pyclass]
+#[pyclass(name = "KvRouter")]
 pub(crate) struct KvPushRouter {
     inner: Arc<llm_rs::kv_router::KvPushRouter>,
 }
@@ -762,7 +762,7 @@ impl KvPushRouter {
 
 #[pymethods]
 impl KvPushRouter {
-    /// Create a new KvPushRouter for KV-aware routing to workers.
+    /// Create a new KvRouter for KV-aware routing to workers.
     ///
     /// # Arguments
     /// * `endpoint` - The endpoint to route requests to

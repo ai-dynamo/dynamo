@@ -1316,9 +1316,9 @@ class ZmqKvEventListener:
         """
         ...
 
-class KvPushRouter:
+class KvRouter:
     """
-    A KV-aware push router that performs intelligent routing based on KV cache overlap.
+    A KV-aware router that performs intelligent routing based on KV cache overlap.
     """
 
     def __init__(
@@ -1328,7 +1328,7 @@ class KvPushRouter:
         kv_router_config: KvRouterConfig,
     ) -> None:
         """
-        Create a new KvPushRouter instance.
+        Create a new KvRouter instance.
 
         Args:
             endpoint: The endpoint to connect to for routing requests

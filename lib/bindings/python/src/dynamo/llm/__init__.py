@@ -11,7 +11,7 @@ from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KserveGrpcService as KserveGrpcService
 from dynamo._core import KvEventPublisher as KvEventPublisher
-from dynamo._core import KvPushRouter as KvPushRouter
+from dynamo._core import KvRouter as KvRouter
 from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder

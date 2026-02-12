@@ -20,7 +20,7 @@ from typing import Optional
 
 import uvloop
 
-from dynamo.llm import KvPushRouter, KvRouterConfig
+from dynamo.llm import KvRouter, KvRouterConfig
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -42,7 +42,7 @@ class StandaloneRouterHandler:
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
-        self.kv_push_router: Optional[KvPushRouter] = None
+        self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
 
     async def initialize(self):
@@ -66,15 +66,14 @@ class StandaloneRouterHandler:
 
             self.worker_client = await worker_endpoint.client()
 
-            # Create KvPushRouter with specified configuration
-            self.kv_push_router = KvPushRouter(
+            self.kv_router = KvRouter(
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
             )
 
         except Exception as e:
-            logger.error(f"Failed to initialize KvPushRouter: {e}")
+            logger.error(f"Failed to initialize KvRouter: {e}")
             raise
 
     async def generate(self, request):
@@ -85,11 +84,11 @@ class StandaloneRouterHandler:
         Wraps the request into PreprocessedRequest format and wraps worker responses
         into LLMEngineOutput format.
         """
-        if self.kv_push_router is None:
-            logger.error("KvPushRouter not initialized - cannot process request")
+        if self.kv_router is None:
+            logger.error("KvRouter not initialized - cannot process request")
             raise RuntimeError("Router not initialized")
 
-        # Wrap incoming request into PreprocessedRequest format for KvPushRouter
+        # Wrap incoming request into PreprocessedRequest format for KvRouter
         # The request should already have most fields, but we ensure it has the structure
         # Build routing hints from request (supports both nested routing object and legacy dp_rank)
         routing = request.get("routing")
@@ -112,8 +111,7 @@ class StandaloneRouterHandler:
             "extra_args": request.get("extra_args"),
         }
 
-        # Route and process through KvPushRouter
-        async for worker_output in await self.kv_push_router.generate_from_request(
+        async for worker_output in await self.kv_router.generate_from_request(
             preprocessed_request
         ):
             # Wrap worker output into LLMEngineOutput format
@@ -142,11 +140,11 @@ class StandaloneRouterHandler:
         overlap, but does NOT actually route the request or update router states.
         It's useful for debugging, monitoring, or implementing custom routing logic.
         """
-        if self.kv_push_router is None:
-            logger.error("KvPushRouter not initialized - cannot get best worker")
+        if self.kv_router is None:
+            logger.error("KvRouter not initialized - cannot get best worker")
             raise RuntimeError("Router not initialized")
 
-        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_push_router.best_worker(
+        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_router.best_worker(
             token_ids, router_config_override
         )
 

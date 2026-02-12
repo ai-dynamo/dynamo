@@ -9,23 +9,23 @@ For quick start instructions, see the [Router README](README.md). This document 
 
 ## Table of Contents
 
-- [Using KvPushRouter Python API](#using-kvpushrouter-python-api)
+- [Using KvRouter Python API](#using-kvrouter-python-api)
 - [K8s Examples](#k8s-examples)
 - [Routing Patterns](#routing-patterns)
 - [Custom Routing Example: Minimizing TTFT](#custom-routing-example-minimizing-ttft)
 - [KV Event Publishing for Custom Engines](#kv-event-publishing-for-custom-engines)
 - [Global Router (Hierarchical Routing)](#global-router-hierarchical-routing)
 
-## Using KvPushRouter Python API
+## Using KvRouter Python API
 
-Instead of launching the KV Router via command line, you can create a `KvPushRouter` object directly in Python. This allows per-request routing configuration overrides.
+Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
 
 >[!Warning]
-> **Multiple Routers in Same Process**: If you need to run multiple `KvPushRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvPushRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvPushRouter` instance.
+> **Multiple Routers in Same Process**: If you need to run multiple `KvRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvRouter` instance.
 
 ### Methods
 
-The `KvPushRouter` provides the following methods:
+The `KvRouter` provides the following methods:
 
 - **`generate(token_ids, model, ...)`**: Route and execute a request, returning an async stream of responses. Automatically handles worker selection, state tracking, and lifecycle management.
 
@@ -52,7 +52,7 @@ python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf
 
 ```python
 import asyncio
-from dynamollm import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamollm import DistributedRuntime, KvRouter, KvRouterConfig
 
 async def main():
     # Get runtime and create endpoint
@@ -63,7 +63,7 @@ async def main():
 
     # Create KV router
     kv_router_config = KvRouterConfig()
-    router = KvPushRouter(
+    router = KvRouter(
         endpoint=endpoint,
         block_size=16,
         kv_router_config=kv_router_config
@@ -162,7 +162,7 @@ extraPodSpec:
 
 ## Routing Patterns
 
-The `KvPushRouter` supports multiple usage patterns depending on your control requirements:
+The `KvRouter` supports multiple usage patterns depending on your control requirements:
 
 ### 1. Automatic Routing (Recommended)
 Call `generate()` directly and let the router handle everything:
@@ -221,7 +221,7 @@ Here's an example of using `get_potential_loads()` to implement custom routing t
 
 ```python
 import asyncio
-from dynamo.llm import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamo.llm import DistributedRuntime, KvRouter, KvRouterConfig
 
 async def minimize_ttft_routing():
     # Setup router
@@ -230,7 +230,7 @@ async def minimize_ttft_routing():
     component = namespace.component("backend")
     endpoint = component.endpoint("generate")
 
-    router = KvPushRouter(
+    router = KvRouter(
         endpoint=endpoint,
         block_size=16,
         kv_router_config=KvRouterConfig()
