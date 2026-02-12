@@ -464,7 +464,13 @@ class BaseConfigModifier:
 
         Returns:
             Complete DGD config dict ready for YAML serialization
+
+        Raises:
+            ValueError: If mode is not "agg" or "disagg"
         """
+        if mode not in ("agg", "disagg"):
+            raise ValueError(f"Invalid mode '{mode}': must be 'agg' or 'disagg'")
+
         config = cls.load_default_config(mode=mode)
         cfg = Config.model_validate(config)
 
@@ -514,6 +520,43 @@ class BaseConfigModifier:
 
         return result
 
+    _NON_WORKER_SERVICES = {"Frontend", "Planner"}
+
+    @classmethod
+    def _resolve_service_name(
+        cls,
+        cfg: Config,
+        component_type: SubComponentType,
+    ) -> str | None:
+        """Resolve the service name for a given component type, with fallback."""
+        try:
+            return get_service_name_by_type(cfg, cls.BACKEND, component_type)
+        except Exception:
+            # Fallback: find the first worker service (skip Frontend, Planner)
+            for name in cfg.spec.services:
+                if name not in cls._NON_WORKER_SERVICES:
+                    return name
+            return None
+
+    @staticmethod
+    def _apply_worker_config(
+        service: Any,
+        cli_args: list[str],
+        replicas: int,
+        gpus: int,
+    ) -> None:
+        """Apply CLI args, replicas, and GPU resources to a single worker service."""
+        service.replicas = replicas
+
+        if service.resources is None:
+            service.resources = ServiceResources()
+        if service.resources.limits is None:
+            service.resources.limits = {}
+        service.resources.limits["gpu"] = str(gpus)
+
+        if service.extraPodSpec and service.extraPodSpec.mainContainer:
+            service.extraPodSpec.mainContainer.args = list(cli_args)
+
     @classmethod
     def _apply_disagg_workers(
         cls,
@@ -527,38 +570,17 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to disagg worker services."""
         for sct, cli_args, replicas, gpus in [
-            (
-                SubComponentType.PREFILL,
-                prefill_cli_args,
-                prefill_replicas,
-                prefill_gpus,
-            ),
+            (SubComponentType.PREFILL, prefill_cli_args, prefill_replicas, prefill_gpus),
             (SubComponentType.DECODE, decode_cli_args, decode_replicas, decode_gpus),
         ]:
-            try:
-                svc_name = get_service_name_by_type(cfg, cls.BACKEND, sct)
-            except Exception:
+            svc_name = cls._resolve_service_name(cfg, sct)
+            if svc_name is None or svc_name not in cfg.spec.services:
                 logger.warning(
                     "Could not find %s service for backend %s, skipping",
-                    sct.value,
-                    cls.BACKEND,
+                    sct.value, cls.BACKEND,
                 )
                 continue
-
-            if svc_name not in cfg.spec.services:
-                continue
-
-            service = cfg.spec.services[svc_name]
-            service.replicas = replicas
-
-            if service.resources is None:
-                service.resources = ServiceResources()
-            if service.resources.limits is None:
-                service.resources.limits = {}
-            service.resources.limits["gpu"] = str(gpus)
-
-            if service.extraPodSpec and service.extraPodSpec.mainContainer:
-                service.extraPodSpec.mainContainer.args = list(cli_args)
+            cls._apply_worker_config(cfg.spec.services[svc_name], cli_args, replicas, gpus)
 
     @classmethod
     def _apply_agg_worker(
@@ -569,28 +591,8 @@ class BaseConfigModifier:
         agg_gpus: int,
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to the agg worker service."""
-        try:
-            svc_name = get_service_name_by_type(
-                cfg, cls.BACKEND, SubComponentType.DECODE
-            )
-        except Exception:
-            svc_name = None
-            for name, svc in cfg.spec.services.items():
-                if name != "Frontend":
-                    svc_name = name
-                    break
-            if svc_name is None:
-                logger.warning("Could not find worker service for agg mode")
-                return
-
-        service = cfg.spec.services[svc_name]
-        service.replicas = agg_replicas
-
-        if service.resources is None:
-            service.resources = ServiceResources()
-        if service.resources.limits is None:
-            service.resources.limits = {}
-        service.resources.limits["gpu"] = str(agg_gpus)
-
-        if service.extraPodSpec and service.extraPodSpec.mainContainer:
-            service.extraPodSpec.mainContainer.args = list(agg_cli_args)
+        svc_name = cls._resolve_service_name(cfg, SubComponentType.DECODE)
+        if svc_name is None or svc_name not in cfg.spec.services:
+            logger.warning("Could not find worker service for agg mode")
+            return
+        cls._apply_worker_config(cfg.spec.services[svc_name], agg_cli_args, agg_replicas, agg_gpus)

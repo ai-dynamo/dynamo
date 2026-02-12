@@ -113,6 +113,7 @@ deploy:
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
+  - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 
 vllm:
