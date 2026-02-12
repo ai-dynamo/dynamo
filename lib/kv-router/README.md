@@ -67,13 +67,13 @@ block2 in B: seq_hash = hash(hash(hash(block0') || block1') || block2) = 0x2222
 
 Both data structures support three operations:
 
-| Operation | Description | Hot Path? |
-|-----------|-------------|-----------|
-| `store_blocks` | Add blocks for a worker | No (background) |
-| `remove_blocks` | Remove blocks for a worker | No (background) |
-| `find_matches` | Find workers with matching prefix | **Yes** (per-request) |
+| Operation | Description |
+|-----------|-------------|
+| `store_blocks` | Add blocks for a worker (background) |
+| `remove_blocks` | Remove blocks for a worker (background) |
+| `find_matches` | Find workers with matching prefix (per-request) |
 
-The key insight: **reads (find_matches) are far more frequent than writes (store/remove)**. This motivates different structural tradeoffs.
+**Read vs write cost and frequency**: When the radix tree has little or no shared prefix for a request, `find_matches` can exit after a single root-level lookup (first block miss)—reads then do less work than writes (which traverse and update multiple nodes). Vice versa, with large prefix overlap, reads traverse deeper and can be invoked more often than writes. We consider both extremes; the proposed data structures are designed to handle them.
 
 ---
 
