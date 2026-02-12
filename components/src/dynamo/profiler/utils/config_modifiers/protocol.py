@@ -570,17 +570,25 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to disagg worker services."""
         for sct, cli_args, replicas, gpus in [
-            (SubComponentType.PREFILL, prefill_cli_args, prefill_replicas, prefill_gpus),
+            (
+                SubComponentType.PREFILL,
+                prefill_cli_args,
+                prefill_replicas,
+                prefill_gpus,
+            ),
             (SubComponentType.DECODE, decode_cli_args, decode_replicas, decode_gpus),
         ]:
             svc_name = cls._resolve_service_name(cfg, sct)
             if svc_name is None or svc_name not in cfg.spec.services:
                 logger.warning(
                     "Could not find %s service for backend %s, skipping",
-                    sct.value, cls.BACKEND,
+                    sct.value,
+                    cls.BACKEND,
                 )
                 continue
-            cls._apply_worker_config(cfg.spec.services[svc_name], cli_args, replicas, gpus)
+            cls._apply_worker_config(
+                cfg.spec.services[svc_name], cli_args, replicas, gpus
+            )
 
     @classmethod
     def _apply_agg_worker(
@@ -595,4 +603,6 @@ class BaseConfigModifier:
         if svc_name is None or svc_name not in cfg.spec.services:
             logger.warning("Could not find worker service for agg mode")
             return
-        cls._apply_worker_config(cfg.spec.services[svc_name], agg_cli_args, agg_replicas, agg_gpus)
+        cls._apply_worker_config(
+            cfg.spec.services[svc_name], agg_cli_args, agg_replicas, agg_gpus
+        )
