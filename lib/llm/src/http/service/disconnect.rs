@@ -171,6 +171,12 @@ pub fn monitor_for_disconnects(
     mut stream_handle: ConnectionHandle,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
+
+    // Default to Cancelled: if the stream is dropped unexpectedly (e.g. client
+    // disconnect causing a broken-pipe on the SSE write), the guard will report
+    // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
+    inflight_guard.mark_error(ErrorType::Cancelled);
+
     async_stream::try_stream! {
         tokio::pin!(stream);
         loop {
