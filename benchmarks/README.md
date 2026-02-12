@@ -20,7 +20,7 @@ This directory contains benchmarking scripts and tools for performance evaluatio
 ## Quick Start
 
 ### Benchmark a Dynamo Deployment
-First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/kubernetes/), then:
+First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/pages/kubernetes/), then:
 
 ```bash
 # Port-forward your deployment to http://localhost:8000
@@ -71,4 +71,4 @@ Detailed information is provided in the `prefix_data_generator` directory.
 
 ## Comprehensive Guide
 
-For detailed documentation, configuration options, and advanced usage, see the [complete benchmarking guide](../docs/benchmarks/benchmarking.md).
+For detailed documentation, configuration options, and advanced usage, see the [complete benchmarking guide](../docs/pages/benchmarks/benchmarking.md).

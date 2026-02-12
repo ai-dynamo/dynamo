@@ -43,7 +43,7 @@ if HAS_VLLM:
 pytestmark = [
     pytest.mark.kvbm,
     pytest.mark.integration,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.vllm,
     pytest.mark.nightly,
     pytest.mark.pre_merge,
