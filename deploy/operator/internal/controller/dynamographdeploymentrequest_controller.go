@@ -1164,7 +1164,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		profilerContainer := corev1.Container{
 			Name:         ContainerNameProfiler,
 			Image:        imageName,
-			Command:      []string{"python", "-m", "benchmarks.profiler.profile_sla"},
+			Command:      []string{"python", "-m", "dynamo.profiler.profile_sla"},
 			Args:         profilerArgs,
 			Env:          profilerEnv,
 			VolumeMounts: volumeMounts,

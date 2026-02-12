@@ -424,7 +424,7 @@ spec:
                 profilingResults:
                   description: |-
                     ProfilingResults contains a reference to the ConfigMap holding profiling data.
-                    Format: "configmap/<name>"
+                    Format: "configmap/\<name\>"
                   type: string
                 state:
                   description: |-

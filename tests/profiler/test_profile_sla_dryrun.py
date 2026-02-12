@@ -18,10 +18,10 @@ import pytest
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
-from benchmarks.profiler.utils.defaults import SearchStrategy  # noqa: E402
-from benchmarks.profiler.utils.model_info import ModelInfo  # noqa: E402
-from benchmarks.profiler.utils.search_space_autogen import (  # noqa: E402
+from dynamo.profiler.profile_sla import run_profile  # noqa: E402
+from dynamo.profiler.utils.defaults import SearchStrategy  # noqa: E402
+from dynamo.profiler.utils.model_info import ModelInfo  # noqa: E402
+from dynamo.profiler.utils.search_space_autogen import (  # noqa: E402
     auto_generate_search_space,
 )
 
@@ -335,7 +335,7 @@ class TestProfileSLADryRun:
     @pytest.mark.integration
     @pytest.mark.gpu_0
     @pytest.mark.vllm
-    @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
+    @patch("dynamo.profiler.utils.model_info.get_model_info")
     async def test_profile_with_autogen_search_space_h100(
         self,
         mock_get_model_info,
@@ -402,7 +402,7 @@ class TestProfileSLADryRun:
     @pytest.mark.gpu_0
     @pytest.mark.integration
     @pytest.mark.sglang
-    @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
+    @patch("dynamo.profiler.utils.model_info.get_model_info")
     async def test_sglang_profile_with_autogen_search_space_h100(
         self,
         mock_get_model_info,
@@ -469,7 +469,7 @@ class TestProfileSLADryRun:
     @pytest.mark.gpu_0
     @pytest.mark.integration
     @pytest.mark.trtllm
-    @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
+    @patch("dynamo.profiler.utils.model_info.get_model_info")
     async def test_trtllm_profile_with_autogen_search_space_h100(
         self,
         mock_get_model_info,

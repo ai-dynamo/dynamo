@@ -223,6 +223,6 @@ To add other backends (TensorRT, ONNX, Python, etc.), edit the Makefile's `build
 
 ## Related Documentation
 
-- [Dynamo Backend Guide](../../../docs/development/backend-guide.md)
+- [Dynamo Backend Guide](../../../docs/pages/development/backend-guide.md)
 - [Triton Inference Server](https://github.com/triton-inference-server/server)
 - [KServe Protocol](https://kserve.github.io/website/latest/modelserving/data_plane/v2_protocol/)
