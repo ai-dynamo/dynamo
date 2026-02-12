@@ -226,14 +226,15 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 
 ### Automatic GPU Discovery
 
-Cluster-scoped operators can optionally enable automatic GPU discovery:
+The operator automatically discovers GPU resources from your Kubernetes cluster nodes when available. GPU discovery provides:
 
-```yaml
-spec:
-  enableGpuDiscovery: true
-```
+- Hardware information (GPU model, VRAM, GPUs per node)
+- Automatic calculation of profiling search space based on model size
+- Hardware system identifier for AI Configurator integration
 
-This is only available with cluster-scoped operators (`namespaceRestriction.enabled=false`) as it requires cluster-wide node access permissions.
+**Permissions**: GPU discovery requires cluster-wide node read permissions. Cluster-scoped operators automatically have these permissions. Namespace-restricted operators can also use GPU discovery if granted node read permissions via RBAC.
+
+If GPU discovery is unavailable (no permissions or no GPU labels), the profiler will use manually specified hardware configuration or defaults.
 
 ## Configuration
 
