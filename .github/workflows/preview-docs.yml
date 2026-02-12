@@ -37,6 +37,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install Fern CLI tool
         run: npm install -g fern-api
 
@@ -45,9 +50,18 @@ jobs:
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
         run: |
+          if [ -z "$FERN_TOKEN" ]; then
+            echo "::error::FERN_TOKEN secret is not configured"
+            exit 1
+          fi
           OUTPUT=$(fern generate --docs --preview 2>&1) || true
           echo "$OUTPUT"
-          URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()')
+          URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()') || true
+          if [ -z "$URL" ]; then
+            echo "::error::Failed to extract preview URL from fern output"
+            echo "⚠️ Fern docs preview generation failed. Check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details." > preview_url.txt
+            exit 1
+          fi
           echo "Preview URL: $URL"
           echo "🌿 Preview your docs: $URL" > preview_url.txt
 
