@@ -51,12 +51,6 @@ jobs:
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
         run: |
-          if [ -z "$FERN_TOKEN" ]; then
-            echo "::error::FERN_TOKEN secret is not configured"
-            echo "has_url=false" >> "$GITHUB_OUTPUT"
-            echo "⚠️ Fern docs preview skipped: FERN_TOKEN secret is not configured." > "$GITHUB_WORKSPACE/preview_url.txt"
-            exit 0
-          fi
           OUTPUT=$(fern generate --docs --preview 2>&1)
           FERN_EXIT=$?
           echo "$OUTPUT"
