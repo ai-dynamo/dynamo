@@ -34,6 +34,10 @@ def env_or_default(
     if value is None:
         return default
 
+    # No type info available: default=None and no explicit value_type.
+    if value_type is None and default is None:
+        return value  # type: ignore[return-value]
+
     # Prefer the explicit type if provided; otherwise derive from default
     target_type = value_type if value_type is not None else type(default)
 
