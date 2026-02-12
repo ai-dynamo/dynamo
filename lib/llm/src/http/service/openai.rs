@@ -1394,11 +1394,7 @@ async fn responses(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|e| {
-                    tracing::error!(
-                        request_id,
-                        "Failed to fold responses stream: {:?}",
-                        e
-                    );
+                    tracing::error!(request_id, "Failed to fold responses stream: {:?}", e);
                     ErrorMessage::internal_server_error(&format!(
                         "Failed to fold responses stream: {}",
                         e

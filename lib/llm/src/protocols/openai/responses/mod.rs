@@ -6,8 +6,9 @@ pub mod stream_converter;
 use dynamo_async_openai::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, InputContent, InputItem, InputParam,
     InputRole, Instructions, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent,
-    OutputStatus, OutputTextContent, Response, ResponseTextParam, Role as ResponseRole, ServiceTier,
-    Status, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    OutputStatus, OutputTextContent, Response, ResponseTextParam, Role as ResponseRole,
+    ServiceTier, Status, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
+    Truncation,
 };
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -320,7 +321,10 @@ fn convert_input_items_to_messages(
                     ));
                 }
                 other => {
-                    tracing::debug!("Skipping unsupported input item type during conversion: {:?}", std::mem::discriminant(other));
+                    tracing::debug!(
+                        "Skipping unsupported input item type during conversion: {:?}",
+                        std::mem::discriminant(other)
+                    );
                 }
             },
             InputItem::EasyMessage(easy) => {
@@ -1049,7 +1053,11 @@ mod tests {
             choices: vec![dynamo_async_openai::types::ChatChoice {
                 index: 0,
                 message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                    content: Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text("This is a reply".to_string())),
+                    content: Some(
+                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                            "This is a reply".to_string(),
+                        ),
+                    ),
                     refusal: None,
                     tool_calls: None,
                     role: dynamo_async_openai::types::Role::Assistant,

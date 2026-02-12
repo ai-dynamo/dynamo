@@ -17,10 +17,10 @@ use dynamo_async_openai::types::responses::{
     OutputMessageContent, OutputStatus, OutputTextContent, Response, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
     ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent,
-    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseStreamEvent,
-    ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam, ServiceTier, Status,
-    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
+    ResponseTextDoneEvent, ResponseTextParam, ServiceTier, Status, TextResponseFormatConfiguration,
+    ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use uuid::Uuid;
 
@@ -312,7 +312,6 @@ impl ResponseStreamConverter {
                             events.push(make_sse_event(&args_delta));
                         }
                     }
-
                 }
             }
         }
@@ -535,9 +534,7 @@ fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
         ResponseStreamEvent::ResponseMCPCallArgumentsDelta(_) => {
             "response.mcp_call_arguments.delta"
         }
-        ResponseStreamEvent::ResponseMCPCallArgumentsDone(_) => {
-            "response.mcp_call_arguments.done"
-        }
+        ResponseStreamEvent::ResponseMCPCallArgumentsDone(_) => "response.mcp_call_arguments.done",
         ResponseStreamEvent::ResponseMCPCallCompleted(_) => "response.mcp_call.completed",
         ResponseStreamEvent::ResponseMCPCallFailed(_) => "response.mcp_call.failed",
         ResponseStreamEvent::ResponseMCPCallInProgress(_) => "response.mcp_call.in_progress",
