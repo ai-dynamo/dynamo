@@ -17,13 +17,18 @@ type TRTLLMBackend struct {
 	MpiRunSecretName string
 }
 
-// shellQuote quotes a string for safe use in shell commands.
-// It wraps the string in single quotes and escapes any single quotes within.
-func shellQuote(s string) string {
-	// If string contains spaces, special chars, or quotes, wrap in single quotes
-	// and escape any single quotes by ending the quote, adding escaped quote, and restarting
+// shellQuoteForBashC quotes a string for safe use inside a single-quoted bash -c '...' command.
+// Since the outer context is already single-quoted, we CANNOT use single quotes here.
+// Instead, we use double quotes and escape characters that are special inside double quotes:
+// backslash, double quote, dollar sign, and backtick.
+func shellQuoteForBashC(s string) string {
 	if strings.ContainsAny(s, " \t\n'\"\\{}[]$`!") {
-		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+		escaped := s
+		escaped = strings.ReplaceAll(escaped, `\`, `\\`)  // must be first
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+		escaped = strings.ReplaceAll(escaped, "`", "\\`")
+		return `"` + escaped + `"`
 	}
 	return s
 }
@@ -125,10 +130,10 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
 		var quotedParts []string
 		for _, part := range container.Command {
-			quotedParts = append(quotedParts, shellQuote(part))
+			quotedParts = append(quotedParts, shellQuoteForBashC(part))
 		}
 		for _, part := range container.Args {
-			quotedParts = append(quotedParts, shellQuote(part))
+			quotedParts = append(quotedParts, shellQuoteForBashC(part))
 		}
 		originalCommand = strings.Join(quotedParts, " ")
 	} else if len(container.Args) > 0 {
