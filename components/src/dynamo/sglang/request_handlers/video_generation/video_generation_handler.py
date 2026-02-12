@@ -17,6 +17,7 @@ from dynamo.sglang.protocol import (
     CreateVideoRequest,
     VideoData,
     VideoGenerationResponse,
+    VideoNvExt,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
@@ -84,10 +85,6 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         Yields:
             Response dict with generated video (OpenAI-compatible format).
         """
-        logger.info(
-            f"Video generation request: model={request.get('model')}, "
-            f"size={request.get('size')}, steps={request.get('num_inference_steps')}"
-        )
         start_time = time.time()
 
         # Get trace header for distributed tracing (for logging/observability)
@@ -96,18 +93,21 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             logger.debug(f"Video generation request with trace: {trace_header}")
 
         try:
-            # Default to 50 steps if not provided
-            request["num_inference_steps"] = request.get("num_inference_steps", 50)
-
             req = CreateVideoRequest(**request)
+            nvext = req.nvext or VideoNvExt()
+
+            logger.info(
+                f"Video generation request: model={req.model}, "
+                f"size={req.size}, steps={nvext.num_inference_steps}"
+            )
 
             # Parse size
             width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
-            num_frames = req.num_frames
+            num_frames = nvext.num_frames
             if num_frames is None:
-                num_frames = req.fps * req.seconds
+                num_frames = nvext.fps * req.seconds
 
             # Generate video
             video_bytes = await self._generate_video(
@@ -115,12 +115,12 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 width=width,
                 height=height,
                 num_frames=num_frames,
-                fps=req.fps,
-                num_inference_steps=req.num_inference_steps,
-                guidance_scale=req.guidance_scale,
-                seed=req.seed,
+                fps=nvext.fps,
+                num_inference_steps=nvext.num_inference_steps,
+                guidance_scale=nvext.guidance_scale,
+                seed=nvext.seed,
                 request_id=context.id(),
-                negative_prompt=req.negative_prompt,
+                negative_prompt=nvext.negative_prompt,
                 input_reference=req.input_reference,
             )
 

@@ -163,12 +163,14 @@ class VideoGenerationHealthCheckPayload(HealthCheckPayload):
             "prompt": "test",  # Minimal prompt
             "model": model_path,
             "seconds": 1,
-            "fps": 8,
-            "num_frames": 8,  # Minimal frames for fast health check
             "size": "256x256",  # Small size for fast health check
-            "num_inference_steps": 1,  # Just 1 step (fast but low quality)
-            "guidance_scale": 5.0,  # Standard guidance scale for video
             "response_format": "b64_json",  # Don't require filesystem for health check
+            "nvext": {
+                "fps": 8,
+                "num_frames": 8,  # Minimal frames for fast health check
+                "num_inference_steps": 1,  # Just 1 step (fast but low quality)
+                "guidance_scale": 5.0,  # Standard guidance scale for video
+            },
         }
 
         super().__init__()

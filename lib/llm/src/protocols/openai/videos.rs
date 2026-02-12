@@ -11,7 +11,7 @@ mod nvext;
 pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
 
-/// Request for video generation (/v1/videos/generations endpoint)
+/// Request for video generation (/v1/videos endpoint)
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
@@ -20,41 +20,17 @@ pub struct NvCreateVideoRequest {
     /// The model to use for video generation
     pub model: String,
 
-    /// Optional input reference for I2V (image path/url)
+    /// Optional image reference that guides generation (for I2V)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_reference: Option<String>,
 
-    /// Duration in seconds (default: 4)
+    /// Clip duration in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<i32>,
-
-    /// Frames per second (default: 24)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fps: Option<i32>,
-
-    /// Number of frames to generate (overrides fps * seconds if set)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub num_frames: Option<i32>,
 
     /// Video size in WxH format (default: "832x480")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
-
-    /// Number of denoising steps (default: 50)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub num_inference_steps: Option<i32>,
-
-    /// CFG guidance scale (default: 5.0)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub guidance_scale: Option<f32>,
-
-    /// Optional negative prompt
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub negative_prompt: Option<String>,
-
-    /// Random seed for reproducibility
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed: Option<i64>,
 
     /// Optional user identifier
     #[serde(skip_serializing_if = "Option::is_none")]

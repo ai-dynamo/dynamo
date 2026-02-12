@@ -181,22 +181,29 @@ class ImagesResponse(BaseModel):
 # ============================================================================
 
 
+class VideoNvExt(BaseModel):
+    """NVIDIA extensions for video generation requests."""
+
+    annotations: Optional[list[str]] = None
+    fps: Optional[int] = 24
+    num_frames: Optional[int] = None  # Override: if set, ignores fps * seconds
+    negative_prompt: Optional[str] = None
+    num_inference_steps: Optional[int] = 50
+    guidance_scale: float = 5.0
+    seed: Optional[int] = None
+
+
 class CreateVideoRequest(BaseModel):
-    """Request for /v1/videos/generations endpoint"""
+    """Request for /v1/videos endpoint"""
 
     prompt: str
     model: str
     input_reference: Optional[str] = None  # For I2V (image-to-video) - image path/url
     seconds: Optional[int] = 4
-    fps: Optional[int] = 24
-    num_frames: Optional[int] = None  # Override: if set, ignores fps * seconds
     size: Optional[str] = "832x480"  # WxH format (Wan default: 832x480)
-    num_inference_steps: Optional[int] = 50
-    guidance_scale: float = 5.0
-    negative_prompt: Optional[str] = None
-    seed: Optional[int] = None
     user: Optional[str] = None
     response_format: Optional[str] = "url"  # url or b64_json
+    nvext: Optional[VideoNvExt] = None
 
 
 class VideoData(BaseModel):

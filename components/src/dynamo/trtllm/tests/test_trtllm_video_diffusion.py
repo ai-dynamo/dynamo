@@ -24,6 +24,7 @@ from dynamo.trtllm.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
     VideoData,
+    VideoNvExt,
 )
 
 pytestmark = [
@@ -267,52 +268,48 @@ class TestVideoHandlerComputeNumFrames:
     def test_compute_num_frames_explicit(self):
         """Test that explicit num_frames takes priority."""
         req = NvCreateVideoRequest(
-            prompt="test",
-            model="test-model",
+            prompt="test", model="test-model", seconds=10
+        )
+        nvext = VideoNvExt(
             num_frames=100,
-            seconds=10,  # Should be ignored
             fps=30,  # Should be ignored
         )
-        assert self.handler._compute_num_frames(req) == 100
+        assert self.handler._compute_num_frames(req, nvext) == 100
 
     def test_compute_num_frames_from_seconds_fps(self):
         """Test computation from seconds * fps."""
         req = NvCreateVideoRequest(
-            prompt="test",
-            model="test-model",
-            seconds=4,
-            fps=24,
+            prompt="test", model="test-model", seconds=4
         )
-        assert self.handler._compute_num_frames(req) == 96  # 4 * 24
+        nvext = VideoNvExt(fps=24)
+        assert self.handler._compute_num_frames(req, nvext) == 96  # 4 * 24
 
     def test_compute_num_frames_only_seconds(self):
         """Test seconds with default fps (24)."""
         req = NvCreateVideoRequest(
-            prompt="test",
-            model="test-model",
-            seconds=5,
+            prompt="test", model="test-model", seconds=5
         )
+        nvext = VideoNvExt()
         # seconds=5, default fps=24 -> 5 * 24 = 120
-        assert self.handler._compute_num_frames(req) == 120
+        assert self.handler._compute_num_frames(req, nvext) == 120
 
     def test_compute_num_frames_only_fps(self):
         """Test fps with default seconds (4)."""
         req = NvCreateVideoRequest(
-            prompt="test",
-            model="test-model",
-            fps=30,
+            prompt="test", model="test-model"
         )
+        nvext = VideoNvExt(fps=30)
         # default seconds=4, fps=30 -> 4 * 30 = 120
-        assert self.handler._compute_num_frames(req) == 120
+        assert self.handler._compute_num_frames(req, nvext) == 120
 
     def test_compute_num_frames_defaults(self):
         """Test all None uses config default."""
         req = NvCreateVideoRequest(
-            prompt="test",
-            model="test-model",
+            prompt="test", model="test-model"
         )
+        nvext = VideoNvExt()
         assert (
-            self.handler._compute_num_frames(req)
+            self.handler._compute_num_frames(req, nvext)
             == MockDiffusionConfig.default_num_frames
         )
 
@@ -345,43 +342,41 @@ class TestNvCreateVideoRequest:
         """Test that optional fields default to None."""
         req = NvCreateVideoRequest(prompt="A cat", model="wan_t2v")
 
-        assert req.size is None
+        assert req.input_reference is None
         assert req.seconds is None
-        assert req.fps is None
-        assert req.num_frames is None
-        assert req.num_inference_steps is None
-        assert req.guidance_scale is None
-        assert req.negative_prompt is None
-        assert req.seed is None
+        assert req.size is None
         assert req.response_format is None
+        assert req.nvext is None
 
     def test_full_request_valid(self):
-        """Test a fully populated request."""
+        """Test a fully populated request with nvext."""
         req = NvCreateVideoRequest(
             prompt="A majestic lion",
             model="wan_t2v",
-            size="1920x1080",
             seconds=5,
-            fps=30,
-            num_frames=150,
-            num_inference_steps=30,
-            guidance_scale=7.5,
-            negative_prompt="blurry, low quality",
-            seed=42,
+            size="1920x1080",
             response_format="b64_json",
+            nvext=VideoNvExt(
+                fps=30,
+                num_frames=150,
+                num_inference_steps=30,
+                guidance_scale=7.5,
+                negative_prompt="blurry, low quality",
+                seed=42,
+            ),
         )
 
         assert req.prompt == "A majestic lion"
         assert req.model == "wan_t2v"
-        assert req.size == "1920x1080"
         assert req.seconds == 5
-        assert req.fps == 30
-        assert req.num_frames == 150
-        assert req.num_inference_steps == 30
-        assert req.guidance_scale == 7.5
-        assert req.negative_prompt == "blurry, low quality"
-        assert req.seed == 42
+        assert req.size == "1920x1080"
         assert req.response_format == "b64_json"
+        assert req.nvext.fps == 30
+        assert req.nvext.num_frames == 150
+        assert req.nvext.num_inference_steps == 30
+        assert req.nvext.guidance_scale == 7.5
+        assert req.nvext.negative_prompt == "blurry, low quality"
+        assert req.nvext.seed == 42
 
 
 class TestVideoData:

@@ -1709,12 +1709,12 @@ async fn videos(
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Videos endpoint
-/// If not path is provided, the default path is `/v1/videos/generations`
+/// If no path is provided, the default path is `/v1/videos`
 pub fn videos_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/videos/generations".to_string());
+    let path = path.unwrap_or("/v1/videos".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(videos))
