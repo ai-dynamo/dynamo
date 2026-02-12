@@ -3,8 +3,15 @@
 
 """Unit tests for runtime utilities."""
 
+import pytest
 
 from dynamo.common.utils.runtime import slugify_model_name
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 
 class TestSlugifyModelName:
