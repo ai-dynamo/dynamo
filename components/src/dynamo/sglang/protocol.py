@@ -14,7 +14,6 @@ TokenIdType = int
 # ============================================================================
 # Standard LLM Protocol Types
 # ============================================================================
-# TODO: move these to common for all LLMs once we adopt dynamo-run
 # derived from lib/llm/src/protocols/common/preprocessor.rs
 class StopConditions(BaseModel):
     max_tokens: Optional[int] = None
