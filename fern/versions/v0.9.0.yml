@@ -187,6 +187,8 @@ navigation:
         path: ../pages-v0.9.0/design-docs/disagg-serving.md
       - page: Distributed Runtime
         path: ../pages-v0.9.0/design-docs/distributed-runtime.md
+      - page: Discovery Plane
+        path: ../pages-v0.9.0/design-docs/discovery-plane.md
       - page: Request Plane
         path: ../pages-v0.9.0/design-docs/request-plane.md
       - page: Event Plane
