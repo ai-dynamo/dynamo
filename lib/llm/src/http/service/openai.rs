@@ -96,19 +96,20 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
 fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
     match code {
         StatusCode::BAD_REQUEST => {
+            // 400
             if message.starts_with("Validation:") {
                 ErrorType::Validation
             } else {
                 ErrorType::Internal
             }
         }
-        StatusCode::NOT_FOUND => ErrorType::NotFound,
-        StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented,
-        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload,
-        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload,
-        StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal,
-        _ if code.is_client_error() => ErrorType::Validation,
-        _ => ErrorType::Internal,
+        StatusCode::NOT_FOUND => ErrorType::NotFound,              // 404
+        StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented,  // 501
+        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload,      // 429
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload,    // 503
+        StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal,  // 500
+        _ if code.is_client_error() => ErrorType::Validation,      // other 4xx
+        _ => ErrorType::Internal,                                  // everything else
     }
 }
 
@@ -504,6 +505,11 @@ async fn completions_single(
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -673,6 +679,11 @@ async fn completions_batch(
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -1097,6 +1108,11 @@ async fn chat_completions(
                 })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -1296,8 +1312,8 @@ async fn responses(
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceed.
     if let Some(resp) = validate_response_unsupported_fields(&request) {
-        // Note: these validation errors return Ok() with error response, not Err()
-        // So we don't mark_error here - they're successful HTTP responses with 501 status
+        // Mark as NotImplemented so the guard doesn't drop with the default Internal
+        inflight_guard.mark_error(ErrorType::NotImplemented);
         return Ok(resp.into_response());
     }
 
@@ -1500,6 +1516,11 @@ async fn responses(
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
 
         Ok(Json(response).into_response())
     }
