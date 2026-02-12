@@ -253,7 +253,6 @@ type DynamoGraphDeploymentRequestStatus struct {
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.status.backend`

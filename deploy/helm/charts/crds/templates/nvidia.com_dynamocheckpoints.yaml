@@ -8280,7 +8280,7 @@ spec:
             - message: spec.identity is immutable after creation
               rule: '!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity'
       served: true
-      storage: true
+      storage: false
       subresources:
         status: {}
     - additionalPrinterColumns:
@@ -16531,6 +16531,6 @@ spec:
             - message: spec.identity is immutable after creation
               rule: '!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity'
       served: true
-      storage: false
+      storage: true
       subresources:
         status: {}

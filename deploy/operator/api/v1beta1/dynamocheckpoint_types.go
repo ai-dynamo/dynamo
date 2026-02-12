@@ -173,6 +173,7 @@ type DynamoCheckpointStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dckpt
 // +kubebuilder:printcolumn:name="Model",type="string",JSONPath=".spec.identity.model",description="Model identifier"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=".spec.identity.backendFramework",description="Backend framework"

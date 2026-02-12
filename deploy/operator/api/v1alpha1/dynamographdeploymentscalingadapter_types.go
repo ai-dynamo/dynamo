@@ -68,7 +68,6 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="DGD",type="string",JSONPath=".spec.dgdRef.name",description="DynamoGraphDeployment name"
 // +kubebuilder:printcolumn:name="SERVICE",type="string",JSONPath=".spec.dgdRef.serviceName",description="Service name"
