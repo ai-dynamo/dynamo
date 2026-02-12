@@ -279,7 +279,7 @@ def cmd_line_args():
         "--encode-endpoint",
         type=str,
         default="",
-        help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) for the encode worker. Default: {DEFAULT_ENCODE_ENDPOINT}",
+        help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) for the encode worker. e.g. {DEFAULT_ENCODE_ENDPOINT}",
     )
     parser.add_argument(
         "--allowed-local-media-path",
