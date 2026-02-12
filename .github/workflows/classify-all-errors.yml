@@ -4,6 +4,8 @@ name: Classify All Workflow Errors
 on:
   workflow_run:
     workflows:
+      - "PR"
+      - "Build Frontend Image"
       - "CI Test Suite"
       - "Copyright Checks"
       - "Container Validation (Dynamo)"
@@ -11,6 +13,7 @@ on:
       - "Nightly CI Pipeline"
       - "Post-Merge CI Pipeline"
       - "NVIDIA Test Lab Validation"
+      - "Lint PR"
     types: [completed]
 
 permissions:
