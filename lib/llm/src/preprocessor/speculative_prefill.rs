@@ -12,7 +12,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_async_openai::types::ChatCompletionRequestMessage;
+use dynamo_async_openai::types::{
+    ChatCompletionMessageContent, ChatCompletionRequestAssistantMessage,
+    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
+};
 use futures::Stream;
 use futures::stream::StreamExt;
 use minijinja::value::Value;
@@ -109,10 +112,7 @@ pub fn maybe_wrap_stream(
     Box::pin(stream.map(move |item| {
         if let Some(ref resp) = item.data {
             for choice in &resp.choices {
-                if let Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                    ref text,
-                )) = choice.delta.content
-                {
+                if let Some(ChatCompletionMessageContent::Text(ref text)) = choice.delta.content {
                     accumulated_text.push_str(text);
                 }
             }
@@ -140,16 +140,13 @@ async fn prefill_task(
     original_messages: Vec<ChatCompletionRequestMessage>,
     response_text: String,
 ) -> Result<()> {
-    let assistant_msg = ChatCompletionRequestMessage::Assistant(
-        dynamo_async_openai::types::ChatCompletionRequestAssistantMessage {
-            content: Some(
-                dynamo_async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(
-                    response_text,
-                ),
-            ),
+    let assistant_msg =
+        ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                response_text,
+            )),
             ..Default::default()
-        },
-    );
+        });
 
     let mut messages = original_messages;
     messages.push(assistant_msg);
