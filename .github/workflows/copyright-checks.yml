@@ -45,44 +45,45 @@ jobs:
           python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
           deactivate
 
-  classify-workflow-errors:
-    name: Classify Workflow Errors
-    runs-on: ubuntu-24.04
-    container:
-      image: ghcr.io/${{ github.repository }}/helm-tester:0.1.1
-      options: --tty
-      volumes:
-      - ${{ github.workspace }}:/workspace
-    if: always() && !cancelled()
-    needs: [copyright-checks]
-    permissions:
-      contents: read
-      checks: write
-      packages: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        run: |
-          apt-get update && apt-get install -y python3-pip python3-venv
-        working-directory: /workspace
-
-      - name: Classify All Workflow Errors
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          API_FORMAT: "openai"
-          API_BASE_URL: "https://inference-api.nvidia.com/v1"
-          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
-          ENABLE_ERROR_CLASSIFICATION: "true"
-          ENABLE_GITHUB_ANNOTATIONS: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
-          OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
-        working-directory: /workspace
-        run: |
-          apt-get update && apt-get install -y python3-venv || true
-          python3 -m venv /tmp/error-classification-venv
-          . /tmp/error-classification-venv/bin/activate
-          pip install -r opensearch_upload/requirements.txt
-          python3 .github/workflows/classify_workflow_errors.py || echo "⚠️  Classification failed but continuing"
+  # classify-workflow-errors job disabled - now handled by centralized classify-all-errors.yml workflow
+  # classify-workflow-errors:
+  #   name: Classify Workflow Errors
+  #   runs-on: ubuntu-24.04
+  #   container:
+  #     image: ghcr.io/${{ github.repository }}/helm-tester:0.1.1
+  #     options: --tty
+  #     volumes:
+  #     - ${{ github.workspace }}:/workspace
+  #   if: always() && !cancelled()
+  #   needs: [copyright-checks]
+  #   permissions:
+  #     contents: read
+  #     checks: write
+  #     packages: read
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Set up Python
+  #       run: |
+  #         apt-get update && apt-get install -y python3-pip python3-venv
+  #       working-directory: /workspace
+  #
+  #     - name: Classify All Workflow Errors
+  #       env:
+  #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  #         API_FORMAT: "openai"
+  #         API_BASE_URL: "https://inference-api.nvidia.com/v1"
+  #         ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
+  #         ENABLE_ERROR_CLASSIFICATION: "true"
+  #         ENABLE_GITHUB_ANNOTATIONS: "true"
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #         ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
+  #         OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
+  #       working-directory: /workspace
+  #       run: |
+  #         apt-get update && apt-get install -y python3-venv || true
+  #         python3 -m venv /tmp/error-classification-venv
+  #         . /tmp/error-classification-venv/bin/activate
+  #         pip install -r opensearch_upload/requirements.txt
+  #         python3 .github/workflows/classify_workflow_errors.py || echo "⚠️  Classification failed but continuing"
