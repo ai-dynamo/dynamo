@@ -20,11 +20,7 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
-from dynamo.llm import (
-    KvEventPublisher,
-    WorkerMetricsPublisher,
-    ZmqKvEventPublisherConfig,
-)
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Component, Endpoint
 from dynamo.sglang.args import Config
 
@@ -260,19 +256,17 @@ class DynamoSglangPublisher:
 
                 zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
 
-                zmq_config = ZmqKvEventPublisherConfig(
-                    worker_id=self.generate_endpoint.connection_id(),
-                    kv_block_size=self.server_args.page_size,
-                    zmq_endpoint=zmq_ep,
-                    enable_local_indexer=self.dynamo_args.enable_local_indexer,
-                    dp_rank=dp_rank,
-                )
                 logging.info(
                     f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} "
                     f"(connecting to {zmq_ep})"
                 )
                 publisher = KvEventPublisher(
-                    component=self.component, zmq_config=zmq_config
+                    component=self.component,
+                    kv_block_size=self.server_args.page_size,
+                    zmq_endpoint=zmq_ep,
+                    zmq_topic="",
+                    enable_local_indexer=self.dynamo_args.enable_local_indexer,
+                    dp_rank=dp_rank,
                 )
                 self.kv_publishers.append(publisher)
 

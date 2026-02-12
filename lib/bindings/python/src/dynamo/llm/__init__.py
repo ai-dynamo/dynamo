@@ -28,7 +28,6 @@ from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
-from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for_seq_py
 from dynamo._core import fetch_llm as fetch_llm
 from dynamo._core import lora_name_to_id as lora_name_to_id
