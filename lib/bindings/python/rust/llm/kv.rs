@@ -16,11 +16,8 @@ use tracing;
 
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks, start_zmq_listener};
-use llm_rs::kv_router::CacheControlResponse;
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use rs::pipeline::{PushRouter, RouterMode};
-use rs::protocols::annotated::Annotated;
 use serde_json::json;
 
 #[pyfunction]
@@ -878,18 +875,10 @@ impl KvPushRouter {
                 .router_enable_agentic_cache_control
             {
                 let component = kv_router.client().endpoint.component().clone();
-                let client = component
-                    .endpoint("cache_control")
-                    .client()
-                    .await
-                    .map_err(to_pyerr)?;
                 Some(
-                    PushRouter::<serde_json::Value, Annotated<CacheControlResponse>>::from_client(
-                        client,
-                        RouterMode::KV,
-                    )
-                    .await
-                    .map_err(to_pyerr)?,
+                    llm_rs::kv_router::create_cache_control_client(&component)
+                        .await
+                        .map_err(to_pyerr)?,
                 )
             } else {
                 None

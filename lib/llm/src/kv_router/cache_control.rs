@@ -6,51 +6,19 @@ use dynamo_runtime::{
     component::Component,
     pipeline::{PushRouter, RouterMode},
     protocols::annotated::Annotated,
-    protocols::maybe_error::MaybeError,
 };
-use serde::{Deserialize, Serialize};
-
-/// Response from the worker's cache_control service mesh endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheControlResponse {
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unpinned_count: Option<u32>,
-}
-
-impl MaybeError for CacheControlResponse {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        CacheControlResponse {
-            status: "error".to_string(),
-            message: Some(err.to_string()),
-            pinned_count: None,
-            unpinned_count: None,
-        }
-    }
-
-    fn err(&self) -> Option<anyhow::Error> {
-        if self.status == "error" {
-            Some(anyhow::anyhow!(
-                "cache_control error: {}",
-                self.message.as_deref().unwrap_or("unknown")
-            ))
-        } else {
-            None
-        }
-    }
-}
 
 /// A PushRouter client typed for cache_control requests/responses.
-pub type CacheControlClient = PushRouter<serde_json::Value, Annotated<CacheControlResponse>>;
+///
+/// Both request and response are untyped JSON. The worker's cache_control
+/// endpoint returns {"status": "ok"/"error", ...} but the router treats
+/// PIN as fire-and-forget and only logs the response at debug level.
+pub type CacheControlClient = PushRouter<serde_json::Value, Annotated<serde_json::Value>>;
 
 /// Create a cache_control client from a component.
 ///
 /// Connects to the "cache_control" endpoint on the given component and returns
-/// a typed PushRouter client for sending cache control operations (pin_prefix,
+/// a PushRouter client for sending cache control operations (pin_prefix,
 /// unpin_prefix) to workers.
 pub async fn create_cache_control_client(component: &Component) -> Result<CacheControlClient> {
     let client = component.endpoint("cache_control").client().await?;
