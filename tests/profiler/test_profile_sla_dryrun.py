@@ -317,8 +317,6 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.system = "h100_sxm"  # Renamed from aic_system, moved to hardware
                 self.search_strategy = SearchStrategy.RAPID  # New top-level arg
-                # Set to 0 to trigger auto-generation path
-                self.num_gpus_per_node = 0
                 # GPU discovery values (auto-populated by Operator)
                 self.num_gpus_per_node = 8
                 self.gpu_model = "H100-SXM5-80GB"
@@ -386,7 +384,6 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.system = "h100_sxm"  # Renamed from aic_system, moved to hardware
                 self.search_strategy = SearchStrategy.RAPID  # New top-level arg
-                self.num_gpus_per_node = 0
                 # GPU discovery values (auto-populated by Operator)
                 self.num_gpus_per_node = 8
                 self.gpu_model = "H100-SXM5-80GB"
@@ -454,7 +451,6 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.system = "h100_sxm"  # Renamed from aic_system, moved to hardware
                 self.search_strategy = SearchStrategy.RAPID  # New top-level arg
-                self.num_gpus_per_node = 0
                 # GPU discovery values (auto-populated by Operator)
                 self.num_gpus_per_node = 8
                 self.gpu_model = "H100-SXM5-80GB"

@@ -103,8 +103,8 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
     args.model_info = model_info
 
     # Determine the search space for profiling
-    # If user specified both min and max GPU ranges, use them
-    # Otherwise, auto-calculate based on GPU hardware info and model size
+    # User-provided min/max values take precedence; auto-calculate missing bounds
+    # based on GPU hardware info and model size
     user_specified_ranges = (
         args.min_num_gpus_per_engine != 0 and args.max_num_gpus_per_engine != 0
     )
@@ -118,7 +118,8 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             logger.warning("num_gpus_per_node not specified, setting to 8")
             args.num_gpus_per_node = 8
     else:
-        # Auto-calculate search space
+        # Auto-calculate search space (honor partial user overrides)
+        # NOTE: will be handled in AIC
         if args.num_gpus_per_node != 0 and args.gpu_vram_mib != 0:
             # Have GPU hardware info - calculate based on model size
             if not args.model:
@@ -150,14 +151,23 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
                     min_gpu * MOE_MODEL_MAX_NUM_GPU_FACTOR, args.num_gpus_per_node
                 )
 
-            if min_gpu > max_gpu:
-                error_msg = f"Model {args.model} requires {min_gpu} GPUs but cluster only has {args.num_gpus_per_node} GPUs per node"
+            # Honor partial user overrides
+            final_min = args.min_num_gpus_per_engine or min_gpu
+            final_max = args.max_num_gpus_per_engine or max_gpu
+
+            # Validate final_min <= final_max
+            if final_min > final_max:
+                error_msg = f"Invalid GPU range: min_num_gpus_per_engine ({final_min}) > max_num_gpus_per_engine ({final_max})"
                 logger.error(error_msg)
                 raise RuntimeError(error_msg)
 
-            logger.info(f"Auto-generated search space: {min_gpu} to {max_gpu} GPUs")
-            args.min_num_gpus_per_engine = min_gpu
-            args.max_num_gpus_per_engine = max_gpu
+            # Clamp to valid range [1, args.num_gpus_per_node]
+            final_min = max(1, min(final_min, args.num_gpus_per_node))
+            final_max = max(1, min(final_max, args.num_gpus_per_node))
+
+            logger.info(f"Auto-generated search space: {final_min} to {final_max} GPUs")
+            args.min_num_gpus_per_engine = final_min
+            args.max_num_gpus_per_engine = final_max
         else:
             # No GPU info available - use defaults
             logger.warning("GPU hardware info not available, using default values")

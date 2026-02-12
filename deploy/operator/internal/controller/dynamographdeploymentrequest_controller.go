@@ -990,7 +990,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 	}
 
-	// Run GPU discovery before creating job (cluster-wide and namespace-restricted operators if they have node read permissions
+	// Run GPU discovery before creating job (cluster-wide and namespace-restricted operators if they have node read permissions)
 	var gpuInfo *gpu.GPUInfo
 	logger.Info("Attempting GPU discovery for profiling job")
 	discoveredInfo, err := gpu.DiscoverGPUs(ctx, r.Client)
@@ -1331,8 +1331,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nv
 		if _, hasNumGpus := hardwareConfig["numGpusPerNode"]; !hasNumGpus {
 			hardwareConfig["numGpusPerNode"] = gpuInfo.GPUsPerNode
 		}
-		hardwareConfig["gpuModel"] = gpuInfo.Model
-		hardwareConfig["gpuVramMib"] = gpuInfo.VRAMPerGPU
+		if _, hasGpuModel := hardwareConfig["gpuModel"]; !hasGpuModel {
+			hardwareConfig["gpuModel"] = gpuInfo.Model
+		}
+		if _, hasGpuVram := hardwareConfig["gpuVramMib"]; !hasGpuVram {
+			hardwareConfig["gpuVramMib"] = gpuInfo.VRAMPerGPU
+		}
 		if gpuInfo.System != "" {
 			if _, hasSystem := hardwareConfig["system"]; !hasSystem {
 				hardwareConfig["system"] = gpuInfo.System

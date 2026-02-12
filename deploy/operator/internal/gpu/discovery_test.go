@@ -19,6 +19,7 @@ package gpu
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,15 +47,12 @@ func createNode(name string, gpuCount int, gpuModel string, vramMiB int) *corev1
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				LabelGPUCount:   string(rune(gpuCount + '0')), // Convert int to string
+				LabelGPUCount:   strconv.Itoa(gpuCount),
 				LabelGPUProduct: gpuModel,
-				LabelGPUMemory:  string(rune(vramMiB/10000 + '0')), // Simplified for test
+				LabelGPUMemory:  strconv.Itoa(vramMiB),
 			},
 		},
 	}
-	// Fix: properly convert int to string
-	node.Labels[LabelGPUCount] = string(rune(gpuCount + '0'))
-	node.Labels[LabelGPUMemory] = string(rune(vramMiB/10000 + '0'))
 	return node
 }
 
