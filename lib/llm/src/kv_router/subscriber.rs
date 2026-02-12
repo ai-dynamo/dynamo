@@ -14,12 +14,10 @@ use dynamo_runtime::{
 };
 use futures::StreamExt;
 use rand::Rng;
-use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, KvRouterConfig, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-    indexer::{DumpRequest, GetWorkersRequest, KvIndexer},
+    Indexer, KV_EVENT_SUBJECT, KvRouterConfig, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
     protocols::{DpRank, RouterEvent, WorkerId},
     router_discovery_query,
     worker_query::WorkerQueryClient,
@@ -84,7 +82,7 @@ async fn get_instance_discovery_stream(
 async fn download_stable_snapshot(
     nats_client: &dynamo_runtime::transports::nats::Client,
     bucket_name: &str,
-    kv_events_tx: &mpsc::Sender<RouterEvent>,
+    indexer: &Indexer,
 ) -> Result<()> {
     let url = url::Url::parse(&format!(
         "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
@@ -147,9 +145,7 @@ async fn download_stable_snapshot(
 
     // Send all events to the indexer
     for event in prev_events {
-        if let Err(e) = kv_events_tx.send(event).await {
-            tracing::warn!("Failed to send initial event to indexer: {e:?}");
-        }
+        indexer.apply_event(event).await;
     }
     tracing::info!("Successfully sent all initial events to indexer");
 
@@ -162,57 +158,27 @@ struct SnapshotResources {
     nats_client: dynamo_runtime::transports::nats::Client,
     bucket_name: String,
     instances_rx: tokio::sync::watch::Receiver<Vec<dynamo_runtime::component::Instance>>,
-    get_workers_tx: mpsc::Sender<GetWorkersRequest>,
-    snapshot_tx: mpsc::Sender<DumpRequest>,
+    indexer: Indexer,
 }
 
 impl SnapshotResources {
     /// Perform snapshot upload and purge operations
-    async fn purge_then_snapshot(
-        &self,
-        nats_queue: &mut NatsQueue,
-        remove_worker_tx: &mpsc::Sender<WorkerId>,
-    ) -> anyhow::Result<()> {
-        // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
-        // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
-        // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
+    async fn purge_then_snapshot(&self, nats_queue: &mut NatsQueue) -> anyhow::Result<()> {
         tracing::info!("Purging acknowledged messages and performing snapshot of radix tree");
         let start_time = std::time::Instant::now();
 
         // Clean up stale workers before snapshot
-        // Get current worker IDs from instances_rx
         let current_instances = self.instances_rx.borrow().clone();
         let current_worker_ids: std::collections::HashSet<u64> = current_instances
             .iter()
             .map(|instance| instance.instance_id)
             .collect();
 
-        // Get worker IDs from the indexer
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let get_workers_req = GetWorkersRequest { resp: resp_tx };
-
-        if let Err(e) = self.get_workers_tx.send(get_workers_req).await {
-            tracing::warn!("Failed to send get_workers request during snapshot: {e:?}");
-        } else {
-            match resp_rx.await {
-                Ok(indexer_worker_ids) => {
-                    // Find workers in indexer but not in current instances
-                    for worker_id in indexer_worker_ids {
-                        if !current_worker_ids.contains(&worker_id) {
-                            tracing::info!(
-                                "Removing stale worker {worker_id} from indexer during snapshot"
-                            );
-                            if let Err(e) = remove_worker_tx.send(worker_id).await {
-                                tracing::warn!(
-                                    "Failed to send remove_worker for stale worker {worker_id}: {e:?}"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to receive worker IDs from indexer: {e:?}");
-                }
+        let indexer_worker_ids = self.indexer.get_workers().await;
+        for worker_id in indexer_worker_ids {
+            if !current_worker_ids.contains(&worker_id) {
+                tracing::info!("Removing stale worker {worker_id} from indexer during snapshot");
+                self.indexer.remove_worker(worker_id).await;
             }
         }
 
@@ -220,18 +186,11 @@ impl SnapshotResources {
         nats_queue.purge_acknowledged().await?;
 
         // Now request a snapshot from the indexer (which reflects the post-purge state)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let dump_req = DumpRequest { resp: resp_tx };
-
-        self.snapshot_tx
-            .send(dump_req)
+        let events = self
+            .indexer
+            .dump_events()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send dump request: {e:?}"))?;
-
-        // Wait for the dump response
-        let events = resp_rx
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to receive dump response: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to dump events for snapshot: {e:?}"))?;
 
         // Upload the snapshot to NATS object store in background (non-blocking)
         let nats_client = self.nats_client.clone();
@@ -262,14 +221,10 @@ impl SnapshotResources {
 }
 
 /// Start a unified background task for event consumption and optional snapshot management
-#[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
     component: Component,
     consumer_id: String,
-    kv_events_tx: mpsc::Sender<RouterEvent>,
-    remove_worker_tx: mpsc::Sender<WorkerId>,
-    maybe_get_workers_tx: Option<mpsc::Sender<GetWorkersRequest>>,
-    maybe_snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
+    indexer: Indexer,
     cancellation_token: CancellationToken,
     router_snapshot_threshold: Option<u32>,
     router_reset_states: bool,
@@ -307,7 +262,7 @@ pub async fn start_kv_router_background(
     // Handle initial state based on router_reset_states flag
     if !router_reset_states {
         // Try to download initial state from object store with stability check
-        download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await?;
+        download_stable_snapshot(&nats_client, &bucket_name, &indexer).await?;
     } else {
         // Delete the bucket to reset state
         tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
@@ -335,22 +290,13 @@ pub async fn start_kv_router_background(
     let client = generate_endpoint.client().await?;
     let instances_rx = client.instance_source.as_ref().clone();
 
-    // Only set up snapshot-related resources if snapshot_tx, get_workers_tx, and threshold are provided
-    let snapshot_resources = if let (Some(get_workers_tx), Some(snapshot_tx), Some(_)) = (
-        maybe_get_workers_tx,
-        maybe_snapshot_tx,
-        router_snapshot_threshold,
-    ) {
-        Some(SnapshotResources {
-            nats_client,
-            bucket_name,
-            instances_rx,
-            get_workers_tx,
-            snapshot_tx,
-        })
-    } else {
-        None
-    };
+    // Only set up snapshot-related resources if snapshot threshold is configured
+    let snapshot_resources = router_snapshot_threshold.map(|_| SnapshotResources {
+        nats_client,
+        bucket_name,
+        instances_rx,
+        indexer: indexer.clone(),
+    });
 
     tokio::spawn(async move {
         // Create interval with jitter
@@ -392,9 +338,7 @@ pub async fn start_kv_router_background(
                         "DISCOVERY: Generate endpoint instance removed, removing worker {worker_id}"
                     );
 
-                    if let Err(e) = remove_worker_tx.send(worker_id).await {
-                        tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
-                    }
+                    indexer.remove_worker(worker_id).await;
                 }
 
                 // Handle event consumption
@@ -410,12 +354,7 @@ pub async fn start_kv_router_background(
                             };
 
                             // Forward the RouterEvent to the indexer
-                            if let Err(e) = kv_events_tx.send(event).await {
-                                tracing::warn!(
-                                    "failed to send kv event to indexer; shutting down: {e:?}"
-                                );
-                                break;
-                            }
+                            indexer.apply_event(event).await;
                         },
                         Ok(None) => {
                             tracing::trace!("Dequeue timeout, continuing");
@@ -449,7 +388,6 @@ pub async fn start_kv_router_background(
 
                     match resources.purge_then_snapshot(
                         &mut nats_queue,
-                        &remove_worker_tx,
                     ).await {
                         Ok(_) => tracing::info!("Successfully performed purge and snapshot"),
                         Err(e) => tracing::debug!("Could not perform purge and snapshot: {e:?}"),
@@ -510,15 +448,13 @@ pub async fn start_kv_router_background(
 /// This is appropriate when workers have local indexers enabled.
 pub async fn start_kv_router_background_event_plane(
     component: Component,
-    kv_events_tx: mpsc::Sender<RouterEvent>,
-    remove_worker_tx: mpsc::Sender<WorkerId>,
+    indexer: Indexer,
     cancellation_token: CancellationToken,
     transport_kind: EventTransportKind,
 ) -> Result<()> {
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
     // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client =
-        WorkerQueryClient::spawn(component.clone(), remove_worker_tx, kv_events_tx.clone()).await?;
+    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer.clone()).await?;
 
     // Subscribe to KV events using the selected event plane transport
     let mut subscriber =
@@ -611,12 +547,7 @@ pub async fn start_kv_router_background_event_plane(
                         .or_insert(event_id);
 
                     // Forward the RouterEvent to the indexer
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::warn!(
-                            "failed to send kv event to indexer; shutting down: {e:?}"
-                        );
-                        break;
-                    }
+                    indexer.apply_event(event).await;
                 }
             }
         }
@@ -670,7 +601,7 @@ pub async fn start_subscriber(
     component: Component,
     kv_router_config: &KvRouterConfig,
     router_id: u64,
-    kv_indexer: &KvIndexer,
+    indexer: Indexer,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
     let transport_kind = EventTransportKind::from_env_or_default();
@@ -690,14 +621,7 @@ pub async fn start_subscriber(
         start_kv_router_background(
             component,
             consumer_id,
-            kv_indexer.event_sender(),
-            kv_indexer.remove_worker_sender(),
-            kv_router_config
-                .router_snapshot_threshold
-                .map(|_| kv_indexer.get_workers_sender()),
-            kv_router_config
-                .router_snapshot_threshold
-                .map(|_| kv_indexer.snapshot_event_sender()),
+            indexer,
             cancellation_token,
             kv_router_config.router_snapshot_threshold,
             kv_router_config.router_reset_states,
@@ -719,8 +643,7 @@ pub async fn start_subscriber(
 
         start_kv_router_background_event_plane(
             component.clone(),
-            kv_indexer.event_sender(),
-            kv_indexer.remove_worker_sender(),
+            indexer,
             cancellation_token,
             transport_kind,
         )

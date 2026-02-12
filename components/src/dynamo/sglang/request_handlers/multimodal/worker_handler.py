@@ -4,13 +4,14 @@
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import sglang as sgl
 import torch
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component, Context
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -165,7 +166,9 @@ class StreamProcessor:
                     if finish_reason:
                         output.update(
                             {
-                                "finish_reason": finish_reason.get("type", "stop"),
+                                "finish_reason": normalize_finish_reason(
+                                    finish_reason.get("type", "stop")
+                                ),
                                 "finished": True,
                             }
                         )
@@ -248,8 +251,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         prefill_client: Client = None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ):
-        super().__init__(component, engine, config, None)
+        super().__init__(component, engine, config, None, None, shutdown_event)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
@@ -423,8 +427,14 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
     Processes multimodal inputs and coordinates with decode worker.
     """
 
-    def __init__(self, component: Component, engine: sgl.Engine, config: Config):
-        super().__init__(component, engine, config)
+    def __init__(
+        self,
+        component: Component,
+        engine: sgl.Engine,
+        config: Config,
+        shutdown_event: Optional[asyncio.Event] = None,
+    ):
+        super().__init__(component, engine, config, None, None, shutdown_event)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
