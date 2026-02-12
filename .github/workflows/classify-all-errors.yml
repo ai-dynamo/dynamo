@@ -5,7 +5,7 @@ on:
   workflow_run:
     workflows:
       - "PR"
-      - "Build Frontend Image"
+      # - "Build Frontend Image"  # Temporarily disabled
       - "CI Test Suite"
       - "Copyright Checks"
       - "Container Validation (Dynamo)"
