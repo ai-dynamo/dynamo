@@ -71,19 +71,29 @@ class TrtllmConfigModifier(BaseConfigModifier):
         target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
-        if is_moe_model:
-            raise NotImplementedError(
-                "MoE model support is not implemented for TrtLLM backend"
-            )
-
         cfg = Config.model_validate(config)
 
-        # set metadata name
-        cfg.metadata.name = "trtllm-agg"
+        # set metadata name (short to avoid Grove 45-char limit for multinode)
+        cfg.metadata.name = "agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
+
+        # Rename services to shorter names to avoid Grove 45-char naming limit for multinode
+        # TRTLLMDecodeWorker (18 chars) -> dec (3 chars)
+        # TRTLLMPrefillWorker (18 chars) -> pre (3 chars)
+        old_decode_name = "TRTLLMDecodeWorker"
+        old_prefill_name = "TRTLLMPrefillWorker"
+        new_decode_name = "dec"
+        new_prefill_name = "pre"
+
+        if old_decode_name in cfg.spec.services:
+            cfg.spec.services[new_decode_name] = cfg.spec.services.pop(old_decode_name)
+        if old_prefill_name in cfg.spec.services:
+            cfg.spec.services[new_prefill_name] = cfg.spec.services.pop(
+                old_prefill_name
+            )
 
         if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
@@ -246,9 +256,53 @@ class TrtllmConfigModifier(BaseConfigModifier):
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
-        raise NotImplementedError(
-            "TEP (Tensor Expert Parallelism) is not implemented for TrtLLM backend"
+        """
+        Set Tensor Expert Parallelism (TEP) for TensorRT-LLM MoE models.
+
+        TRTLLM uses JSON fields in --override-engine-args.
+        All MoE configuration is done via JSON, not command-line args.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
         )
+
+        # Set up resources with multinode configuration
+        setup_worker_service_resources(worker_service, tep_size, num_gpus_per_node)
+
+        # Get and validate args
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        # Parse existing override-engine-args (if any) and update
+        override_dict, args = parse_override_engine_args(args)
+
+        # 1. Set tensor_parallel_size=tep_size (splits KV heads)
+        override_dict["tensor_parallel_size"] = tep_size
+
+        # 2. Set moe_expert_parallel_size=tep_size (distributes experts across GPUs)
+        override_dict["moe_expert_parallel_size"] = tep_size
+
+        # 3. Set moe_tensor_parallel_size=1 (each expert's weights fully on one GPU)
+        override_dict["moe_tensor_parallel_size"] = 1
+
+        # 4. Disable attention DP (TEP uses TP for attention)
+        override_dict["enable_attention_dp"] = False
+
+        # 5. Remove WIDEEP backend if present -- WIDEEP requires attention DP
+        #    which is incompatible with TEP. Let TRT-LLM use its default backend.
+        moe_config = override_dict.get("moe_config")
+        if isinstance(moe_config, dict) and moe_config.get("backend") == "WIDEEP":
+            del moe_config["backend"]
+            if not moe_config:
+                del override_dict["moe_config"]
+
+        # Serialize JSON and append to args
+        override_str = json.dumps(override_dict)
+        args = append_argument(args, ["--override-engine-args", override_str])
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()
 
     @classmethod
     def set_config_dep_size(
@@ -258,9 +312,76 @@ class TrtllmConfigModifier(BaseConfigModifier):
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
-        raise NotImplementedError(
-            "DEP (Data Expert Parallelism) is not implemented for TrtLLM backend"
+        """
+        Set Data Expert Parallelism (DEP) for TensorRT-LLM MoE models.
+
+        TRTLLM uses JSON fields in --override-engine-args.
+        All MoE configuration is done via JSON, not command-line args.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
         )
+
+        # Set up resources with multinode configuration
+        setup_worker_service_resources(worker_service, dep_size, num_gpus_per_node)
+
+        # Get and validate args
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        # Parse existing override-engine-args (if any) and update
+        override_dict, args = parse_override_engine_args(args)
+
+        # 1. Set tensor_parallel_size=dep_size (use all GPUs)
+        #    Attention DP below ensures KV heads aren't split
+        override_dict["tensor_parallel_size"] = dep_size
+
+        # 2. Set moe_expert_parallel_size=dep_size (distributes experts across GPUs)
+        override_dict["moe_expert_parallel_size"] = dep_size
+
+        # 3. Set moe_tensor_parallel_size=1 (each expert's weights fully on one GPU)
+        override_dict["moe_tensor_parallel_size"] = 1
+
+        # 4. Enable attention DP (replicates KV heads, partitions requests)
+        override_dict["enable_attention_dp"] = True
+
+        # 5. Set WIDEEP MoE backend for DEP on Blackwell (SM100).
+        #    Also set moe_config.max_num_tokens to bound the MoE workspace
+        #    independently of the top-level max_num_tokens. Without this, the
+        #    DeepGemmMoEOp workspace defaults to the top-level max_num_tokens
+        #    and can OOM when it is set high for prefill.
+        #    Note: The pydantic field is MoeConfig.max_num_tokens (not
+        #    moe_max_num_tokens). The top-level max_num_tokens controls sequence
+        #    chunking; moe_config.max_num_tokens controls MoE workspace size.
+        #    Reference: deepseek-r1/agg/wide_ep/wide_ep_agg.yaml uses
+        #    max_num_tokens = max_batch_size * ep_size = 256 * 16 = 4096.
+        if dep_size > 1:
+            if "moe_config" not in override_dict:
+                override_dict["moe_config"] = {}
+            override_dict["moe_config"]["backend"] = "WIDEEP"
+            override_dict["moe_config"]["max_num_tokens"] = dep_size * 256
+
+            # Add required environment variables for WIDEEP
+            container = worker_service.extraPodSpec.mainContainer
+            if container.env is None:
+                container.env = []
+            existing_env_names = {
+                e["name"] if isinstance(e, dict) else e.name for e in container.env
+            }
+            for name, value in [
+                ("TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER", "1"),
+                ("TRTLLM_ENABLE_PDL", "1"),
+            ]:
+                if name not in existing_env_names:
+                    container.env.append({"name": name, "value": value})
+
+        # Serialize JSON and append to args
+        override_str = json.dumps(override_dict)
+        args = append_argument(args, ["--override-engine-args", override_str])
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()
 
     @classmethod
     def get_model_name(cls, config: dict) -> Tuple[str, str]:
@@ -304,11 +425,14 @@ class TrtllmConfigModifier(BaseConfigModifier):
                         # Extract the number in parentheses at the end
                         match = re.search(r"paged KV cache \((\d+)\)", line)
                         if match:
-                            max_tokens = int(match.group(1))
-                            logger.info(
-                                f"Found TRT-LLM KV cache max tokens: {max_tokens}"
+                            kv_tokens_per_rank = int(match.group(1))
+                            total_kv_tokens = kv_tokens_per_rank * max(
+                                1, int(attention_dp_size)
                             )
-                            return max_tokens
+                            logger.info(
+                                f"Found TRT-LLM KV cache: {kv_tokens_per_rank} per rank x {attention_dp_size} = {total_kv_tokens} total"
+                            )
+                            return total_kv_tokens
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
 
@@ -341,8 +465,56 @@ class TrtllmConfigModifier(BaseConfigModifier):
 
         # Parse existing override-engine-args (if any) and update
         override_dict, args = parse_override_engine_args(args)
-        override_dict["max_batch_size"] = int(max_batch_size)
-        override_dict["max_num_tokens"] = int(max_num_tokens)
+
+        # Note: max_batch_size here is the attention DP size (== DEP size for
+        # MoE), not a literal batch size.  The caller in
+        # parallelization_mapping passes mapping.get_attn_dp_size().
+        attn_dp_size = max(1, int(max_batch_size))
+        max_num_tokens_int = max(1, int(max_num_tokens))
+
+        # TRT-LLM build config is per-rank, so divide the total token cap by
+        # the number of attention DP ranks.
+        per_rank_max_num_tokens = (
+            max(1, max_num_tokens_int // attn_dp_size)
+            if attn_dp_size > 1
+            else max_num_tokens_int
+        )
+
+        override_dict["max_batch_size"] = attn_dp_size
+        override_dict["max_num_tokens"] = per_rank_max_num_tokens
+        override_str = json.dumps(override_dict)
+        args = append_argument(args, ["--override-engine-args", override_str])
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()
+
+    @classmethod
+    def set_decode_config(
+        cls,
+        config: dict,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """
+        Configure decode engine limits for decode profiling runs.
+
+        Removes max_batch_size so TRT-LLM auto-tunes for decode concurrency
+        sweeps (default 2048). Does not override max_num_tokens -- the base
+        config value (e.g. 8192 from qwen3) is sufficient for decode, and
+        moe_config.max_num_tokens (set by set_config_dep_size) independently
+        bounds the WIDEEP MoE workspace.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        override_dict, args = parse_override_engine_args(args)
+
+        # Remove max_batch_size to let TRT-LLM auto-tune (default 2048).
+        override_dict.pop("max_batch_size", None)
+
         override_str = json.dumps(override_dict)
         args = append_argument(args, ["--override-engine-args", override_str])
 
