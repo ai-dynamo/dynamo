@@ -28,7 +28,7 @@ Dynamo's coordination layer adapts to the deployment environment:
 | **Kubernetes** (with operator) | Native K8s (CRDs, EndpointSlices) | NATS (optional) | TCP |
 | **Bare metal / Local** (default) | etcd | NATS (optional) | TCP |
 
-> **Note:** The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
+> **Note:** The runtime defaults to `etcd` for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -62,7 +62,7 @@ The operator explicitly sets:
 DYN_DISCOVERY_BACKEND=kubernetes
 ```
 
-> **Important:** This must be explicitly configured. The runtime defaults to `kv_store` in all environments.
+> **Important:** This must be explicitly configured. The runtime defaults to `etcd` in all environments.
 
 ### How It Works
 
@@ -90,7 +90,7 @@ DYN_DISCOVERY_BACKEND=kubernetes
 
 ## etcd Architecture (Default for All Deployments)
 
-When `DYN_DISCOVERY_BACKEND=kv_store` (the global default), etcd is used for service discovery.
+When `DYN_DISCOVERY_BACKEND=etcd` (the default), etcd is used for service discovery.
 
 ### Connection Configuration
 
@@ -414,7 +414,7 @@ Full service discovery with etcd:
 
 ```bash
 # This is the default - no configuration needed
-# export DYN_DISCOVERY_BACKEND=kv_store  # (implicit)
+# export DYN_DISCOVERY_BACKEND=etcd  # (implicit default)
 
 # Workers register with etcd
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B
