@@ -119,6 +119,9 @@ impl ModelType {
         let mut endpoint_types = Vec::new();
         if self.contains(Self::Chat) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
+            // Translation layers over chat completions
+            endpoint_types.push(crate::endpoint_type::EndpointType::Responses);
+            endpoint_types.push(crate::endpoint_type::EndpointType::AnthropicMessages);
         }
         if self.contains(Self::Completions) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Completion);
