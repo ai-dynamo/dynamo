@@ -98,10 +98,13 @@ class ClaudeClient:
         Returns:
             ClassificationResult
         """
+        # Apply rate limiting BEFORE making the request
+        self.rate_limiter.wait_if_needed()
+
         # Build user prompt
         user_prompt = build_user_prompt(error_text, error_context)
 
-        # Make API call with OpenAI format
+        # Make API call with OpenAI format (with retry logic for rate limits)
         url = f"{self.api_base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -118,8 +121,44 @@ class ClaudeClient:
             "max_tokens": 1024
         }
 
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
+        # Retry with exponential backoff for rate limit errors
+        max_retries = 3
+        retry_delay = 2.0  # Start with 2 seconds
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+
+                # Handle rate limit errors (429)
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        # Check for Retry-After header
+                        retry_after = response.headers.get('Retry-After')
+                        if retry_after:
+                            try:
+                                wait_time = float(retry_after)
+                                print(f"⏳ Rate limit hit (429), Retry-After: {wait_time}s")
+                            except ValueError:
+                                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                        else:
+                            wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+
+                        print(f"⏳ Rate limit hit (429), waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ Rate limit exceeded after {max_retries} retries")
+                        response.raise_for_status()
+
+                response.raise_for_status()
+                break  # Success, exit retry loop
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    print(f"⏳ Timeout, retrying {attempt + 1}/{max_retries}")
+                    time.sleep(retry_delay)
+                    continue
+                raise
 
         data = response.json()
 
@@ -534,6 +573,9 @@ Return JSON format as specified in the system prompt."""
         Returns:
             Parsed result dict
         """
+        # Apply rate limiting BEFORE making the request
+        self.rate_limiter.wait_if_needed()
+
         # Truncate log if too large
         max_log_length = 400000
         if len(job_log) > max_log_length:
@@ -543,7 +585,7 @@ Return JSON format as specified in the system prompt."""
         # Build prompt
         user_prompt = self._build_full_log_prompt(job_log, job_name, job_id)
 
-        # Make API call with OpenAI format
+        # Make API call with OpenAI format (with retry logic for rate limits)
         url = f"{self.api_base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -560,8 +602,44 @@ Return JSON format as specified in the system prompt."""
             "max_tokens": 4096
         }
 
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
+        # Retry with exponential backoff for rate limit errors
+        max_retries = 3
+        retry_delay = 2.0
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=120)
+
+                # Handle rate limit errors (429)
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        # Check for Retry-After header
+                        retry_after = response.headers.get('Retry-After')
+                        if retry_after:
+                            try:
+                                wait_time = float(retry_after)
+                                print(f"⏳ Rate limit hit (429) for job {job_name}, Retry-After: {wait_time}s")
+                            except ValueError:
+                                wait_time = retry_delay * (2 ** attempt)
+                        else:
+                            wait_time = retry_delay * (2 ** attempt)
+
+                        print(f"⏳ Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ Rate limit exceeded for job {job_name} after {max_retries} retries")
+                        response.raise_for_status()
+
+                response.raise_for_status()
+                break  # Success, exit retry loop
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    print(f"⏳ Timeout for job {job_name}, retrying {attempt + 1}/{max_retries}")
+                    time.sleep(retry_delay)
+                    continue
+                raise
 
         data = response.json()
 
@@ -719,6 +797,9 @@ Use this **exact format**:
         failed_jobs: int
     ) -> str:
         """Generate formatted summary using OpenAI-compatible API."""
+        # Apply rate limiting BEFORE making the request
+        self.rate_limiter.wait_if_needed()
+
         # Build list of all errors with context
         error_list = []
         for c in classifications:
@@ -806,8 +887,44 @@ Use this **exact format**:
                 "max_tokens": 2000
             }
 
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
+            # Retry with exponential backoff for rate limit errors
+            max_retries = 3
+            retry_delay = 2.0
+
+            for attempt in range(max_retries):
+                try:
+                    response = requests.post(url, headers=headers, json=payload, timeout=60)
+
+                    # Handle rate limit errors (429)
+                    if response.status_code == 429:
+                        if attempt < max_retries - 1:
+                            # Check for Retry-After header
+                            retry_after = response.headers.get('Retry-After')
+                            if retry_after:
+                                try:
+                                    wait_time = float(retry_after)
+                                    print(f"⏳ Rate limit hit (429) for summary, Retry-After: {wait_time}s")
+                                except ValueError:
+                                    wait_time = retry_delay * (2 ** attempt)
+                            else:
+                                wait_time = retry_delay * (2 ** attempt)
+
+                            print(f"⏳ Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            print(f"❌ Rate limit exceeded for summary after {max_retries} retries")
+                            response.raise_for_status()
+
+                    response.raise_for_status()
+                    break  # Success, exit retry loop
+
+                except requests.exceptions.Timeout:
+                    if attempt < max_retries - 1:
+                        print(f"⏳ Timeout for summary, retrying {attempt + 1}/{max_retries}")
+                        time.sleep(retry_delay)
+                        continue
+                    raise
 
             data = response.json()
             content = data["choices"][0]["message"]["content"]
