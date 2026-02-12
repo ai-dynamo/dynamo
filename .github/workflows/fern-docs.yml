@@ -99,6 +99,11 @@ jobs:
       - name: Install Fern CLI
         run: npm install -g fern-api
 
+      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
+      - name: Create fern directory symlink
+        working-directory: docs
+        run: ln -s . fern
+
       - name: Validate Fern configuration
         working-directory: docs
         run: fern check
@@ -122,6 +127,11 @@ jobs:
 
       - name: Install Fern CLI
         run: npm install -g fern-api
+
+      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
+      - name: Create fern directory symlink
+        working-directory: docs
+        run: ln -s . fern
 
       - name: Check for broken links
         working-directory: docs
@@ -265,6 +275,12 @@ jobs:
       - name: Install Fern CLI
         if: steps.changes.outputs.has_changes == 'true'
         run: npm install -g fern-api
+
+      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
+      - name: Create fern directory symlink
+        if: steps.changes.outputs.has_changes == 'true'
+        working-directory: docs-checkout/docs
+        run: ln -s . fern
 
       - name: Publish Docs
         if: steps.changes.outputs.has_changes == 'true'
@@ -457,6 +473,11 @@ jobs:
 
       - name: Install Fern CLI
         run: npm install -g fern-api
+
+      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
+      - name: Create fern directory symlink
+        working-directory: ./docs
+        run: ln -s . fern
 
       - name: Publish Docs
         env:

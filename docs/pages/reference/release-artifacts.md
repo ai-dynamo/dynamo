@@ -14,7 +14,7 @@ Release history in this document begins at v0.6.0.
 ## Current Release: Dynamo v0.8.1
 
 - **GitHub Release:** [v0.8.1](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1)
-- **Docs:** [v0.8.1](https://docs.nvidia.com/dynamo/archive/0.8.1/index.html)
+- **Docs:** [v0.8.1](https://docs.nvidia.com/dynamo/v-0-8-1/)
 - **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
 
 ### Patch Release: v0.8.1.post1 (Jan 23, 2026)
@@ -164,12 +164,12 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 | Version | Release Date | GitHub | Docs |
 |---------|--------------|--------|------|
-| `v0.8.1` | Jan 23, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.8.1/index.html) |
-| `v0.8.0` | Jan 15, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.8.0/index.html) |
-| `v0.7.1` | Dec 15, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.7.1/index.html) |
-| `v0.7.0` | Nov 26, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.7.0/index.html) |
-| `v0.6.1` | Nov 6, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.6.1/index.html) |
-| `v0.6.0` | Oct 28, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.6.0/index.html) |
+| `v0.8.1` | Jan 23, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1) | [Docs](https://docs.nvidia.com/dynamo/v-0-8-1/) |
+| `v0.8.0` | Jan 15, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0) | [Docs](https://docs.nvidia.com/dynamo/v-0-8-0/) |
+| `v0.7.1` | Dec 15, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) | [GitHub](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) |
+| `v0.7.0` | Nov 26, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.0) | [GitHub](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.0) |
+| `v0.6.1` | Nov 6, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.1) | [GitHub](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.1) |
+| `v0.6.0` | Oct 28, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.0) | [GitHub](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.0) |
 
 ### Container Images
 
