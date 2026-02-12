@@ -23,6 +23,40 @@ use crate::protocols::openai::chat_completions::{
 };
 
 // ---------------------------------------------------------------------------
+// Custom deserializers
+// ---------------------------------------------------------------------------
+
+/// Deserialize `system` from either a plain string or an array of text blocks.
+/// The Anthropic API accepts both `"system": "text"` and
+/// `"system": [{"type": "text", "text": "..."}]`.
+fn deserialize_system_prompt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SystemPrompt {
+        Text(String),
+        Blocks(Vec<SystemBlock>),
+    }
+
+    #[derive(Deserialize)]
+    struct SystemBlock {
+        text: String,
+    }
+
+    let maybe: Option<SystemPrompt> = Option::deserialize(deserializer)?;
+    Ok(maybe.map(|sp| match sp {
+        SystemPrompt::Text(s) => s,
+        SystemPrompt::Blocks(blocks) => blocks
+            .into_iter()
+            .map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Request types
 // ---------------------------------------------------------------------------
 
@@ -38,8 +72,12 @@ pub struct AnthropicCreateMessageRequest {
     /// The conversation messages.
     pub messages: Vec<AnthropicMessage>,
 
-    /// Optional system prompt.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional system prompt (string or array of `{"type":"text","text":"..."}` blocks).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_system_prompt"
+    )]
     pub system: Option<String>,
 
     /// Sampling temperature (0.0 - 1.0).
