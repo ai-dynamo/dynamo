@@ -106,10 +106,11 @@ uv pip install --python .venv-docs --group docs
 
 ## Viewing the Documentation
 
-After building, open `docs/build/html/index.html` in your, or use Python's built-in HTTP server:
+After building, use Fern's local preview server:
 
 ```bash
-cd docs/build/html
-python -m http.server 8000
-# Then visit http://localhost:8000 in your browser
+fern docs dev
+# Then visit the local URL shown in your browser
 ```
+
+Or view the published docs at [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/).
