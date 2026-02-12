@@ -67,7 +67,7 @@ The profile results directory should contain `selected_prefill_interpolation/` a
 To generate profiling data for your own model/hardware configuration, run the profiler (see [SLA-driven profiling documentation](../../../../docs/pages/components/profiler/profiler-guide.md) for details):
 
 ```bash
-python benchmarks/profiler/profile_sla.py \
+python components/src/dynamo/profiler/profile_sla.py \
   --profile-config your_profile_config.yaml
 ```
 

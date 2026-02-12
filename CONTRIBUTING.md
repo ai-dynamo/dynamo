@@ -142,7 +142,7 @@ Understanding Dynamo's architecture helps you find where to make changes. For th
 | **Planner** | Real-time performance tuning and worker scaling | `components/src/dynamo/planner/` |
 | **Workers** | Backend engine integrations (vLLM, SGLang, TensorRT-LLM) | `components/src/dynamo/{vllm,sglang,trtllm}/` |
 | **KV Cache Manager** | Multi-tier cache offloading (GPU → CPU → SSD → Object Storage) | `lib/bindings/kvbm/` |
-| **SLA Profiler** | Benchmarking and SLA-driven configuration | `benchmarks/profiler/` |
+| **SLA Profiler** | Benchmarking and SLA-driven configuration | `components/src/dynamo/profiler/` |
 
 ### Communication Planes
 
