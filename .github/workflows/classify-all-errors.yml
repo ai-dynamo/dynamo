@@ -16,6 +16,13 @@ on:
       - "Lint PR"
     types: [completed]
 
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Workflow run ID to analyze (leave empty to analyze latest failed run)'
+        required: false
+        type: string
+
 permissions:
   actions: read
   checks: write
@@ -26,14 +33,16 @@ jobs:
   classify-errors:
     name: Classify Workflow Errors
     runs-on: ubuntu-latest
-    # Only run if the triggering workflow failed
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    # Only run if: manually triggered OR the triggering workflow failed
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'failure'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.workflow_run.head_branch }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -61,6 +70,7 @@ jobs:
 
           # GitHub context
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
 
           # OpenSearch (optional)
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
