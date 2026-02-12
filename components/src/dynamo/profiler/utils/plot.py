@@ -21,8 +21,8 @@ import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
 
-from benchmarks.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
-from benchmarks.profiler.utils.pareto import compute_pareto
+from dynamo.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
+from dynamo.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

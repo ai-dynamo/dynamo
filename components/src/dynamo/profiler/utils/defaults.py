@@ -13,7 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from enum import Enum
+
+
+def resolve_deploy_path(rel_path: str) -> str:
+    """Resolve a deploy YAML path relative to the dynamo workspace root.
+
+    Uses get_workspace_dir() which handles repo root, container, and env var cases.
+    """
+    from dynamo.common.utils.paths import get_workspace_dir
+
+    return os.path.join(get_workspace_dir(), rel_path)
+
 
 DYNAMO_RUN_DEFAULT_PORT = 8000
 

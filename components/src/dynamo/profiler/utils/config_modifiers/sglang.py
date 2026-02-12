@@ -7,7 +7,8 @@ from typing import Tuple
 
 import yaml
 
-from benchmarks.profiler.utils.config import (
+from dynamo.planner.defaults import SubComponentType
+from dynamo.profiler.utils.config import (
     Config,
     append_argument,
     break_arguments,
@@ -19,9 +20,12 @@ from benchmarks.profiler.utils.config import (
     update_image,
     validate_and_get_worker_args,
 )
-from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
-from benchmarks.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
-from dynamo.planner.defaults import SubComponentType
+from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
+from dynamo.profiler.utils.defaults import (
+    DYNAMO_RUN_DEFAULT_PORT,
+    EngineType,
+    resolve_deploy_path,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -33,16 +37,25 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-
-DEFAULT_SGLANG_CONFIG_PATH = "examples/backends/sglang/deploy/disagg.yaml"
+DEFAULT_SGLANG_DISAGG_CONFIG_PATH = resolve_deploy_path(
+    "examples/backends/sglang/deploy/disagg.yaml"
+)
+DEFAULT_SGLANG_AGG_CONFIG_PATH = resolve_deploy_path(
+    "examples/backends/sglang/deploy/agg.yaml"
+)
 
 
 class SGLangConfigModifier(BaseConfigModifier):
     BACKEND = "sglang"
 
     @classmethod
-    def load_default_config(cls) -> dict:
-        with open(DEFAULT_SGLANG_CONFIG_PATH, "r") as f:
+    def load_default_config(cls, mode: str = "disagg") -> dict:
+        path = (
+            DEFAULT_SGLANG_AGG_CONFIG_PATH
+            if mode == "agg"
+            else DEFAULT_SGLANG_DISAGG_CONFIG_PATH
+        )
+        with open(path, "r") as f:
             return yaml.safe_load(f)
 
     @classmethod

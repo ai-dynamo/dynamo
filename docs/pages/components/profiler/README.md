@@ -77,7 +77,7 @@ profilingConfig:
 For advanced scenarios, run the profiler directly:
 
 ```bash
-python -m benchmarks.profiler.profile_sla \
+python -m dynamo.profiler.profile_sla \
   --backend vllm \
   --config path/to/disagg.yaml \
   --model meta-llama/Llama-3-8B \

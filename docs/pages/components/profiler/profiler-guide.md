@@ -50,7 +50,7 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `benchmarks/profiler/deploy/`:
+The recommended deployment method is through DGDRs. Sample configurations are provided in `components/src/dynamo/profiler/deploy/`:
 
 | Sample | Description |
 |--------|-------------|
@@ -148,7 +148,7 @@ curl http://localhost:8000/v1/models
 For advanced use cases or local development:
 
 ```bash
-python -m benchmarks.profiler.profile_sla \
+python -m dynamo.profiler.profile_sla \
   --backend vllm \
   --config path/to/disagg.yaml \
   --model meta-llama/Llama-3-8B \
@@ -644,4 +644,4 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 - [SLA Planner Guide](../planner/planner-guide.md) - End-to-end deployment workflow
 - [SLA Planner Architecture](../planner/planner-guide.md) - How the Planner uses profiling data
 - [DGDR API Reference](../../kubernetes/api-reference.md) - DGDR specification
-- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/profiler/utils/profiler_argparse.py) - Full CLI reference
+- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/profiler_argparse.py) - Full CLI reference

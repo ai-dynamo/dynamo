@@ -20,12 +20,12 @@ from aiconfigurator.webapp.components.profiling import (
     load_profiling_javascript,
 )
 
-from benchmarks.profiler.utils.dgd_generation import (
+from dynamo.profiler.utils.dgd_generation import (
     generate_decode_service_config_preview,
     generate_prefill_decode_services_config_preview,
     generate_prefill_service_config_preview,
 )
-from benchmarks.profiler.utils.pareto import compute_pareto
+from dynamo.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
 
