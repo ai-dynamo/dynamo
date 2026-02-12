@@ -302,15 +302,11 @@ RUN if [ "${FRAMEWORK}" = "sglang" ]; then \
 RUN git lfs install
 
 # Install common and test dependencies (matches main Dockerfile dev stage)
-# This installs pytest-benchmark and other test dependencies required for CI
+# Install test and dev dependencies on top of runtime base (which already has runtime + framework deps)
 # TRT-LLM specific: Also installs cupy-cuda13x with special index strategy (Dockerfile.trtllm lines 768-776)
 # SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
 ARG FRAMEWORK
-RUN --mount=type=bind,source=./container/deps/requirements.runtime.txt,target=/tmp/requirements.runtime.txt \
-    --mount=type=bind,source=./container/deps/requirements.runtime.vllm.txt,target=/tmp/requirements.runtime.vllm.txt \
-    --mount=type=bind,source=./container/deps/requirements.runtime.trtllm.txt,target=/tmp/requirements.runtime.trtllm.txt \
-    --mount=type=bind,source=./container/deps/requirements.runtime.sglang.txt,target=/tmp/requirements.runtime.sglang.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
@@ -318,10 +314,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.runtime.txt,target=/t
     uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.runtime.txt \
-        --requirement /tmp/requirements.runtime.vllm.txt \
-        --requirement /tmp/requirements.runtime.trtllm.txt \
-        --requirement /tmp/requirements.runtime.sglang.txt \
         --requirement /tmp/requirements.test.txt \
         --requirement /tmp/requirements.dev.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
