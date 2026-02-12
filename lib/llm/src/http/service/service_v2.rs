@@ -118,6 +118,7 @@ impl State {
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
     ) -> Self {
+
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),

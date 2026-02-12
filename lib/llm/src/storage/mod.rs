@@ -22,26 +22,14 @@
 //!   production deployments.
 //! - Custom: implement the [`ResponseStorage`] trait for Postgres, S3, etc.
 
-pub mod config;
 pub mod manager;
 pub mod response_storage;
-pub mod session_lock;
-pub mod trace_replay;
 
-#[cfg(feature = "redis-storage")]
-pub mod redis_lock;
 #[cfg(feature = "redis-storage")]
 pub mod redis_storage;
 
-pub use config::{StorageBackend, StorageConfig};
 pub use manager::InMemoryResponseStorage;
 pub use response_storage::{ResponseStorage, StorageError, StoredResponse, validate_key_component};
-pub use session_lock::{InMemorySessionLock, LockConfig, LockError, LockGuard, SessionLock};
-pub use trace_replay::{
-    ParsedTrace, ReplayResult, parse_trace_content, parse_trace_file, replay_trace,
-};
 
-#[cfg(feature = "redis-storage")]
-pub use redis_lock::RedisSessionLock;
 #[cfg(feature = "redis-storage")]
 pub use redis_storage::RedisResponseStorage;
