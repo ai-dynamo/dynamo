@@ -159,7 +159,7 @@ async fn prefill_task(
     let encoding = tokenizer.encode(&formatted_prompt)?;
     let token_ids = encoding.token_ids().to_vec();
 
-    tracing::debug!(
+    tracing::info!(
         num_tokens = token_ids.len(),
         "Speculative prefill: sending next-turn prefix"
     );

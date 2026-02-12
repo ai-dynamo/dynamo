@@ -78,6 +78,10 @@ struct Args {
     #[arg(long, default_value = "42")]
     seed: u64,
 
+    /// Smoke-test mode: 1 user, 1 turn, ~50 tokens ISL/OSL, no delay
+    #[arg(long)]
+    ping: bool,
+
     /// Ignored -- passed by cargo bench
     #[arg(long, hide = true)]
     bench: bool,
@@ -517,7 +521,16 @@ fn print_per_turn_table(label: &str, stats: &[PerTurnStats]) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    if args.ping {
+        args.num_users = 1;
+        args.num_turns = 1;
+        args.num_user_tokens = 50;
+        args.max_completion_tokens = 50;
+        args.mean_delay_ms = 0;
+        args.verbose = true;
+    }
 
     println!("Multiturn Chat Benchmark");
     println!("========================\n");
