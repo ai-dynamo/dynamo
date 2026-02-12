@@ -121,55 +121,53 @@ class GitHubAnnotator:
         category_name = classification.primary_category.replace("_", " ").title()
         confidence_pct = int(classification.confidence_score * 100)
 
-        # Build message
+        # Build message - use simple formatting for better GitHub rendering
         lines = [
-            f"**{icon} Error Classification: {category_name}**",
+            f"{icon} Error Classification: {category_name}",
             "",
         ]
 
         # Add workflow and job info prominently at the top
         if classification.workflow_id:
-            lines.append(f"**Workflow**: `{classification.workflow_id}`")
+            lines.append(f"Workflow: {classification.workflow_id}")
         if classification.job_name:
-            lines.append(f"**Job**: `{classification.job_name}`")
+            lines.append(f"Job: {classification.job_name}")
         if classification.step_name:
-            lines.append(f"**Step**: `{classification.step_name}`")
+            lines.append(f"Step: {classification.step_name}")
 
         lines.extend([
             "",
-            f"**Confidence**: {confidence_pct}%",
+            f"Confidence: {confidence_pct}%",
             "",
-            "**Root Cause**:",
+            "Root Cause:",
             classification.root_cause_summary or "Unable to determine root cause",
             "",
         ])
 
         # Add additional error source info
         if classification.error_source:
-            lines.append(f"**Error Source**: {classification.error_source}")
+            lines.append(f"Error Source: {classification.error_source}")
 
         if classification.test_name:
-            lines.append(f"**Test**: `{classification.test_name}`")
+            lines.append(f"Test: {classification.test_name}")
 
         if classification.framework:
-            lines.append(f"**Framework**: {classification.framework}")
+            lines.append(f"Framework: {classification.framework}")
 
         # Add error text if configured
         if self.config.include_error_text and classification.error_snippet:
             lines.extend([
                 "",
-                "**Error Text**:",
-                "```",
-                classification.error_snippet,
-                "```",
+                "Error Text:",
+                classification.error_snippet[:500] + ("..." if len(classification.error_snippet) > 500 else ""),
             ])
 
         # Add footer
         lines.extend([
             "",
             "---",
-            f"*Classified by AI Error Classification System*",
-            f"*Hash: `{classification.error_hash[:8]}...`*",
+            f"Classified by AI Error Classification System",
+            f"Hash: {classification.error_hash[:8]}...",
         ])
 
         return "\n".join(lines)
