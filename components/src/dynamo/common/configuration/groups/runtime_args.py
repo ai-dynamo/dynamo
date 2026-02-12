@@ -34,6 +34,10 @@ class DynamoRuntimeConfig(ConfigBase):
         self.enable_local_indexer = not self.durable_kv_events
 
 
+# For simplicity, we do not prepend "dyn-" unless it's absolutely necessary. These are
+# exemplary exceptions:
+# - To avoid name conflicts with different backends, prefix "dyn-" for dynamo specific
+#   args.
 class DynamoRuntimeArgGroup(ArgGroup):
     """Dynamo runtime configuration parameters (common to all backends)."""
 
@@ -90,7 +94,6 @@ class DynamoRuntimeArgGroup(ArgGroup):
         )
 
         # Optional: tool/reasoning parsers (choices from dynamo._core when available)
-        # To avoid name conflicts with different backends, prefix "dyn-" for dynamo specific args
         add_argument(
             g,
             flag_name="--dyn-tool-call-parser",

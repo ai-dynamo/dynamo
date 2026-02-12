@@ -20,8 +20,9 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoModel
-from vllm import LLM
 from vllm.utils.system_utils import update_environment_variables
+
+from vllm import LLM
 
 logger = logging.getLogger(__name__)
 
