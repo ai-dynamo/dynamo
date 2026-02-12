@@ -402,7 +402,7 @@ Controls how many threads the encoder uses to fetch and load images concurrently
 export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 ```
 
-Only applies to the EPD encode worker (which uses SGLang's `MMEncoder` internally). Has no effect on normal SGLang serving.
+Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/encode_server.py) internally).
 
 ## Known Limitations
 
