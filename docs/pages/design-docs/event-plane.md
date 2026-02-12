@@ -3,430 +3,137 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Event Plane Architecture
+# Dynamo Event Plane
 
-This document describes Dynamo's event plane architecture, which handles service discovery, coordination, and event distribution using etcd and NATS.
+The event plane provides Dynamo with a pub/sub layer for near real-time event exchange between components. It delivers KV cache updates, worker load metrics, and sequence tracking events, enabling features like KV-aware routing and disaggregated serving.
 
-## Overview
+## When Is the Event Plane Used?
 
-Dynamo's coordination layer adapts to the deployment environment:
+Key use cases:
 
-| Deployment | Service Discovery | KV Events | Request Plane |
-|------------|-------------------|-----------|---------------|
-| **Kubernetes** (with operator) | Native K8s (CRDs, EndpointSlices) | NATS (optional) | TCP |
-| **Bare metal / Local** (default) | etcd | NATS (optional) | TCP |
+- **KV cache events** -- Workers publish cache state so the router can make cache-aware scheduling decisions.
+- **Worker load metrics** -- Workers report utilization so the router can balance load.
+- **Sequence tracking** -- Coordinates active sequences across router replicas for fault tolerant routing.
 
-> **Note:** The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
+![Event plane architecture showing NATS and ZMQ transport options connecting Frontend, Planner, and Worker](../../assets/img/event-plane-transport.svg)
 
-![Coordination Layer showing Service Discovery and NATS connecting to Frontend, Planner, and Worker](/assets/img/event-plane-coordination.svg)
+## Choosing a Transport
 
-## Kubernetes-Native Service Discovery
+The event plane supports two transports:
 
-When running on Kubernetes with the Dynamo operator, service discovery uses native Kubernetes resources instead of etcd.
+| | NATS (default) | ZMQ |
+|---|---|---|
+| **External infrastructure** | Requires a NATS server | None (peer-to-peer) |
+| **Setup complexity** | Simple -- point at a NATS server | Automatic -- workers bind sockets and register via discovery |
+| **Best for** | Large-scale deployments | Low operational overhead |
 
-### Configuration
+## Configuration
 
-The operator explicitly sets:
+### Transport Selection
+
+Set the `DYN_EVENT_PLANE` environment variable to choose a transport:
+
 ```bash
-DYN_DISCOVERY_BACKEND=kubernetes
+# Use NATS (default -- no need to set explicitly)
+export DYN_EVENT_PLANE=nats
+
+# Use ZMQ
+export DYN_EVENT_PLANE=zmq
 ```
 
-> **Important:** This must be explicitly configured. The runtime defaults to `kv_store` in all environments.
+Python components also accept this as a CLI flag:
 
-### How It Works
+```bash
+# vLLM backend
+python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 
-1. **DynamoWorkerMetadata CRD**: Workers register their endpoints by creating/updating DynamoWorkerMetadata custom resources
-2. **EndpointSlices**: Used to signal readiness status to the system
-3. **K8s API Watches**: Components watch for CRD changes to discover available endpoints
+# SGLang backend
+python3 -m dynamo.sglang --event-plane zmq --model Qwen/Qwen3-0.6B
+```
 
-### Benefits
-
-- No external etcd cluster required
-- Native integration with Kubernetes lifecycle
-- Automatic cleanup when pods terminate
-- Works with standard K8s RBAC
-
-### Environment Variables (Injected by Operator)
-
-| Variable | Description |
-|----------|-------------|
-| `DYN_DISCOVERY_BACKEND` | Set to `kubernetes` |
-| `POD_NAME` | Current pod name |
-| `POD_NAMESPACE` | Current namespace |
-| `POD_UID` | Pod unique identifier |
-
----
-
-## etcd Architecture (Default for All Deployments)
-
-When `DYN_DISCOVERY_BACKEND=kv_store` (the global default), etcd is used for service discovery.
-
-### Connection Configuration
-
-etcd connection is configured via environment variables:
+### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ETCD_ENDPOINTS` | Comma-separated etcd URLs | `http://localhost:2379` |
-| `ETCD_AUTH_USERNAME` | Basic auth username | None |
-| `ETCD_AUTH_PASSWORD` | Basic auth password | None |
-| `ETCD_AUTH_CA` | CA certificate path (TLS) | None |
-| `ETCD_AUTH_CLIENT_CERT` | Client certificate path | None |
-| `ETCD_AUTH_CLIENT_KEY` | Client key path | None |
+| `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | `nats` |
+| `NATS_SERVER` | NATS server URL (NATS transport only) | `nats://localhost:4222` |
 
-Example:
-```bash
-export ETCD_ENDPOINTS=http://etcd-0:2379,http://etcd-1:2379,http://etcd-2:2379
-```
+## NATS Transport
 
-### Lease Management
+When using NATS (`DYN_EVENT_PLANE=nats` or unset):
 
-Each `DistributedRuntime` maintains a primary lease with etcd:
+- Requires a running NATS server. Set `NATS_SERVER` if it is not on `localhost:4222`.
+- Events are published to NATS subjects scoped by namespace and component.
+- Built-in reconnection and message buffering during brief disconnections.
 
-![DistributedRuntime connected to Primary Lease with Keep-Alive Heartbeat to etcd](/assets/img/event-plane-lease.svg)
-
-**Lease Lifecycle:**
-
-1. **Creation**: Lease created during `DistributedRuntime` initialization
-2. **Keep-Alive**: Background task sends heartbeats at 50% of remaining TTL
-3. **Expiration**: If heartbeats stop, lease expires after TTL (10 seconds default)
-4. **Cleanup**: All keys associated with the lease are automatically deleted
-
-**Automatic Recovery:**
-
-- Reconnection with exponential backoff (50ms to 5s)
-- Deadline-based retry logic
-- Cancellation token propagation
-
-### Service Discovery
-
-Endpoints are registered in etcd for dynamic discovery:
-
-**Key Format:**
-```
-/services/{namespace}/{component}/{endpoint}/{instance_id}
-```
-
-**Example:**
-```
-/services/vllm-agg/backend/generate/694d98147d54be25
-```
-
-**Registration Data:**
-```json
-{
-  "namespace": "vllm-agg",
-  "component": "backend",
-  "endpoint": "generate",
-  "instance_id": 7587888160958628000,
-  "transport": {
-    "tcp": "192.168.1.10:9999"
-  }
-}
-```
-
-### Discovery Queries
-
-The discovery system supports multiple query patterns:
-
-| Query Type | Pattern | Use Case |
-|------------|---------|----------|
-| `AllEndpoints` | `/services/` | List all services |
-| `NamespacedEndpoints` | `/services/{namespace}/` | Filter by namespace |
-| `ComponentEndpoints` | `/services/{namespace}/{component}/` | Filter by component |
-| `Endpoint` | `/services/{namespace}/{component}/{endpoint}/` | Specific endpoint |
-
-### Watch Functionality
-
-Clients watch etcd prefixes for real-time updates:
-
-```python
-# Client watches for endpoint changes
-watcher = etcd.watch_prefix("/services/vllm-agg/backend/generate/")
-
-for event in watcher:
-    if event.type == "PUT":
-        # New endpoint registered
-        add_endpoint(event.value)
-    elif event.type == "DELETE":
-        # Endpoint removed (worker died)
-        remove_endpoint(event.key)
-```
-
-**Watch Features:**
-
-- Initial state retrieval with `get_and_watch_prefix()`
-- Automatic reconnection on stream failure
-- Revision tracking for no-event-loss guarantees
-- Event types: `PUT` (create/update) and `DELETE`
-
-### Distributed Locks
-
-etcd provides distributed locking for coordination:
-
-**Lock Types:**
-
-| Type | Key Pattern | Behavior |
-|------|-------------|----------|
-| Write Lock | `v1/{prefix}/writer` | Exclusive (no readers/writers) |
-| Read Lock | `v1/{prefix}/readers/{id}` | Shared (multiple readers) |
-
-**Operations:**
-
-```rust
-// Non-blocking write lock
-let lock = client.try_write_lock("my_resource").await?;
-
-// Blocking read lock with polling (100ms intervals)
-let lock = client.read_lock_with_wait("my_resource").await?;
-```
-
-## NATS Architecture
-
-### When NATS is Used
-
-NATS is used for:
-
-1. **KV Cache Events**: Real-time KV cache state updates for routing
-2. **Router Replica Sync**: Synchronizing router state across replicas
-3. **Legacy Request Plane**: NATS-based request transport (optional)
-
-### Configuration
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `NATS_SERVER` | NATS server URL | `nats://localhost:4222` |
-
-### Disabling NATS
-
-For deployments without KV-aware routing:
+Example setup:
 
 ```bash
-# Disable NATS and KV events
-python -m dynamo.frontend --no-kv-events
+export NATS_SERVER=nats://nats-server:4222
+export DYN_EVENT_PLANE=nats
+
+# Start workers -- they publish events to NATS automatically
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+
+# Start frontend -- it subscribes to events from NATS automatically
+python3 -m dynamo.frontend --router-mode kv
 ```
 
-This enables "approximate mode" for KV routing without event persistence.
+## ZMQ Transport
 
-### Event Publishing
+When using ZMQ (`DYN_EVENT_PLANE=zmq`):
 
-Components publish events to NATS subjects:
+- No external server required. Each worker binds a ZMQ PUB socket and advertises its address through the discovery system.
+- Subscribers automatically discover and connect to all active publishers.
+- When publishers come and go (e.g., workers scaling up/down), subscribers dynamically adjust their connections.
 
-```rust
-pub trait EventPublisher {
-    async fn publish(&self, event: &str, data: &[u8]) -> Result<()>;
-    async fn publish_serialized<T: Serialize>(&self, event: &str, data: &T) -> Result<()>;
-}
-```
-
-**Subject Naming:**
-```
-{base_subject}.{event_name}
-```
-
-Example:
-```
-vllm-agg.backend.kv_cache_update
-```
-
-### Event Subscription
-
-Components subscribe to events:
-
-```rust
-pub trait EventSubscriber {
-    async fn subscribe(&self, topic: &str) -> Result<Subscriber>;
-    async fn subscribe_typed<T: DeserializeOwned>(&self, topic: &str) -> Result<TypedSubscriber<T>>;
-}
-```
-
-### JetStream Persistence
-
-For durable event delivery, NATS JetStream provides:
-
-- Message persistence
-- Replay from offset
-- Consumer groups for load balancing
-- Acknowledgment tracking
-
-## Key-Value Store Abstraction
-
-Dynamo provides a unified KV store interface supporting multiple backends:
-
-### Supported Backends
-
-| Backend | Use Case | Configuration |
-|---------|----------|---------------|
-| `EtcdStore` | Production deployments | `ETCD_ENDPOINTS` |
-| `MemoryStore` | Testing, development | Default |
-| `NatsStore` | NATS-only deployments | `NATS_SERVER` |
-| `FileStore` | Local persistence | File path |
-
-### Store Interface
-
-```rust
-pub trait KvStore {
-    async fn get(&self, bucket: &str, key: &str) -> Result<Option<Vec<u8>>>;
-    async fn put(&self, bucket: &str, key: &str, value: &[u8]) -> Result<()>;
-    async fn delete(&self, bucket: &str, key: &str) -> Result<()>;
-    async fn watch(&self, bucket: &str) -> Result<WatchStream>;
-}
-```
-
-### Buckets
-
-Data is organized into logical buckets:
-
-| Bucket | Purpose |
-|--------|---------|
-| `v1/instances` | Endpoint instance registry |
-| `v1/mdc` | Model deployment cards |
-
-## Typed Prefix Watcher
-
-For type-safe watching of etcd prefixes:
-
-```rust
-// Watch and maintain HashMap of deserialized values
-let watcher = watch_prefix_with_extraction::<DiscoveryInstance>(
-    &etcd_client,
-    "/services/vllm-agg/",
-    lease_id_extractor,
-    value_extractor,
-).await?;
-
-// Receive updates via watch channel
-let instances = watcher.borrow();
-```
-
-**Key Extractors:**
-
-| Extractor | Description |
-|-----------|-------------|
-| `lease_id()` | Use lease ID as key |
-| `key_string()` | Extract key with prefix stripping |
-| `full_key_string()` | Use full etcd key |
-
-## Reliability Features
-
-### Connection Resilience
-
-**etcd Reconnection:**
-- Exponential backoff: 50ms to 5s
-- Deadline-based retry logic
-- Mutex ensures single concurrent reconnect
-
-**NATS Reconnection:**
-- Built-in reconnection in NATS client
-- Configurable max reconnect attempts
-- Buffering during disconnection
-
-### Lease-Based Cleanup
-
-When a worker crashes or loses connectivity:
-
-1. Keep-alive heartbeats stop
-2. Lease expires after TTL (10 seconds)
-3. All registered endpoints automatically deleted
-4. Clients receive DELETE watch events
-5. Traffic reroutes to healthy workers
-
-### Transaction Safety
-
-etcd transactions ensure atomic operations:
-
-```rust
-// Atomic create-if-not-exists
-let txn = Txn::new()
-    .when([Compare::create_revision(key, CompareOp::Equal, 0)])
-    .and_then([Op::put(key, value, options)]);
-
-etcd_client.txn(txn).await?;
-```
-
-This prevents race conditions in concurrent service registration.
-
-## Operational Modes
-
-### Kubernetes Mode (Requires Explicit Configuration)
-
-Native Kubernetes service discovery:
+Example setup:
 
 ```bash
-# Operator explicitly sets this (not auto-detected):
-export DYN_DISCOVERY_BACKEND=kubernetes
+export DYN_EVENT_PLANE=zmq
 
-# Workers register via K8s CRDs
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B
+# Start workers -- each binds a ZMQ socket, registers with discovery
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
-# Frontend discovers workers via K8s API
-python -m dynamo.frontend
+# Start frontend -- discovers workers and connects directly
+python3 -m dynamo.frontend --router-mode kv
 ```
 
-No etcd or NATS required for basic operation when using K8s discovery.
+## Disabling the Event Plane
 
-### KV Store Mode (Global Default)
-
-Full service discovery with etcd:
+If you do not need KV-aware routing, you can disable the event plane entirely:
 
 ```bash
-# This is the default - no configuration needed
-# export DYN_DISCOVERY_BACKEND=kv_store  # (implicit)
-
-# Workers register with etcd
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B
-
-# Frontend discovers workers via etcd
-python -m dynamo.frontend
-```
-
-### KV-Aware Routing (Optional)
-
-Enable NATS for KV cache event tracking:
-
-```bash
-# Default: KV events enabled (requires NATS)
-python -m dynamo.frontend --router-mode kv
-
-# Disable KV events for prediction-based routing (no NATS)
-python -m dynamo.frontend --router-mode kv --no-kv-events
+python3 -m dynamo.frontend --router-mode kv --no-kv-events
 ```
 
 With `--no-kv-events`:
-- Router predicts cache state based on routing decisions
-- TTL-based expiration and LRU pruning
-- No NATS infrastructure required
 
-## Best Practices
+- The router falls back to prediction-based cache-aware routing (estimates cache state from routing decisions).
+- No NATS server or ZMQ sockets are needed.
+- TTL-based expiration and LRU pruning keep predicted state from growing stale.
 
-### 1. Use Kubernetes Discovery on K8s
+## Deployment Modes
 
-The Dynamo operator automatically sets `DYN_DISCOVERY_BACKEND=kubernetes` for pods. No additional setup required when using the operator.
+### Bare Metal / Local
 
-### 2. For Bare Metal: Deploy etcd Cluster
-
-For bare-metal production deployments, deploy a 3-node etcd cluster for high availability.
-
-### 3. Configure Appropriate TTLs (etcd mode)
-
-Balance between detection speed and overhead:
-
-- **Short TTL (5s)**: Faster failure detection, more keep-alive traffic
-- **Long TTL (30s)**: Less overhead, slower detection
-
-### 4. KV Routing Without NATS
-
-For simpler deployments without NATS:
+Both transports work out of the box:
 
 ```bash
-# Use prediction-based KV routing
-python -m dynamo.frontend --router-mode kv --no-kv-events
+# NATS (requires nats-server running)
+export NATS_SERVER=nats://localhost:4222
+
+# OR ZMQ (no extra infrastructure)
+export DYN_EVENT_PLANE=zmq
 ```
 
-This provides KV-aware routing with reduced accuracy but no NATS dependency.
+### Kubernetes (with Dynamo Operator)
+
+The operator can inject `DYN_EVENT_PLANE` into pods. The same transport options apply. If using NATS, deploy a NATS server in the cluster and set `NATS_SERVER` accordingly.
 
 ## Related Documentation
 
-- [Distributed Runtime](distributed-runtime.md) - Runtime architecture
-- [Request Plane](request-plane.md) - Request transport configuration
-- [Fault Tolerance](../fault-tolerance/README.md) - Failure handling
+- [Discovery Plane](discovery-plane.md) -- Service discovery and coordination (etcd, Kubernetes)
+- [Distributed Runtime](distributed-runtime.md) -- Runtime architecture
+- [Request Plane](request-plane.md) -- Request transport configuration
+- [Fault Tolerance](../fault-tolerance/README.md) -- Failure handling
