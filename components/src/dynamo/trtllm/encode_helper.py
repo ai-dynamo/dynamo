@@ -278,7 +278,7 @@ class EncodeHelper:
 
     @staticmethod
     async def _process_full_epd_flow(
-        text_prompt: str,
+        prompt_token_ids_from_request: list,
         image_urls: list,
         tokenizer,
         model_dir: str,
@@ -292,9 +292,9 @@ class EncodeHelper:
         containing multimodal embedding handles for the prefill worker.
 
         Args:
-            text_prompt: Text portion of the prompt
+            prompt_token_ids_from_request: token IDs from the request (Rust preprocessor)
             image_urls: List of image URLs to process
-            tokenizer: Tokenizer for decoding prompt_token_ids from encoder output
+            tokenizer: Tokenizer for decoding prompt_token_ids_from_request
             model_dir: Path to model directory (unused; kept for API compatibility)
             model_type: Model type string (unused; kept for API compatibility)
             engine: TensorRTLLMEngine with MultimodalEncoder
@@ -311,9 +311,14 @@ class EncodeHelper:
             yield {"ep_disaggregated_params": None}
             return
 
-        # TextPrompt: prompt + multi_modal_data (same shape as multimodal_processor PD flow).
         processed_mm_data = {"image": pil_images}
-        inputs = [{"prompt": text_prompt, "multi_modal_data": processed_mm_data}]
+        inputs = [
+            {
+                "prompt_token_ids": prompt_token_ids_from_request,
+                "multi_modal_data": processed_mm_data,
+                "mm_processor_kwargs": {},
+            }
+        ]
 
         # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
         # blocking the encode worker's event loop under concurrency.
@@ -344,22 +349,16 @@ class EncodeHelper:
         params_dict = asdict(encoded_params)
 
         # Extract processed prompt (includes <image> tokens) for prefill/decode consistency.
-        # Token IDs come from encoder output (input_processor ran inside generate).
         # NOTE: processed_prompt will contain template/placeholder tokens
         # (e.g. <image>, [INST], etc.). Adding special tokens here can change
         # token alignment across EPD stages (prefill/decode), so we explicitly
         # avoid adding them.
-        first_output = encoder_outputs[0]
-        prompt_token_ids = (
-            list(first_output.prompt_token_ids)
-            if first_output.prompt_token_ids
-            else None
-        )
         processed_prompt = None
-        if prompt_token_ids and tokenizer is not None:
+        if tokenizer is not None:
             processed_prompt = tokenizer.decode(
-                first_output.prompt_token_ids, skip_special_tokens=False
+                prompt_token_ids_from_request, skip_special_tokens=False
             )
+
         logging.debug(
             "ENCODE WORKER: Extracted processed_prompt (len=%s)",
             len(processed_prompt) if processed_prompt is not None else None,
@@ -368,7 +367,7 @@ class EncodeHelper:
         yield {
             "ep_disaggregated_params": params_dict,
             "processed_prompt": processed_prompt,
-            "prompt_token_ids": prompt_token_ids,
+            "prompt_token_ids": prompt_token_ids_from_request,
         }
 
     @staticmethod
@@ -407,7 +406,7 @@ class EncodeHelper:
             "messages", request.get("messages", [])
         )
         (
-            text_prompt,
+            _,
             image_urls,
             embedding_paths,
         ) = multimodal_processor.extract_prompt_and_media(messages)
@@ -423,7 +422,7 @@ class EncodeHelper:
                 yield response
 
         # Flow 2: Full EPD flow (image URLs via MultimodalEncoder)
-        elif image_urls and text_prompt:
+        elif image_urls and request.get("token_ids"):
             if model_dir is None or model_type is None:
                 yield {
                     "error": "model_dir and model_type are required for full EPD encode"
@@ -432,11 +431,22 @@ class EncodeHelper:
             if engine is None:
                 yield {"error": "No engine configured on encode worker for full EPD"}
                 return
+            # Use token_ids from request (Rust preprocessor already applied
+            # chat template and tokenized; token_ids then include image placeholder tokens
+            # if the model's tokenizer_config chat template emits them).
+            token_ids = request.get("token_ids")
             async for response in EncodeHelper._process_full_epd_flow(
-                text_prompt, image_urls, tokenizer, model_dir, model_type, engine
+                token_ids,
+                image_urls,
+                tokenizer,
+                model_dir,
+                model_type,
+                engine,
             ):
                 yield response
 
         # No valid multimodal content found
         else:
-            yield {"error": "No embedding_paths or image_urls found in request"}
+            yield {
+                "error": "No embedding_paths or image_urls found in request, or image_urls without text_prompt or token_ids"
+            }
