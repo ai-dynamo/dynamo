@@ -288,9 +288,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 f"Invalid size format '{size_str}', expected 'WxH' (e.g. '832x480')"
             ) from e
 
-    async def _upload_to_fs(
-        self, video_bytes: bytes, request_id: str
-    ) -> str:
+    async def _upload_to_fs(self, video_bytes: bytes, request_id: str) -> str:
         """Upload video to filesystem and return URL.
 
         Args:

@@ -119,9 +119,7 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 f"To allow larger sizes, increase --max-width and/or --max-height."
             )
 
-    def _compute_num_frames(
-        self, req: NvCreateVideoRequest, nvext: VideoNvExt
-    ) -> int:
+    def _compute_num_frames(self, req: NvCreateVideoRequest, nvext: VideoNvExt) -> int:
         """Compute num_frames from request parameters.
 
         Priority:

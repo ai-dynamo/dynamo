@@ -267,9 +267,7 @@ class TestVideoHandlerComputeNumFrames:
 
     def test_compute_num_frames_explicit(self):
         """Test that explicit num_frames takes priority."""
-        req = NvCreateVideoRequest(
-            prompt="test", model="test-model", seconds=10
-        )
+        req = NvCreateVideoRequest(prompt="test", model="test-model", seconds=10)
         nvext = VideoNvExt(
             num_frames=100,
             fps=30,  # Should be ignored
@@ -278,35 +276,27 @@ class TestVideoHandlerComputeNumFrames:
 
     def test_compute_num_frames_from_seconds_fps(self):
         """Test computation from seconds * fps."""
-        req = NvCreateVideoRequest(
-            prompt="test", model="test-model", seconds=4
-        )
+        req = NvCreateVideoRequest(prompt="test", model="test-model", seconds=4)
         nvext = VideoNvExt(fps=24)
         assert self.handler._compute_num_frames(req, nvext) == 96  # 4 * 24
 
     def test_compute_num_frames_only_seconds(self):
         """Test seconds with default fps (24)."""
-        req = NvCreateVideoRequest(
-            prompt="test", model="test-model", seconds=5
-        )
+        req = NvCreateVideoRequest(prompt="test", model="test-model", seconds=5)
         nvext = VideoNvExt()
         # seconds=5, default fps=24 -> 5 * 24 = 120
         assert self.handler._compute_num_frames(req, nvext) == 120
 
     def test_compute_num_frames_only_fps(self):
         """Test fps with default seconds (4)."""
-        req = NvCreateVideoRequest(
-            prompt="test", model="test-model"
-        )
+        req = NvCreateVideoRequest(prompt="test", model="test-model")
         nvext = VideoNvExt(fps=30)
         # default seconds=4, fps=30 -> 4 * 30 = 120
         assert self.handler._compute_num_frames(req, nvext) == 120
 
     def test_compute_num_frames_defaults(self):
         """Test all None uses config default."""
-        req = NvCreateVideoRequest(
-            prompt="test", model="test-model"
-        )
+        req = NvCreateVideoRequest(prompt="test", model="test-model")
         nvext = VideoNvExt()
         assert (
             self.handler._compute_num_frames(req, nvext)
