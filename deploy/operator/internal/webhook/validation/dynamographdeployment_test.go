@@ -508,6 +508,174 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		// Service name length validation tests
+		{
+			name: "service name too long for single-node deployment",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "verylongdynamographdeploymentname",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"VeryLongServiceNameThatExceedsLimit": {},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "combined resource name length",
+		},
+		{
+			name: "service name too long for multinode deployment",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "vllm-agg",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"VllmPrefillWorker": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "combined resource name length",
+		},
+		{
+			name: "valid service name length for single-node",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dgd",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid service name length for multinode",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dgd",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "boundary case - exactly at 45 char limit for single-node",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					// DGD name (3 chars) + service name (42 chars) = 45 chars (exactly at limit)
+					Name:      "dgd",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						// 42 character service name
+						"abcdefghijklmnopqrstuvwxyz0123456789ABCDEF": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "boundary case - one char over limit for single-node",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					// DGD name (3 chars) + service name (43 chars) = 46 chars (over limit)
+					Name:      "dgd",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						// 43 character service name
+						"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG": {},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "combined resource name length 46 exceeds 45-character limit",
+		},
+		// Grove disabled tests - service name length validation should be skipped
+		{
+			name: "long service name allowed when Grove disabled via annotation",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "verylongdynamographdeploymentname",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"VeryLongServiceNameThatExceedsLimit": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "long multinode service name allowed when Grove disabled via annotation",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "vllm-agg",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"VllmPrefillWorker": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Grove annotation case insensitive - FALSE",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "verylongdynamographdeploymentname",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "FALSE",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"VeryLongServiceNameThatExceedsLimit": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
 		// Annotation validation test cases
 		{
 			name: "no annotations is valid",
