@@ -90,9 +90,6 @@ class Config:
     # Use vLLM's tokenizer for pre/post processing
     use_vllm_tokenizer: bool = False
 
-    # sleep mode support (enable_sleep_mode comes from vLLM's engine_args)
-    sleep_mode_level: int = 1
-
     # Whether to enable NATS for KV events (derived from kv_events_config in overwrite_args)
     use_kv_events: bool = False
 
@@ -301,13 +298,6 @@ def parse_args() -> Config:
         default=False,
         help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
     )
-    parser.add_argument(
-        "--sleep-mode-level",
-        type=int,
-        default=1,
-        choices=[1, 2, 3],
-        help="Sleep mode level (1=offload to CPU, 2=discard weights, 3=discard all). Default: 1",
-    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -454,7 +444,6 @@ def parse_args() -> Config:
     config.enable_local_indexer = not args.durable_kv_events
     # For omni mode, use vLLM (AsyncOmni) tokenizer on backend
     config.use_vllm_tokenizer = args.use_vllm_tokenizer or args.omni
-    config.sleep_mode_level = args.sleep_mode_level
     # use_kv_events is set later in overwrite_args() based on kv_events_config
 
     # Validate custom Jinja template file exists if provided

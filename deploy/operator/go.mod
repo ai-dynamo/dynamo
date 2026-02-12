@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	emperror.dev/errors v0.8.1
+	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.6
 	github.com/bsm/gomega v1.27.10
 	github.com/go-logr/logr v1.4.3
@@ -30,7 +31,6 @@ require (
 )
 
 require (
-	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
