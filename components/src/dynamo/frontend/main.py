@@ -107,7 +107,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
         vllm_flags = vllm_parser.parse_args(unknown)
     else:
         if unknown:
-            logger.exception(f"Unknown arguments specified: {unknown}")
+            logger.error(f"Unknown arguments specified: {unknown}")
             sys.exit(1)
     return config, vllm_flags
 
