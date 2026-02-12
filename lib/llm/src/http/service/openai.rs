@@ -67,7 +67,7 @@ const VALIDATION_PREFIX: &str = "Validation: ";
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
 /// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
-fn get_body_limit() -> usize {
+pub(super) fn get_body_limit() -> usize {
     std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -247,7 +247,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 // TODO: Similar function exists in lib/llm/src/grpc/service/openai.rs but with different signature and simpler logic
-fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+pub(super) fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
     if let Some(trace_context) = get_distributed_tracing_context()
         && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
@@ -820,7 +820,7 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
 
 /// Checks if the first event in the stream is a backend error.
 /// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise.
-async fn check_for_backend_error(
+pub(super) async fn check_for_backend_error(
     mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
     + Send
     + Unpin

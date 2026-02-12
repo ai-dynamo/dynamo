@@ -16,6 +16,8 @@ pub enum EndpointType {
     Images,
     /// Responses API
     Responses,
+    /// Anthropic Messages API
+    AnthropicMessages,
 }
 
 impl EndpointType {
@@ -26,6 +28,7 @@ impl EndpointType {
             Self::Embedding => "embedding",
             Self::Images => "images",
             Self::Responses => "responses",
+            Self::AnthropicMessages => "anthropic_messages",
         }
     }
 
@@ -36,6 +39,7 @@ impl EndpointType {
             Self::Embedding,
             Self::Images,
             Self::Responses,
+            Self::AnthropicMessages,
         ]
     }
 }

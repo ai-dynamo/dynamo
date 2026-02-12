@@ -262,6 +262,7 @@ impl KserveServiceConfigBuilder {
             .enable_cmpl_endpoints(false)
             .enable_embeddings_endpoints(false)
             .enable_responses_endpoints(false)
+            .enable_anthropic_endpoints(false)
             .build()?;
 
         // Share the HTTP service's model manager and metrics object with gRPC state

@@ -49,6 +49,7 @@ struct StateFlags {
     embeddings_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
+    anthropic_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -59,6 +60,9 @@ impl StateFlags {
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::AnthropicMessages => {
+                self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
+            }
         }
     }
 
@@ -78,6 +82,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::AnthropicMessages => self
+                .anthropic_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
         }
     }
@@ -108,6 +115,7 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
+                anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
         }
@@ -195,6 +203,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
+
+    #[builder(default = "true")]
+    enable_anthropic_endpoints: bool,
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
@@ -354,6 +365,8 @@ static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
+/// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
+static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
@@ -375,6 +388,10 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
+        state.flags.set(
+            &EndpointType::AnthropicMessages,
+            config.enable_anthropic_endpoints,
+        );
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -496,6 +513,11 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
+        let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
+            state.clone(),
+            request_template.clone(),
+            var(HTTP_SVC_ANTHROPIC_PATH_ENV).ok(),
+        );
 
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
@@ -503,6 +525,10 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+        endpoint_routes.insert(
+            EndpointType::AnthropicMessages,
+            (anthropic_docs, anthropic_route),
+        );
 
         for endpoint_type in EndpointType::all() {
             let state_route = state.clone();
