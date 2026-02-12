@@ -186,6 +186,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_multi_gpu_tests: true
       test_gpu_timeout_minutes: 35
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
   # ============================================================================
@@ -205,6 +206,7 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_multi_gpu_tests: true
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
   # ============================================================================
@@ -224,6 +226,7 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_multi_gpu_tests: true
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
 
