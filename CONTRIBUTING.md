@@ -286,6 +286,6 @@ By contributing, you agree that your contributions will be licensed under the [A
 
 - **Discord**: [Join our community](https://discord.gg/nvidia-dynamo)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/latest/index.html)
+- **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/)
 
 Thank you for contributing to Dynamo!
