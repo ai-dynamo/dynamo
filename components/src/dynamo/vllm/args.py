@@ -32,8 +32,6 @@ VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
-    model: str
-    served_model_name: Optional[str] = None
     component: str
     endpoint: str
     is_prefill_worker: bool
@@ -43,14 +41,14 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     request_plane: str
     event_plane: str
     enable_local_indexer: bool = True
+    use_kv_events: bool
 
     # mirror vLLM
     model: str
-    served_model_name: Optional[str]
+    served_model_name: Optional[str] = None
 
     # rest vLLM args
     engine_args: AsyncEngineArgs
-    use_kv_events: bool
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -112,7 +110,14 @@ def parse_args() -> Config:
     # Validate arguments
     dynamo_config.validate()
 
-    engine_config = AsyncEngineArgs.from_cli_args(vllm_parser.parse_args(unknown))
+    vllm_args = vllm_parser.parse_args(unknown)
+    # Set the model name from the command line arguments
+    # model is defined in AsyncEngineArgs, but when AsyncEngineArgs.from_cli_args is called,
+    # vllm will update the model name to the full path of the model, which will break the dynamo logic,
+    # as we use the model name as served_model_name (if served_model_name is not set)
+    dynamo_config.model = vllm_args.model
+
+    engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
@@ -139,7 +144,6 @@ def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
     """Update dynamo_config fields from engine_config and worker flags."""
-    dynamo_config.model = engine_config.model
 
     if getattr(engine_config, "served_model_name", None) is not None:
         served = engine_config.served_model_name
