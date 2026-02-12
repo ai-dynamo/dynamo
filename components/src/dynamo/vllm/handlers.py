@@ -212,8 +212,7 @@ def build_sampling_params_openai(
                 setattr(sampling_params, param_key, request[req_key])
 
     # Handle max_tokens
-    if "max_tokens" in request and request["max_tokens"] is not None:
-        sampling_params.max_tokens = request["max_tokens"]
+    sampling_params.max_tokens = request.get("max_tokens", None) or default_sampling_params.get("max_tokens", None)
 
     # Handle stop sequences
     if "stop" in request and request["stop"] is not None:
