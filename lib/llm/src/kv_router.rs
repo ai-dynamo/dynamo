@@ -389,7 +389,7 @@ impl KvRouter {
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = self
             .kv_router_config
-            .compute_seq_hashes_for_tracking(tokens, self.block_size);
+            .compute_seq_hashes_for_tracking(tokens, self.block_size, router_config_override);
         let seq_hash_elapsed = start.elapsed();
 
         let best_worker = self
@@ -449,7 +449,7 @@ impl KvRouter {
 
         let maybe_seq_hashes = self
             .kv_router_config
-            .compute_seq_hashes_for_tracking(tokens, self.block_size);
+            .compute_seq_hashes_for_tracking(tokens, self.block_size, None);
 
         if let Err(e) = self
             .scheduler
@@ -516,7 +516,7 @@ impl KvRouter {
 
         let maybe_seq_hashes = self
             .kv_router_config
-            .compute_seq_hashes_for_tracking(tokens, self.block_size);
+            .compute_seq_hashes_for_tracking(tokens, self.block_size, None);
 
         Ok(self
             .scheduler
