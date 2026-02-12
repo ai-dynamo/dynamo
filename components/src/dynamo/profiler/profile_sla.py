@@ -22,6 +22,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import yaml
 
+from deploy.utils.dynamo_deployment import (
+    DynamoDeploymentClient,
+    cleanup_remaining_deployments,
+)
+from dynamo.planner.defaults import SubComponentType
 from dynamo.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
     get_prefill_ttft,
@@ -51,20 +56,12 @@ from dynamo.profiler.utils.profile_prefill import (
     profile_prefill_aiconfigurator,
 )
 from dynamo.profiler.utils.profiler_argparse import create_profiler_parser
-from dynamo.profiler.utils.profiler_status import (
-    ProfilerStatus,
-    write_profiler_status,
-)
+from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
 from dynamo.profiler.webui.select_config import (
     add_profiling_error,
     clear_profiling_errors,
     pick_config_with_webui,
 )
-from deploy.utils.dynamo_deployment import (
-    DynamoDeploymentClient,
-    cleanup_remaining_deployments,
-)
-from dynamo.planner.defaults import SubComponentType
 
 
 @dataclass

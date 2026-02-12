@@ -6,12 +6,9 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from dynamo.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
-from dynamo.profiler.utils.model_info import (
-    MOE_ADDITIONAL_TP_ARCHITECTURES,
-    ModelInfo,
-)
 from dynamo.planner.defaults import SubComponentType
+from dynamo.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
+from dynamo.profiler.utils.model_info import MOE_ADDITIONAL_TP_ARCHITECTURES, ModelInfo
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

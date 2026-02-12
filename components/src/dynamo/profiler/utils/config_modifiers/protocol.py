@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol, Tuple
 
+from dynamo.planner.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     Container,
@@ -29,7 +30,6 @@ from dynamo.profiler.utils.config import (
     update_image,
 )
 from dynamo.profiler.utils.defaults import EngineType
-from dynamo.planner.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
 
@@ -527,7 +527,12 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to disagg worker services."""
         for sct, cli_args, replicas, gpus in [
-            (SubComponentType.PREFILL, prefill_cli_args, prefill_replicas, prefill_gpus),
+            (
+                SubComponentType.PREFILL,
+                prefill_cli_args,
+                prefill_replicas,
+                prefill_gpus,
+            ),
             (SubComponentType.DECODE, decode_cli_args, decode_replicas, decode_gpus),
         ]:
             try:
@@ -535,7 +540,8 @@ class BaseConfigModifier:
             except Exception:
                 logger.warning(
                     "Could not find %s service for backend %s, skipping",
-                    sct.value, cls.BACKEND,
+                    sct.value,
+                    cls.BACKEND,
                 )
                 continue
 
@@ -564,7 +570,9 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to the agg worker service."""
         try:
-            svc_name = get_service_name_by_type(cfg, cls.BACKEND, SubComponentType.DECODE)
+            svc_name = get_service_name_by_type(
+                cfg, cls.BACKEND, SubComponentType.DECODE
+            )
         except Exception:
             svc_name = None
             for name, svc in cfg.spec.services.items():
