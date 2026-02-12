@@ -947,8 +947,79 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		}
 	}
 
+	if err := r.validateGPUHardwareInfo(ctx, dgdr); err != nil {
+		return err
+	}
+
 	// The profiler will validate the rest of the configuration
 	return nil
+}
+
+// validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling
+func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
+	logger := log.FromContext(ctx)
+
+	// Check for hardware info and GPU ranges
+	// TODO: will be cleaner once we swap to new DGDR schema (#6130)
+	var config map[string]interface{}
+	if dgdr.Spec.ProfilingConfig.Config != nil {
+		if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+			// Config parse errors will be caught later, skip validation here
+			return nil
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	hardwareVal, hasHardware := config["hardware"]
+	var hasManualHardwareConfig bool
+	if hasHardware && hardwareVal != nil {
+		if hardwareConfig, ok := hardwareVal.(map[string]interface{}); ok {
+			_, hasGPUModel := hardwareConfig["gpuModel"]
+			_, hasGPUVram := hardwareConfig["gpuVramMib"]
+			_, hasNumGPUs := hardwareConfig["numGpusPerNode"]
+			hasManualHardwareConfig = hasGPUModel || hasGPUVram || hasNumGPUs
+		}
+	}
+
+	var hasExplicitGPURanges bool
+	if engineVal, hasEngine := config["engine"]; hasEngine && engineVal != nil {
+		if engineConfig, ok := engineVal.(map[string]interface{}); ok {
+			minGPUs, hasMin := engineConfig["minNumGpusPerEngine"]
+			maxGPUs, hasMax := engineConfig["maxNumGpusPerEngine"]
+			if hasMin && hasMax {
+				minVal, _ := minGPUs.(float64)
+				maxVal, _ := maxGPUs.(float64)
+				hasExplicitGPURanges = minVal > 0 && maxVal > 0
+			}
+		}
+	}
+
+	// If manual config or explicit ranges are provided, validation passes
+	if hasManualHardwareConfig || hasExplicitGPURanges {
+		return nil
+	}
+
+	_, err := gpu.DiscoverGPUs(ctx, r.Client)
+	if err == nil {
+		// GPU discovery is available, validation passes
+		return nil
+	}
+
+	logger.Info("GPU discovery not available", "reason", err.Error())
+
+	isNamespaceScoped := r.Config.RestrictedNamespace != ""
+	if isNamespaceScoped {
+		return fmt.Errorf(`GPU hardware info required but cannot be auto-discovered (namespace-scoped operator lacks node read permissions).
+
+Add hardware config to profilingConfig.config.hardware (numGpusPerNode, gpuModel, gpuVramMib) or specify engine.minNumGpusPerEngine and engine.maxNumGpusPerEngine.
+
+See: https://github.com/ai-dynamo/dynamo/issues/6257`)
+	}
+
+	return fmt.Errorf(`GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.hardware (numGpusPerNode, gpuModel, gpuVramMib) or specify engine.minNumGpusPerEngine and engine.maxNumGpusPerEngine.
+
+See profiling documentation for configuration details.`)
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource
