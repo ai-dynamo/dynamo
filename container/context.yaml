@@ -63,7 +63,7 @@ trtllm:
   base_image: nvcr.io/nvidia/pytorch
   base_image_tag: 25.12-py3
   runtime_image: nvcr.io/nvidia/cuda-dl-base
-  runtime_image_tag: 25.10-cuda13.0-runtime-ubuntu24.04
+  runtime_image_tag: 25.12-cuda13.1-runtime-ubuntu24.04
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "false"
   enable_kvbm: "true"
