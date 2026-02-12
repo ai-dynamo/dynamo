@@ -19,6 +19,7 @@
 //      partial assistant responses without add_generation_prompt
 
 use anyhow::Result;
+use dynamo_async_openai::types::ReasoningEffort;
 use minijinja::value::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -82,6 +83,10 @@ pub trait OAIChatLikeRequest {
     }
 
     fn extract_text(&self) -> Option<TextInput> {
+        None
+    }
+
+    fn extract_reasoning_effort(&self) -> Option<ReasoningEffort> {
         None
     }
 
