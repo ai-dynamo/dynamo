@@ -537,7 +537,7 @@ impl DistributedConfig {
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
 
-        // DYN_DISCOVERY_BACKEND selects both the discovery mechanism and the KV store backend.
+        // DYN_DISCOVERY_BACKEND selects the discovery mechanism
         // Valid values: "kubernetes", "etcd" (default), "file", "mem"
         let backend_str =
             std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "etcd".to_string());
