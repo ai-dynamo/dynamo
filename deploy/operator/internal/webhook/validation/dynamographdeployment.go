@@ -249,8 +249,11 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
 	// Validate service name length constraints for Grove PodCliqueSet naming
-	if err := v.validateServiceNameLength(serviceName, service); err != nil {
-		return nil, err
+	// Only validate when Grove pathway may be in use
+	if v.isGrovePathway() {
+		if err := v.validateServiceNameLength(serviceName, service); err != nil {
+			return nil, err
+		}
 	}
 
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
@@ -316,6 +319,14 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 	}
 
 	return nil
+}
+
+// isGrovePathway determines if Grove pathway may be used for this deployment.
+// Grove is used when the nvidia.com/enable-grove annotation is NOT explicitly set to "false".
+// This is a conservative check - if Grove might be used, we validate the name length constraints.
+func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
+	return v.deployment.Annotations == nil ||
+		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
 }
 
 // validatePVCs validates the PVC configurations.
