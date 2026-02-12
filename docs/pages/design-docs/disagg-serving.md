@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Disaggregated Serving
 ---
 
 # Dynamo Disaggregation: Separating Prefill and Decode for Enhanced Performance
