@@ -881,8 +881,8 @@ jobs:
         id: operator-tag
         run: |
           # Try to use nightly-operator-amd64 if it exists, otherwise fall back to main-operator
-          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          if docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64 2>/dev/null; then
+          # Check Azure ACR since that's where helm will pull from
+          if docker pull ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64 2>/dev/null; then
             echo "tag=${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64" >> $GITHUB_OUTPUT
             echo "Using nightly operator image: ${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64"
           else
