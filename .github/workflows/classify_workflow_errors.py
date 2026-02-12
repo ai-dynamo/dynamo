@@ -58,22 +58,87 @@ def create_opensearch_client(config: Config) -> Optional[OpenSearch]:
     )
 
 
+def find_latest_failed_pr_run(github_token: str, repo: str) -> Optional[str]:
+    """
+    Find the latest failed PR workflow run.
+
+    Args:
+        github_token: GitHub token for authentication
+        repo: Repository name (owner/repo)
+
+    Returns:
+        Run ID as string, or None if not found
+    """
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    # Fetch recent workflow runs
+    runs_url = f"https://api.github.com/repos/{repo}/actions/runs?event=pull_request&status=failure&per_page=10"
+
+    try:
+        print(f"🔍 Searching for latest failed PR workflow run...")
+        response = requests.get(runs_url, headers=headers, timeout=10)
+
+        if response.status_code != 200:
+            print(f"❌ Failed to fetch runs: HTTP {response.status_code}")
+            return None
+
+        runs_data = response.json()
+        runs = runs_data.get("workflow_runs", [])
+
+        if not runs:
+            print("⚠️  No failed PR runs found")
+            return None
+
+        # Get the most recent failed PR run
+        latest_run = runs[0]
+        run_id = str(latest_run["id"])
+        workflow_name = latest_run["name"]
+        branch = latest_run["head_branch"]
+
+        print(f"✅ Found latest failed run: {workflow_name} on {branch} (ID: {run_id})")
+        return run_id
+
+    except Exception as e:
+        print(f"❌ Error finding latest failed run: {e}")
+        return None
+
+
 def fetch_workflow_jobs() -> List[Dict[str, Any]]:
     """
     Fetch all jobs in the current workflow run.
+
+    Respects WORKFLOW_RUN_ID if set (for workflow_dispatch trigger).
+    Otherwise uses GITHUB_RUN_ID (for workflow_run trigger).
 
     Returns:
         List of job objects from GitHub API
     """
     github_token = os.getenv("GITHUB_TOKEN")
     repo = os.getenv("GITHUB_REPOSITORY")
-    run_id = os.getenv("GITHUB_RUN_ID")
+
+    # Check for explicit run ID (from workflow_dispatch input)
+    run_id = os.getenv("WORKFLOW_RUN_ID")
+
+    if not run_id:
+        # Fallback to current run ID (for workflow_run trigger)
+        run_id = os.getenv("GITHUB_RUN_ID")
+
+    # If still no run_id and we're in workflow_dispatch mode, find latest failed PR run
+    if not run_id:
+        github_event_name = os.getenv("GITHUB_EVENT_NAME")
+        if github_event_name == "workflow_dispatch":
+            print("ℹ️  No run_id specified, searching for latest failed PR run...")
+            run_id = find_latest_failed_pr_run(github_token, repo)
 
     if not all([github_token, repo, run_id]):
         print("❌ Missing required GitHub environment variables")
         print(f"   GITHUB_TOKEN: {'set' if github_token else 'missing'}")
         print(f"   GITHUB_REPOSITORY: {repo or 'missing'}")
-        print(f"   GITHUB_RUN_ID: {run_id or 'missing'}")
+        print(f"   WORKFLOW_RUN_ID: {os.getenv('WORKFLOW_RUN_ID') or 'not set'}")
+        print(f"   GITHUB_RUN_ID: {os.getenv('GITHUB_RUN_ID') or 'not set'}")
         return []
 
     headers = {
@@ -84,7 +149,7 @@ def fetch_workflow_jobs() -> List[Dict[str, Any]]:
     jobs_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs"
 
     try:
-        print(f"📡 Fetching workflow jobs from GitHub API...")
+        print(f"📡 Fetching workflow jobs from GitHub API (run ID: {run_id})...")
         response = requests.get(jobs_url, headers=headers, timeout=10)
 
         if response.status_code != 200:
@@ -502,11 +567,16 @@ def validate_classifications(classifications: List[Any], errors: List[ErrorConte
 
 def classify_and_annotate_workflow_errors():
     """Main function for workflow-level error classification."""
+    # Determine which run ID to use
+    run_id = os.getenv("WORKFLOW_RUN_ID") or os.getenv("GITHUB_RUN_ID")
+    event_name = os.getenv("GITHUB_EVENT_NAME")
+
     print("=" * 70)
     print("WORKFLOW ERROR CLASSIFICATION")
     print("=" * 70)
+    print(f"Trigger: {event_name}")
     print(f"Workflow: {os.getenv('GITHUB_WORKFLOW')}")
-    print(f"Run ID: {os.getenv('GITHUB_RUN_ID')}")
+    print(f"Run ID: {run_id}")
     print(f"Repository: {os.getenv('GITHUB_REPOSITORY')}")
     print("=" * 70)
 
@@ -565,8 +635,11 @@ def classify_and_annotate_workflow_errors():
         github_token = os.getenv("GITHUB_TOKEN")
         repo = os.getenv("GITHUB_REPOSITORY")
 
+        # Use WORKFLOW_RUN_ID if set (workflow_dispatch), otherwise GITHUB_RUN_ID
+        target_run_id = os.getenv("WORKFLOW_RUN_ID") or os.getenv("GITHUB_RUN_ID")
+
         workflow_context = {
-            "workflow_id": os.getenv("GITHUB_RUN_ID"),
+            "workflow_id": target_run_id,
             "workflow_name": os.getenv("GITHUB_WORKFLOW"),
             "repo": repo,
             "branch": os.getenv("GITHUB_REF_NAME"),
