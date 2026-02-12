@@ -576,7 +576,7 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
         if connector == "lmcache":
             connector_cfg = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
         elif connector == "flexkv":
-            connector_cfg = {"kv_connector": "FlexKVDynamoConnectorV1", "kv_role": "kv_both"}
+            connector_cfg = {"kv_connector": "FlexKVConnectorV1", "kv_role": "kv_both"}
         elif connector == "nixl":
             connector_cfg = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
         elif connector == "kvbm":
