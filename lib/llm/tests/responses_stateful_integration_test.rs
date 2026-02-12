@@ -333,7 +333,8 @@ async fn test_missing_tenant_header() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    // Case 3: Missing x-session-id header
+    // Case 3: Missing x-session-id header — should succeed with default session
+    // (x-session-id is metadata, not a security boundary)
     {
         let (app, _storage) = create_test_router();
 
@@ -341,7 +342,7 @@ async fn test_missing_tenant_header() {
             .uri("/v1/responses")
             .method("POST")
             .header("x-tenant-id", "tenant_test")
-            // Missing x-session-id
+            // Missing x-session-id — defaults to "default"
             .header("content-type", "application/json")
             .body(Body::from(
                 json!({
@@ -353,7 +354,7 @@ async fn test_missing_tenant_header() {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
 

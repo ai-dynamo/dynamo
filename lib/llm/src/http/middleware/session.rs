@@ -44,7 +44,10 @@ const MAX_HEADER_LENGTH: usize = 256;
 
 /// Validate a header value: must be non-empty, at most MAX_HEADER_LENGTH chars,
 /// and contain only alphanumeric characters, hyphens, underscores, and dots.
-fn validate_header_value(value: &str, header_name: &str) -> Result<(), (StatusCode, String)> {
+pub(crate) fn validate_header_value(
+    value: &str,
+    header_name: &str,
+) -> Result<(), (StatusCode, String)> {
     if value.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -76,14 +79,14 @@ fn validate_header_value(value: &str, header_name: &str) -> Result<(), (StatusCo
 ///
 /// # Headers
 /// - `x-tenant-id` (required): Tenant identifier
-/// - `x-session-id` (required): Session/conversation identifier
+/// - `x-session-id` (optional): Session/conversation identifier (defaults to "default")
 ///
 /// # Validation
-/// Both headers must be non-empty, at most 256 characters, and contain only
+/// Headers must be non-empty, at most 256 characters, and contain only
 /// alphanumeric characters, hyphens, underscores, and dots (`^[a-zA-Z0-9._-]+$`).
 ///
 /// # Errors
-/// Returns 400 Bad Request if required headers are missing or invalid.
+/// Returns 400 Bad Request if `x-tenant-id` is missing or any provided header is invalid.
 pub async fn extract_session_middleware(
     mut request: Request,
     next: Next,
@@ -101,16 +104,21 @@ pub async fn extract_session_middleware(
     validate_header_value(&tenant_id, "x-tenant-id")
         .map_err(|(code, msg)| (code, msg).into_response())?;
 
-    // Extract and validate session_id (required)
-    let session_id = headers
-        .get("x-session-id")
-        .ok_or_else(|| bad_request("Missing required header: x-session-id"))?
-        .to_str()
-        .map_err(|_| bad_request("x-session-id contains invalid characters"))?
-        .to_string();
-
-    validate_header_value(&session_id, "x-session-id")
-        .map_err(|(code, msg)| (code, msg).into_response())?;
+    // Extract and validate session_id (optional, defaults to "default")
+    // Session is metadata for grouping responses, not a security boundary.
+    // Cross-session access within a tenant is allowed by design.
+    let session_id = match headers.get("x-session-id") {
+        Some(value) => {
+            let value = value
+                .to_str()
+                .map_err(|_| bad_request("x-session-id contains invalid characters"))?
+                .to_string();
+            validate_header_value(&value, "x-session-id")
+                .map_err(|(code, msg)| (code, msg).into_response())?;
+            value
+        }
+        None => "default".to_string(),
+    };
 
     // Insert context into request extensions for downstream handlers
     request.extensions_mut().insert(RequestSession {
@@ -191,7 +199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_missing_session_id() {
+    async fn test_missing_session_id_defaults_to_default() {
         let app = create_test_router();
 
         let request = Request::builder()
@@ -202,7 +210,15 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // x-session-id is optional; missing value defaults to "default"
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_str.contains("tenant=tenant_123"));
+        assert!(body_str.contains("session=default"));
     }
 
     #[tokio::test]

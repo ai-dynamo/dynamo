@@ -1183,15 +1183,86 @@ async fn handler_responses_stateless(
 
 /// OpenAI Responses Request Handler (stateful mode)
 ///
-/// This method will handle the incoming request for the /v1/responses endpoint.
-/// Requires session middleware to extract tenant_id and session_id from headers.
-async fn handler_responses(
+/// POST handler that conditionally requires session headers based on the request body.
+/// When `store: true` or `previous_response_id` is set, `x-tenant-id` is required.
+/// Otherwise, `x-tenant-id` is optional (defaults to "default").
+/// `x-session-id` is always optional (defaults to "default").
+///
+/// This avoids applying session middleware as a blanket layer on POST, which would
+/// force callers to send `x-tenant-id` even for stateless fire-and-forget requests.
+async fn handler_responses_stateful_post(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Extension(session): Extension<RequestSession>,
     headers: HeaderMap,
     Json(request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
+    let needs_tenant =
+        request.inner.store == Some(true) || request.inner.previous_response_id.is_some();
+    let session = extract_session_from_headers(&headers, needs_tenant)?;
     handler_responses_inner(state, template, session, headers, request).await
+}
+
+/// Extract session from request headers with conditional tenant requirement.
+///
+/// When `require_tenant` is true (stateful features in use), `x-tenant-id` is
+/// required and returns 400 if missing. When false, it defaults to "default".
+/// `x-session-id` is always optional (defaults to "default").
+fn extract_session_from_headers(
+    headers: &HeaderMap,
+    require_tenant: bool,
+) -> Result<RequestSession, ErrorResponse> {
+    use crate::http::middleware::session::validate_header_value;
+
+    let tenant_id = match headers.get("x-tenant-id") {
+        Some(value) => {
+            let value = value.to_str().map_err(|_| {
+                ErrorMessage::from_http_error(HttpError {
+                    code: 400,
+                    message: "x-tenant-id contains invalid characters".to_string(),
+                })
+            })?;
+            validate_header_value(value, "x-tenant-id").map_err(|(_, msg)| {
+                ErrorMessage::from_http_error(HttpError {
+                    code: 400,
+                    message: msg,
+                })
+            })?;
+            value.to_string()
+        }
+        None if require_tenant => {
+            return Err(ErrorMessage::from_http_error(HttpError {
+                code: 400,
+                message: "Missing required header: x-tenant-id. \
+                          This header is required when using `store: true` or \
+                          `previous_response_id`."
+                    .to_string(),
+            }));
+        }
+        None => "default".to_string(),
+    };
+
+    let session_id = match headers.get("x-session-id") {
+        Some(value) => {
+            let value = value.to_str().map_err(|_| {
+                ErrorMessage::from_http_error(HttpError {
+                    code: 400,
+                    message: "x-session-id contains invalid characters".to_string(),
+                })
+            })?;
+            validate_header_value(value, "x-session-id").map_err(|(_, msg)| {
+                ErrorMessage::from_http_error(HttpError {
+                    code: 400,
+                    message: msg,
+                })
+            })?;
+            value.to_string()
+        }
+        None => "default".to_string(),
+    };
+
+    Ok(RequestSession {
+        tenant_id,
+        session_id,
+    })
 }
 
 /// Shared inner handler for both stateful and stateless response paths
@@ -1915,8 +1986,10 @@ async fn handler_delete_response(
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
 /// If not path is provided, the default path is `/v1/responses`
 ///
-/// When `stateful` is true: registers POST, GET, DELETE routes with session
-/// middleware that validates x-tenant-id and x-session-id headers.
+/// When `stateful` is true: registers POST, GET, DELETE routes.
+/// - POST: headers extracted conditionally — `x-tenant-id` required only when
+///   `store: true` or `previous_response_id` is set; `x-session-id` always optional
+/// - GET/DELETE: session middleware requires `x-tenant-id` (always access stored data)
 ///
 /// When `stateful` is false: registers only POST (stateless). No session middleware.
 /// Requests with `store: true` or `previous_response_id` return 400.
@@ -1931,14 +2004,25 @@ pub fn responses_router(
 
     if stateful {
         let path_with_id = format!("{}/{{id}}", &path);
-        let router = Router::new()
-            .route(&path, post(handler_responses))
+
+        // POST route: no session middleware — handler extracts headers conditionally
+        // based on whether the request uses stateful features (store/previous_response_id)
+        let post_router = Router::new()
+            .route(&path, post(handler_responses_stateful_post))
+            .layer(middleware::from_fn(smart_json_error_middleware))
+            .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+            .with_state((state.clone(), template.clone()));
+
+        // GET/DELETE routes: session middleware required (always access stored data)
+        let crud_router = Router::new()
             .route(&path_with_id, get(handler_get_response))
             .route(&path_with_id, delete(handler_delete_response))
             .layer(middleware::from_fn(extract_session_middleware))
             .layer(middleware::from_fn(smart_json_error_middleware))
             .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
             .with_state((state, template));
+
+        let router = post_router.merge(crud_router);
         (vec![doc], router)
     } else {
         // Stateless mode: POST only, no session middleware, no GET/DELETE
