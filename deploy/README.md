@@ -1,1 +1,0 @@
-../docs/kubernetes/README.md
