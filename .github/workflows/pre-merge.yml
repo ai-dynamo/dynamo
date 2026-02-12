@@ -224,6 +224,7 @@ jobs:
           ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
           ENABLE_ERROR_CLASSIFICATION: "true"
           ENABLE_GITHUB_ANNOTATIONS: "true"
+          ENABLE_PR_COMMENTS: "false"  # Disabled in per-workflow jobs (no permissions)
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
           OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
