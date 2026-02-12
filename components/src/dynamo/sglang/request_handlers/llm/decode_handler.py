@@ -4,11 +4,12 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
 from dynamo._core import Component, Context
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -24,6 +25,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         config: Config,
         publisher: DynamoSglangPublisher,
         generate_endpoint=None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -32,6 +34,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
+            shutdown_event: Optional event to signal shutdown.
             generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
@@ -40,6 +43,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
             generate_endpoint,
+            shutdown_event,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -225,7 +229,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out = {}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
-                    out["finish_reason"] = finish_reason["type"]
+                    out["finish_reason"] = normalize_finish_reason(
+                        finish_reason["type"]
+                    )
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
@@ -297,7 +303,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 text = res.get("text", "")
 
                 finish_reason = res["meta_info"]["finish_reason"]
-                finish_reason_type = finish_reason["type"] if finish_reason else None
+                finish_reason_type = (
+                    normalize_finish_reason(finish_reason["type"])
+                    if finish_reason
+                    else None
+                )
                 next_count = len(text)
                 delta = text[count:]
 

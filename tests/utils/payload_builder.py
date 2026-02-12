@@ -12,7 +12,13 @@ from tests.utils.payloads import (
     CompletionPayload,
     CompletionPayloadWithLogprobs,
     EmbeddingPayload,
+    LMCacheMetricsPayload,
     MetricsPayload,
+    ResponsesPayload,
+    ResponsesStreamPayload,
+    SGLangMetricsPayload,
+    TRTLLMMetricsPayload,
+    VLLMMetricsPayload,
 )
 
 # Common default text prompt used across tests
@@ -178,15 +184,39 @@ def metric_payload_default(
     backend: Optional[str] = None,
     port: int = DefaultPort.SYSTEM1.value,
 ) -> MetricsPayload:
-    return MetricsPayload(
-        body={},
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
-        expected_response=[],
-        min_num_requests=min_num_requests,
-        backend=backend,
-        port=port,
-    )
+    """Create a metrics payload for the specified backend.
+
+    Args:
+        min_num_requests: Minimum number of requests expected in metrics
+        repeat_count: Number of times to repeat the request
+        expected_log: Expected log messages
+        backend: Backend type ('vllm', 'sglang', 'trtllm', 'lmcache')
+        port: Port to use for metrics endpoint
+
+    Returns:
+        Backend-specific MetricsPayload subclass based on backend parameter
+    """
+    common_args = {
+        "body": {},
+        "repeat_count": repeat_count,
+        "expected_log": expected_log or [],
+        "expected_response": [],
+        "min_num_requests": min_num_requests,
+        "port": port,
+    }
+
+    # Return backend-specific payload class
+    if backend == "vllm":
+        return VLLMMetricsPayload(**common_args)
+    elif backend == "sglang":
+        return SGLangMetricsPayload(**common_args)
+    elif backend == "trtllm":
+        return TRTLLMMetricsPayload(**common_args)
+    elif backend == "lmcache":
+        return LMCacheMetricsPayload(**common_args)
+    else:
+        # Default to base MetricsPayload for unknown backends
+        return MetricsPayload(**common_args)
 
 
 def chat_payload(
@@ -451,4 +481,53 @@ def completion_payload_with_logprobs(
         repeat_count=repeat_count,
         expected_log=[],
         expected_response=expected_response or ["AI", "knock", "joke"],
+    )
+
+
+def responses_payload_default(
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 200,
+    temperature: float = 0.0,
+) -> ResponsesPayload:
+    """Create a default Responses API payload (non-streaming).
+
+    For full compliance testing, use the OpenResponses bun CLI instead.
+    """
+    return ResponsesPayload(
+        body={
+            "input": TEXT_PROMPT,
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def responses_stream_payload_default(
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 200,
+    temperature: float = 0.0,
+) -> ResponsesStreamPayload:
+    """Create a default Responses API streaming payload.
+
+    For full compliance testing, use the OpenResponses bun CLI instead.
+    """
+    return ResponsesStreamPayload(
+        body={
+            "input": TEXT_PROMPT,
+            "stream": True,
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
     )
