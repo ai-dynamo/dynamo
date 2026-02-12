@@ -47,6 +47,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 )
@@ -989,13 +990,29 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 	}
 
+	// Run GPU discovery before creating job (cluster-wide and namespace-restricted operators if they have node read permissions
+	var gpuInfo *gpu.GPUInfo
+	logger.Info("Attempting GPU discovery for profiling job")
+	discoveredInfo, err := gpu.DiscoverGPUs(ctx, r.Client)
+	if err != nil {
+		// This path is expected for namespace-restricted operators without node read permissions
+		logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
+			"reason", err.Error())
+	} else {
+		gpuInfo = discoveredInfo
+		logger.Info("GPU discovery completed successfully",
+			"gpusPerNode", gpuInfo.GPUsPerNode,
+			"model", gpuInfo.Model,
+			"vramMiB", gpuInfo.VRAMPerGPU,
+			"system", gpuInfo.System)
+	}
+
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {
 		jobName := getProfilingJobName(dgdr)
 		outputConfigMapName := getOutputConfigMapName(dgdr)
 
-		// Parse and prepare profiling config
-		configYAML, err := r.prepareProfilingConfig(dgdr)
+		configYAML, err := r.prepareProfilingConfig(dgdr, gpuInfo)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1067,12 +1084,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Profiler args: pass the config as an inline YAML string via --profile-config
 		profilerArgs := []string{
 			"--profile-config", string(configYAML),
-		}
-
-		// Add --enable-gpu-discovery flag based on DGDR spec
-		// GPU discovery requires cluster-wide node access
-		if dgdr.Spec.EnableGpuDiscovery {
-			profilerArgs = append(profilerArgs, "--enable-gpu-discovery")
 		}
 
 		// Use profiler image from profilingConfig
@@ -1245,7 +1256,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 }
 
 // prepareProfilingConfig parses and modifies the profiling config
-func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) ([]byte, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, gpuInfo *gpu.GPUInfo) ([]byte, error) {
 	// Parse the profiling config from JSON
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
@@ -1300,6 +1311,33 @@ func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nv
 	// If ConfigMapRef is provided, set engine.config path
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
 		engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+	}
+
+	// User-specified values take precedence over auto-discovered values
+	if gpuInfo != nil {
+		hardwareVal, hasHardware := config["hardware"]
+		var hardwareConfig map[string]interface{}
+		if !hasHardware || hardwareVal == nil {
+			hardwareConfig = make(map[string]interface{})
+			config["hardware"] = hardwareConfig
+		} else {
+			var ok bool
+			hardwareConfig, ok = hardwareVal.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("profilingConfig.config.hardware must be an object, got %T", hardwareVal)
+			}
+		}
+
+		if _, hasNumGpus := hardwareConfig["numGpusPerNode"]; !hasNumGpus {
+			hardwareConfig["numGpusPerNode"] = gpuInfo.GPUsPerNode
+		}
+		hardwareConfig["gpuModel"] = gpuInfo.Model
+		hardwareConfig["gpuVramMib"] = gpuInfo.VRAMPerGPU
+		if gpuInfo.System != "" {
+			if _, hasSystem := hardwareConfig["system"]; !hasSystem {
+				hardwareConfig["system"] = gpuInfo.System
+			}
+		}
 	}
 
 	// Serialize config to YAML for passing to profiler

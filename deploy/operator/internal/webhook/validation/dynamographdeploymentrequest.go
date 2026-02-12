@@ -58,10 +58,8 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 		err = errors.Join(err, errors.New("spec.profilingConfig.config is required and must not be empty"))
 	}
 
-	// Validate enableGpuDiscovery is only true for cluster-wide operators
-	if v.request.Spec.EnableGpuDiscovery && !v.isClusterWideOperator {
-		err = errors.Join(err, errors.New("spec.enableGpuDiscovery can only be set to true for cluster-wide operators. Namespace-restricted operators cannot access cluster nodes for GPU discovery. Please set enableGpuDiscovery to false and provide hardware configuration (hardware.min_num_gpus_per_engine, hardware.max_num_gpus_per_engine, hardware.num_gpus_per_node) in spec.profilingConfig.config"))
-	}
+	// Note: GPU discovery is now automatic for cluster-wide operators
+	// Namespace-restricted operators automatically skip GPU discovery and require manual hardware config
 
 	// Parse config to validate structure (only if config is present)
 	if v.request.Spec.ProfilingConfig.Config != nil && len(v.request.Spec.ProfilingConfig.Config.Raw) > 0 {
