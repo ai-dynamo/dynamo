@@ -877,6 +877,18 @@ jobs:
           chmod 600 .kubeconfig
           export KUBECONFIG=$(pwd)/.kubeconfig
           kubectl cluster-info
+      - name: Determine operator image tag
+        id: operator-tag
+        run: |
+          # Try to use nightly-operator-amd64 if it exists, otherwise fall back to main-operator
+          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          if docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64 2>/dev/null; then
+            echo "tag=${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64" >> $GITHUB_OUTPUT
+            echo "Using nightly operator image: ${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64"
+          else
+            echo "tag=main-operator" >> $GITHUB_OUTPUT
+            echo "Nightly operator image not found, using stable operator image: main-operator"
+          fi
       - name: Deploy Operator
         run: |
           set -x
@@ -903,9 +915,6 @@ jobs:
           kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
           # Create docker pull secret for operator image
           kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
-          # Pull operator image (using nightly tag for operator too)
-          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64 || echo "Operator image not found, will use SHA-based tag"
           # Install helm dependencies
           helm repo add bitnami https://charts.bitnami.com/bitnami
           cd deploy/helm/charts/platform/
@@ -915,7 +924,7 @@ jobs:
             --set dynamo-operator.namespaceRestriction.enabled=true \
             --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
             --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+            --set dynamo-operator.controllerManager.manager.image.tag=${{ steps.operator-tag.outputs.tag }} \
             --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
             --timeout 10m --wait
           # Wait for all deployments to be ready
