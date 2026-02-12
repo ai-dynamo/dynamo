@@ -382,7 +382,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: 'gpu_2 or gpu_4'
+          pytest_marks: '(gpu_2 or gpu_4) and pre_merge'
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ inputs.platform }}
