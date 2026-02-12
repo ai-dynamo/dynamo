@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import anthropic
 from anthropic import Anthropic
 import requests
@@ -579,3 +579,262 @@ Return JSON format as specified in the system prompt."""
         result['model_version'] = data.get("model", self.config.anthropic_model)
 
         return result
+
+    def generate_formatted_summary(
+        self,
+        classifications: List[Any],
+        workflow_name: str,
+        run_id: str,
+        run_url: str,
+        failed_jobs: int
+    ) -> str:
+        """
+        Generate a complete formatted markdown summary with Claude.
+
+        This method sends all error classifications to Claude and asks it to:
+        1. Generate an overall workflow failure summary
+        2. Group similar failures across jobs
+        3. List unique job-specific failures
+        4. Format everything as clean, scannable markdown
+
+        Args:
+            classifications: List of ErrorClassification objects
+            workflow_name: Name of the workflow that failed
+            run_id: GitHub workflow run ID
+            run_url: URL to the workflow run
+            failed_jobs: Number of failed jobs
+
+        Returns:
+            Complete markdown-formatted summary string
+        """
+        # Route to appropriate API implementation
+        if self.config.api_format == "openai":
+            return self._generate_formatted_summary_openai(
+                classifications, workflow_name, run_id, run_url, failed_jobs
+            )
+
+        # Rate limit
+        self.rate_limiter.wait_if_needed()
+
+        # Build list of all errors with context
+        error_list = []
+        for c in classifications:
+            error_list.append({
+                "job_name": c.job_name,
+                "step_name": c.step_name,
+                "category": c.primary_category,
+                "confidence": round(c.confidence_score * 100),  # Convert to percentage
+                "root_cause": c.root_cause_summary
+            })
+
+        # Build the prompt
+        prompt = f"""You are analyzing a failed GitHub Actions workflow. Below are all the error classifications from the failed jobs.
+
+**Workflow**: {workflow_name}
+**Run ID**: {run_id}
+**Failed Jobs**: {failed_jobs}
+
+**All Errors**:
+{json.dumps(error_list, indent=2)}
+
+Your task is to generate a concise, well-formatted markdown summary with:
+
+1. **Overall Summary** (2-3 sentences): Explain the primary reason(s) the workflow failed. If multiple jobs failed for the same or similar reason, emphasize that pattern.
+
+2. **Grouped Failures**: Identify similar failures across multiple jobs and group them together. For each group:
+   - Short description of the failure
+   - Number of jobs affected
+   - List of affected job names
+   - Highest confidence score in the group
+   - Root cause explanation
+
+3. **Unique Failures**: List any job-specific failures that don't fit into groups (only 1 job affected). For each:
+   - Job name
+   - Confidence score
+   - Root cause
+
+Use this **exact format**:
+
+### 🤖 Overall Failure Summary
+
+[Your 2-3 sentence summary here]
+
+### ❌ Common Failures (affecting multiple jobs)
+
+**🔴 [Short failure description]** (X jobs affected)
+
+- **Jobs**: `job1`, `job2`, `job3`
+- **Confidence**: XX%
+- **Root Cause**: [explanation]
+
+[Repeat for each group of similar failures]
+
+### 🔍 Unique Job Failures
+
+**🟠 job-name** (step: `step-name`)
+
+- **Confidence**: XX%
+- **Root Cause**: [explanation]
+
+[Repeat for each unique failure]
+
+---
+
+**Guidelines**:
+- Use 🔴 for infrastructure_error, 🟠 for code_error
+- Group by similarity of root cause (not just exact matches) - if errors are conceptually similar (e.g., all Docker-related, all import errors), group them even if wording differs slightly
+- If 5+ jobs fail for essentially the same reason, definitely group them
+- Only show "Common Failures" section if 2+ jobs share a root cause
+- Only show "Unique Failures" section if there are job-specific issues
+- Keep root causes concise but informative (1-2 sentences max)
+- In the overall summary, mention the most impactful patterns (e.g., "6 jobs failed due to Docker auth")
+"""
+
+        try:
+            # Call Claude with the native API
+            response = self.client.messages.create(
+                model=self.config.anthropic_model,
+                max_tokens=2000,
+                temperature=0.3,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            return response.content[0].text.strip()
+
+        except anthropic.APIError as e:
+            print(f"✗ Claude API error during summary generation: {e}")
+            # Fallback to a basic summary if Claude fails
+            return self._generate_fallback_summary(classifications, failed_jobs)
+
+        except Exception as e:
+            print(f"✗ Unexpected error during summary generation: {e}")
+            return self._generate_fallback_summary(classifications, failed_jobs)
+
+    def _generate_formatted_summary_openai(
+        self,
+        classifications: List[Any],
+        workflow_name: str,
+        run_id: str,
+        run_url: str,
+        failed_jobs: int
+    ) -> str:
+        """Generate formatted summary using OpenAI-compatible API."""
+        # Build list of all errors with context
+        error_list = []
+        for c in classifications:
+            error_list.append({
+                "job_name": c.job_name,
+                "step_name": c.step_name,
+                "category": c.primary_category,
+                "confidence": round(c.confidence_score * 100),
+                "root_cause": c.root_cause_summary
+            })
+
+        prompt = f"""You are analyzing a failed GitHub Actions workflow. Below are all the error classifications from the failed jobs.
+
+**Workflow**: {workflow_name}
+**Run ID**: {run_id}
+**Failed Jobs**: {failed_jobs}
+
+**All Errors**:
+{json.dumps(error_list, indent=2)}
+
+Your task is to generate a concise, well-formatted markdown summary with:
+
+1. **Overall Summary** (2-3 sentences): Explain the primary reason(s) the workflow failed. If multiple jobs failed for the same or similar reason, emphasize that pattern.
+
+2. **Grouped Failures**: Identify similar failures across multiple jobs and group them together. For each group:
+   - Short description of the failure
+   - Number of jobs affected
+   - List of affected job names
+   - Highest confidence score in the group
+   - Root cause explanation
+
+3. **Unique Failures**: List any job-specific failures that don't fit into groups (only 1 job affected). For each:
+   - Job name
+   - Confidence score
+   - Root cause
+
+Use this **exact format**:
+
+### 🤖 Overall Failure Summary
+
+[Your 2-3 sentence summary here]
+
+### ❌ Common Failures (affecting multiple jobs)
+
+**🔴 [Short failure description]** (X jobs affected)
+
+- **Jobs**: `job1`, `job2`, `job3`
+- **Confidence**: XX%
+- **Root Cause**: [explanation]
+
+[Repeat for each group of similar failures]
+
+### 🔍 Unique Job Failures
+
+**🟠 job-name** (step: `step-name`)
+
+- **Confidence**: XX%
+- **Root Cause**: [explanation]
+
+[Repeat for each unique failure]
+
+---
+
+**Guidelines**:
+- Use 🔴 for infrastructure_error, 🟠 for code_error
+- Group by similarity of root cause (not just exact matches) - if errors are conceptually similar (e.g., all Docker-related, all import errors), group them even if wording differs slightly
+- If 5+ jobs fail for essentially the same reason, definitely group them
+- Only show "Common Failures" section if 2+ jobs share a root cause
+- Only show "Unique Failures" section if there are job-specific issues
+- Keep root causes concise but informative (1-2 sentences max)
+- In the overall summary, mention the most impactful patterns (e.g., "6 jobs failed due to Docker auth")
+"""
+
+        try:
+            url = f"{self.api_base_url}/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.anthropic_api_key}"
+            }
+
+            payload = {
+                "model": self.config.anthropic_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 2000
+            }
+
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+
+            return content.strip()
+
+        except Exception as e:
+            print(f"✗ Error during OpenAI summary generation: {e}")
+            return self._generate_fallback_summary(classifications, failed_jobs)
+
+    def _generate_fallback_summary(self, classifications: List[Any], failed_jobs: int) -> str:
+        """Generate a basic fallback summary if Claude fails."""
+        # Count by category
+        category_counts = {}
+        for c in classifications:
+            cat = c.primary_category
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+
+        # Build simple summary
+        summary = "### 🤖 Overall Failure Summary\n\n"
+        summary += f"The workflow failed with {len(classifications)} error(s) across {failed_jobs} job(s).\n\n"
+
+        if category_counts:
+            summary += "**Breakdown by category:**\n"
+            for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
+                icon = "🔴" if cat == "infrastructure_error" else "🟠"
+                cat_name = cat.replace("_", " ").title()
+                summary += f"- {icon} {cat_name}: {count}\n"
+
+        return summary

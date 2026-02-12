@@ -604,7 +604,11 @@ def classify_and_annotate_workflow_errors():
 
         # Initialize classifier and annotator
         classifier = ErrorClassifier(config, opensearch_client)
-        annotator = GitHubAnnotator(AnnotationConfig.from_env())
+        # Pass Claude client to annotator for intelligent summary generation
+        annotator = GitHubAnnotator(
+            config=AnnotationConfig.from_env(),
+            claude_client=classifier.claude
+        )
 
         # Fetch all jobs from workflow
         print("\n" + "=" * 70)

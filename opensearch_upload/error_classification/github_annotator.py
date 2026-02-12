@@ -44,14 +44,16 @@ class AnnotationConfig:
 class GitHubAnnotator:
     """Creates GitHub annotations for error classifications."""
 
-    def __init__(self, config: Optional[AnnotationConfig] = None):
+    def __init__(self, config: Optional[AnnotationConfig] = None, claude_client: Optional[Any] = None):
         """
         Initialize GitHub annotator.
 
         Args:
             config: Annotation configuration (defaults to env-based config)
+            claude_client: Optional ClaudeClient instance for generating summaries
         """
         self.config = config or AnnotationConfig.from_env()
+        self.claude_client = claude_client
 
         # GitHub context from environment
         self.github_token = os.getenv("GITHUB_TOKEN")
@@ -430,8 +432,38 @@ class GitHubAnnotator:
             print("⚠️  Not a PR context, skipping PR comment")
             return False
 
-        # Build markdown summary
-        markdown = self._build_summary_markdown(classifications, error_contexts or {})
+        # Get workflow context
+        workflow_name = os.getenv("GITHUB_WORKFLOW", "Unknown Workflow")
+        run_id = os.getenv("WORKFLOW_RUN_ID") or os.getenv("GITHUB_RUN_ID", "unknown")
+        repo = self.repo or "unknown/repo"
+        run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+        failed_jobs = len(set(c.job_name for c in classifications if c.job_name))
+
+        # Build header manually
+        markdown = f"## 🔴 Workflow Failed: {workflow_name}\n\n"
+        markdown += f"**Workflow Run**: [#{run_id}]({run_url}) | "
+        markdown += f"**Failed Jobs**: {failed_jobs}\n\n"
+
+        # Use Claude to generate the rest (grouping + summary) if available
+        if self.claude_client:
+            try:
+                print("  🤖 Generating formatted summary with Claude...")
+                claude_summary = self.claude_client.generate_formatted_summary(
+                    classifications=classifications,
+                    workflow_name=workflow_name,
+                    run_id=run_id,
+                    run_url=run_url,
+                    failed_jobs=failed_jobs
+                )
+                markdown += claude_summary
+            except Exception as e:
+                print(f"  ⚠️  Claude summary generation failed, falling back to basic format: {e}")
+                # Fallback to old format if Claude fails
+                markdown += self._build_summary_markdown_body(classifications, error_contexts or {})
+        else:
+            # No Claude client available, use basic format
+            print("  ℹ️  No Claude client available, using basic format")
+            markdown += self._build_summary_markdown_body(classifications, error_contexts or {})
 
         # Post comment via GitHub API
         try:
@@ -556,21 +588,20 @@ class GitHubAnnotator:
 
         return None
 
-    def _build_summary_markdown(
+    def _build_summary_markdown_body(
         self,
         classifications: List[Any],
         error_contexts: Dict[str, Any]
     ) -> str:
-        """Build markdown summary table."""
+        """Build markdown summary table (fallback format without Claude)."""
         # Group by category
         infrastructure, code_errors, _ = self._group_by_severity(classifications)
 
         # Count unique jobs
         unique_jobs = len(set(c.job_name for c in classifications if c.job_name))
 
-        # Build markdown
-        md = "## 🤖 AI Error Classification Summary\n\n"
-        md += f"Found **{len(classifications)} unique error(s)** across **{unique_jobs} job(s)** in this workflow\n\n"
+        # Build markdown (without the header, which is added in create_pr_comment)
+        md = f"Found **{len(classifications)} unique error(s)** across **{unique_jobs} job(s)** in this workflow\n\n"
 
         # Infrastructure errors table
         if infrastructure:
