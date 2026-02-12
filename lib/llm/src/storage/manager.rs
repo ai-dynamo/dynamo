@@ -73,22 +73,6 @@ impl ResponseStorage for InMemoryResponseStorage {
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        // Enforce max_responses_per_session (0 = unlimited)
-        if self.max_responses_per_session > 0 {
-            let storage = self.storage.read().await;
-            let prefix = format!("{tenant_id}:responses:");
-            let now = Self::now_epoch_secs();
-            let count = storage
-                .iter()
-                .filter(|(k, _)| k.starts_with(&prefix))
-                .filter(|(_, v)| v.session_id == session_id)
-                .filter(|(_, v)| !Self::is_expired(v, now))
-                .count();
-            if count >= self.max_responses_per_session {
-                return Err(StorageError::SessionFull);
-            }
-        }
-
         let key = Self::make_key(tenant_id, &response_id);
         let now = Self::now_epoch_secs();
         let expires_at = ttl.map(|d| now + d.as_secs());
@@ -102,7 +86,25 @@ impl ResponseStorage for InMemoryResponseStorage {
             expires_at,
         };
 
-        self.storage.write().await.insert(key, stored);
+        // Hold a single write lock for both the count check and insert to
+        // prevent TOCTOU races where concurrent requests could exceed the limit.
+        let mut storage = self.storage.write().await;
+
+        // Enforce max_responses_per_session (0 = unlimited)
+        if self.max_responses_per_session > 0 {
+            let prefix = format!("{tenant_id}:responses:");
+            let count = storage
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .filter(|(_, v)| v.session_id == session_id)
+                .filter(|(_, v)| !Self::is_expired(v, now))
+                .count();
+            if count >= self.max_responses_per_session {
+                return Err(StorageError::SessionFull);
+            }
+        }
+
+        storage.insert(key, stored);
 
         Ok(response_id)
     }
@@ -135,10 +137,11 @@ impl ResponseStorage for InMemoryResponseStorage {
                 }
             }
 
-            // Validate tenant (hard boundary)
-            // Session is metadata only — cross-session access within a tenant is allowed
+            // Defense-in-depth: key scheme guarantees tenant match,
+            // but return NotFound (not TenantMismatch) per trait contract
+            // to avoid leaking existence to other tenants.
             if stored.tenant_id != tenant_id {
-                return Err(StorageError::TenantMismatch);
+                return Err(StorageError::NotFound);
             }
 
             Ok(stored.clone())
@@ -159,9 +162,11 @@ impl ResponseStorage for InMemoryResponseStorage {
         let mut storage = self.storage.write().await;
         let stored = storage.get(&key).ok_or(StorageError::NotFound)?;
 
-        // Validate tenant (hard boundary)
+        // Defense-in-depth: key scheme guarantees tenant match,
+        // but return NotFound (not TenantMismatch) per trait contract
+        // to avoid leaking existence to other tenants.
         if stored.tenant_id != tenant_id {
-            return Err(StorageError::TenantMismatch);
+            return Err(StorageError::NotFound);
         }
 
         // Check expiration — expired entries should be treated as NotFound
