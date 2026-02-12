@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use dynamo_kv_router::{ConcurrentRadixTree, ThreadPoolIndexer};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
@@ -17,6 +19,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 use futures::stream;
+use tokio::sync::oneshot;
 use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
@@ -43,10 +46,11 @@ use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::{
         approx::PruneConfig,
-        indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
+        indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
             DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
-            TokensWithHashes, WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
+            TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+            compute_block_hash_for_seq,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
@@ -113,11 +117,17 @@ pub trait WorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
+#[derive(Clone)]
 pub enum Indexer {
-    /// Updates itself based on KV events emitted by backend workers or routing decisions.
+    /// Single-threaded radix tree with channel-based event processing.
     /// Supports TTL-based expiration and size-based pruning.
     /// Has the ability to persist and snapshot states.
     KvIndexer(KvIndexer),
+
+    /// Concurrent radix tree with a thread pool for event processing.
+    /// Uses sticky worker routing for per-worker event serialization.
+    /// Does not support TTL/pruning.
+    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTree>>),
 
     /// Used when we do not wish to use the indexer at all (e.g., when overlap_score_weight is 0).
     /// Note: This will cause KV events to accumulate in JetStream as we do not regularly purge them.
@@ -132,30 +142,37 @@ impl Indexer {
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         if kv_router_config.overlap_score_weight == 0.0 {
-            // When overlap_score_weight is zero, we don't need to track prefixes
-            Indexer::None
-        } else {
-            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
-
-            // If use_kv_events is false, enable TTL and pruning for approximate behavior
-            let prune_config = if !kv_router_config.use_kv_events {
-                Some(PruneConfig {
-                    ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
-                    max_tree_size: kv_router_config.router_max_tree_size,
-                    prune_target_ratio: kv_router_config.router_prune_target_ratio,
-                })
-            } else {
-                None
-            };
-
-            Indexer::KvIndexer(KvIndexer::new_with_frequency(
-                cancellation_token,
-                None, // expiration_duration for frequency tracking
-                block_size,
-                kv_indexer_metrics,
-                prune_config,
-            ))
+            return Indexer::None;
         }
+
+        if kv_router_config.router_event_threads > 1 {
+            return Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
+                ConcurrentRadixTree::new(),
+                kv_router_config.router_event_threads as usize,
+                block_size,
+            )));
+        }
+
+        let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+
+        // If use_kv_events is false, enable TTL and pruning for approximate behavior
+        let prune_config = if !kv_router_config.use_kv_events {
+            Some(PruneConfig {
+                ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
+                max_tree_size: kv_router_config.router_max_tree_size,
+                prune_target_ratio: kv_router_config.router_prune_target_ratio,
+            })
+        } else {
+            None
+        };
+
+        Indexer::KvIndexer(KvIndexer::new_with_frequency(
+            cancellation_token,
+            None, // expiration_duration for frequency tracking
+            block_size,
+            kv_indexer_metrics,
+            prune_config,
+        ))
     }
 
     pub(crate) async fn find_matches(
@@ -164,6 +181,7 @@ impl Indexer {
     ) -> Result<OverlapScores, KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
+            Indexer::Concurrent(tpi) => tpi.find_matches(sequence).await,
             Indexer::None => Ok(OverlapScores {
                 scores: HashMap::new(),
                 frequencies: Vec::new(),
@@ -175,6 +193,7 @@ impl Indexer {
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => indexer.dump_events().await,
+            Indexer::Concurrent(tpi) => tpi.dump_events().await,
             Indexer::None => {
                 panic!(
                     "Cannot dump events: indexer does not exist (is overlap_score_weight set to 0?)"
@@ -194,7 +213,53 @@ impl Indexer {
                     .process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
+            Indexer::Concurrent(tpi) => {
+                tpi.process_routing_decision_for_request(tokens_with_hashes, worker)
+                    .await
+            }
             Indexer::None => Ok(()),
+        }
+    }
+
+    pub(crate) async fn apply_event(&self, event: RouterEvent) {
+        match self {
+            Indexer::KvIndexer(indexer) => {
+                if let Err(e) = indexer.event_sender().send(event).await {
+                    tracing::warn!("Failed to send event to indexer: {e}");
+                }
+            }
+            Indexer::Concurrent(tpi) => tpi.apply_event(event).await,
+            Indexer::None => {}
+        }
+    }
+
+    pub(crate) async fn remove_worker(&self, worker_id: WorkerId) {
+        match self {
+            Indexer::KvIndexer(indexer) => {
+                if let Err(e) = indexer.remove_worker_sender().send(worker_id).await {
+                    tracing::warn!("Failed to send worker removal for {worker_id}: {e}");
+                }
+            }
+            Indexer::Concurrent(tpi) => {
+                KvIndexerInterface::remove_worker(tpi.as_ref(), worker_id).await;
+            }
+            Indexer::None => {}
+        }
+    }
+
+    pub(crate) async fn get_workers(&self) -> Vec<WorkerId> {
+        match self {
+            Indexer::KvIndexer(indexer) => {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                let req = GetWorkersRequest { resp: resp_tx };
+                if let Err(e) = indexer.get_workers_sender().send(req).await {
+                    tracing::warn!("Failed to send get_workers request: {e}");
+                    return Vec::new();
+                }
+                resp_rx.await.unwrap_or_default()
+            }
+            Indexer::Concurrent(tpi) => tpi.backend().get_workers(),
+            Indexer::None => Vec::new(),
         }
     }
 }
@@ -255,18 +320,11 @@ impl KvRouter {
 
         // Start KV event subscription if needed (use_kv_events=true and overlap_score_weight>0)
         if kv_router_config.should_subscribe_to_kv_events() {
-            // Guaranteed to be KvIndexer since overlap_score_weight > 0.0
-            let Indexer::KvIndexer(kv_indexer) = &indexer else {
-                unreachable!(
-                    "should_subscribe_to_kv_events implies overlap_score_weight > 0 implies KvIndexer"
-                )
-            };
-
             subscriber::start_subscriber(
                 component.clone(),
                 &kv_router_config,
                 router_id,
-                kv_indexer,
+                indexer.clone(),
                 cancellation_token.clone(),
             )
             .await?;

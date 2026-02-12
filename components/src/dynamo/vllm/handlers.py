@@ -22,6 +22,7 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -435,20 +436,6 @@ class BaseWorkerHandler(ABC):
                 lock = asyncio.Lock()
                 self._lora_load_locks[lora_name] = lock
             return lock
-
-    def _normalize_finish_reason(self, finish_reason: str) -> str:
-        """
-        Normalize vLLM finish reasons to Dynamo-compatible values.
-
-        vLLM may return finish reasons that aren't recognized by Dynamo's Rust layer.
-        This method maps them to compatible values.
-        [TODO]: Remove this method and add the right code in the Rust layer.
-        """
-        # Map vLLM's "abort" to Dynamo's "cancelled"
-        if finish_reason.startswith("abort"):
-            logging.debug(f"Normalizing finish reason: {finish_reason} to cancelled")
-            return "cancelled"
-        return finish_reason
 
     async def load_lora(self, request=None):
         """
@@ -1223,9 +1210,7 @@ class BaseWorkerHandler(ABC):
                     out["top_logprobs"] = top_logprobs
 
                 if output.finish_reason:
-                    out["finish_reason"] = self._normalize_finish_reason(
-                        output.finish_reason
-                    )
+                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
                     out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
                         request_output=res,
                         embedding_sequence_length=embedding_sequence_length,
@@ -1438,9 +1423,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "role": "assistant",
                             "content": delta_text,
                         },
-                        "finish_reason": self._normalize_finish_reason(
-                            output.finish_reason
-                        ),
+                        "finish_reason": normalize_finish_reason(output.finish_reason),
                     }
 
                     chunk = {
