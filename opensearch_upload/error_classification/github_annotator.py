@@ -125,14 +125,26 @@ class GitHubAnnotator:
         lines = [
             f"**{icon} Error Classification: {category_name}**",
             "",
+        ]
+
+        # Add workflow and job info prominently at the top
+        if classification.workflow_id:
+            lines.append(f"**Workflow**: `{classification.workflow_id}`")
+        if classification.job_name:
+            lines.append(f"**Job**: `{classification.job_name}`")
+        if classification.step_name:
+            lines.append(f"**Step**: `{classification.step_name}`")
+
+        lines.extend([
+            "",
             f"**Confidence**: {confidence_pct}%",
             "",
             "**Root Cause**:",
             classification.root_cause_summary or "Unable to determine root cause",
             "",
-        ]
+        ])
 
-        # Add error source info
+        # Add additional error source info
         if classification.error_source:
             lines.append(f"**Error Source**: {classification.error_source}")
 
@@ -224,13 +236,19 @@ class GitHubAnnotator:
         icon = self.get_category_icon(classification.primary_category)
         category_name = classification.primary_category.replace("_", " ").title()
 
+        # Build title with job context
+        title_parts = [icon, category_name]
+        if classification.job_name:
+            title_parts.append(f"({classification.job_name})")
+        title = " ".join(title_parts)
+
         annotation = {
             "path": file_path,
             "start_line": start_line,
             "end_line": end_line,
             "annotation_level": level,
             "message": self.format_annotation_message(classification, error_context),
-            "title": f"{icon} {category_name}",
+            "title": title,
         }
 
         return annotation
