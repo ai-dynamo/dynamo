@@ -6,6 +6,7 @@ name: PR
 on:
   push:
     branches:
+      - ci/update-builder
       - main
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
