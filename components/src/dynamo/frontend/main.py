@@ -60,24 +60,12 @@ def setup_engine_factory(
     return EngineFactory(runtime, router_config, config, vllm_flags)
 
 
-def _is_vllm_chat_processor(argv: list[str]) -> bool:
-    for idx, arg in enumerate(argv):
-        if arg == "--chat-processor" and idx + 1 < len(argv):
-            return argv[idx + 1] == "vllm"
-        if arg.startswith("--chat-processor="):
-            return arg.split("=", 1)[1] == "vllm"
-
-    env_value = os.environ.get("DYN_CHAT_PROCESSOR")
-    return env_value is not None and env_value.lower() == "vllm"
-
-
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
     Returns:
         FrontendConfig: Parsed configuration object.
     """
-    is_vllm = _is_vllm_chat_processor(sys.argv[1:])
 
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
@@ -94,7 +82,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
     vllm_flags = None
 
     # parse extra vllm flags using vllm native parser.
-    if is_vllm:
+    if config.chat_processor == "vllm":
         try:
             from vllm.utils import FlexibleArgumentParser
         except ImportError:
