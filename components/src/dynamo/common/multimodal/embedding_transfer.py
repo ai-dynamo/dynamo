@@ -425,7 +425,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
         )
 
         if self.warmedup_descriptors.empty():
-            logger.warning(
+            logger.debug(
                 "No warmed up descriptors available, creating a temporary one for transfer."
             )
             encodings_tensor = torch.zeros(*embeddings_shape, dtype=embeddings_dtype)

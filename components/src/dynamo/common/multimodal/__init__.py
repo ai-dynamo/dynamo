@@ -5,6 +5,8 @@
 
 from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
 from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingReceiver,
+    LocalEmbeddingSender,
     NixlPersistentEmbeddingReceiver,
     NixlPersistentEmbeddingSender,
     TransferRequest,
@@ -15,4 +17,6 @@ __all__ = [
     "NixlPersistentEmbeddingReceiver",
     "NixlPersistentEmbeddingSender",
     "TransferRequest",
+    "LocalEmbeddingReceiver",
+    "LocalEmbeddingSender",
 ]

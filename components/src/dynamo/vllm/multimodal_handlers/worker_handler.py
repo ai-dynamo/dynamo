@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import logging
+import os
 from collections import defaultdict
 from typing import Any
 
@@ -12,7 +13,10 @@ from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo.common.multimodal.embedding_transfer import NixlPersistentEmbeddingReceiver
+from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingReceiver,
+    NixlPersistentEmbeddingReceiver,
+)
 from dynamo.runtime import Client, Component, DistributedRuntime
 
 from ..handlers import BaseWorkerHandler
@@ -21,6 +25,8 @@ from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_m
 from ..multimodal_utils.prefill_worker_utils import accumulate_embeddings
 
 logger = logging.getLogger(__name__)
+
+TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 
 
 class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
@@ -162,7 +168,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self.image_loader = ImageLoader()
         # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
         # to be at matching size, need to overwrite nixl connect library
-        self.embedding_receiver = NixlPersistentEmbeddingReceiver(max_items=0)
+        self.embedding_receiver = (
+            LocalEmbeddingReceiver()
+            if TRANSFER_LOCAL
+            else NixlPersistentEmbeddingReceiver(max_items=0)
+        )
 
         logger.info("Multimodal PD Worker has been initialized")
 
@@ -239,8 +249,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Use empty list instead of None to satisfy Pydantic validation on decode worker after vllm upgrade
         request.multimodal_inputs = []
 
-        logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
-        logger.info(f"{multi_modal_data}")
+        # logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
+        # logger.info(f"{multi_modal_data}")
 
         # Deepcopy the request to avoid modifying the original
         # when we adjust sampling params for prefill

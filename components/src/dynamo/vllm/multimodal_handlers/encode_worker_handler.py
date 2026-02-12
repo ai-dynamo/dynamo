@@ -5,7 +5,6 @@ import asyncio
 import logging
 import os
 import shutil
-import tempfile
 import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, AsyncIterator
@@ -18,7 +17,7 @@ from vllm.multimodal.hasher import MultiModalHasher
 from vllm.sampling_params import SamplingParams
 
 import dynamo.nixl_connect as connect
-from dynamo.common.multimodal import NixlPersistentEmbeddingSender
+from dynamo.common.multimodal import LocalEmbeddingSender, NixlPersistentEmbeddingSender
 from dynamo.runtime import Client, DistributedRuntime
 
 from ..multimodal_utils import (
@@ -51,6 +50,8 @@ except ImportError as e:
 CACHE_SIZE_MAXIMUM = 8
 
 TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
+# [gluo NOTE] default off to benchmark standalone encoder
+ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 0))
 
 
 @dataclass
@@ -75,6 +76,7 @@ class EncodeWorkerHandler:
             self.model, trust_remote_code=True
         )
         self.vision_model = load_vision_model(self.model)
+        logger.info(f"Output {self.vision_model.out_hidden_size}?")
         self.min_workers = 1
 
         # Get encoder components for the model
@@ -85,8 +87,12 @@ class EncodeWorkerHandler:
         self._accumulated_time = 0.0
         self._processed_requests = 0
         self.readables = []
-        self.embedding_cache = EmbeddingCache()
-        self.embedding_sender = NixlPersistentEmbeddingSender()
+        self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
+        self.embedding_sender = (
+            LocalEmbeddingSender()
+            if TRANSFER_LOCAL
+            else NixlPersistentEmbeddingSender()
+        )
         self.send_complete_queue = asyncio.Queue()
         self.send_complete_checker_task = asyncio.create_task(
             self.check_complete(self.send_complete_queue)
@@ -98,12 +104,8 @@ class EncodeWorkerHandler:
             if transfer_future is None:  # Sentinel value to stop the checker
                 queue.task_done()
                 break
-            await transfer_future.await_completion()
+            await transfer_future
             queue.task_done()
-
-        # Use system temp directory for encoder cache files
-        self._cache_dir = os.path.join(tempfile.gettempdir(), "encoder_cache")
-        os.makedirs(self._cache_dir, exist_ok=True)
 
     def cleanup(self):
         self.send_complete_queue.put_nowait(
@@ -152,8 +154,10 @@ class EncodeWorkerHandler:
 
                 image_url = request.multimodal_inputs[idx].multimodal_input.image_url
                 # see if we have local cache
-                embedding_key = self.embedding_cache.generate_hash_key(image_url)
-                if self.embedding_cache.has_key(embedding_key):
+                embedding_key = EmbeddingCache.generate_hash_key(image_url)
+                if self.embedding_cache is not None and self.embedding_cache.has_key(
+                    embedding_key
+                ):
                     (image_grid_thw, embeddings_cpu) = self.embedding_cache.get(
                         embedding_key
                     )
@@ -239,13 +243,14 @@ class EncodeWorkerHandler:
                     splitted_embeddings[split_idx].unsqueeze(0),
                 )
                 # Cache the computed value for future use
-                self.embedding_cache.set(
-                    embedding_lists[list_idx].key,
-                    (
-                        embedding_lists[list_idx].image_grid_thw,
-                        embedding_lists[list_idx].embeddings_cpu,
-                    ),
-                )
+                if self.embedding_cache is not None:
+                    self.embedding_cache.set(
+                        embedding_lists[list_idx].key,
+                        (
+                            embedding_lists[list_idx].image_grid_thw,
+                            embedding_lists[list_idx].embeddings_cpu,
+                        ),
+                    )
 
             # Prepare transfer
             send_tasks = [
@@ -260,6 +265,7 @@ class EncodeWorkerHandler:
 
             for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
                 embedding_item, transfer_request = item
+                # logger.info(f"{embedding_item.embeddings_cpu.shape} prepared for transfer.")
                 # Update request for transfer metadata
                 request.multimodal_inputs[idx].multimodal_input.image_url = None
                 request.multimodal_inputs[
