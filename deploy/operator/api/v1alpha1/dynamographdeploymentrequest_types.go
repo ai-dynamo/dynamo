@@ -146,16 +146,13 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:default=false
 	UseMocker bool `json:"useMocker,omitempty"`
 
-	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
-	// resources from the Kubernetes cluster nodes. When enabled, the profiler will override
-	// any manually specified hardware configuration (minNumGpusPerEngine, maxNumGpusPerEngine,
-	// numGpusPerNode) with values detected from the cluster.
-	// Requires cluster-wide node access permissions - only available with cluster-scoped operators.
-	// +kubebuilder:default=false
-	// +kubebuilder:validation:Optional
-	EnableGpuDiscovery bool `json:"enableGpuDiscovery,omitempty"`
-
 	// ProfilingConfig provides the complete configuration for the profiling job.
+	// Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes
+	// cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted),
+	// discovered GPU configuration is used as defaults when hardware configuration is not manually
+	// specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values
+	// always take precedence over auto-discovered values. If GPU discovery fails (e.g.,
+	// namespace-restricted operator without node permissions), manual hardware config is required.
 	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
 	// Note: deployment.model and engine.backend are automatically set from the high-level
