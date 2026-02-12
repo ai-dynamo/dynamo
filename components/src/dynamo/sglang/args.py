@@ -145,6 +145,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         ),
         "help": "Base URL for rewriting image URLs in responses (e.g., http://localhost:8008/). When set, generated image URLs will use this base instead of filesystem URLs. Can be set via DYN_IMAGE_DIFFUSION_URL_BASE env var.",
     },
+    "encode-attn-implementation": {
+        "flags": ["--encode-attn-implementation"],
+        "type": str,
+        "default": None,
+        "help": "Override attention implementation for the multimodal encode worker (e.g., flash_attention_2, sdpa, eager).",
+    },
 }
 
 
@@ -190,6 +196,8 @@ class DynamoArgs:
     image_diffusion_worker: bool = False
     image_diffusion_fs_url: Optional[str] = None
     image_diffusion_base_url: Optional[str] = None
+    # encode worker attention override
+    encode_attn_implementation: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -596,6 +604,9 @@ async def parse_args(args: list[str]) -> Config:
         image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
         image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
         image_diffusion_base_url=getattr(parsed_args, "image_diffusion_base_url", None),
+        encode_attn_implementation=getattr(
+            parsed_args, "encode_attn_implementation", None
+        ),
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=not parsed_args.durable_kv_events,
         use_kv_events=use_kv_events,

@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+from contextlib import ExitStack
 from typing import AsyncIterator, Optional
 
 import torch
@@ -60,11 +61,22 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         self.image_processor = AutoImageProcessor.from_pretrained(
             self.model, trust_remote_code=True
         )
+        attn_impl = config.dynamo_args.encode_attn_implementation
+        if attn_impl is not None and attn_impl not in (
+            "flash_attention_2",
+            "sdpa",
+            "eager",
+        ):
+            raise ValueError(
+                "encode_attn_implementation must be one of: "
+                "flash_attention_2, sdpa, eager"
+            )
         self.vision_model = AutoModel.from_pretrained(
             self.model,
             device_map="auto",
             torch_dtype=torch.float16,
             trust_remote_code=True,
+            attn_implementation=attn_impl,
         )
 
         # Load tokenizer to convert image token string to integer ID
@@ -120,14 +132,31 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         # 6. Create a descriptor for the embeddings and send to downstream worker.
 
         try:
-            if not request.multimodal_input.image_url:
+            multimodal_groups = request.multimodal_inputs
+
+            if not multimodal_groups:
                 raise ValueError("image_url is required for the encode worker.")
 
-            image = await self.image_loader.load_image(
-                request.multimodal_input.image_url
+            images = []
+            for idx, mm_group in enumerate(multimodal_groups):
+                mm_input = mm_group.multimodal_input
+                if not mm_input or not mm_input.image_url:
+                    raise ValueError(
+                        f"image_url is required for the encode worker (index={idx})."
+                    )
+                if mm_input.video_url is not None:
+                    raise NotImplementedError(
+                        "video_url encoding is not supported in SGLang encode worker"
+                    )
+                images.append(mm_input.image_url)
+
+            loaded_images = await asyncio.gather(
+                *[self.image_loader.load_image(url) for url in images]
             )
 
-            image_embeds = self.image_processor(images=image, return_tensors="pt")
+            image_embeds = self.image_processor(
+                images=loaded_images, return_tensors="pt"
+            )
             precomputed_embeddings = encode_image_embeddings(
                 model_name=self.served_model_name,
                 image_embeds=image_embeds,
@@ -135,36 +164,62 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 projector=None,
             )
 
-            image_grid_thw = (
+            image_grid_thw_list = (
                 image_embeds["image_grid_thw"].tolist()
                 if "image_grid_thw" in image_embeds
-                else None
+                else [None] * len(multimodal_groups)
             )
 
-            # Store the image data info in the request for downstream
-            request.image_grid_thw = image_grid_thw
-            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            if len(image_grid_thw_list) != len(multimodal_groups):
+                raise ValueError("image_grid_thw size mismatch")
 
-            # Replace the single image token with multiple image tokens based on embedding shape
-            image_token_id_index = request.request.token_ids.index(self.image_token_id)
+            precomputed_embeddings_list = list(precomputed_embeddings)
+            if len(precomputed_embeddings_list) != len(multimodal_groups):
+                raise ValueError("embeddings batch size mismatch")
 
-            num_image_tokens = precomputed_embeddings.shape[
-                1
-            ]  # Number of image patches
-            # Replace single image token with multiple image tokens
-            request.request.token_ids = (
-                request.request.token_ids[:image_token_id_index]
-                + [self.image_token_id] * num_image_tokens
-                + request.request.token_ids[
-                    image_token_id_index + 1 :
-                ]  # Skip the original token
-            )
+            embeddings_shape_list = []
+            for idx, (mm_group, image_grid_thw, embeddings) in enumerate(
+                zip(multimodal_groups, image_grid_thw_list, precomputed_embeddings_list)
+            ):
+                mm_group.image_grid_thw = image_grid_thw
+                embeddings = (
+                    embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
+                )
+                precomputed_embeddings_list[idx] = embeddings
+                mm_group.embeddings_shape = tuple(embeddings.shape)
+                embeddings_shape_list.append(mm_group.embeddings_shape)
+                mm_group.multimodal_input.image_url = None
 
-            # Create descriptor for the multimodal data
-            descriptor = connect.Descriptor(precomputed_embeddings)
+            # Replace image tokens with multiple image tokens based on embedding shape
+            search_start = 0
+            for embeddings_shape in embeddings_shape_list:
+                num_image_tokens = embeddings_shape[1]
+                try:
+                    image_token_id_index = request.request.token_ids.index(
+                        self.image_token_id, search_start
+                    )
+                except ValueError as e:
+                    raise ValueError(
+                        "Not enough image tokens found for provided images"
+                    ) from e
 
-            with await self._connector.create_readable(descriptor) as readable:
-                request.serialized_request = readable.metadata()
+                request.request.token_ids = (
+                    request.request.token_ids[:image_token_id_index]
+                    + [self.image_token_id] * num_image_tokens
+                    + request.request.token_ids[image_token_id_index + 1 :]
+                )
+                search_start = image_token_id_index + num_image_tokens
+
+            with ExitStack() as stack:
+                readables = []
+                for mm_group, precomputed_embeddings in zip(
+                    multimodal_groups, precomputed_embeddings_list
+                ):
+                    descriptor = connect.Descriptor(precomputed_embeddings)
+                    readable = await self._connector.create_readable(descriptor)
+                    readable = stack.enter_context(readable)
+                    readables.append(readable)
+                    mm_group.serialized_request = readable.metadata()
 
                 logger.debug(f"Request: {request.model_dump_json()}")
 
@@ -172,11 +227,13 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 response_generator = await self.pd_worker_client.round_robin(
                     request.model_dump_json()
                 )
-                await readable.wait_for_completion()
+
+                for readable in readables:
+                    await readable.wait_for_completion()
 
                 async for response in response_generator:
-                    yield response.data() if hasattr(response, "data") else str(
-                        response
+                    yield (
+                        response.data() if hasattr(response, "data") else str(response)
                     )
 
         except Exception as e:

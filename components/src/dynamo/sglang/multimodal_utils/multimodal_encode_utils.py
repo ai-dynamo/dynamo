@@ -161,10 +161,4 @@ def encode_image_embeddings(
             raise NotImplementedError(
                 f"Model not supported: {normalized_name} (original: {model_name})"
             )
-
-        # Normalize output shape
-        if isinstance(embeddings, (tuple, list)):
-            embeddings = embeddings[0]
-        embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
-
         return embeddings
