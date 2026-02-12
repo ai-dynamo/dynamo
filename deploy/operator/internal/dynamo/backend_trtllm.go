@@ -133,7 +133,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
+		"chmod 644 ~/.ssh/id_rsa.pub",
 		fmt.Sprintf("printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > ~/.ssh/config", commonconsts.MpiRunSshPort),
 	}
 
@@ -148,7 +148,10 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Generate environment variable flags for mpirun
 	envVarsStr := generateEnvVarFlags(container.Env)
 
-	mpirunCmd := fmt.Sprintf("mpirun --allow-run-as-root --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
+	// Use --allow-run-as-root only when the container is running as root (UID 0).
+	// When running as a non-root user, mpirun works without this flag and omitting
+	// it avoids masking accidental root execution.
+	mpirunCmd := fmt.Sprintf("mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
 		totalGPUs,
 		allHostnames,
 		commonconsts.MpiRunSshPort,
@@ -183,14 +186,15 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
+		"chmod 644 ~/.ssh/id_rsa.pub",
 		fmt.Sprintf("printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > ~/.ssh/config", commonconsts.MpiRunSshPort),
 		// Generate host keys in user writable directory
 		"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N ''",
 		"ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N ''",
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
 		// Create SSH daemon config to use custom host keys location and non-privileged port
-		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
+		// Note: AuthorizedKeysFile uses relative path (.ssh/) because ~ is not expanded in sshd_config
+		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile .ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 
