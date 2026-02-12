@@ -164,16 +164,11 @@ class Endpoint:
         """
         ...
 
-    async def client(self) -> Client:
+    async def client(self, router_mode: Optional[RouterMode] = None) -> Client:
         """
-        Create a `Client` capable of calling served instances of this endpoint using round-robin routing.
-        """
-        ...
+        Create a `Client` capable of calling served instances of this endpoint.
 
-    async def client2(self, router_mode: RouterMode) -> Client:
-        """
-        Create a `Client` capable of calling served instances of this endpoint, using a specific
-        router mode (random, round-robin, kv).
+        By default this uses round-robin routing when `router_mode` is not provided.
         """
         ...
 
@@ -1000,6 +995,7 @@ class KvRouterConfig:
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
+        router_event_threads: int = 1,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1023,6 +1019,8 @@ class KvRouterConfig:
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+            router_event_threads: Number of event processing threads (default: 1).
+                When > 1, uses a concurrent radix tree with a thread pool.
         """
         ...
 

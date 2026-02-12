@@ -119,7 +119,7 @@ jobs:
   build:
     if: inputs.build_image
     name: Build ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
-    runs-on: prod-builder-v2
+    runs-on: prod-builder-v3
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
     env:
@@ -129,23 +129,19 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
-        with:
-          python-version: '3.12'
-          pip-install: jinja2 pyyaml
       - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
         id: extra-tags
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
-          PLATFORM: linux/${{ inputs.platform }}
+          CUDA_VERSION: ${{ inputs.cuda_version }}
         run: |
+          CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
           if [ -n "$EXTRA_TAGS" ]; then
             RESULT=""
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-${{ inputs.platform }}"$'\n'
+                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
             echo "tags<<EOF" >> $GITHUB_OUTPUT
@@ -202,7 +198,7 @@ jobs:
               --platform=${{ inputs.platform }} \
               --cuda-version=${{ inputs.cuda_version }} \
               --show-result \
-              --short-output
+              --output-short-filename
       - name: Build Container
         id: build-image
         timeout-minutes: ${{ inputs.build_timeout_minutes }}

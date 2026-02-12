@@ -75,7 +75,7 @@ jobs:
               --framework=dynamo \
               --platform=amd64 \
               --show-result \
-              --short-output
+              --output-short-filename
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
