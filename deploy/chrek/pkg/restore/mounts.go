@@ -6,81 +6,44 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v7/rpc"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
 )
 
 // GenerateExtMountMaps generates external mount mappings for CRIU restore.
-// It parses /proc/1/mountinfo (the restore container's mounts) and adds
-// mappings for all mount points plus masked/readonly paths from common.
-//
-// If meta is nil or doesn't have OCI-derived paths, falls back to defaults.
-func GenerateExtMountMaps(meta *common.CheckpointMetadata) ([]*criurpc.ExtMountMap, error) {
-	var maps []*criurpc.ExtMountMap
-	addedMounts := make(map[string]bool)
+// It reuses the exact dump-time ext-mount plan persisted in checkpoint manifest.
+func GenerateExtMountMaps(data *checkpoint.CheckpointManifest) ([]*criurpc.ExtMountMap, error) {
+	if data == nil {
+		return nil, fmt.Errorf("checkpoint manifest is required")
+	}
+	if len(data.CRIUDump.ExtMnt) == 0 {
+		return nil, fmt.Errorf("checkpoint manifest is missing criuDump.extMnt")
+	}
 
-	// Add root filesystem mapping first
-	maps = append(maps, &criurpc.ExtMountMap{
+	maps := []*criurpc.ExtMountMap{{
 		Key: proto.String("/"),
 		Val: proto.String("."),
-	})
-	addedMounts["/"] = true
+	}}
+	addedMounts := map[string]struct{}{"/": {}}
 
-	// Parse /proc/1/mountinfo for all current mount points
-	mountPoints, err := common.GetMountPointPaths("/proc/1/mountinfo")
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse mountinfo: %w", err)
-	}
-
-	for _, mountPoint := range mountPoints {
-		if addedMounts[mountPoint] || mountPoint == "/" {
+	// Replay dump-time ext-mount plan exactly, with restore-specific root remap.
+	for _, mount := range data.CRIUDump.ExtMnt {
+		key := mount.Key
+		if key == "" || key == "/" {
 			continue
 		}
-		maps = append(maps, &criurpc.ExtMountMap{
-			Key: proto.String(mountPoint),
-			Val: proto.String(mountPoint),
-		})
-		addedMounts[mountPoint] = true
-	}
-
-	// Use masked paths from checkpoint metadata (OCI spec derived)
-	// Fall back to defaults for backwards compatibility
-	maskedPaths := common.DefaultMaskedPaths()
-	if meta != nil && len(meta.MaskedPaths) > 0 {
-		maskedPaths = meta.MaskedPaths
-	}
-
-	for _, path := range maskedPaths {
-		if addedMounts[path] {
+		if _, exists := addedMounts[key]; exists {
 			continue
 		}
-		maps = append(maps, &criurpc.ExtMountMap{
-			Key: proto.String(path),
-			Val: proto.String(path),
-		})
-		addedMounts[path] = true
-	}
-
-	// Also add readonly paths from metadata if available
-	if meta != nil {
-		for _, path := range meta.ReadonlyPaths {
-			if addedMounts[path] {
-				continue
-			}
-			maps = append(maps, &criurpc.ExtMountMap{
-				Key: proto.String(path),
-				Val: proto.String(path),
-			})
-			addedMounts[path] = true
+		val := mount.Val
+		if val == "" {
+			val = key
 		}
+		maps = append(maps, &criurpc.ExtMountMap{
+			Key: proto.String(key),
+			Val: proto.String(val),
+		})
+		addedMounts[key] = struct{}{}
 	}
 
 	return maps, nil
-}
-
-// AddExtMountMap is a helper to create a single ExtMountMap entry.
-func AddExtMountMap(key, val string) *criurpc.ExtMountMap {
-	return &criurpc.ExtMountMap{
-		Key: proto.String(key),
-		Val: proto.String(val),
-	}
 }

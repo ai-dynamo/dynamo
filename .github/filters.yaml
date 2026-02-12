@@ -8,27 +8,24 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build
-#   fern     -> fern docs lint, sync, and version release
+#   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   docs, examples, ignore, planner
+#   examples, ignore, planner
 
 all:
   - '**'
 
 docs:
   - 'docs/**'
+  - 'fern/**'
   - '**/*.md'
-  - '**/*.rst'
   - '**/*.txt'
   - '**/.gitignore'
   - '**/.helmignore'
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
-
-fern:
-  - 'fern/**'
 
 examples:
   - 'recipes/**'
@@ -101,7 +98,7 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  - 'docs/kubernetes/api_reference.md'
+  - 'docs/pages/kubernetes/api-reference.md'
 
 deploy:
   - '!**/*.md'
