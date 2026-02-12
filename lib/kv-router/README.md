@@ -269,17 +269,6 @@ Where J = jump_size, W = number of workers. The jump optimization reduces D iter
 | **Memory** | Higher (Rc/Arc overhead per node) | Lower (flat entries) |
 | **Cache locality** | Poor (pointer chasing) | Better (position-first) |
 
-### Benchmark Results (1M blocks, depth 1024, 128 workers)
-
-| Operation | RadixTree | NestedMap | Winner |
-|-----------|-----------|-----------|--------|
-| STORE_BLOCK | 90µs | 98µs | RadixTree (1.1x) |
-| REMOVE_BLOCK | 91µs | 233µs | RadixTree (2.5x) |
-| FIND_MATCHES (HIT) | 227µs | **44µs** | **NestedMap (5.2x)** |
-| FIND_MATCHES (PARTIAL) | 216µs | **44µs** | **NestedMap (4.9x)** |
-
-**Recommendation**: Use NestedMap for read-heavy workloads (typical router usage).
-
 ---
 
 ## Why Position Matters for PositionalIndexer
