@@ -17,10 +17,10 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::stream;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
-use tokio::sync::mpsc;
 
+use crate::kv_router::Indexer;
 use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
-use crate::kv_router::protocols::{DpRank, RouterEvent, WorkerId};
+use crate::kv_router::protocols::{DpRank, WorkerId};
 use crate::kv_router::worker_kv_indexer_query_endpoint;
 
 // Recovery retry configuration
@@ -43,10 +43,8 @@ pub struct WorkerQueryClient {
     component: Component,
     /// Routers keyed by dp_rank — each dp_rank has its own endpoint. Created lazily.
     routers: Arc<DashMap<DpRank, Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>>,
-    /// Channel to send recovered events to the router indexer
-    kv_events_tx: mpsc::Sender<RouterEvent>,
-    /// Channel to send worker removal events to the router indexer
-    remove_worker_tx: mpsc::Sender<WorkerId>,
+    /// Indexer for applying recovered events and worker removals.
+    indexer: Indexer,
 }
 
 impl WorkerQueryClient {
@@ -55,16 +53,11 @@ impl WorkerQueryClient {
     /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
-    pub async fn spawn(
-        component: Component,
-        remove_worker_tx: mpsc::Sender<WorkerId>,
-        kv_events_tx: mpsc::Sender<RouterEvent>,
-    ) -> Result<Arc<Self>> {
+    pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
         let client = Arc::new(Self {
             component: component.clone(),
             routers: Arc::new(DashMap::new()),
-            kv_events_tx,
-            remove_worker_tx,
+            indexer,
         });
 
         let client_bg = client.clone();
@@ -151,11 +144,7 @@ impl WorkerQueryClient {
                             tracing::warn!(
                                 "WorkerQueryClient: all dp_ranks gone for worker {worker_id}, removing"
                             );
-                            if let Err(e) = self.remove_worker_tx.send(worker_id).await {
-                                tracing::warn!(
-                                    "Failed to send worker removal for worker {worker_id}: {e}"
-                                );
-                            }
+                            self.indexer.remove_worker(worker_id).await;
                         }
                     }
                 }
@@ -354,12 +343,7 @@ impl WorkerQueryClient {
         tracing::info!("Recovered {count} events from worker {worker_id} dp_rank {dp_rank}");
 
         for event in events {
-            if let Err(e) = self.kv_events_tx.send(event).await {
-                tracing::error!(
-                    "Failed to send recovered event to indexer for worker {worker_id} dp_rank {dp_rank}: {e}"
-                );
-                anyhow::bail!("Failed to send recovered event: {e}");
-            }
+            self.indexer.apply_event(event).await;
         }
 
         Ok(count)
