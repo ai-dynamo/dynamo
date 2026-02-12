@@ -268,7 +268,7 @@ pub trait ResponseStorage: Send + Sync {
                 self.store_response(
                     tenant_id,
                     target_session_id,
-                    Some(&response.response_id),
+                    None,
                     response.response.clone(),
                     remaining_ttl,
                 )
@@ -280,7 +280,7 @@ pub trait ResponseStorage: Send + Sync {
             self.store_response(
                 tenant_id,
                 target_session_id,
-                Some(&response.response_id),
+                None,
                 response.response.clone(),
                 remaining_ttl,
             )

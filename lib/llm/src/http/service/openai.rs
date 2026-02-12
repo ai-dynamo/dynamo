@@ -1974,37 +1974,45 @@ async fn responses(
 
         // Store response if requested
         if should_store {
-            // Serialize response for storage
-            let response_json = serde_json::to_value(&response).unwrap_or_else(|e| {
-                tracing::warn!("Failed to serialize response for storage: {}", e);
-                serde_json::json!({})
-            });
+            // Serialize response for storage — skip entirely on failure
+            // rather than storing an empty {} that would corrupt GET lookups
+            match serde_json::to_value(&response) {
+                Ok(response_json) => {
+                    let store_result = storage
+                        .store_response(
+                            &session.tenant_id,
+                            &session.session_id,
+                            Some(&response.inner.id), // Use the response's existing ID
+                            response_json,
+                            Some(std::time::Duration::from_secs(86400)), // 24 hour TTL
+                        )
+                        .await;
 
-            let store_result = storage
-                .store_response(
-                    &session.tenant_id,
-                    &session.session_id,
-                    Some(&response.inner.id), // Use the response's existing ID
-                    response_json,
-                    Some(std::time::Duration::from_secs(86400)), // 24 hour TTL
-                )
-                .await;
-
-            match store_result {
-                Ok(stored_id) => {
-                    tracing::info!(
-                        tenant_id = %session.tenant_id,
-                        session_id = %session.session_id,
-                        response_id = %stored_id,
-                        "Stored response successfully"
-                    );
+                    match store_result {
+                        Ok(stored_id) => {
+                            tracing::info!(
+                                tenant_id = %session.tenant_id,
+                                session_id = %session.session_id,
+                                response_id = %stored_id,
+                                "Stored response successfully"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant_id = %session.tenant_id,
+                                session_id = %session.session_id,
+                                error = %e,
+                                "Failed to store response"
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         tenant_id = %session.tenant_id,
                         session_id = %session.session_id,
                         error = %e,
-                        "Failed to store response"
+                        "Failed to serialize response for storage, skipping"
                     );
                 }
             }
@@ -2177,7 +2185,7 @@ async fn handler_get_response(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Extension(session): Extension<RequestSession>,
     Path(response_id): Path<String>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ErrorResponse> {
     let storage = state.response_storage();
 
     match storage
@@ -2202,9 +2210,17 @@ async fn handler_get_response(
                 response_id = %response_id,
                 "Response not found"
             );
-            Err(StatusCode::NOT_FOUND)
+            Err(ErrorMessage::from_http_error(HttpError {
+                code: 404,
+                message: "Response not found".to_string(),
+            }))
         }
-        Err(StorageError::InvalidKey(_)) => Err(StatusCode::BAD_REQUEST),
+        Err(StorageError::InvalidKey(msg)) => {
+            Err(ErrorMessage::from_http_error(HttpError {
+                code: 400,
+                message: format!("Invalid response ID: {msg}"),
+            }))
+        }
         Err(e) => {
             tracing::error!(
                 tenant_id = %session.tenant_id,
@@ -2213,7 +2229,9 @@ async fn handler_get_response(
                 error = %e,
                 "Failed to retrieve response"
             );
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(ErrorMessage::internal_server_error(&format!(
+                "Failed to retrieve response: {e}"
+            )))
         }
     }
 }
@@ -2223,7 +2241,7 @@ async fn handler_delete_response(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Extension(session): Extension<RequestSession>,
     Path(response_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, ErrorResponse> {
     let storage = state.response_storage();
 
     match storage
@@ -2248,9 +2266,17 @@ async fn handler_delete_response(
                 response_id = %response_id,
                 "Response not found for deletion"
             );
-            Err(StatusCode::NOT_FOUND)
+            Err(ErrorMessage::from_http_error(HttpError {
+                code: 404,
+                message: "Response not found".to_string(),
+            }))
         }
-        Err(StorageError::InvalidKey(_)) => Err(StatusCode::BAD_REQUEST),
+        Err(StorageError::InvalidKey(msg)) => {
+            Err(ErrorMessage::from_http_error(HttpError {
+                code: 400,
+                message: format!("Invalid response ID: {msg}"),
+            }))
+        }
         Err(e) => {
             tracing::error!(
                 tenant_id = %session.tenant_id,
@@ -2259,7 +2285,9 @@ async fn handler_delete_response(
                 error = %e,
                 "Failed to delete response"
             );
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(ErrorMessage::internal_server_error(&format!(
+                "Failed to delete response: {e}"
+            )))
         }
     }
 }

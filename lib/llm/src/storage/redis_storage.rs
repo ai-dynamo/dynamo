@@ -129,16 +129,40 @@ impl ResponseStorage for RedisResponseStorage {
                 StorageError::BackendError(format!("Failed to get connection: {}", e))
             })?;
 
-        // Enforce max_responses_per_session (0 = unlimited)
-        if self.max_responses_per_session > 0 {
+        // Enforce max_responses_per_session (0 = unlimited).
+        // Uses a Lua script to atomically check SCARD and conditionally SADD,
+        // avoiding a TOCTOU race between separate SCARD and SADD commands.
+        let session_added_atomically = if self.max_responses_per_session > 0 {
             let index_key = Self::session_index_key(tenant_id, session_id);
-            let count: usize = conn.scard(&index_key).await.map_err(|e| {
-                StorageError::BackendError(format!("Failed to count session responses: {}", e))
-            })?;
-            if count >= self.max_responses_per_session {
+            let script = redis::Script::new(
+                r#"
+                local count = redis.call('SCARD', KEYS[1])
+                if count >= tonumber(ARGV[1]) then
+                    return 0
+                end
+                redis.call('SADD', KEYS[1], ARGV[2])
+                return 1
+                "#,
+            );
+            let result: i32 = script
+                .key(&index_key)
+                .arg(self.max_responses_per_session)
+                .arg(&response_id)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| {
+                    StorageError::BackendError(format!(
+                        "Failed to check/add session response: {}",
+                        e
+                    ))
+                })?;
+            if result == 0 {
                 return Err(StorageError::SessionFull);
             }
-        }
+            true
+        } else {
+            false
+        };
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -177,10 +201,15 @@ impl ResponseStorage for RedisResponseStorage {
                 })?;
         }
 
-        // Add response ID to the session index
-        conn.sadd::<_, _, ()>(&index_key, &response_id)
-            .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to add to index: {}", e)))?;
+        // Add response ID to the session index (skip if already added atomically
+        // by the Lua script during max_responses_per_session enforcement)
+        if !session_added_atomically {
+            conn.sadd::<_, _, ()>(&index_key, &response_id)
+                .await
+                .map_err(|e| {
+                    StorageError::BackendError(format!("Failed to add to index: {}", e))
+                })?;
+        }
 
         // Keep index TTL aligned with response TTLs
         if let Some(ttl) = ttl {
@@ -249,10 +278,11 @@ impl ResponseStorage for RedisResponseStorage {
             }
         }
 
-        // Validate tenant (hard boundary)
-        // Session is metadata only — cross-session access within a tenant is allowed
+        // Defense-in-depth: key scheme guarantees tenant match,
+        // but return NotFound (not TenantMismatch) per trait contract
+        // to avoid leaking existence to other tenants.
         if stored.tenant_id != tenant_id {
-            return Err(StorageError::TenantMismatch);
+            return Err(StorageError::NotFound);
         }
 
         Ok(stored)
@@ -286,9 +316,11 @@ impl ResponseStorage for RedisResponseStorage {
             StorageError::SerializationError(format!("Failed to deserialize: {}", e))
         })?;
 
-        // Validate tenant (hard boundary)
+        // Defense-in-depth: key scheme guarantees tenant match,
+        // but return NotFound (not TenantMismatch) per trait contract
+        // to avoid leaking existence to other tenants.
         if stored.tenant_id != tenant_id {
-            return Err(StorageError::TenantMismatch);
+            return Err(StorageError::NotFound);
         }
 
         // Check expiration — expired entries should be treated as NotFound
