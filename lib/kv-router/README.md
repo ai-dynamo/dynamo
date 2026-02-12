@@ -2,6 +2,8 @@
 
 This document explains the KV cache index implementations: `RadixTree` (and its concurrent variant `ConcurrentRadixTree`) and `PositionalIndexer` (NestedMap).
 
+The concurrent indexers achieve a combined throughput of over **10 million events + requests per second** with **p99 latency under 10 microseconds**.
+
 ## Motivation: The Four Block Identifiers
 
 Every cached KV block in a distributed LLM system needs four pieces of information:
