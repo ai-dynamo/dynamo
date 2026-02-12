@@ -484,7 +484,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [debug-pipeline, changed-files]
+    needs: [vllm-debug-pipeline, sglang-debug-pipeline, trtllm-debug-pipeline, changed-files]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -505,7 +505,7 @@ jobs:
     name: Cleanup AKS resources
     runs-on: prod-default-small-v2
     if: always()
-    needs: [debug-pipeline]
+    needs: [vllm-debug-pipeline, sglang-debug-pipeline, trtllm-debug-pipeline, changed-files]
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
