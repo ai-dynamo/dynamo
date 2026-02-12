@@ -17,8 +17,12 @@ import pytest
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
-from benchmarks.profiler.utils.model_info import ModelInfo  # noqa: E402
+from dynamo.profiler.profile_sla import run_profile  # noqa: E402
+from dynamo.profiler.utils.model_info import ModelInfo  # noqa: E402
+
+pytestmark = [
+    pytest.mark.aiconfigurator,
+]
 
 
 # Override the logger fixture from conftest.py to prevent directory creation
@@ -110,10 +114,11 @@ class TestProfileSlaAiconfigurator:
         with pytest.raises(ValueError, match="Database not found"):
             await run_profile(llm_args)
 
+    @pytest.mark.trtllm
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
-    @pytest.mark.gpu_1
+    @pytest.mark.gpu_0
     @pytest.mark.integration
     async def test_trtllm_aiconfigurator_single_model(self, llm_args):
         # Test that profile_sla works with the model & backend in the llm_args fixture.
@@ -124,17 +129,19 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.gpu_1
     @pytest.mark.integration
     @pytest.mark.nightly
+    # fmt: off
     @pytest.mark.parametrize(
         "backend, aic_backend_version",
         [
-            ("trtllm", None),
-            ("trtllm", "1.2.0rc5"),
-            ("vllm", None),
-            ("vllm", "0.12.0"),
-            ("sglang", None),
-            ("sglang", "0.5.6.post2"),
+            pytest.param("trtllm", None,          marks=pytest.mark.trtllm),
+            pytest.param("trtllm", "1.2.0rc5",    marks=pytest.mark.trtllm),
+            pytest.param("vllm",   None,          marks=pytest.mark.vllm),
+            pytest.param("vllm",   "0.12.0",      marks=pytest.mark.vllm),
+            pytest.param("sglang", None,          marks=pytest.mark.sglang),
+            pytest.param("sglang", "0.5.6.post2", marks=pytest.mark.sglang),
         ],
     )
+    # fmt: on
     @pytest.mark.parametrize(
         "hf_model_id",
         [

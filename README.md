@@ -15,14 +15,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-![Dynamo banner](./docs/images/frontpage-banner.png)
+![Dynamo banner](./docs/assets/img/frontpage-banner.png)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ) ![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Support Matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Docs](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Support Matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/pages/reference/support-matrix.md)** | **[Docs](https://docs.nvidia.com/dynamo/)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
 
 # NVIDIA Dynamo
 
@@ -31,7 +31,7 @@ High-throughput, low-latency inference framework designed for serving generative
 ## Why Dynamo
 
 <p align="center">
-  <img src="./docs/images/frontpage-gpu-vertical.png" alt="Multi Node Multi-GPU topology" width="600" />
+  <img src="./docs/assets/img/frontpage-gpu-vertical.png" alt="Multi Node Multi-GPU topology" width="600" />
 </p>
 
 Large language models exceed single-GPU capacity. Tensor parallelism spreads layers across GPUs but creates coordination challenges. Dynamo closes this orchestration gap.
@@ -48,25 +48,25 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 
 ## Backend Feature Support
 
-| | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) | [vLLM](docs/backends/vllm/README.md) |
+| | [SGLang](docs/pages/backends/sglang/README.md) | [TensorRT-LLM](docs/pages/backends/trtllm/README.md) | [vLLM](docs/pages/backends/vllm/README.md) |
 |---|:----:|:----------:|:--:|
 | **Best For** | High-throughput serving | Maximum performance | Broadest feature coverage |
-| [**Disaggregated Serving**](docs/design_docs/disagg_serving.md) | ✅ | ✅ | ✅ |
-| [**KV-Aware Routing**](docs/components/router/README.md) | ✅ | ✅ | ✅ |
-| [**SLA-Based Planner**](docs/components/planner/planner_guide.md) | ✅ | ✅ | ✅ |
-| [**KVBM**](docs/components/kvbm/README.md) | 🚧 | ✅ | ✅ |
-| [**Multimodal**](docs/features/multimodal/README.md) | ✅ | ✅ | ✅ |
-| [**Tool Calling**](docs/agents/tool-calling.md) | ✅ | ✅ | ✅ |
+| [**Disaggregated Serving**](docs/pages/design-docs/disagg-serving.md) | ✅ | ✅ | ✅ |
+| [**KV-Aware Routing**](docs/pages/components/router/README.md) | ✅ | ✅ | ✅ |
+| [**SLA-Based Planner**](docs/pages/components/planner/planner-guide.md) | ✅ | ✅ | ✅ |
+| [**KVBM**](docs/pages/components/kvbm/README.md) | 🚧 | ✅ | ✅ |
+| [**Multimodal**](docs/pages/features/multimodal/README.md) | ✅ | ✅ | ✅ |
+| [**Tool Calling**](docs/pages/agents/tool-calling.md) | ✅ | ✅ | ✅ |
 
-> **[Full Feature Matrix →](docs/reference/feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
+> **[Full Feature Matrix →](docs/pages/reference/feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
 
 ## Dynamo Architecture
 
 <p align="center">
-  <img src="./docs/images/frontpage-architecture.png" alt="Dynamo architecture" width="600" />
+  <img src="./docs/assets/img/frontpage-architecture.png" alt="Dynamo architecture" width="600" />
 </p>
 
-> **[Architecture Deep Dive →](docs/design_docs/architecture.md)**
+> **[Architecture Deep Dive →](docs/pages/design-docs/architecture.md)**
 
 ## Latest News
 
@@ -87,7 +87,7 @@ Want to help shape the future of distributed LLM inference? See the **[Contribut
 # Local Quick Start
 
 The following examples require a few system level packages.
-Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/reference/support-matrix.md](docs/reference/support-matrix.md)
+Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/pages/reference/support-matrix.md](docs/pages/reference/support-matrix.md)
 
 ## Install Dynamo
 
@@ -108,7 +108,7 @@ docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runt
 
 > **Tip:** To run frontend and worker in the same container, either run processes in background with `&` (see below), or open a second terminal and use `docker exec -it <container_id> bash`.
 
-See [Release Artifacts](docs/reference/release-artifacts.md#container-images) for available versions.
+See [Release Artifacts](docs/pages/reference/release-artifacts.md#container-images) for available versions.
 
 ### Option B: Install from PyPI
 
@@ -143,7 +143,7 @@ pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/wh
 pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
 ```
 
-> **Note:** TensorRT-LLM requires `pip` due to a transitive Git URL dependency that `uv` doesn't resolve. We recommend using the [TensorRT-LLM container](docs/reference/release-artifacts.md#container-images) for broader compatibility.
+> **Note:** TensorRT-LLM requires `pip` due to a transitive Git URL dependency that `uv` doesn't resolve. We recommend using the [TensorRT-LLM container](docs/pages/reference/release-artifacts.md#container-images) for broader compatibility.
 
 **vLLM**
 
@@ -220,7 +220,7 @@ For production deployments on Kubernetes clusters with multiple GPUs.
 ## Prerequisites
 
 - Kubernetes cluster with GPU nodes
-- [Dynamo Platform installed](docs/kubernetes/README.md)
+- [Dynamo Platform installed](docs/pages/kubernetes/README.md)
 - HuggingFace token for model downloads
 
 ## Production Recipes
@@ -346,8 +346,8 @@ python3 -m dynamo.frontend
 
 Dynamo provides comprehensive benchmarking tools:
 
-- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
-- **[SLA-Driven Deployments](docs/components/planner/planner_guide.md)** – Optimize deployments to meet SLA requirements
+- **[Benchmarking Guide](docs/pages/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
+- **[SLA-Driven Deployments](docs/pages/components/planner/planner-guide.md)** – Optimize deployments to meet SLA requirements
 
 ## Frontend OpenAPI Specification
 
@@ -357,11 +357,11 @@ The OpenAI-compatible frontend exposes an OpenAPI 3 spec at `/openapi.json`. To 
 cargo run -p dynamo-llm --bin generate-frontend-openapi
 ```
 
-This writes to `docs/reference/api/openapi.json`.
+This writes to `docs/pages/reference/api/openapi.json`.
 
 ## Service Discovery and Messaging
 
-Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/kubernetes/service_discovery.md)) handle service discovery. External services are optional for most deployments:
+Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/pages/kubernetes/service-discovery.md)) handle service discovery. External services are optional for most deployments:
 
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|
@@ -387,11 +387,11 @@ See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LL
 - [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)
 
 <!-- Reference links for Feature Compatibility Matrix -->
-[disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/components/router/README.md
-[planner]: docs/components/planner/planner_guide.md
-[kvbm]: docs/components/kvbm/README.md
+[disagg]: docs/pages/design-docs/disagg-serving.md
+[kv-routing]: docs/pages/components/router/README.md
+[planner]: docs/pages/components/planner/planner-guide.md
+[kvbm]: docs/pages/components/kvbm/README.md
 [mm]: examples/multimodal/
-[migration]: docs/fault_tolerance/request_migration.md
+[migration]: docs/pages/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
-[tools]: docs/agents/tool-calling.md
+[tools]: docs/pages/agents/tool-calling.md

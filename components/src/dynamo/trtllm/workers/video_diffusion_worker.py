@@ -85,7 +85,7 @@ async def init_video_diffusion_worker(
         raise RuntimeError(
             "ModelType.Videos not available in dynamo-runtime. "
             "Video diffusion requires a compatible dynamo-runtime version. "
-            "See docs/backends/trtllm/README.md for setup instructions."
+            "See docs/pages/backends/trtllm/README.md for setup instructions."
         )
     model_type = ModelType.Videos
 

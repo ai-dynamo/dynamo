@@ -39,7 +39,7 @@ From the Dynamo repository root:
 
 ```bash
 # Build the base Dynamo image
-python container/render.py --framework=dynamo --target=runtime --short-output
+python container/render.py --framework=dynamo --target=runtime --output-short-filename
 docker build -f container/rendered.Dockerfile .
 
 # Build the Triton worker image
@@ -223,6 +223,6 @@ To add other backends (TensorRT, ONNX, Python, etc.), edit the Makefile's `build
 
 ## Related Documentation
 
-- [Dynamo Backend Guide](../../../docs/development/backend-guide.md)
+- [Dynamo Backend Guide](../../../docs/pages/development/backend-guide.md)
 - [Triton Inference Server](https://github.com/triton-inference-server/server)
 - [KServe Protocol](https://kserve.github.io/website/latest/modelserving/data_plane/v2_protocol/)

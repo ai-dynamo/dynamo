@@ -17,7 +17,7 @@ export DOCKER_SERVER=<ECR_REGISTRY>
 export DOCKER_USERNAME=AWS
 export DOCKER_PASSWORD="$(aws ecr get-login-password --region <ECR_REGION>)"
 export IMAGE_TAG=0.3.2.1
-python container/render.py --framework=dynamo --target=runtime --short-output
+python container/render.py --framework=dynamo --target=runtime --output-short-filename
 docker build -t dynamo:latest-vllm -f container/rendered.Dockerfile .
 ```
 

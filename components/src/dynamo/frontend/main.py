@@ -251,6 +251,12 @@ def parse_args():
         help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
     )
     parser.add_argument(
+        "--router-event-threads",
+        type=int,
+        default=int(os.environ.get("DYN_ROUTER_EVENT_THREADS", "1")),
+        help="KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput. Can be set via DYN_ROUTER_EVENT_THREADS env var (default: 1).",
+    )
+    parser.add_argument(
         "--enforce-disagg",
         action="store_true",
         default=False,
@@ -438,6 +444,7 @@ async def async_main():
             router_ttl_secs=flags.router_ttl,
             router_max_tree_size=flags.router_max_tree_size,
             router_prune_target_ratio=flags.router_prune_target_ratio,
+            router_event_threads=flags.router_event_threads,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

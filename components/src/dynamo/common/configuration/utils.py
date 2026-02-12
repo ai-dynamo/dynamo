@@ -40,6 +40,9 @@ def env_or_default(env_var: str, default: T) -> T:
         return int(value)  # type: ignore
     elif isinstance(default, float):
         return float(value)  # type: ignore
+    elif isinstance(default, list):
+        # Env vars for list options (e.g. DYN_CONNECTOR) are space-separated; downstream expects a list.
+        return [x.strip() for x in value.split() if x.strip()]  # type: ignore
     else:
         return value  # type: ignore
 
@@ -75,7 +78,11 @@ def add_argument(
 
     names = [flag_name]
 
-    env_help = _build_help_message(help, env_var, default_with_env, obsolete_flag)
+    if obsolete_flag:
+        # Accept obsolete flag as an alias (still show deprecation note in help)
+        names.append(obsolete_flag)
+
+    env_help = _build_help_message(help, env_var, default, obsolete_flag)
 
     add_arg_opts = {
         "dest": arg_dest,
@@ -126,7 +133,7 @@ def _build_help_message(
     Build help message with env var and default value.
     """
     if obsolete_flag:
-        return f"{help_text}\nenv var: {env_var} | default: {default}\nobsolete flag: {obsolete_flag}"
+        return f"{help_text}\nenv var: {env_var} | default: {default}\ndeprecating flag: {obsolete_flag}"
     return f"{help_text}\nenv var: {env_var} | default: {default}"
 
 
