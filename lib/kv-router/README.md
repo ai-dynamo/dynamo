@@ -318,4 +318,3 @@ let workers_at_64 = index.get(&(64, local_hashes[64]));  // O(1) lookup
 let workers_at_128 = index.get(&(128, local_hashes[128]));  // O(1) lookup
 // Skip positions 1-63, 65-127 entirely!
 ```
-
