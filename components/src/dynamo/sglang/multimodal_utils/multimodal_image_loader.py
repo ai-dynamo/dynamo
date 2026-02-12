@@ -91,7 +91,10 @@ class ImageLoader:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
             # PIL is sync, so offload to a thread to avoid blocking the event loop
-            image = await asyncio.to_thread(Image.open, image_data)
+            # Restrict to supported formats to prevent PSD parsing
+            image = await asyncio.to_thread(
+                Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
+            )
 
             # Validate image format and convert to RGB
             if image.format not in ("JPEG", "PNG", "WEBP"):
