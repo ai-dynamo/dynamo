@@ -6,7 +6,7 @@ name: PR
 on:
   push:
     branches:
-      - debug/rrubin 
+      - debug/rrubin
       # Note: release/* branches are handled by release.yml workflow
   workflow_dispatch:
     inputs:
@@ -87,7 +87,6 @@ jobs:
 #       - name: "Check all dependent jobs"
 #         run: |
 #           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
-
 
 #   # ============================================================================
 #   # Operator
