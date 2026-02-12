@@ -46,7 +46,7 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--use-vllm-tokenizer",
             env_var="DYN_VLLM_USE_TOKENIZER",
             default=False,
-            help="Use vLLM's tokenizer for pre/post processing (bypasses Dynamo preprocessor).",
+            help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
         )
 
         add_argument(
@@ -107,7 +107,7 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--enable-multimodal",
             env_var="DYN_VLLM_ENABLE_MULTIMODAL",
             default=False,
-            help="Enable multimodal processing (required for any multimodal component).",
+            help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
         )
         add_argument(
             g,
@@ -142,35 +142,35 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--vllm-native-encoder-worker",
             env_var="DYN_VLLM_NATIVE_ENCODER_WORKER",
             default=False,
-            help="Run as vLLM-native encoder worker using ECConnector.",
+            help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
         )
         add_argument(
             g,
             flag_name="--ec-connector-backend",
             env_var="DYN_VLLM_EC_CONNECTOR_BACKEND",
             default="ECExampleConnector",
-            help="ECConnector implementation class. Only works when --vllm-native-encoder-worker is enabled.",
+            help="ECConnector implementation class for encoder disaggregation.",
         )
         add_argument(
             g,
             flag_name="--ec-storage-path",
             env_var="DYN_VLLM_EC_STORAGE_PATH",
             default=None,
-            help="Storage path for ECConnector (required for ECExampleConnector). Only works when --vllm-native-encoder-worker is enabled.",
+            help="Storage path for ECConnector (required for ECExampleConnector, optional for other backends).",
         )
         add_argument(
             g,
             flag_name="--ec-extra-config",
             env_var="DYN_VLLM_EC_EXTRA_CONFIG",
             default=None,
-            help="Additional ECConnector configuration as JSON string. Only works when --vllm-native-encoder-worker is enabled.",
+            help="Additional ECConnector configuration as JSON string.",
         )
         add_negatable_bool_argument(
             g,
             flag_name="--ec-consumer-mode",
             env_var="DYN_VLLM_EC_CONSUMER_MODE",
             default=False,
-            help="Configure as ECConnector consumer (for PD workers). Only works when --vllm-native-encoder-worker is enabled.",
+            help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers).",
         )
 
         # vLLM-Omni
@@ -179,14 +179,14 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--omni",
             env_var="DYN_VLLM_OMNI",
             default=False,
-            help="Run as vLLM-Omni worker for multi-stage pipelines.",
+            help="Run as vLLM-Omni worker for multi-stage pipelines (supports text-to-text, text-to-image, etc.).",
         )
         add_argument(
             g,
             flag_name="--stage-configs-path",
             env_var="DYN_VLLM_STAGE_CONFIGS_PATH",
             default=None,
-            help="Path to vLLM-Omni stage configuration YAML. Required for --omni.",
+            help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
         )
 
 
@@ -228,7 +228,6 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_requires_flag()
         self._validate_ec_connector_storage()
         self._validate_omni_stage_config()
-        self._validate_sleep_mode_level()
 
     def _validate_prefill_decode_exclusive(self) -> None:
         """Ensure at most one of is_prefill_worker and is_decode_worker is set."""
@@ -276,22 +275,14 @@ class DynamoVllmConfig(ConfigBase):
                 and not self.ec_storage_path
             ):
                 raise ValueError(
-                    "--ec-storage-path is required when using ECExampleConnector backend"
+                    "--ec-storage-path is required when using ECExampleConnector backend. "
+                    "Specify a shared storage path for encoder cache."
                 )
 
     def _validate_omni_stage_config(self) -> None:
         """Require stage_configs_path when using --omni."""
-        if self.omni and not self.stage_configs_path:
+        if self.stage_configs_path and not self.omni:
             raise ValueError(
-                "--stage-configs-path is required when using --omni. "
+                "--stage-configs-path is only allowed when using --omni. "
                 "Specify a YAML file containing stage configurations for the multi-stage pipeline."
             )
-
-    def _validate_sleep_mode_level(self) -> None:
-        """Ensure sleep_mode_level is 1, 2, or 3."""
-        if self.sleep_mode_level is not None and self.sleep_mode_level not in (
-            1,
-            2,
-            3,
-        ):
-            raise ValueError("sleep_mode_level must be 1, 2, or 3")

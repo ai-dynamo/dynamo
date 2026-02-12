@@ -32,9 +32,6 @@ class DynamoRuntimeConfig(ConfigBase):
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
 
-        if not self.namespace:
-            raise ValueError("namespace is required")
-
 
 class DynamoRuntimeArgGroup(ArgGroup):
     """Dynamo runtime configuration parameters (common to all backends)."""
@@ -55,7 +52,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--store-kv",
             env_var="DYN_STORE_KV",
             default="etcd",
-            help="KV store backend: etcd, file, mem.",
+            help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
             choices=["etcd", "file", "mem"],
         )
         add_argument(
@@ -63,7 +60,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--request-plane",
             env_var="DYN_REQUEST_PLANE",
             default="tcp",
-            help="Request distribution plane: tcp, nats, http.",
+            help="Determines how requests are distributed from routers to workers. 'tcp' is fastest.",
             choices=["tcp", "nats", "http"],
         )
         add_argument(
@@ -71,7 +68,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default="nats",
-            help="Event publishing plane: nats, zmq.",
+            help="Determines how events are published.",
             choices=["nats", "zmq"],
         )
         add_argument(
@@ -79,7 +76,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--connector",
             env_var="DYN_CONNECTOR",
             default=["nixl"],
-            help="KV connector chain in order (e.g. nixl lmcache). Options: nixl, lmcache, kvbm, null, none.",
+            help="List of connectors to use in order (e.g., --connector nixl lmcache). Options: nixl, lmcache, kvbm, null, none. Order will be preserved in MultiConnector.",
             nargs="*",
         )
 
@@ -98,7 +95,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--dyn-tool-call-parser",
             env_var="DYN_TOOL_CALL_PARSER",
             default=None,
-            help="Tool call parser name for the model",
+            help="Tool call parser name for the model.",
             choices=get_tool_parser_names(),
         )
         add_argument(
@@ -114,7 +111,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--custom-jinja-template",
             env_var="DYN_CUSTOM_JINJA_TEMPLATE",
             default=None,
-            help="Path to a custom Jinja template file to override the model's default chat template.",
+            help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
         )
 
         add_argument(
@@ -123,7 +120,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENDPOINT_TYPES",
             default="chat,completions",
             obsolete_flag="--dyn-endpoint-types",
-            help="Comma-separated endpoint types to enable (e.g. chat,completions).",
+            help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Use 'completions' for models without chat templates.",
         )
 
         add_argument(
