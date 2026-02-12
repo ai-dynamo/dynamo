@@ -20,10 +20,8 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - prod-tester-amd-gpu-4-v1
-          - prod-tester-amd-gpu-v1
+          - gcp-dev-tester-gpu-1-v1
     steps:
       - name: Check GPUs (inside Docker)
         run: |
-          docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
-          echo "GPU count: $(docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi -L | wc -l)"
+          nvidia-smi
