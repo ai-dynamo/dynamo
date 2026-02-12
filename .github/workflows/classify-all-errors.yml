@@ -2,6 +2,13 @@ name: Classify All Workflow Errors
 
 # Trigger after specific workflows complete
 on:
+  push:
+    branches:
+      - nmailhot/ai-error-class  # Feature branch for testing
+      - main                     # Production
+    paths-ignore:
+      - '**.md'                  # Don't trigger on docs
+      - 'README*'
   workflow_run:
     workflows:
       - "PR"
