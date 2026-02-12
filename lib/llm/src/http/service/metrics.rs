@@ -111,7 +111,7 @@ pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometh
 /// # Note
 /// With 2 significant figures, there are roughly 90 unique values per order of magnitude.
 /// Requesting more buckets than can be uniquely represented will result in deduplication.
-fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
+pub fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
     if count == 0 {
         return vec![];
     }
@@ -153,7 +153,7 @@ fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
 }
 
 /// Round a number to a specified number of significant figures
-fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
+pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
     if value == 0.0 {
         return 0.0;
     }
@@ -331,8 +331,11 @@ pub struct ResponseMetricCollector {
     osl: usize,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
-    // we track if tokenizer latency has been observed to ensure we only increment once per request
-    tokenizer_latency_observed: bool,
+    // we track if tokenize latency has been observed to ensure we only increment once per request
+    tokenize_latency_observed: bool,
+    // latest accumulated detokenize latency and sample count reported by tracker
+    detokenize_latency_total: Duration,
+    detokenize_count_total: u64,
     // Prefill worker info for TTFT attribution (set from LLMMetricAnnotation)
     prefill_worker_id: Option<u64>,
     prefill_dp_rank: Option<u32>,
@@ -992,7 +995,9 @@ impl ResponseMetricCollector {
             start_time: Instant::now(),
             osl: 0,
             cached_tokens_observed: false,
-            tokenizer_latency_observed: false,
+            tokenize_latency_observed: false,
+            detokenize_latency_total: Duration::ZERO,
+            detokenize_count_total: 0,
             prefill_worker_id: None,
             prefill_dp_rank: None,
             prefill_worker_type: None,
@@ -1057,16 +1062,29 @@ impl ResponseMetricCollector {
         }
     }
 
-    /// Observe tokenizer latency in milliseconds, once per request.
-    pub fn observe_tokenizer_latency(&mut self, tokenizer_latency: Option<Duration>) {
-        if let Some(latency) = tokenizer_latency
-            && !self.tokenizer_latency_observed
+    /// Observe tokenize/detokenize latencies in milliseconds.
+    /// Tokenize is observed once per request; detokenize is accumulated and observed at request end.
+    pub fn observe_tokenize_latencies(
+        &mut self,
+        tokenize_latency: Option<Duration>,
+        detokenize_latency: Option<Duration>,
+        detokenize_count: Option<u64>,
+    ) {
+        if let Some(latency) = tokenize_latency
+            && !self.tokenize_latency_observed
         {
-            self.tokenizer_latency_observed = true;
+            self.tokenize_latency_observed = true;
             self.metrics
                 .tokenizer_latency
                 .with_label_values(&[frontend_service::operation::TOKENIZE])
                 .observe(latency.as_secs_f64() * 1000.0);
+        }
+
+        if let Some(latency) = detokenize_latency {
+            self.detokenize_latency_total = latency;
+        }
+        if let Some(count) = detokenize_count {
+            self.detokenize_count_total = count;
         }
     }
 
@@ -1160,6 +1178,15 @@ impl ResponseMetricCollector {
 
 impl Drop for ResponseMetricCollector {
     fn drop(&mut self) {
+        if !self.detokenize_latency_total.is_zero() && self.detokenize_count_total > 0 {
+            let avg_detokenize_latency_ms = (self.detokenize_latency_total.as_secs_f64() * 1000.0)
+                / self.detokenize_count_total as f64;
+            self.metrics
+                .tokenizer_latency
+                .with_label_values(&[frontend_service::operation::DETOKENIZE])
+                .observe(avg_detokenize_latency_ms);
+        }
+
         // Publish final OSL when the collector is dropped
         self.metrics
             .output_sequence_length
@@ -1184,7 +1211,11 @@ pub fn process_response_and_observe_metrics<T>(
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_cached_tokens(metrics.cached_tokens);
-        response_collector.observe_tokenizer_latency(metrics.tokenizer_latency);
+        response_collector.observe_tokenize_latencies(
+            metrics.tokenize_latency,
+            metrics.detokenize_total_latency,
+            metrics.detokenize_count,
+        );
         response_collector.set_worker_info(
             metrics.prefill_worker_id,
             metrics.prefill_dp_rank,
@@ -1234,7 +1265,11 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_cached_tokens(metrics.cached_tokens);
-        response_collector.observe_tokenizer_latency(metrics.tokenizer_latency);
+        response_collector.observe_tokenize_latencies(
+            metrics.tokenize_latency,
+            metrics.detokenize_total_latency,
+            metrics.detokenize_count,
+        );
         response_collector.set_worker_info(
             metrics.prefill_worker_id,
             metrics.prefill_dp_rank,
@@ -1740,7 +1775,9 @@ mod tests {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
-            tokenizer_latency: Some(Duration::from_millis(8)),
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -1757,6 +1794,9 @@ mod tests {
 
         // Should return Ok(None) for metrics annotation events
         assert!(matches!(result, Ok(None)));
+
+        // Drop collector so the detokenize observation fires in Drop
+        drop(collector);
 
         // Should have observed the cached tokens from the metrics annotation event
         let metric_families = registry.gather();
@@ -1775,11 +1815,31 @@ mod tests {
             .iter()
             .find(|mf| mf.name() == expected_tokenizer_metric_name)
             .expect("histogram should be registered");
-        assert_eq!(
-            histogram_family.get_metric()[0]
-                .get_histogram()
-                .get_sample_count(),
-            1
+
+        // Find the tokenize and detokenize observations by label
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+        // 8ms
+        assert!(
+            (tokenize_metric.get_histogram().get_sample_sum() - 8.0).abs() < 0.001,
+            "tokenize latency should be 8.0ms"
+        );
+
+        let detokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "detokenize"))
+            .expect("detokenize metric should exist");
+        assert_eq!(detokenize_metric.get_histogram().get_sample_count(), 1);
+        // Average: 100us total / 2 samples = 50us = 0.05ms
+        assert!(
+            (detokenize_metric.get_histogram().get_sample_sum() - 0.05).abs() < 0.001,
+            "detokenize average latency should be 0.05ms, got {}",
+            detokenize_metric.get_histogram().get_sample_sum()
         );
     }
 
@@ -1818,7 +1878,9 @@ mod tests {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
-            tokenizer_latency: Some(Duration::from_millis(8)),
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -1828,6 +1890,9 @@ mod tests {
         // Process via the non-streaming metrics hook
         let mut http_queue_guard = None;
         process_response_and_observe_metrics(&annotated, &mut collector, &mut http_queue_guard);
+
+        // Drop collector so the detokenize observation fires in Drop
+        drop(collector);
 
         // Should have observed the cached tokens from the metrics annotation event
         let metric_families = registry.gather();
@@ -1846,11 +1911,26 @@ mod tests {
             .iter()
             .find(|mf| mf.name() == expected_tokenizer_metric_name)
             .expect("histogram should be registered");
-        assert_eq!(
-            histogram_family.get_metric()[0]
-                .get_histogram()
-                .get_sample_count(),
-            1
+
+        // Find the tokenize and detokenize observations by label
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+
+        let detokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "detokenize"))
+            .expect("detokenize metric should exist");
+        assert_eq!(detokenize_metric.get_histogram().get_sample_count(), 1);
+        // Average: 100us total / 2 samples = 50us = 0.05ms
+        assert!(
+            (detokenize_metric.get_histogram().get_sample_sum() - 0.05).abs() < 0.001,
+            "detokenize average latency should be 0.05ms, got {}",
+            detokenize_metric.get_histogram().get_sample_sum()
         );
     }
 }

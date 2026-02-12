@@ -29,6 +29,7 @@ MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.router,
     pytest.mark.vllm,
     pytest.mark.model(MODEL_NAME),
 ]
@@ -384,12 +385,18 @@ def test_vllm_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "router_event_threads",
+    [1, 2],
+    ids=["single_thread", "multi_thread"],
+)
 def test_router_decisions_vllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
+    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting vLLM router prefix reuse test with two workers")
@@ -413,7 +420,12 @@ def test_router_decisions_vllm_multiple_workers(
         endpoint = component.endpoint("generate")
 
         _test_router_decisions(
-            vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=False
+            vllm_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=False,
+            router_event_threads=router_event_threads,
         )
 
 

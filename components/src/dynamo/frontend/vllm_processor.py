@@ -448,7 +448,9 @@ class EngineFactory:
                 kv_router_config=self.router_config.kv_router_config,
             )
         else:
-            router = await generate_endpoint.client2(self.router_config.router_mode)
+            router = await generate_endpoint.client(
+                router_mode=self.router_config.router_mode
+            )
 
         gen = VllmProcessor(
             tokenizer,

@@ -16,8 +16,9 @@ use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
 use super::metrics::register_worker_timing_metrics;
-use crate::discovery::{ModelManager, register_worker_load_metrics};
+use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
+use crate::kv_router::metrics::{register_routing_overhead_metrics, register_worker_load_metrics};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -395,6 +396,12 @@ impl HttpServiceConfigBuilder {
         // These are updated by ResponseMetricCollector when observing TTFT/ITL
         if let Err(e) = register_worker_timing_metrics(&registry) {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
+        }
+
+        // Register routing overhead metrics (block hashing, find matches, scheduling latencies)
+        // These are updated by KvRouter::find_best_match on every routing decision
+        if let Err(e) = register_routing_overhead_metrics(&registry) {
+            tracing::warn!("Failed to register routing overhead metrics: {}", e);
         }
 
         let mut router = axum::Router::new();
