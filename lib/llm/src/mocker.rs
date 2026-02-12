@@ -394,10 +394,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
         let bootstrap_server = self.bootstrap_server.clone();
+        let reasoning = self.engine_args.reasoning.clone();
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
             let mut token_count = 0;
+            let think_len = reasoning
+                .as_ref()
+                .map(|cfg| cfg.num_thinking_tokens(max_output_tokens))
+                .unwrap_or(0);
 
             loop {
                 tokio::select! {
@@ -407,8 +412,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             break;
                         };
 
-                        // Generate a new token
-                        let token_id = generate_random_token();
+                        // Generate a token (with thinking boundaries if configured)
+                        let token_id = if token_count == 0 && think_len > 0 {
+                            reasoning.as_ref().unwrap().start_thinking_token_id
+                        } else if think_len > 0 && token_count == think_len - 1 {
+                            reasoning.as_ref().unwrap().end_thinking_token_id
+                        } else {
+                            generate_random_token()
+                        };
                         token_count += 1;
 
                         let output = LLMEngineOutput {
