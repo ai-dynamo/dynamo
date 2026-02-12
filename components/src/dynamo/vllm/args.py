@@ -86,6 +86,7 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(
         description="Dynamo vLLM worker configuration",
         formatter_class=argparse.RawTextHelpFormatter,
+        allow_abbrev=False,
     )
 
     # Build argument parser
