@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -71,6 +72,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 	// Validate that at least one service is specified
 	if len(v.deployment.Spec.Services) == 0 {
 		return nil, fmt.Errorf("spec.services must have at least one service")
+	}
+
+	// Validate annotations
+	if err := v.validateAnnotations(); err != nil {
+		return nil, err
 	}
 
 	// Validate PVCs
@@ -411,6 +417,26 @@ func (v *DynamoGraphDeploymentValidator) validateRestartStrategyOrder() error {
 	}
 
 	return err
+}
+
+// validateAnnotations validates known DGD annotations have valid values.
+func (v *DynamoGraphDeploymentValidator) validateAnnotations() error {
+	annotations := v.deployment.GetAnnotations()
+	if annotations == nil {
+		return nil
+	}
+
+	var errs []error
+
+	// Validate operator origin version is valid semver (if present)
+	if value, exists := annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+		if _, err := semver.NewVersion(value); err != nil {
+			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be valid semver",
+				consts.KubeAnnotationDynamoOperatorOriginVersion, value))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 func getUnique[T comparable](slice []T) []T {

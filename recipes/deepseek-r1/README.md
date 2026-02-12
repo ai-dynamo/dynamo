@@ -13,7 +13,7 @@ Production-ready deployments for **DeepSeek-R1** (671B MoE) across multiple back
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/pages/kubernetes/README.md)
 2. **GPU cluster** with H200 or GB200 GPUs matching the configuration requirements
 3. **HuggingFace token** with access to DeepSeek models
 4. **High-bandwidth networking** — InfiniBand or RoCE recommended for multi-node deployments

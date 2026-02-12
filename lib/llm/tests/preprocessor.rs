@@ -501,7 +501,7 @@ pub mod openai_preprocessor_tests {
         let oai_preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
         let request = Request::from(SINGLE_CHAT_MESSAGE, None, None, mdc.slug().to_string());
         let preprocessed_request = oai_preprocessor
-            .preprocess_request(&request)
+            .preprocess_request(&request, None)
             .await
             .unwrap()
             .0;
@@ -583,7 +583,10 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
         let message = build_message("Test multimodal content", media_chunks);
         let request = Request::from(&message, None, None, mdc.slug().to_string());
 
-        let (preprocessed, _annotations) = preprocessor.preprocess_request(&request).await.unwrap();
+        let (preprocessed, _annotations) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
 
         // Verify multimodal data handling
         if media_chunks.is_empty() {

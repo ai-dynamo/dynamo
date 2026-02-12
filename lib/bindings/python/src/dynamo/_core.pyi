@@ -164,9 +164,11 @@ class Endpoint:
         """
         ...
 
-    async def client(self) -> Client:
+    async def client(self, router_mode: Optional[RouterMode] = None) -> Client:
         """
-        Create a `Client` capable of calling served instances of this endpoint
+        Create a `Client` capable of calling served instances of this endpoint.
+
+        By default this uses round-robin routing when `router_mode` is not provided.
         """
         ...
 
@@ -247,6 +249,18 @@ class Client:
     async def direct(self, request: JsonLike, instance: str) -> AsyncIterator[JsonLike]:
         """
         Pick a specific instance of the endpoint
+        """
+        ...
+
+
+class ModelCardInstanceId:
+    """
+    Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
+    The instance_id is not currently exposed in the Python bindings.
+    """
+    def triple(self) -> Tuple[str, str, str]:
+        """
+        Triple of namespace, component and endpoint this worker is serving.
         """
         ...
 
@@ -981,6 +995,7 @@ class KvRouterConfig:
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
+        router_event_threads: int = 1,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1004,6 +1019,8 @@ class KvRouterConfig:
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+            router_event_threads: Number of event processing threads (default: 1).
+                When > 1, uses a concurrent radix tree with a thread pool.
         """
         ...
 
@@ -1504,7 +1521,7 @@ class EntrypointArgs:
         namespace: Optional[str] = None,
         is_prefill: bool = False,
         migration_limit: int = 0,
-        engine_factory: Optional[Callable] = None,
+        chat_engine_factory: Optional[Callable] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -1527,7 +1544,7 @@ class EntrypointArgs:
             namespace: Dynamo namespace for model discovery scoping
             is_prefill: Whether this is a prefill worker
             migration_limit: Maximum number of request migrations (0=disabled)
-            engine_factory: Optional Python engine factory callback
+            chat_engine_factory: Optional Python chat completions engine factory callback
         """
         ...
 
@@ -1583,4 +1600,5 @@ __all__ = [
     "ModelDeploymentCard",
     "PythonAsyncEngine",
     "prometheus_names",
+    "ModelCardInstanceId",
 ]

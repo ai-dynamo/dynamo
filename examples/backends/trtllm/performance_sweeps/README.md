@@ -41,7 +41,7 @@ Please note that:
 3. `post_process.py` - Scan the aiperf results to produce a json with entries to each config point.
 4. `plot_performance_comparison.py` - Takes the json result file for disaggregated and/or aggregated configuration sweeps and plots a pareto line for better visualization.
 
-For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../../../../docs/backends/trtllm/multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide.
+For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../../../../docs/pages/backends/trtllm/multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide.
 
 ## Usage
 
@@ -49,7 +49,7 @@ For more finer grained details on how to launch TRTLLM backend workers with Deep
 
 Before running the scripts, ensure you have:
 1. Access to a SLURM cluster
-2. Container image of Dynamo with TensorRT-LLM built using instructions from [here](https://github.com/ai-dynamo/dynamo/tree/main/docs/backends/trtllm/README.md#build-container).
+2. Container image of Dynamo with TensorRT-LLM built using instructions from [here](https://github.com/ai-dynamo/dynamo/tree/main/docs/pages/backends/trtllm/README.md#build-container).
 3. Model files accessible on the cluster
 4. Required environment variables set
 
@@ -69,7 +69,7 @@ export SLURM_JOB_NAME=""
 
 # NOTE: IMAGE must be set manually for now
 # To build an iamge, see the steps here:
-# https://github.com/ai-dynamo/dynamo/tree/main/docs/backends/trtllm/README.md#build-container
+# https://github.com/ai-dynamo/dynamo/tree/main/docs/pages/backends/trtllm/README.md#build-container
 export IMAGE="<dynamo_trtllm_image>"
 
 # NOTE: In general, Deepseek R1 is very large, so it is recommended to

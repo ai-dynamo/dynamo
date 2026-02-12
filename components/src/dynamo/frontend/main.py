@@ -21,6 +21,7 @@ import logging
 import os
 import pathlib
 import signal
+import sys
 
 import uvloop
 
@@ -30,8 +31,6 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
-    ModelDeploymentCard,
-    PythonAsyncEngine,
     RouterConfig,
     RouterMode,
     make_engine,
@@ -48,19 +47,18 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def _dummy_generator(request):
-    """Minimal generator that yields nothing. Work in progress."""
-    return
-    yield  # Makes this an async generator
-
-
-async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+def setup_engine_factory(
+    runtime: DistributedRuntime,
+    router_config: RouterConfig,
+    flags: argparse.Namespace,
+):  # Returns EngineFactory:
     """
-    Called by Rust when a model is discovered.
+    When using vllm pre and post processor, create the EngineFactory that
+    creates the engines that run requests.
     """
-    loop = asyncio.get_running_loop()
-    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
-    return PythonAsyncEngine(_dummy_generator, loop)
+    from .vllm_processor import EngineFactory
+
+    return EngineFactory(runtime, router_config, flags)
 
 
 def validate_model_name(value):
@@ -87,10 +85,36 @@ def parse_args():
     Returns:
         argparse.Namespace: Parsed command-line arguments.
     """
-    parser = argparse.ArgumentParser(
-        description="Dynamo Frontend: HTTP+Pre-processor+Router",
-        formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+
+    # We need to know before we parse the arguments
+    full_args = " ".join(sys.argv)
+    is_vllm = (
+        "--chat-processor vllm" in full_args or "--chat-processor=vllm" in full_args
     )
+
+    if not is_vllm:
+        # Normal case, Dynamo processor
+        parser = argparse.ArgumentParser(
+            description="Dynamo Frontend: HTTP+Pre-processor+Router",
+            formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+        )
+    else:
+        # vllm processor
+        try:
+            from vllm.utils import FlexibleArgumentParser
+        except ImportError:
+            try:
+                from vllm.utils.argparse_utils import FlexibleArgumentParser
+            except ModuleNotFoundError:
+                logger.exception(
+                    "Flag '--chat-processor vllm' requires vllm be installed."
+                )
+                sys.exit(1)
+
+        parser = FlexibleArgumentParser(
+            description="Dynamo Frontend: HTTP+Pre-processor+Router",
+        )
+
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Frontend {__version__}"
     )
@@ -227,6 +251,12 @@ def parse_args():
         help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
     )
     parser.add_argument(
+        "--router-event-threads",
+        type=int,
+        default=int(os.environ.get("DYN_ROUTER_EVENT_THREADS", "1")),
+        help="KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput. Can be set via DYN_ROUTER_EVENT_THREADS env var (default: 1).",
+    )
+    parser.add_argument(
         "--enforce-disagg",
         action="store_true",
         default=False,
@@ -307,11 +337,23 @@ def parse_args():
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--exp-python-factory",
-        action="store_true",
-        default=False,
-        help="[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be created via a Python callback instead of the default Rust pipeline.",
+        "--chat-processor",
+        dest="chat_processor",
+        type=str,
+        choices=["dynamo", "vllm"],
+        default="dynamo",
+        help="[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post processor.",
     )
+    if is_vllm:
+        try:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            parser = FrontendArgs.add_cli_args(parser)
+            parser = AsyncEngineArgs.add_cli_args(parser)
+        except ModuleNotFoundError:
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            sys.exit(1)
 
     flags = parser.parse_args()
 
@@ -400,6 +442,7 @@ async def async_main():
             router_ttl_secs=flags.router_ttl,
             router_max_tree_size=flags.router_max_tree_size,
             router_prune_target_ratio=flags.router_prune_target_ratio,
+            router_event_threads=flags.router_event_threads,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random
@@ -408,19 +451,19 @@ async def async_main():
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
+    router_config = RouterConfig(
+        router_mode,
+        kv_router_config,
+        active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
+        active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+        active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
+        enforce_disagg=flags.enforce_disagg,
+    )
     kwargs = {
         "http_host": flags.http_host,
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
-        "router_config": RouterConfig(
-            router_mode,
-            kv_router_config,
-            active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
-            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
-            enforce_disagg=flags.enforce_disagg,
-        ),
-        "migration_limit": flags.migration_limit,
+        "router_config": router_config,
     }
 
     if flags.model_name:
@@ -436,8 +479,11 @@ async def async_main():
     if flags.kserve_grpc_server and flags.grpc_metrics_port:
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
 
-    if flags.exp_python_factory:
-        kwargs["engine_factory"] = engine_factory
+    if flags.chat_processor == "vllm":
+        chat_engine_factory = setup_engine_factory(
+            runtime, router_config, flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
