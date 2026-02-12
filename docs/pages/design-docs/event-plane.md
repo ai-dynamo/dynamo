@@ -13,7 +13,7 @@ Key use cases:
 
 - **KV cache events** -- Workers publish cache state so the router can make cache-aware scheduling decisions.
 - **Worker load metrics** -- Workers report utilization so the router can balance load.
-- **Sequence tracking** -- Coordinates active sequences across router replicas for fault tolerant routing.
+- **Sequence tracking** -- Coordinates active sequences across router replicas for fault-tolerant routing.
 
 ![Event plane architecture showing NATS and ZMQ transport options connecting Frontend, Planner, and Worker](../../assets/img/event-plane-transport.svg)
 

@@ -15,7 +15,7 @@ The discovery backend adapts to the deployment environment.
 | Deployment | Discovery Backend | Configuration |
 |------------|-------------------|---------------|
 | **Kubernetes** (with Dynamo operator) | Native K8s (CRDs, EndpointSlices) | Operator sets `DYN_DISCOVERY_BACKEND=kubernetes` |
-| **Bare metal / Local** (default) | etcd | `ETCD_ENDPOINTS` (defaults to `localhost:2379`) |
+| **Bare metal / Local** (default) | etcd | `ETCD_ENDPOINTS` (defaults to `http://localhost:2379`) |
 
 > **Note:** The runtime always defaults to etcd (`kv_store`). Kubernetes discovery must be explicitly enabled -- the Dynamo operator handles this automatically.
 
