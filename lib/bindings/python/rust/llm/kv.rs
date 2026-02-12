@@ -870,10 +870,7 @@ impl KvPushRouter {
             .await?;
 
             // Create cache_control client if agentic cache control is enabled
-            let cc_client = if kv_router_config
-                .inner()
-                .router_enable_agentic_cache_control
-            {
+            let cc_client = if kv_router_config.inner().router_enable_agentic_cache_control {
                 let component = kv_router.client().endpoint.component().clone();
                 Some(
                     llm_rs::kv_router::create_cache_control_client(&component)
