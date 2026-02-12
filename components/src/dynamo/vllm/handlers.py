@@ -4,6 +4,7 @@
 import asyncio
 import base64
 import binascii
+import hashlib
 import io
 import logging
 import os
@@ -46,6 +47,46 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def _image_to_bytes(img) -> bytes:
+    """Convert a PIL Image to PNG bytes for hashing."""
+    from PIL import Image
+
+    if isinstance(img, Image.Image):
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    elif isinstance(img, bytes):
+        return img
+    else:
+        raise TypeError(f"Unsupported image type for hashing: {type(img)}")
+
+
+def _compute_mm_uuids(multi_modal_data: Dict[str, Any] | None) -> Dict[str, list[str]] | None:
+    """
+    Compute multi_modal_uuids from multi_modal_data.
+
+    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
+    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    """
+    if not multi_modal_data or "image" not in multi_modal_data:
+        return None
+    images = multi_modal_data["image"]
+    if not isinstance(images, list):
+        images = [images]
+    if not images:
+        return None
+    uuids = []
+    for img in images:
+        try:
+            raw_bytes = _image_to_bytes(img)
+            uuids.append(hashlib.sha256(raw_bytes).hexdigest())
+        except Exception as e:
+            logger.warning(f"Failed to compute mm_uuid for image: {e}")
+            uuids.append("")
+    return {"image": uuids}
+
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
 # None = not yet initialized, False = disabled/failed, LoRAManager = initialized
@@ -1025,9 +1066,14 @@ class BaseWorkerHandler(ABC):
                 )
         else:
             # Normal path: use token IDs
-            prompt = TokensPrompt(
-                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+            mm_uuids = _compute_mm_uuids(multi_modal_data)
+            prompt_kwargs = dict(
+                prompt_token_ids=request["token_ids"],
+                multi_modal_data=multi_modal_data,
             )
+            if mm_uuids is not None:
+                prompt_kwargs["multi_modal_uuids"] = mm_uuids
+            prompt = TokensPrompt(**prompt_kwargs)
             return prompt, embedding_sequence_length, None
 
     @staticmethod
