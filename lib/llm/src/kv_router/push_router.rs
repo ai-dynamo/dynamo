@@ -7,18 +7,16 @@ use anyhow::Result;
 use dynamo_runtime::{
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
-        RouterMode, SingleIn, async_trait,
+        SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
-    protocols::maybe_error::MaybeError,
 };
 use futures::stream::{self, StreamExt};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
     kv_router::{
-        KvRouter,
+        CacheControlClient, KvRouter,
         metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
@@ -26,44 +24,10 @@ use crate::{
     protocols::common::{llm_backend::LLMEngineOutput, timing::RequestPhase},
 };
 
-/// Response from the worker's cache_control service mesh endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheControlResponse {
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unpinned_count: Option<u32>,
-}
-
-impl MaybeError for CacheControlResponse {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        CacheControlResponse {
-            status: "error".to_string(),
-            message: Some(err.to_string()),
-            pinned_count: None,
-            unpinned_count: None,
-        }
-    }
-
-    fn err(&self) -> Option<anyhow::Error> {
-        if self.status == "error" {
-            Some(anyhow::anyhow!(
-                "cache_control error: {}",
-                self.message.as_deref().unwrap_or("unknown")
-            ))
-        } else {
-            None
-        }
-    }
-}
-
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    cache_control_client: Option<PushRouter<serde_json::Value, Annotated<CacheControlResponse>>>,
+    cache_control_client: Option<CacheControlClient>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -77,9 +41,7 @@ impl KvPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
-        cache_control_client: Option<
-            PushRouter<serde_json::Value, Annotated<CacheControlResponse>>,
-        >,
+        cache_control_client: Option<CacheControlClient>,
     ) -> Self {
         KvPushRouter {
             inner,
@@ -461,6 +423,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
             // After stream completion, if pin hint was set, fire-and-forget pin_prefix
             // to the worker. This runs after all response tokens have been yielded.
+            // TODO: Track whether the stream ended naturally vs via cancellation
+            // (context_for_monitoring.stopped()). Pinning after cancellation is wrong
+            // because the prefix may be incomplete on the worker. Add a
+            // `generation_completed` bool, set it on natural stream end, and gate
+            // the PIN call on it.
             if pin_prefix {
                 if let (Some(cc), Some(token_ids)) = (&cc_client, &token_ids_for_pin) {
                     let pin_request = serde_json::json!({

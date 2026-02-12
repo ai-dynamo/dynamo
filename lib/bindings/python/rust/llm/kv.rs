@@ -16,7 +16,7 @@ use tracing;
 
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks, start_zmq_listener};
-use llm_rs::kv_router::push_router::CacheControlResponse;
+use llm_rs::kv_router::CacheControlResponse;
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use rs::pipeline::{PushRouter, RouterMode};

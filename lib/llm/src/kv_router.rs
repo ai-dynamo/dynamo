@@ -24,6 +24,7 @@ pub use dynamo_kv_router::approx;
 pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
+pub mod cache_control;
 pub mod config;
 pub mod metrics;
 pub mod prefill_router;
@@ -36,6 +37,7 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
+pub use cache_control::{CacheControlClient, CacheControlResponse, create_cache_control_client};
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use prefill_router::PrefillRouter;
 pub use push_router::KvPushRouter;

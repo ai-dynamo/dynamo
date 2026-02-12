@@ -86,6 +86,7 @@ impl KvRouterConfig {
                 router_max_tree_size,
                 router_prune_target_ratio,
                 router_queue_threshold,
+                router_enable_agentic_cache_control: false,
             },
         }
     }

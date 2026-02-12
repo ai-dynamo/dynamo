@@ -9,7 +9,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter, push_router::CacheControlResponse},
+    kv_router::{KvPushRouter, KvRouter, PrefillRouter, create_cache_control_client},
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
@@ -287,14 +287,7 @@ where
             let cc_client =
                 if chooser.kv_router_config().router_enable_agentic_cache_control {
                     let component = chooser.client().endpoint.component().clone();
-                    let client = component.endpoint("cache_control").client().await?;
-                    Some(
-                        PushRouter::<serde_json::Value, Annotated<CacheControlResponse>>::from_client(
-                            client,
-                            RouterMode::KV,
-                        )
-                        .await?,
-                    )
+                    Some(create_cache_control_client(&component).await?)
                 } else {
                     None
                 };
