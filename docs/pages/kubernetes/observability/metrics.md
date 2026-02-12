@@ -158,7 +158,7 @@ Visit http://localhost:9090 and try these example queries:
 - `dynamo_frontend_requests_total`
 - `dynamo_frontend_time_to_first_token_seconds_bucket`
 
-![Prometheus UI showing Dynamo metrics](/assets/img/prometheus-k8s.png)
+![Prometheus UI showing Dynamo metrics](../../../assets/img/prometheus-k8s.png)
 
 ### In Grafana
 ```bash
@@ -176,7 +176,7 @@ Visit http://localhost:3000 and log in with the credentials captured above.
 
 Once logged in, find the Dynamo dashboard under General.
 
-![Grafana dashboard showing Dynamo metrics](/assets/img/grafana-k8s.png)
+![Grafana dashboard showing Dynamo metrics](../../../assets/img/grafana-k8s.png)
 
 ## Operator Metrics
 

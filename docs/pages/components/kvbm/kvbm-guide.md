@@ -383,7 +383,7 @@ trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --ex
 
 **Solution:** Enable KVBM metrics and check the Grafana dashboard for `Onboard Blocks - Host to Device` and `Onboard Blocks - Disk to Device`. Large numbers of onboarded KV blocks indicate good cache reuse:
 
-![Grafana Example](/assets/img/kvbm-metrics-grafana.png)
+![Grafana Example](../../../assets/img/kvbm-metrics-grafana.png)
 
 ### KVBM Worker Initialization Timeout
 
