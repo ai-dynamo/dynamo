@@ -181,8 +181,7 @@ impl AnthropicStreamConverter {
                                         input: serde_json::json!({}),
                                     },
                                 };
-                                events
-                                    .push(make_sse_event("content_block_start", &block_start));
+                                events.push(make_sse_event("content_block_start", &block_start));
                             }
 
                             self.tool_call_states[tc_index]
@@ -260,10 +259,7 @@ impl AnthropicStreamConverter {
     }
 }
 
-fn make_sse_event(
-    event_type: &str,
-    event: &AnthropicStreamEvent,
-) -> Result<Event, anyhow::Error> {
+fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Event, anyhow::Error> {
     let data = serde_json::to_string(event)?;
     Ok(Event::default().event(event_type).data(data))
 }

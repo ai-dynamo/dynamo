@@ -189,10 +189,11 @@ pub struct AnthropicTool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AnthropicToolChoice {
+    /// Named tool: `{type: "tool", name: "..."}`
+    /// Must be listed before Simple so serde tries the stricter shape first.
+    Named(AnthropicToolChoiceNamed),
     /// Simple mode: "auto", "any", or "none".
     Simple(AnthropicToolChoiceSimple),
-    /// Named tool: `{type: "tool", name: "..."}`
-    Named(AnthropicToolChoiceNamed),
 }
 
 /// Simple tool choice modes.
@@ -447,9 +448,9 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
 
         // Convert stop_sequences -> stop
-        let stop = req.stop_sequences.map(|seqs| {
-            dynamo_async_openai::types::Stop::StringArray(seqs)
-        });
+        let stop = req
+            .stop_sequences
+            .map(|seqs| dynamo_async_openai::types::Stop::StringArray(seqs));
 
         Ok(NvCreateChatCompletionRequest {
             inner: dynamo_async_openai::types::CreateChatCompletionRequest {
@@ -513,7 +514,9 @@ fn convert_user_blocks(
                 ));
             }
             AnthropicContentBlock::Image { .. } => {
-                // Image blocks are not yet supported in this conversion
+                tracing::warn!(
+                    "Image content blocks are not supported in the Anthropic-to-chat-completions conversion; replaced with placeholder text."
+                );
                 text_parts.push("[image]".to_string());
             }
             AnthropicContentBlock::ToolUse { .. } => {
@@ -609,9 +612,7 @@ fn convert_anthropic_tools(tools: &[AnthropicTool]) -> Vec<ChatCompletionTool> {
 }
 
 /// Convert Anthropic tool_choice to ChatCompletionToolChoiceOption.
-fn convert_anthropic_tool_choice(
-    tc: &AnthropicToolChoice,
-) -> ChatCompletionToolChoiceOption {
+fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
     match tc {
         AnthropicToolChoice::Simple(simple) => match simple.choice_type {
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
@@ -651,12 +652,8 @@ pub fn chat_completion_to_anthropic_response(
             dynamo_async_openai::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
             dynamo_async_openai::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
             dynamo_async_openai::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_async_openai::types::FinishReason::ContentFilter => {
-                AnthropicStopReason::EndTurn
-            }
-            dynamo_async_openai::types::FinishReason::FunctionCall => {
-                AnthropicStopReason::ToolUse
-            }
+            dynamo_async_openai::types::FinishReason::ContentFilter => AnthropicStopReason::EndTurn,
+            dynamo_async_openai::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
         });
 
         // Extract tool calls
@@ -676,6 +673,9 @@ pub fn chat_completion_to_anthropic_response(
         let text = match choice.message.content {
             Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(t)) => Some(t),
             Some(dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_)) => {
+                tracing::warn!(
+                    "Multimodal (Parts) content in chat completion response replaced with placeholder text in Anthropic conversion."
+                );
                 Some("[multimodal content]".to_string())
             }
             None => None,
@@ -982,7 +982,8 @@ mod tests {
 
     #[test]
     fn test_deserialize_simple_message() {
-        let json = r#"{"model":"test","max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}"#;
+        let json =
+            r#"{"model":"test","max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}"#;
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.model, "test");
         assert_eq!(req.max_tokens, 100);

@@ -108,17 +108,16 @@ async fn handler_anthropic_messages(
     let (mut connection_handle, stream_handle) =
         create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
-    let response = tokio::spawn(
-        anthropic_messages(state, template, request, stream_handle).in_current_span(),
-    )
-    .await
-    .map_err(|e| {
-        anthropic_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "api_error",
-            &format!("Failed to await messages task: {:?}", e),
-        )
-    })?;
+    let response =
+        tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())
+            .await
+            .map_err(|e| {
+                anthropic_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "api_error",
+                    &format!("Failed to await messages task: {:?}", e),
+                )
+            })?;
 
     connection_handle.disarm();
     response
@@ -145,6 +144,9 @@ async fn anthropic_messages(
         if request.temperature.is_none() {
             request.temperature = Some(template.temperature);
         }
+        if request.max_tokens == 0 {
+            request.max_tokens = template.max_completion_tokens;
+        }
     }
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
@@ -167,7 +169,7 @@ async fn anthropic_messages(
             )
         })?;
 
-    let request = context.map(|mut _req| chat_request);
+    let request = context.map(|_req| chat_request);
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
@@ -198,11 +200,10 @@ async fn anthropic_messages(
 
     let ctx = engine_stream.context();
 
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        &model,
-        Endpoint::AnthropicMessages,
-        streaming,
-    );
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::AnthropicMessages, streaming);
 
     if streaming {
         stream_handle.arm();
@@ -276,8 +277,8 @@ async fn anthropic_messages(
         // Check first event for backend errors using the openai helper
         let stream_with_check = super::openai::check_for_backend_error(engine_stream)
             .await
-            .map_err(|(_status, _json_err)| {
-                tracing::error!(request_id, "Backend error detected");
+            .map_err(|(status, json_err)| {
+                tracing::error!(request_id, %status, ?json_err, "Backend error detected");
                 anthropic_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "api_error",
@@ -306,8 +307,7 @@ async fn anthropic_messages(
                     )
                 })?;
 
-        let response =
-            chat_completion_to_anthropic_response(chat_response, &model_for_resp);
+        let response = chat_completion_to_anthropic_response(chat_response, &model_for_resp);
 
         inflight_guard.mark_ok();
 
