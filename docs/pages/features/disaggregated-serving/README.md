@@ -24,17 +24,17 @@ AIConfigurator answers these questions in seconds, providing:
 
 ### End-to-End Workflow
 
-![AIConfigurator end-to-end workflow](/assets/img/e2e-workflow.svg)
+![AIConfigurator end-to-end workflow](../../../assets/img/e2e-workflow.svg)
 
 ### Aggregated vs Disaggregated Architecture
 
 AIConfigurator evaluates two deployment architectures and recommends the best one for your workload:
 
-![Aggregated vs Disaggregated architecture comparison](/assets/img/arch-comparison.svg)
+![Aggregated vs Disaggregated architecture comparison](../../../assets/img/arch-comparison.svg)
 
 ### When to Use Each Architecture
 
-![Decision flowchart for choosing aggregated vs disaggregated](/assets/img/decision-flowchart.svg)
+![Decision flowchart for choosing aggregated vs disaggregated](../../../assets/img/decision-flowchart.svg)
 
 ## Quick Start
 
@@ -288,7 +288,7 @@ Run AIPerf **inside the cluster** to avoid network latency affecting measurement
 
 To use AIPerf to benchmark an AIC-recommended configuration, you'll need to translate AIC parameters into AIPerf profiling arguments (we are working to automate this):
 
-![AIC-to-AIPerf parameter mapping](/assets/img/param-mapping.svg)
+![AIC-to-AIPerf parameter mapping](../../../assets/img/param-mapping.svg)
 
 | AIC Output | AIPerf Parameter | Notes |
 |------------|-----------------|-------|

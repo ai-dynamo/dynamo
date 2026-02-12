@@ -21,19 +21,19 @@ from typing import Any, Optional
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.config import (
+from dynamo.common.utils.paths import get_workspace_dir
+from dynamo.planner.defaults import MockerComponentName, SubComponentType
+from dynamo.profiler.utils.config import (
     Config,
     DgdPlannerServiceConfig,
     set_argument_value,
 )
-from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
     apply_parallel_mapping_to_config,
 )
-from benchmarks.profiler.utils.planner_utils import build_planner_args_from_namespace
-from dynamo.common.utils.paths import get_workspace_dir
-from dynamo.planner.defaults import MockerComponentName, SubComponentType
+from dynamo.profiler.utils.planner_utils import build_planner_args_from_namespace
 
 # Path to mocker disagg config relative to workspace
 MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"

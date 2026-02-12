@@ -22,49 +22,46 @@ from dataclasses import dataclass, field
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.aiperf import (
-    get_decode_itl_and_thpt_per_gpu,
-    get_prefill_ttft,
-)
-from benchmarks.profiler.utils.config import Config, get_service_name_by_type
-from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
-    ParallelizationMapping,
-    apply_parallel_mapping_to_config,
-    get_candidate_parallel_mappings,
-)
-from benchmarks.profiler.utils.defaults import EngineType
-from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
-from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.plot import (
-    plot_decode_performance,
-    plot_pd_joint_results,
-    plot_prefill_performance,
-)
-from benchmarks.profiler.utils.profile_decode import (
-    get_num_request_range,
-    profile_decode,
-    profile_decode_aiconfigurator,
-)
-from benchmarks.profiler.utils.profile_prefill import (
-    profile_prefill,
-    profile_prefill_aiconfigurator,
-)
-from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
-from benchmarks.profiler.utils.profiler_status import (
-    ProfilerStatus,
-    write_profiler_status,
-)
-from benchmarks.profiler.webui.select_config import (
-    add_profiling_error,
-    clear_profiling_errors,
-    pick_config_with_webui,
-)
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
 from dynamo.planner.defaults import SubComponentType
+from dynamo.profiler.utils.aiperf import (
+    get_decode_itl_and_thpt_per_gpu,
+    get_prefill_ttft,
+)
+from dynamo.profiler.utils.config import Config, get_service_name_by_type
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
+    ParallelizationMapping,
+    apply_parallel_mapping_to_config,
+    get_candidate_parallel_mappings,
+)
+from dynamo.profiler.utils.defaults import EngineType
+from dynamo.profiler.utils.dgd_generation import generate_dgd_config_with_planner
+from dynamo.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
+from dynamo.profiler.utils.plot import (
+    plot_decode_performance,
+    plot_pd_joint_results,
+    plot_prefill_performance,
+)
+from dynamo.profiler.utils.profile_decode import (
+    get_num_request_range,
+    profile_decode,
+    profile_decode_aiconfigurator,
+)
+from dynamo.profiler.utils.profile_prefill import (
+    profile_prefill,
+    profile_prefill_aiconfigurator,
+)
+from dynamo.profiler.utils.profiler_argparse import create_profiler_parser
+from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
+from dynamo.profiler.webui.select_config import (
+    add_profiling_error,
+    clear_profiling_errors,
+    pick_config_with_webui,
+)
 
 
 @dataclass

@@ -6,9 +6,9 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from benchmarks.profiler.utils.aiperf import get_prefill_ttft
-from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.plot import plot_prefill_interpolation
+from dynamo.profiler.utils.aiperf import get_prefill_ttft
+from dynamo.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
+from dynamo.profiler.utils.plot import plot_prefill_interpolation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

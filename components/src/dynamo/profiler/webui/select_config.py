@@ -5,7 +5,7 @@ import json
 import logging
 import queue
 
-from benchmarks.profiler.webui.utils import (
+from dynamo.profiler.webui.utils import (
     add_profiling_error,
     clear_profiling_errors,
     create_gradio_interface,

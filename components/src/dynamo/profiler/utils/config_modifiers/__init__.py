@@ -16,13 +16,13 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from benchmarks.profiler.utils.config_modifiers.protocol import (
+    from dynamo.profiler.utils.config_modifiers.protocol import (
         ConfigModifierProtocol,
     )
 
-from benchmarks.profiler.utils.config_modifiers.sglang import SGLangConfigModifier
-from benchmarks.profiler.utils.config_modifiers.trtllm import TrtllmConfigModifier
-from benchmarks.profiler.utils.config_modifiers.vllm import VllmV1ConfigModifier
+from dynamo.profiler.utils.config_modifiers.sglang import SGLangConfigModifier
+from dynamo.profiler.utils.config_modifiers.trtllm import TrtllmConfigModifier
+from dynamo.profiler.utils.config_modifiers.vllm import VllmV1ConfigModifier
 
 CONFIG_MODIFIERS: dict[str, type["ConfigModifierProtocol"]] = {
     "vllm": VllmV1ConfigModifier,

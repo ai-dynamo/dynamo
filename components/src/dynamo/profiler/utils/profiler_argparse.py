@@ -8,8 +8,8 @@ from typing import Any, Dict
 
 import yaml
 
-from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_parser
-from benchmarks.profiler.utils.search_space_autogen import auto_generate_search_space
+from dynamo.profiler.utils.planner_utils import add_planner_arguments_to_parser
+from dynamo.profiler.utils.search_space_autogen import auto_generate_search_space
 
 
 def _get(cfg: Dict[str, Any], camel: str, snake: str, default: Any = None) -> Any:
