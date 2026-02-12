@@ -37,3 +37,8 @@ DEFAULT_GPU_COST_PER_HOUR = 3.0  # Cost per GPU per hour in dollars
 class EngineType(str, Enum):
     PREFILL = "prefill"
     DECODE = "decode"
+
+
+class SearchStrategy(str, Enum):
+    RAPID = "rapid"
+    THOROUGH = "thorough"

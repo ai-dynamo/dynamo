@@ -33,7 +33,7 @@ from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     apply_parallel_mapping_to_config,
     get_candidate_parallel_mappings,
 )
-from benchmarks.profiler.utils.defaults import EngineType
+from benchmarks.profiler.utils.defaults import EngineType, SearchStrategy
 from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
@@ -143,10 +143,6 @@ async def run_profile(args):
     # Clear any errors from previous profiling runs
     clear_profiling_errors()
 
-    # Inherit aic_backend from backend if not explicitly set
-    if not args.aic_backend:
-        args.aic_backend = args.backend
-
     # Write initial status for external jobs to monitor
     os.makedirs(args.output_dir, exist_ok=True)
     write_profiler_status(
@@ -200,37 +196,29 @@ async def run_profile(args):
                 f"Using minimum of user-provided and model's maximum context length: {sweep_max_context_length}"
             )
 
-        if args.use_ai_configurator:
-            if not args.aic_system:
+        # Initialize AI Configurator estimator (only used when search_strategy == SearchStrategy.RAPID)
+        ai_configurator_perf_estimator: AIConfiguratorPerfEstimator | None = None
+
+        if args.search_strategy == SearchStrategy.RAPID:
+            # Use AI Configurator for rapid estimation
+            if not args.system:
                 raise ValueError(
-                    "Must provide --aic-system when using --use-ai-configurator."
+                    "Must provide --system (hardware system, e.g. h100_sxm) when using rapid search strategy."
                 )
 
-            # Fallback to args.model if aic_hf_id is not provided
-            if not args.aic_hf_id:
-                if args.model:
-                    logger.info(
-                        f"--aic-hf-id not provided, using --model ({args.model}) as HuggingFace ID for AI configurator"
-                    )
-                    args.aic_hf_id = args.model
-                else:
-                    raise ValueError(
-                        "Must provide --aic-hf-id or --model when using --use-ai-configurator."
-                    )
+            if not args.model:
+                raise ValueError(
+                    "Must provide --model (HuggingFace ID) when using rapid search strategy."
+                )
 
-            logger.info("Using aiconfigurator to estimate performance...")
-            ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
-                args.aic_hf_id,
-                args.aic_system.lower(),
-                args.aic_backend,
-                args.aic_backend_version,
+            logger.info(
+                "Using AI Configurator to estimate performance (rapid strategy)..."
             )
-        else:
-            if args.aic_system or args.aic_hf_id or args.aic_backend_version:
-                logger.warning(
-                    "Ignoring --aic-system, --aic-hf-id, and/or --backend-version "
-                    "when not using --use-ai-configurator."
-                )
+            ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
+                hf_id=args.model,
+                system=args.system.lower(),
+                backend=args.backend,
+            )
 
         # first profile prefill
         prefill_data = PrefillProfileData()
@@ -275,7 +263,10 @@ async def run_profile(args):
                 ttft = None
                 if args.dry_run:
                     logger.info("Skipping deployment creation in dry run mode")
-                elif args.use_ai_configurator:
+                elif (
+                    args.search_strategy == SearchStrategy.RAPID
+                    and ai_configurator_perf_estimator
+                ):
                     logger.info("Using ai-configurator to estimate prefill latency")
                     perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
                         args.isl,
@@ -398,7 +389,10 @@ async def run_profile(args):
                 if args.dry_run:
                     logger.info("Skipping deployment creation in dry run mode")
 
-                elif args.use_ai_configurator:
+                elif (
+                    args.search_strategy == SearchStrategy.RAPID
+                    and ai_configurator_perf_estimator
+                ):
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
                     max_concurrency = ai_configurator_perf_estimator.get_max_batch_size(
@@ -470,7 +464,10 @@ async def run_profile(args):
 
                     for num_request in sweep_num_request:
                         itl = thpt_per_gpu = None
-                        if args.use_ai_configurator:
+                        if (
+                            args.search_strategy == SearchStrategy.RAPID
+                            and ai_configurator_perf_estimator
+                        ):
                             logger.info(
                                 "Using ai-configurator to estimate decode latency."
                             )
@@ -514,7 +511,10 @@ async def run_profile(args):
                                 parallel_mapping=mapping,
                             )
 
-                if not args.dry_run and not args.use_ai_configurator:
+                if (
+                    not args.dry_run
+                    and not args.search_strategy == SearchStrategy.RAPID
+                ):
                     logger.info("Cleaning up deployment...")
                     await client.delete_deployment()
                     deployment_clients.remove(client)
@@ -645,7 +645,10 @@ async def run_profile(args):
 
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
-        elif args.use_ai_configurator:
+        elif (
+            args.search_strategy == SearchStrategy.RAPID
+            and ai_configurator_perf_estimator
+        ):
             profile_prefill_aiconfigurator(
                 work_dir,
                 best_prefill_gpus,  # num_gpus
@@ -731,7 +734,10 @@ async def run_profile(args):
 
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
-        elif args.use_ai_configurator:
+        elif (
+            args.search_strategy == SearchStrategy.RAPID
+            and ai_configurator_perf_estimator
+        ):
             attention_dp_size = best_decode_mapping.get_attn_dp_size()
             max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
                 args.isl, args.osl, tp_size=best_decode_mapping.get_tp_size()
