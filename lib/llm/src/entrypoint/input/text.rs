@@ -50,7 +50,7 @@ async fn main_loop(
     }
     let theme = dialoguer::theme::ColorfulTheme::default();
 
-    // Initial prompt is the pipe case: `echo "Hello" | dynamo-run ..`
+    // Initial prompt is from piped stdin.
     // We run that single prompt and exit
     let single = initial_prompt.is_some();
     let mut history = dialoguer::BasicHistory::default();
