@@ -13,6 +13,7 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde_json::json;
+use tracing::Instrument;
 
 use crate::{
     kv_router::{
@@ -21,7 +22,10 @@ use crate::{
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
     preprocessor::PreprocessedRequest,
-    protocols::common::{llm_backend::LLMEngineOutput, timing::RequestPhase},
+    protocols::common::{
+        llm_backend::LLMEngineOutput,
+        timing::{RequestPhase, RequestTracker},
+    },
 };
 
 pub struct KvPushRouter {
@@ -36,6 +40,66 @@ struct WorkerSelection {
     overlap_amount: u32,
 }
 
+/// Drop guard that ensures `free()` and final metrics are recorded even if the
+/// response stream is dropped without being polled to completion.
+///
+/// In the happy path, `finish().await` runs cleanup inline in the async context.
+/// If the stream is dropped early (e.g., client disconnect, consumer drop), the
+/// `Drop` impl fires and spawns a task to call `free()`.
+struct RequestGuard {
+    chooser: Arc<KvRouter>,
+    context_id: String,
+    tracker: Option<Arc<RequestTracker>>,
+    request_metrics: Arc<RouterRequestMetrics>,
+    cumulative_osl: usize,
+    metrics_recorded: bool,
+    freed: bool,
+}
+
+impl RequestGuard {
+    async fn finish(&mut self) {
+        self.record_metrics();
+        if let Err(e) = self.chooser.free(&self.context_id).await {
+            tracing::warn!("Failed to free request {}: {e}", self.context_id);
+        }
+        self.freed = true;
+    }
+
+    fn record_metrics(&mut self) {
+        if self.metrics_recorded {
+            return;
+        }
+        self.metrics_recorded = true;
+        if let Some(ref tracker) = self.tracker {
+            tracker.record_finish();
+            tracker.record_osl(self.cumulative_osl);
+            self.request_metrics
+                .output_sequence_tokens
+                .observe(self.cumulative_osl as f64);
+        }
+        self.request_metrics.requests_total.inc();
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.record_metrics();
+        if !self.freed {
+            let chooser = self.chooser.clone();
+            let context_id = self.context_id.clone();
+            let Ok(handle) = tokio::runtime::Handle::try_current() else {
+                tracing::warn!("No tokio runtime for drop guard free of request {context_id}");
+                return;
+            };
+            handle.spawn(async move {
+                if let Err(e) = chooser.free(&context_id).await {
+                    tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
+                }
+            });
+        }
+    }
+}
+
 impl KvPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
@@ -46,18 +110,17 @@ impl KvPushRouter {
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
     ///
-    /// When `is_query_only` is false and `handle_local_updates` is true, this also registers
-    /// the request with the scheduler via `add_request`.
+    /// When `is_query_only` is false, this also registers the request with the scheduler via `add_request`.
     async fn select_worker(
         &self,
         context_id: &str,
         request: &PreprocessedRequest,
         phase: RequestPhase,
         is_query_only: bool,
-        handle_local_updates: bool,
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
+        let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
 
@@ -81,6 +144,7 @@ impl KvPushRouter {
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,
+                    priority_jump,
                 )
                 .await?;
 
@@ -104,7 +168,7 @@ impl KvPushRouter {
             .get_overlap_blocks(&request.token_ids, worker)
             .await?;
 
-        if !is_query_only && handle_local_updates {
+        if !is_query_only {
             self.chooser
                 .add_request(
                     context_id.to_string(),
@@ -166,15 +230,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
-        // Determine if this router should handle local state updates (add_request, free, etc.)
-        // Default is true (router handles bookkeeping). Set to false for GAIE Stage 2 where
-        // an external orchestrator (e.g., EPP sidecar) handles bookkeeping via C FFI.
-        let handle_local_updates = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.enable_local_updates)
-            .unwrap_or(true);
-
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
             .tracker
@@ -184,13 +239,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let block_size = self.chooser.block_size() as usize;
         let selection = self
-            .select_worker(
-                &context_id,
-                &request,
-                phase,
-                is_query_only,
-                handle_local_updates,
-            )
+            .select_worker(&context_id, &request, phase, is_query_only)
+            .instrument(tracing::info_span!("kv_router.select_worker"))
             .await?;
         let WorkerSelection {
             instance_id,
@@ -267,8 +317,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .routing
             .as_ref()
             .and_then(|r| r.expected_output_tokens);
-        let track_output_blocks =
-            self.chooser.kv_router_config().router_track_output_blocks && handle_local_updates;
+        let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
         let (mut backend_input, context) = request.into_parts();
@@ -281,19 +330,36 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
-        let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
+        let mut response_stream = self
+            .inner
+            .direct(updated_request, instance_id)
+            .instrument(tracing::info_span!(
+                "kv_router.route_request",
+                request_id = %context_id,
+                worker_id = instance_id,
+                dp_rank = dp_rank,
+                overlap_blocks = overlap_amount,
+                phase = ?phase,
+            ))
+            .await?;
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
-        // Wrap stream with lifecycle management (mark_prefill_completed, free)
-        // Only perform these operations if handle_local_updates is true.
-        // When false, an external caller (e.g., GAIE sidecar) handles bookkeeping via C FFI.
+        // Wrap stream with lifecycle management (mark_prefill_completed, free).
+        // RequestGuard ensures free() and final metrics run even if the stream is
+        // dropped without being polled to completion (e.g., client disconnect).
         let wrapped_stream = Box::pin(async_stream::stream! {
+            let mut guard = RequestGuard {
+                chooser: chooser.clone(),
+                context_id: context_id.clone(),
+                tracker: tracker.clone(),
+                request_metrics: request_metrics.clone(),
+                cumulative_osl: 0,
+                metrics_recorded: false,
+                freed: false,
+            };
             let mut prefill_marked = false;
             let mut first_token_recorded = false;
-
-            // Output block tracking state
-            let mut cumulative_osl: usize = 0;
             let mut current_total_blocks = isl_tokens.div_ceil(block_size);
 
             loop {
@@ -310,7 +376,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         };
 
-                        if handle_local_updates && !prefill_marked {
+                        if !prefill_marked {
                             // Only mark prefill completed when we receive actual tokens,
                             // not empty bootstrap info (token_ids: []) from disaggregated prefill
                             let has_tokens = item.data.as_ref()
@@ -328,7 +394,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             .map(|d| d.token_ids.len())
                             .unwrap_or(0);
 
-                        // Record first token time on tracker when actual tokens arrive
                         if !first_token_recorded && new_tokens > 0 {
                             if let Some(ref tracker) = tracker {
                                 tracker.record_first_token();
@@ -341,16 +406,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             first_token_recorded = true;
                         }
 
-                        cumulative_osl += new_tokens;
+                        guard.cumulative_osl += new_tokens;
 
-                        // Track output blocks if enabled
                         if track_output_blocks {
-                            let new_total_blocks = (isl_tokens + cumulative_osl).div_ceil(block_size);
+                            let new_total_blocks = (isl_tokens + guard.cumulative_osl).div_ceil(block_size);
                             if new_total_blocks > current_total_blocks {
-                                // New block boundary crossed - add output block with decay
-                                // Clamp eot to min 1 to avoid division by zero, and result to min 0.0
                                 let decay_fraction = expected_output_tokens.map(|eot| {
-                                    (1.0 - (cumulative_osl as f64 / eot.max(1) as f64)).max(0.0)
+                                    (1.0 - (guard.cumulative_osl as f64 / eot.max(1) as f64)).max(0.0)
                                 });
                                 if let Err(e) = chooser.add_output_block(&context_id, decay_fraction).await {
                                     tracing::warn!(
@@ -358,9 +420,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     );
                                 }
 
-                                // Update tracker and observe avg ITL at each block boundary
                                 if let Some(ref tracker) = tracker {
-                                    tracker.record_osl(cumulative_osl);
+                                    tracker.record_osl(guard.cumulative_osl);
                                     tracker.record_finish();
                                     if let Some(avg_itl) = tracker.avg_itl_ms() {
                                         request_metrics
@@ -378,25 +439,53 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            // Record final aggregate metrics (histograms sampled once per request)
-            if let Some(ref tracker) = tracker {
-                tracker.record_finish();
-                tracker.record_osl(cumulative_osl);
-
-                request_metrics
-                    .output_sequence_tokens
-                    .observe(cumulative_osl as f64);
-            }
-            request_metrics.requests_total.inc();
-
-            // Only call free() if we handle local updates.
-            // When handle_local_updates=false, external caller handles cleanup via C FFI.
-            if handle_local_updates
-                && let Err(e) = chooser.free(&context_id).await
-            {
-                tracing::warn!("Failed to free request {context_id}: {e}");
-            }
+            guard.finish().await;
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
+    }
+}
+
+/// A direct routing wrapper for `RouterMode::Direct`.
+///
+/// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
+/// then routes directly to the specified worker. Used when an external router
+/// (e.g., EPP) handles worker selection.
+pub struct DirectRoutingRouter {
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+}
+
+impl DirectRoutingRouter {
+    pub fn new(inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>) -> Self {
+        DirectRoutingRouter { inner }
+    }
+
+    /// Extract worker ID from request routing hints.
+    /// Returns an error if no worker ID is found (required in direct routing mode).
+    fn get_worker_id(request: &PreprocessedRequest) -> Result<u64, Error> {
+        let routing = request.routing.as_ref();
+        let worker_id = routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id));
+
+        worker_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Worker ID required (--direct-route) but none found in request. \
+                 Expected decode_worker_id or backend_instance_id to be set by external router (e.g., EPP)."
+            )
+        })
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for DirectRoutingRouter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let worker_id = Self::get_worker_id(&request)?;
+
+        tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");
+
+        self.inner.direct(request, worker_id).await
     }
 }

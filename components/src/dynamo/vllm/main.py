@@ -28,7 +28,6 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisherConfig,
     fetch_llm,
     register_llm,
 )
@@ -341,14 +340,14 @@ def setup_kv_event_publisher(
                 f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
             )
 
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.connection_id(),
+        kv_publisher = KvEventPublisher(
+            component=component,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
+            zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
         )
-        kv_publisher = KvEventPublisher(component=component, zmq_config=zmq_config)
         kv_publishers.append(kv_publisher)
 
         logger.info(
