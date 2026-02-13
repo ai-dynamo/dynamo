@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 import yaml
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 
 def parse_args():
@@ -76,7 +76,10 @@ def validate_args(args):
 
 def render(args, context, script_dir):
     env = Environment(
-        loader=FileSystemLoader(script_dir), trim_blocks=False, lstrip_blocks=True
+        loader=FileSystemLoader(script_dir),
+        trim_blocks=False,
+        lstrip_blocks=True,
+        undefined=StrictUndefined,  # Raise an error if a variable in the template is not provided in the context
     )
     template = env.get_template("Dockerfile.template")
     rendered = template.render(
