@@ -8,7 +8,6 @@ from typing import List, Dict, Any, Optional
 
 from .config import Config
 from .claude_client import ClaudeClient
-from .deduplicator import ErrorDeduplicator
 from .error_extractor import ErrorContext
 
 
@@ -18,7 +17,6 @@ class ErrorClassification:
 
     # Identity
     error_id: str
-    error_hash: str
 
     # Source references
     workflow_id: Optional[str] = None
@@ -69,85 +67,19 @@ class ErrorClassification:
     # Timestamp
     timestamp: Optional[str] = None
 
-    def to_opensearch_doc(self) -> Dict[str, Any]:
-        """Convert to OpenSearch document format with proper field prefixes."""
-        doc = {
-            "_id": self.error_id,
-            "s_error_id": self.error_id,
-            "s_error_hash": self.error_hash,
-
-            # Source references
-            "s_workflow_id": self.workflow_id,
-            "s_job_id": self.job_id,
-            "s_job_name": self.job_name,
-            "s_step_id": self.step_id,
-            "s_step_name": self.step_name,
-            "s_test_name": self.test_name,
-
-            # Error source
-            "s_error_source": self.error_source,
-            "s_framework": self.framework,
-
-            # Common context
-            "s_user_alias": self.user_alias,
-            "s_repo": self.repo,
-            "s_workflow_name": self.workflow_name,
-            "s_branch": self.branch,
-            "s_pr_id": self.pr_id,
-            "s_commit_sha": self.commit_sha,
-
-            # Error content
-            "s_error_snippet": self.error_snippet,
-            "s_error_full_text": self.error_full_text,
-
-            # AI classification
-            "s_primary_category": self.primary_category,
-            "s_subcategory": self.subcategory,
-            "f_confidence_score": self.confidence_score,
-            "s_root_cause_summary": self.root_cause_summary,
-
-            # Metadata
-            "s_classification_method": self.classification_method,
-            "s_model_version": self.model_version,
-            "ts_classified_at": self.classified_at,
-            "b_is_duplicate": self.is_duplicate,
-
-            # Tracking
-            "l_occurrence_count": self.occurrence_count,
-            "ts_first_seen": self.first_seen,
-            "ts_last_seen": self.last_seen,
-
-            # API usage
-            "l_prompt_tokens": self.prompt_tokens,
-            "l_completion_tokens": self.completion_tokens,
-            "l_cached_tokens": self.cached_tokens,
-
-            "@timestamp": self.timestamp,
-        }
-
-        # Remove None values
-        return {k: v for k, v in doc.items() if v is not None}
-
 
 class ErrorClassifier:
     """Main error classification orchestrator."""
 
-    def __init__(
-        self,
-        config: Config,
-        opensearch_client: Any = None
-    ):
+    def __init__(self, config: Config):
         """
         Initialize classifier.
 
         Args:
             config: Configuration object
-            opensearch_client: OpenSearch client for deduplication
         """
         self.config = config
         self.claude = ClaudeClient(config)
-        self.deduplicator = ErrorDeduplicator(opensearch_client, config)
-        self.opensearch_client = opensearch_client
 
     def classify_job_from_full_log(
         self,
@@ -184,13 +116,10 @@ class ErrorClassifier:
         # Convert results to ErrorClassification objects
         classifications = []
         for error_data in result.get("errors_found", []):
-            # Compute error hash
             error_text = error_data.get("log_excerpt", "")
-            error_hash = self.deduplicator.compute_error_hash(error_text)
 
             classification = ErrorClassification(
                 error_id=str(uuid.uuid4()),
-                error_hash=error_hash,
                 workflow_id=workflow_context.get("workflow_id"),
                 job_id=job_id,
                 job_name=job_name,

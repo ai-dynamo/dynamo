@@ -26,12 +26,6 @@ class Config:
     api_format: str = "anthropic"  # "anthropic" or "openai"
     api_base_url: str = None  # Custom base URL (e.g., NVIDIA: https://inference-api.nvidia.com/v1)
 
-    # OpenSearch settings
-    error_classification_index: str = None
-    opensearch_url: str = None
-    opensearch_username: str = None
-    opensearch_password: str = None
-
     # Processing limits
     max_error_length: int = 10000  # Max chars to send to API
     batch_size: int = 10
@@ -60,10 +54,6 @@ class Config:
             anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
             api_format=os.getenv("API_FORMAT", "anthropic"),  # anthropic or openai
             api_base_url=os.getenv("API_BASE_URL"),  # e.g., https://inference-api.nvidia.com/v1
-            error_classification_index=os.getenv("ERROR_CLASSIFICATION_INDEX"),
-            opensearch_url=os.getenv("OPENSEARCH_URL"),
-            opensearch_username=os.getenv("OPENSEARCH_USERNAME"),
-            opensearch_password=os.getenv("OPENSEARCH_PASSWORD"),
             max_error_length=int(os.getenv("MAX_ERROR_LENGTH", "10000")),
             batch_size=int(os.getenv("BATCH_SIZE", "10")),
             max_rpm=int(os.getenv("MAX_RPM", "50")),

@@ -404,7 +404,7 @@ def extract_errors_from_workflow() -> List[ErrorContext]:
     return errors
 
 
-def validate_classifications(classifications: List[Any], errors: List[ErrorContext]) -> List[str]:
+def classify_and_annotate_workflow_errors():
     """
     Validate classifications for consistency and quality.
 
@@ -565,7 +565,7 @@ def classify_and_annotate_workflow_errors():
         config = Config.from_env()
 
         # Initialize classifier and annotator
-        classifier = ErrorClassifier(config, opensearch_client=None)
+        classifier = ErrorClassifier(config)
         # Pass Claude client to annotator for intelligent summary generation
         annotator = GitHubAnnotator(
             config=AnnotationConfig.from_env(),

@@ -5,7 +5,6 @@ AI-powered error classification system for CI/CD workflows.
 from .config import Config, get_config, ERROR_CATEGORIES
 from .classifier import ErrorClassifier, ErrorClassification
 from .error_extractor import ErrorContext
-from .deduplicator import ErrorDeduplicator
 from .claude_client import ClaudeClient
 from .prompts import get_category_definitions
 from .github_annotator import (
@@ -25,8 +24,6 @@ __all__ = [
     "ErrorClassification",
     # Error context
     "ErrorContext",
-    # Deduplicator
-    "ErrorDeduplicator",
     # Claude client
     "ClaudeClient",
     # Prompts
