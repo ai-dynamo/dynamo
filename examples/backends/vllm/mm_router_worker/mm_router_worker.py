@@ -26,13 +26,7 @@ import signal
 import uvloop
 from transformers import AutoProcessor, AutoTokenizer
 
-from dynamo.llm import (
-    KvRouter,
-    KvRouterConfig,
-    ModelInput,
-    ModelType,
-    register_llm,
-)
+from dynamo.llm import KvRouter, KvRouterConfig, ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 from .handler import MMRouterHandler

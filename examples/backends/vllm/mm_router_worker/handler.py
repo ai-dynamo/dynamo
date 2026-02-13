@@ -56,7 +56,7 @@ class MMRouterHandler:
             "token_ids": [...],
             "sampling_options": {...},
             "stop_conditions": {...},
-            "extra_args": {"messages": [...]} 
+            "extra_args": {"messages": [...]}
         }
 
         Args:
@@ -96,7 +96,9 @@ class MMRouterHandler:
                 )
 
             routing_tokens = processed.tokens
-            routing_blocks = (len(routing_tokens) + self.block_size - 1) // self.block_size
+            routing_blocks = (
+                len(routing_tokens) + self.block_size - 1
+            ) // self.block_size
             logger.debug(
                 f"MM request: {len(routing_tokens)} routing tokens, "
                 f"{len(image_urls)} images, {routing_blocks} routing blocks"
@@ -110,7 +112,9 @@ class MMRouterHandler:
                 )
 
             routing_tokens = tokens
-            routing_blocks = (len(routing_tokens) + self.block_size - 1) // self.block_size
+            routing_blocks = (
+                len(routing_tokens) + self.block_size - 1
+            ) // self.block_size
             logger.debug(
                 f"Text request: {len(routing_tokens)} routing tokens, {routing_blocks} routing blocks"
             )

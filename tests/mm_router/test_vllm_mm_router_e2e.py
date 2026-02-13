@@ -113,7 +113,9 @@ class VLLMWorkerProcess(ManagedProcess):
                 f"{VLLM_MM_MODEL}__internal",
             ],
             env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
-            health_check_urls=[(f"http://localhost:{system_port}/health", _check_ready)],
+            health_check_urls=[
+                (f"http://localhost:{system_port}/health", _check_ready)
+            ],
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
             log_dir=_prepare_log_dir(request, "vllm-worker"),
@@ -149,7 +151,9 @@ class VLLMMMRouterWorkerProcess(ManagedProcess):
                 DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]',
                 DYN_SYSTEM_PORT=str(system_port),
             ),
-            health_check_urls=[(f"http://localhost:{system_port}/health", _check_ready)],
+            health_check_urls=[
+                (f"http://localhost:{system_port}/health", _check_ready)
+            ],
             timeout=240,
             straggler_commands=["mm_router_worker"],
             log_dir=_prepare_log_dir(request, "vllm-mm-router"),
@@ -468,9 +472,7 @@ def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     image_uri = _make_data_uri(_STAIRCASE_IMAGE_FRESH_COLOR)
     staircase_prompt = "MM routing e2e: staircase."
     payload_single = _build_payload([image_uri], prompt=staircase_prompt)
-    payload_double = _build_payload(
-        [image_uri, image_uri], prompt=staircase_prompt
-    )
+    payload_double = _build_payload([image_uri, image_uri], prompt=staircase_prompt)
     payload_triple = _build_payload(
         [image_uri, image_uri, image_uri], prompt=staircase_prompt
     )
@@ -547,7 +549,9 @@ def test_vllm_mm_overlap_diff_images_less_than_same(
     overlap_probe, total_probe, segment_probe = _send_request_get_overlap(
         frontend_port, router_proc, probe_payload, "probe_different_images_req1"
     )
-    assert total_probe > 0, f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
+    assert (
+        total_probe > 0
+    ), f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
     assert abs(total_probe - total_baseline) <= 4, (
         f"Expected different-images total blocks to stay near baseline, "
         f"got different={total_probe}, baseline={total_baseline}"
@@ -572,10 +576,16 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
         prompt="MM routing e2e: prompt-sensitive baseline alpha.",
     )
     overlap_baseline_1, total_baseline_1, _ = _send_request_get_overlap(
-        frontend_port, router_proc, baseline_payload, "baseline_same_images_prompt_a_req1"
+        frontend_port,
+        router_proc,
+        baseline_payload,
+        "baseline_same_images_prompt_a_req1",
     )
     overlap_baseline_2, total_baseline_2, segment_baseline = _send_request_get_overlap(
-        frontend_port, router_proc, baseline_payload, "baseline_same_images_prompt_a_req2"
+        frontend_port,
+        router_proc,
+        baseline_payload,
+        "baseline_same_images_prompt_a_req2",
     )
     overlap_baseline = max(overlap_baseline_1, overlap_baseline_2)
     total_baseline = total_baseline_2
@@ -600,7 +610,9 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     overlap_probe, total_probe, segment_probe = _send_request_get_overlap(
         frontend_port, router_proc, probe_payload, "probe_same_images_prompt_b_req1"
     )
-    assert total_probe > 0, f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
+    assert (
+        total_probe > 0
+    ), f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
     assert abs(total_probe - total_baseline) <= 4, (
         f"Expected different-prompt total blocks to stay near baseline, "
         f"got different_prompt={total_probe}, baseline={total_baseline}"

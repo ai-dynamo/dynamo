@@ -50,7 +50,9 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-def _compute_mm_uuids(multi_modal_data: Dict[str, Any] | None) -> Dict[str, list[str]] | None:
+def _compute_mm_uuids(
+    multi_modal_data: Dict[str, Any] | None
+) -> Dict[str, list[str]] | None:
     """
     Compute multi_modal_uuids from multi_modal_data.
 

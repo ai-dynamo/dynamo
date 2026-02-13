@@ -22,9 +22,7 @@ def image_to_bytes(img: Any) -> bytes:
     raise TypeError(f"Unsupported image type for hashing: {type(img)}")
 
 
-def compute_mm_uuids_from_images(
-    images: Sequence[Any]
-) -> list[str]:
+def compute_mm_uuids_from_images(images: Sequence[Any]) -> list[str]:
     """
     Compute SHA256 hex UUIDs for image inputs.
     """

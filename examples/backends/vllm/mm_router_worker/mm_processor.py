@@ -83,16 +83,15 @@ def process_multimodal(
         pil_images.append(pil_img)
 
     # Get expanded tokens and image ranges (no token replacement for vLLM)
-    tokens, image_ranges = _get_expanded_tokens(prompt, pil_images, tokenizer, processor)
-    logger.info(
-        f"Expanded: {len(tokens)} tokens, "
-        f"image_ranges={image_ranges}"
+    tokens, image_ranges = _get_expanded_tokens(
+        prompt, pil_images, tokenizer, processor
     )
+    logger.info(f"Expanded: {len(tokens)} tokens, " f"image_ranges={image_ranges}")
 
     # Compute mm_hashes exactly like vLLM handler's multi_modal_uuids path.
     mm_uuids = compute_mm_uuids_from_images(pil_images)
     mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
-    
+
     logger.info(f"mm_hashes={mm_hashes}")
 
     return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
@@ -227,9 +226,7 @@ def _get_expanded_tokens(
         return tokenizer.encode(prompt), None
 
 
-def _compute_tokens_per_image(
-    processor_output: dict, processor: Any
-) -> list[int]:
+def _compute_tokens_per_image(processor_output: dict, processor: Any) -> list[int]:
     """
     Compute the number of visual tokens for each image from processor output.
 
@@ -245,9 +242,7 @@ def _compute_tokens_per_image(
 
     grid_thw = processor_output.get("image_grid_thw")
     if grid_thw is None:
-        raise ValueError(
-            "image_grid_thw not found in processor output"
-        )
+        raise ValueError("image_grid_thw not found in processor output")
 
     merge_size = getattr(processor.image_processor, "merge_size", 2)
     return [int(t * h * w) // (merge_size**2) for t, h, w in grid_thw]
@@ -338,4 +333,3 @@ def _compute_per_image_ranges(
         return None
 
     return result
-
