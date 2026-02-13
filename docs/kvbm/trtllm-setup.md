@@ -114,6 +114,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ```bash
 # Build the Dynamo TensorRT-LLM container using commit ID 18e611da773026a55d187870ebcfa95ff00c8482. Note: This build can take a long time.
+rm -rf /tmp/TensorRT-LLM && \
 ./container/build.sh --framework trtllm --tensorrtllm-commit 18e611da773026a55d187870ebcfa95ff00c8482 --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git
 
 # Launch the container
