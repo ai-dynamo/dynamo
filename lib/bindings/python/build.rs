@@ -15,8 +15,7 @@ fn main() {
 
         // Write a minimal valid static archive (just the magic header).
         // macOS `ar` refuses to create an empty archive, so write it directly.
-        std::fs::write(&lib_path, b"!<arch>\n")
-            .expect("failed to create empty libstdc++.a");
+        std::fs::write(&lib_path, b"!<arch>\n").expect("failed to create empty libstdc++.a");
 
         println!("cargo:rustc-link-search=native={}", out_dir);
     }
