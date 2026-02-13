@@ -23,16 +23,34 @@ class SweepMode(str, Enum):
     THOROUGH = "thorough"
 
 
+class ModelCacheSpec(BaseModel):
+    """PVC-based model cache configuration."""
+
+    pvc_name: str = Field(
+        ...,
+        description="Name of the PVC containing the model weights.",
+    )
+    model_path_in_pvc: str = Field(
+        ...,
+        description="Path to the model checkpoint directory within the PVC "
+        "(e.g. 'deepseek-r1' or 'models/Llama-3.1-405B-FP8').",
+    )
+    pvc_mount_path: str = Field(
+        default="/opt/model-cache",
+        description="Mount path for the PVC inside the container.",
+    )
+
+
 class ModelSpec(BaseModel):
     model_name: str = Field(
         ...,
         description="Model name or identifier (e.g. 'meta-llama/Llama-3.1-405B'). "
         "Can be a HuggingFace ID or a private model name. Always required.",
     )
-    pvc_checkpoint_path: Optional[str] = Field(
+    model_cache: Optional[ModelCacheSpec] = Field(
         default=None,
-        description="Optional path to model checkpoint directory inside a PVC. "
-        "When provided, weights are loaded from this path instead of downloading from HF.",
+        description="Optional PVC model cache configuration. "
+        "When provided, weights are loaded from the PVC instead of downloading from HF.",
     )
 
 
@@ -115,9 +133,7 @@ class SLASpec(BaseModel):
         has_e2e = self.e2e_latency is not None
 
         if not has_ttft_itl and not has_e2e:
-            raise ValueError(
-                "SLA must specify either (ttft and itl) or e2e_latency."
-            )
+            raise ValueError("SLA must specify either (ttft and itl) or e2e_latency.")
         if has_ttft_itl and has_e2e:
             raise ValueError(
                 "SLA must specify either (ttft and itl) or e2e_latency, not both."
