@@ -203,7 +203,7 @@ async def worker():
 
     dynamo_args = config.dynamo_args
     runtime, loop = create_runtime(
-        store_kv=dynamo_args.store_kv,
+        discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
         use_kv_events=dynamo_args.use_kv_events,
