@@ -290,12 +290,17 @@ impl PrefillRouter {
                 InnerPrefillRouter::KvRouter(r) => r,
                 _ => return None,
             };
-            // Extract LORA name from routing hints
+            // Extract LORA name and priority jump from routing hints
             let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
+            let priority_jump = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.priority_jump)
+                .unwrap_or(0.0);
             match async {
                 kv_router
                     .chooser
-                    .find_best_match(None, &req.token_ids, None, false, lora_name)
+                    .find_best_match(None, &req.token_ids, None, false, lora_name, priority_jump)
                     .await
             }
             .instrument(tracing::info_span!("kv_find_best_match"))
@@ -627,10 +632,14 @@ impl
                     decode_req.bootstrap_info = Some(info);
                 }
 
-                // Set router_config_override for decode: overlap_score_weight = 0
+                // Set router_config_override for decode:
+                // - overlap_score_weight = 0 (no KV cache overlap scoring for decode)
+                // - assume_kv_reuse = false (generate random hashes since decode workers
+                //   may already have blocks cached from prefill transfer)
                 let existing_override = decode_req.router_config_override.take();
                 decode_req.router_config_override = Some(RouterConfigOverride {
                     overlap_score_weight: Some(0.0),
+                    assume_kv_reuse: Some(false),
                     ..existing_override.unwrap_or_default()
                 });
 

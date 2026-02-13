@@ -24,6 +24,7 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
+from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import (
     KvRouter,
     ModelCardInstanceId,
@@ -367,10 +368,12 @@ class EngineFactory:
         self,
         runtime: DistributedRuntime,
         router_config: RouterConfig,
+        config: FrontendConfig,
         flags: Namespace,
     ):
         self.runtime = runtime
         self.router_config = router_config
+        self.config = config
         self.flags = flags
 
     async def chat_engine_factory(
@@ -444,7 +447,7 @@ class EngineFactory:
         if self.router_config.router_mode == RouterMode.KV:
             router = KvRouter(
                 endpoint=generate_endpoint,
-                block_size=self.flags.kv_cache_block_size or 16,
+                block_size=self.config.kv_cache_block_size or 16,
                 kv_router_config=self.router_config.kv_router_config,
             )
         else:

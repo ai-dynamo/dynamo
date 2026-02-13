@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Profiler Guide
 ---
 
 # Profiler Guide
@@ -170,12 +171,12 @@ The profiler follows a 5-step process:
    - **Prefill**:
      - TP/TEP: Measure TTFT with batch size = 1 (assuming ISL is long enough to saturate compute) without KV reuse.
      - DEP: Attention uses data parallelism. Send a single burst with total concurrency `attention_dp_size × attn_dp_num_req_ratio` (defaults to 4) and compute the reported TTFT as `time_to_first_token.max / attn_dp_num_req_ratio` from the AIPerf summary of that burst.
-   ![Prefill Performance](/assets/img/h100-prefill-performance.png)
+   ![Prefill Performance](../../../assets/img/h100-prefill-performance.png)
    - **Decode**: Measure the ITL under different numbers of in-flight requests, from 1 to the maximum the KV cache can hold. To measure ITL without being affected by piggy-backed prefill requests, the script enables KV-reuse and warms up the engine by issuing the same prompts before measuring.
-   ![Decode Performance](/assets/img/h100-decode-performance.png)
+   ![Decode Performance](../../../assets/img/h100-decode-performance.png)
 4. **Recommendation**: Select optimal parallelization mapping for prefill and decode that achieves the highest per-GPU throughput while adhering to the SLA on TTFT and ITL.
 5. **In-Depth Profiling on the Recommended P/D Engine**: Interpolate TTFT with ISL and ITL with active KV cache and decode context length for more accurate performance estimation.
-![ITL Interpolation](/assets/img/pd-interpolation.png)
+![ITL Interpolation](../../../assets/img/pd-interpolation.png)
    - **Prefill**: Measures TTFT and throughput per GPU across different input lengths with batch size=1.
    - **Decode**: Measures ITL and throughput per GPU under various KV cache loads and decode context lengths.
 
