@@ -37,7 +37,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     is_prefill_worker: bool
     is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
-    store_kv: str
+    discovery_backend: str
     request_plane: str
     event_plane: str
     enable_local_indexer: bool = True
