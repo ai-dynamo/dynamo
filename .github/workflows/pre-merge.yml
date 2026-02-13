@@ -131,6 +131,9 @@ jobs:
     - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       with:
         lfs: true
+    - name: Verify Cargo lock file is in sync
+      working-directory: ${{ matrix.dir }}
+      run: cargo metadata --locked --format-version 1
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
