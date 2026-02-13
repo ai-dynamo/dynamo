@@ -24,7 +24,6 @@ use dynamo_runtime::engine::AsyncEngine;
 use dynamo_runtime::pipeline::{Context as PipelineContext, Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use crate::preprocessor::ANNOTATION_LLM_METRICS;
 use crate::preprocessor::prompt::{OAIChatLikeRequest, OAIPromptFormatter};
 use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
