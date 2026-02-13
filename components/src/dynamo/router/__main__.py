@@ -20,7 +20,7 @@ from typing import Optional
 
 import uvloop
 
-from dynamo.llm import KvPushRouter, KvRouterConfig
+from dynamo.llm import KvRouter, KvRouterConfig
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -42,7 +42,7 @@ class StandaloneRouterHandler:
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
-        self.kv_push_router: Optional[KvPushRouter] = None
+        self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
 
     async def initialize(self):
@@ -66,15 +66,14 @@ class StandaloneRouterHandler:
 
             self.worker_client = await worker_endpoint.client()
 
-            # Create KvPushRouter with specified configuration
-            self.kv_push_router = KvPushRouter(
+            self.kv_router = KvRouter(
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
             )
 
         except Exception as e:
-            logger.error(f"Failed to initialize KvPushRouter: {e}")
+            logger.error(f"Failed to initialize KvRouter: {e}")
             raise
 
     async def generate(self, request):
@@ -85,11 +84,11 @@ class StandaloneRouterHandler:
         Wraps the request into PreprocessedRequest format and wraps worker responses
         into LLMEngineOutput format.
         """
-        if self.kv_push_router is None:
-            logger.error("KvPushRouter not initialized - cannot process request")
+        if self.kv_router is None:
+            logger.error("KvRouter not initialized - cannot process request")
             raise RuntimeError("Router not initialized")
 
-        # Wrap incoming request into PreprocessedRequest format for KvPushRouter
+        # Wrap incoming request into PreprocessedRequest format for KvRouter
         # The request should already have most fields, but we ensure it has the structure
         # Build routing hints from request (supports both nested routing object and legacy dp_rank)
         routing = request.get("routing")
@@ -112,8 +111,7 @@ class StandaloneRouterHandler:
             "extra_args": request.get("extra_args"),
         }
 
-        # Route and process through KvPushRouter
-        async for worker_output in await self.kv_push_router.generate_from_request(
+        async for worker_output in await self.kv_router.generate_from_request(
             preprocessed_request
         ):
             # Wrap worker output into LLMEngineOutput format
@@ -142,11 +140,11 @@ class StandaloneRouterHandler:
         overlap, but does NOT actually route the request or update router states.
         It's useful for debugging, monitoring, or implementing custom routing logic.
         """
-        if self.kv_push_router is None:
-            logger.error("KvPushRouter not initialized - cannot get best worker")
+        if self.kv_router is None:
+            logger.error("KvRouter not initialized - cannot get best worker")
             raise RuntimeError("Router not initialized")
 
-        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_push_router.best_worker(
+        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_router.best_worker(
             token_ids, router_config_override
         )
 
@@ -221,11 +219,27 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--durable-kv-events",
+        action="store_true",
+        dest="durable_kv_events",
+        default=False,
+        help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
+    )
+
+    parser.add_argument(
         "--no-track-active-blocks",
         action="store_false",
         dest="router_track_active_blocks",
         default=True,
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing (default: True)",
+    )
+
+    parser.add_argument(
+        "--no-assume-kv-reuse",
+        action="store_false",
+        dest="router_assume_kv_reuse",
+        default=True,
+        help="KV Router: When tracking active blocks, do not assume KV cache reuse (generate random hashes instead of computing actual block hashes). Useful when KV cache reuse is not expected. By default, KV cache reuse is assumed.",
     )
 
     parser.add_argument(
@@ -288,10 +302,12 @@ async def worker(runtime: DistributedRuntime):
         f"overlap_score_weight={args.kv_overlap_score_weight}, "
         f"router_temperature={args.router_temperature}, "
         f"use_kv_events={args.use_kv_events}, "
+        f"durable_kv_events={args.durable_kv_events}, "
         f"router_replica_sync={args.router_replica_sync}, "
         f"router_reset_states={args.router_reset_states}, "
         f"router_track_active_blocks={args.router_track_active_blocks}, "
         f"router_track_output_blocks={args.router_track_output_blocks}, "
+        f"router_assume_kv_reuse={args.router_assume_kv_reuse}, "
         f"router_ttl_secs={args.router_ttl_secs}, "
         f"router_max_tree_size={args.router_max_tree_size}, "
         f"router_prune_target_ratio={args.router_prune_target_ratio}"
@@ -302,11 +318,13 @@ async def worker(runtime: DistributedRuntime):
         overlap_score_weight=args.kv_overlap_score_weight,
         router_temperature=args.router_temperature,
         use_kv_events=args.use_kv_events,
+        durable_kv_events=args.durable_kv_events,
         router_replica_sync=args.router_replica_sync,
-        router_snapshot_threshold=args.router_snapshot_threshold,
-        router_reset_states=args.router_reset_states,
         router_track_active_blocks=args.router_track_active_blocks,
         router_track_output_blocks=args.router_track_output_blocks,
+        router_assume_kv_reuse=args.router_assume_kv_reuse,
+        router_snapshot_threshold=args.router_snapshot_threshold,
+        router_reset_states=args.router_reset_states,
         router_ttl_secs=args.router_ttl_secs,
         router_max_tree_size=args.router_max_tree_size,
         router_prune_target_ratio=args.router_prune_target_ratio,
