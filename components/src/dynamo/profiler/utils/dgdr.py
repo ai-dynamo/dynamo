@@ -13,7 +13,7 @@ class Backend(str, Enum):
     VLLM = "vllm"
     SGLANG = "sglang"
     TRTLLM = "trtllm"
-    ANY = "any" 
+    ANY = "any"
 
 
 class SweepMode(str, Enum):
