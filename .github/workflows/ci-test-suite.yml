@@ -822,7 +822,7 @@ jobs:
     needs: [build-amd64, build-cuda13-amd64]
     if: always()
     runs-on: prod-builder-amd-v1
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
