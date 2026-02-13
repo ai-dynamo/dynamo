@@ -274,13 +274,14 @@ impl OpenAIPreprocessor {
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
+            let hints = nvext.agent_hints.as_ref();
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
-                enable_local_updates: nvext.enable_local_updates,
-                expected_output_tokens: nvext.expected_output_tokens,
+                expected_output_tokens: hints.and_then(|h| h.osl),
+                priority_jump: hints.and_then(|h| h.latency_sensitivity),
                 lora_name,
             };
             builder.routing(Some(routing));

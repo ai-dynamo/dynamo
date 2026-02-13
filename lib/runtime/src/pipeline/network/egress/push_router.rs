@@ -84,14 +84,17 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
-    Direct(u64),
-    // Marker value, KV routing itself is in dynamo-llm
     KV,
+    Direct,
 }
 
 impl RouterMode {
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
+    }
+
+    pub fn is_direct_routing(&self) -> bool {
+        *self == RouterMode::Direct
     }
 }
 
@@ -432,13 +435,16 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        //InstanceSource::Static => self.r#static(request).await,
         match self.router_mode {
             RouterMode::Random => self.random(request).await,
             RouterMode::RoundRobin => self.round_robin(request).await,
-            RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
             RouterMode::KV => {
                 anyhow::bail!("KV routing should not call generate on PushRouter");
+            }
+            RouterMode::Direct => {
+                anyhow::bail!(
+                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                );
             }
         }
     }

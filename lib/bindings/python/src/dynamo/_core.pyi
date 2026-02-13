@@ -950,6 +950,7 @@ class RouterMode:
     RoundRobin: "RouterMode"
     Random: "RouterMode"
     KV: "RouterMode"
+    Direct: "RouterMode"
     ...
 
 class RouterConfig:
@@ -968,7 +969,7 @@ class RouterConfig:
         Create a RouterConfig.
 
         Args:
-            mode: The router mode (RoundRobin, Random, or KV)
+            mode: The router mode (RoundRobin, Random, KV, or Direct)
             config: Optional KV router configuration (used when mode is KV)
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
@@ -995,6 +996,7 @@ class KvRouterConfig:
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
+        router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 1,
     ) -> None:
         """
@@ -1011,7 +1013,8 @@ class KvRouterConfig:
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
                 When enabled, the router adds placeholder blocks as tokens are generated
-                and applies fractional decay based on progress toward expected_output_tokens.
+                and applies fractional decay based on progress toward expected output
+                sequence length (agent_hints.osl in nvext).
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
@@ -1019,6 +1022,10 @@ class KvRouterConfig:
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: None).
+                When set, requests are queued if all workers exceed this fraction of
+                max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints.
+                If None, queueing is disabled and all requests go directly to the scheduler.
             router_event_threads: Number of event processing threads (default: 1).
                 When > 1, uses a concurrent radix tree with a thread pool.
         """

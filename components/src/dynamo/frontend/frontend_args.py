@@ -62,6 +62,7 @@ class FrontendConfig(ConfigBase):
     router_assume_kv_reuse: bool
     router_track_output_blocks: bool
     router_event_threads: int
+    router_queue_threshold: Optional[float]
     enforce_disagg: bool
 
     migration_limit: int
@@ -166,7 +167,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
             help="How to route the request.",
-            choices=["round-robin", "random", "kv"],
+            choices=["round-robin", "random", "kv", "direct"],
         )
         add_argument(
             g,
@@ -335,6 +336,19 @@ class FrontendArgGroup(ArgGroup):
                 "KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput."
             ),
             arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--router-queue-threshold",
+            env_var="DYN_ROUTER_QUEUE_THRESHOLD",
+            default=None,
+            help=(
+                "KV Router: Queue threshold fraction for prefill token capacity. "
+                "When set, requests are queued if all workers exceed this fraction of "
+                "max_num_batched_tokens. Enables priority scheduling via latency_sensitivity "
+                "hints. Must be > 0. If not set, queueing is disabled."
+            ),
+            arg_type=float,
         )
         add_negatable_bool_argument(
             g,
