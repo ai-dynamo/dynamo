@@ -46,6 +46,9 @@ pub enum RouterMode {
     RoundRobin,
     Random,
     KV,
+    /// Direct routing - reads worker ID from each request's routing hints.
+    /// Used when an external orchestrator (e.g., EPP) handles worker selection.
+    Direct,
 }
 
 impl From<RouterMode> for RsRouterMode {
@@ -54,6 +57,7 @@ impl From<RouterMode> for RsRouterMode {
             RouterMode::RoundRobin => Self::RoundRobin,
             RouterMode::Random => Self::Random,
             RouterMode::KV => Self::KV,
+            RouterMode::Direct => Self::Direct,
         }
     }
 }
@@ -149,6 +153,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Namespace>()?;
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
+    m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
@@ -162,20 +167,16 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
-    m.add_class::<llm::kv::KvIndexer>()?;
-    m.add_class::<llm::kv::ApproxKvIndexer>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::kv::ZmqKvEventListener>()?;
-    m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
-    m.add_class::<llm::kv::KvPushRouter>()?;
-    m.add_class::<llm::kv::KvPushRouterStream>()?;
+    m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -262,6 +263,7 @@ fn register_llm<'p>(
 
     let is_tensor_based = model_type.inner.supports_tensor();
     let is_images = model_type.inner.supports_images();
+    let is_videos = model_type.inner.supports_videos();
 
     let model_type_obj = model_type.inner;
 
@@ -310,9 +312,9 @@ fn register_llm<'p>(
         .or_else(|| Some(source_path.clone()));
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        // For TensorBased and Images models, skip HuggingFace downloads and register directly
-        // These model types don't require tokenizers
-        if is_tensor_based || is_images {
+        // For TensorBased, Images, and Videos models, skip HuggingFace downloads and register directly
+        // These model types handle model loading internally, no tokenizer extraction needed
+        if is_tensor_based || is_images || is_videos {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
@@ -483,6 +485,12 @@ struct Endpoint {
 
 #[pyclass]
 #[derive(Clone)]
+struct ModelCardInstanceId {
+    inner: rs::discovery::ModelCardInstanceId,
+}
+
+#[pyclass]
+#[derive(Clone)]
 struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
 }
@@ -520,6 +528,14 @@ impl ModelType {
     const Images: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Images,
     };
+    #[classattr]
+    const Videos: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Videos,
+    };
+
+    fn supports_chat(&self) -> bool {
+        self.inner.supports_chat()
+    }
 
     fn __or__(&self, other: &Self) -> Self {
         ModelType {
@@ -824,14 +840,20 @@ impl Endpoint {
         })
     }
 
-    fn client<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    #[pyo3(signature = (router_mode = None))]
+    fn client<'p>(
+        &self,
+        py: Python<'p>,
+        router_mode: Option<RouterMode>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
             let push_router = rs::pipeline::PushRouter::<
                 serde_json::Value,
                 RsAnnotated<serde_json::Value>,
-            >::from_client(client, Default::default())
+            >::from_client(client, router_mode.into())
             .await
             .map_err(to_pyerr)?;
             Ok(Client {
@@ -889,6 +911,19 @@ impl Namespace {
             inner,
             event_loop: self.event_loop.clone(),
         })
+    }
+}
+
+#[pymethods]
+impl ModelCardInstanceId {
+    // (namespace, component, endpoint)
+    // TODO: Can these be borrowed as &str?
+    fn triple(&self) -> (String, String, String) {
+        (
+            self.inner.namespace.clone(),
+            self.inner.component.clone(),
+            self.inner.endpoint.clone(),
+        )
     }
 }
 
@@ -955,10 +990,7 @@ impl Client {
                 _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
+            Ok(AsyncResponseStream::new(rx, annotated))
         })
     }
 
@@ -992,10 +1024,7 @@ impl Client {
                 _ => client.random(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
+            Ok(AsyncResponseStream::new(rx, annotated))
         })
     }
 
@@ -1036,10 +1065,7 @@ impl Client {
 
             tokio::spawn(process_stream(stream, tx));
 
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
+            Ok(AsyncResponseStream::new(rx, annotated))
         })
     }
 }
@@ -1074,9 +1100,21 @@ async fn process_stream(
 }
 
 #[pyclass]
-struct AsyncResponseStream {
+pub(crate) struct AsyncResponseStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
     annotated: bool,
+}
+
+impl AsyncResponseStream {
+    pub(crate) fn new(
+        rx: tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>,
+        annotated: bool,
+    ) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
+            annotated,
+        }
+    }
 }
 
 #[pymethods]

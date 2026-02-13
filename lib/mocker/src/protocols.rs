@@ -161,6 +161,18 @@ impl MockEngineArgs {
         MockEngineArgsBuilder::default()
     }
 
+    pub fn is_prefill(&self) -> bool {
+        self.worker_type == WorkerType::Prefill
+    }
+
+    pub fn is_decode(&self) -> bool {
+        self.worker_type == WorkerType::Decode
+    }
+
+    pub fn needs_kv_publisher(&self) -> bool {
+        self.enable_prefix_caching && !self.is_decode()
+    }
+
     /// Create MockEngineArgs from a JSON file containing extra engine arguments
     pub fn from_json_file(path: &Path) -> anyhow::Result<Self> {
         let mut builder = Self::builder();

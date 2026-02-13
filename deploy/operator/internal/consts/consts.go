@@ -81,6 +81,10 @@ const (
 
 	DefaultGroveTerminationDelay = 15 * time.Minute
 
+	// Operator origin version: stamped on DGD at creation time by mutating webhook.
+	// Records which operator version created the resource, enabling version-gated behavior changes.
+	KubeAnnotationDynamoOperatorOriginVersion = "nvidia.com/dynamo-operator-origin-version"
+
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
 	KubeLabelMetricsEnabled      = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection
@@ -117,68 +121,38 @@ const (
 	ResourceStateReady    = "ready"
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
-	// Checkpoint related constants
-	KubeLabelCheckpointSource = "nvidia.com/checkpoint-source"
-	KubeLabelCheckpointHash   = "nvidia.com/checkpoint-hash"
-	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"
 
-	// EnvCheckpointStorageType indicates the storage backend type (pvc, s3, oci)
-	EnvCheckpointStorageType = "DYN_CHECKPOINT_STORAGE_TYPE"
-	// EnvCheckpointLocation is the source location of the checkpoint
-	// For PVC: same as path (e.g., /checkpoints/{hash}.tar)
-	// For S3: s3://bucket/prefix/{hash}.tar
-	// For OCI: oci://registry/repo:{hash}
-	EnvCheckpointLocation = "DYN_CHECKPOINT_LOCATION"
-	// EnvCheckpointPath is the local path to the checkpoint tar file
-	// For PVC: same as location
-	// For S3/OCI: download destination (e.g., /tmp/{hash}.tar)
-	EnvCheckpointPath = "DYN_CHECKPOINT_PATH"
-	// EnvCheckpointHash is the identity hash (for debugging/observability)
-	EnvCheckpointHash = "DYN_CHECKPOINT_HASH"
-	// EnvCheckpointSignalFile is the full path to the signal file
-	// The DaemonSet writes this file after checkpoint is complete
-	// The checkpoint job pod waits for this file, then exits successfully
-	EnvCheckpointSignalFile = "DYN_CHECKPOINT_SIGNAL_FILE"
+	// Checkpoint/restore constants
+	// CROSS-REFERENCE: Some constants below are duplicated in the chrek package at
+	// deploy/chrek/pkg/config/constants.go. If you change a value here, update there too.
 
-	// EnvCheckpointReadyFile is the full path to a file the worker creates
-	// when the model is loaded and ready for checkpointing.
-	// The readiness probe watches this file to trigger DaemonSet checkpoint.
-	EnvCheckpointReadyFile = "DYN_CHECKPOINT_READY_FILE"
+	// Kubernetes labels
+	KubeLabelCheckpointSource = "nvidia.com/checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
+	KubeLabelCheckpointHash   = "nvidia.com/checkpoint-hash"   // Checkpoint identity hash for deduplication
+	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"   // DynamoCheckpoint CR name reference
 
-	// CRIU-related environment variables for restore operations
-	// EnvRestoreMarkerFile is the file created by CRIU after successful restore
-	EnvRestoreMarkerFile = "DYN_RESTORE_MARKER_FILE"
-	// EnvCRIUWorkDir is the working directory for CRIU operations
-	EnvCRIUWorkDir = "CRIU_WORK_DIR"
-	// EnvCRIULogDir is the directory where CRIU writes logs
-	EnvCRIULogDir = "CRIU_LOG_DIR"
-	// EnvCUDAPluginDir is the directory containing CRIU CUDA plugins
-	EnvCUDAPluginDir = "CUDA_PLUGIN_DIR"
-	// EnvCRIUTimeout is the timeout for CRIU operations
-	EnvCRIUTimeout = "CRIU_TIMEOUT"
+	// Environment variables injected into pods
+	EnvCheckpointStorageType  = "DYN_CHECKPOINT_STORAGE_TYPE"   // Storage backend (pvc, s3, oci) — checkpoint job pods only
+	EnvCheckpointLocation     = "DYN_CHECKPOINT_LOCATION"       // Full checkpoint URI — future S3/OCI; for PVC, use PATH+HASH instead
+	EnvCheckpointPath         = "DYN_CHECKPOINT_PATH"           // Base checkpoint directory (e.g., /checkpoints) — PVC restored pods
+	EnvCheckpointHash         = "DYN_CHECKPOINT_HASH"           // Identity hash — all checkpoint-related pods
+	EnvCheckpointSignalFile   = "DYN_CHECKPOINT_SIGNAL_FILE"    // Signal file path — checkpoint job pods
+	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
+	EnvRestoreMarkerFile      = "DYN_RESTORE_MARKER_FILE"       // Restore marker path — injected into restore and checkpoint job pods
+	EnvSkipWaitForCheckpoint  = "SKIP_WAIT_FOR_CHECKPOINT"      // Skip polling, check once — restored/DGD pods
+	// Checkpoint pod-internal constants
+	CheckpointVolumeName               = "checkpoint-storage"  // Pod-internal volume name for checkpoint PVC
+	CheckpointSignalVolumeName         = "checkpoint-signal"   // Pod-internal volume name for signal hostPath
+	CheckpointSignalMountPath          = "/checkpoint-signal"  // Mount path for signal volume inside pods
+	SignalFileCleanupInitContainerName = "cleanup-signal-file" // Init container that removes stale signal files before job starts
 
-	// CheckpointReadyFilePath is the default path for the ready file
-	CheckpointReadyFilePath = "/tmp/checkpoint-ready"
-	// RestoreMarkerFilePath is the default path for the restore marker
-	RestoreMarkerFilePath = "/tmp/dynamo-restored"
-	// CRIUWorkDirPath is the default CRIU work directory
-	CRIUWorkDirPath = "/var/criu-work"
-	// CRIULogDirPath is the default CRIU log directory
-	CRIULogDirPath = "/checkpoints/restore-logs"
-	// CUDAPluginDirPath is the default CUDA plugin directory
-	CUDAPluginDirPath = "/usr/local/lib/criu"
-	// DefaultCRIUTimeout is the default CRIU timeout in seconds (6 hours)
-	DefaultCRIUTimeout = "21600"
+	// SeccompProfilePath is the localhost seccomp profile that blocks io_uring syscalls.
+	// Deployed to nodes by the chrek DaemonSet init container.
+	SeccompProfilePath = "profiles/block-iouring.json"
 
-	CheckpointVolumeName       = "checkpoint-storage"
-	CheckpointSignalVolumeName = "checkpoint-signal"
-	CheckpointBasePath         = "/checkpoints"
-	CheckpointSignalHostPath   = "/var/lib/dynamo-checkpoint/signals"
-	CheckpointSignalMountPath  = "/checkpoint-signal"
-
-	// PodInfo volume for Downward API (critical for CRIU restore)
-	// After CRIU restore, environment variables contain stale values from checkpoint pod.
-	// The Downward API files at /etc/podinfo always have current pod identity.
+	// Pod identity (Downward API) ---
+	// After CRIU restore, env vars contain stale values from the checkpoint pod.
+	// The Downward API files at /etc/podinfo always reflect the current pod.
 	PodInfoVolumeName = "podinfo"
 	PodInfoMountPath  = "/etc/podinfo"
 

@@ -8,27 +8,24 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build
-#   fern     -> fern docs lint, sync, and version release
+#   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   docs, examples, ignore, planner
+#   examples, ignore, planner
 
 all:
   - '**'
 
 docs:
   - 'docs/**'
+  - 'fern/**'
   - '**/*.md'
-  - '**/*.rst'
   - '**/*.txt'
   - '**/.gitignore'
   - '**/.helmignore'
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
-
-fern:
-  - 'fern/**'
 
 examples:
   - 'recipes/**'
@@ -47,7 +44,6 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
-  - 'launch/**'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
@@ -55,14 +51,13 @@ ignore:
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
-  - 'container/Dockerfile.aws'
   - 'container/Dockerfile.docs'
-  - 'container/Dockerfile.epp'
-  - 'container/Dockerfile.frontend'
-  - 'container/Dockerfile.local_dev'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
+  - 'container/templates/aws.Dockerfile'
+  - 'container/templates/local_dev.Dockerfile'
+  - 'container/templates/dev.Dockerfile'
 
 ci: &ci
   - '.github/workflows/**'
@@ -76,8 +71,12 @@ core:
   - '!**/*.rst'
   - '!**/*.txt'
   - *ci
-  - 'container/build.sh'
-  - 'container/Dockerfile'
+  - 'container/render.py'
+  - 'container/Dockerfile.template'
+  - 'container/context.yaml'
+  - 'container/templates/args.Dockerfile'
+  - 'container/templates/dynamo_*'
+  - 'container/templates/wheel_builder.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - '.cargo/config.toml'
@@ -98,9 +97,11 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  - 'docs/kubernetes/api_reference.md'
+  - 'docs/pages/kubernetes/api-reference.md'
 
 deploy:
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/chrek/**'
@@ -108,41 +109,49 @@ deploy:
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
+  - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 
 vllm:
-  - 'container/Dockerfile.vllm'
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
+  - 'container/templates/vllm_*'
 
 sglang:
-  - 'container/Dockerfile.sglang'
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
+  - 'container/templates/sglang_*'
 
 trtllm:
-  - 'container/Dockerfile.trtllm'
+  - '!**/*.md'
+  - '!**/*.rst'
   - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
+  - 'container/templates/trtllm_*'
 
 frontend:
+  - '!**/*.md'
+  - '!**/*.rst'
   - *ci
   - '.cargo/config.toml'
   - 'lib/**'
   - '*.toml'
   - '*.lock'
-  - 'container/build.sh'
-  - 'container/Dockerfile'
   - 'container/deps/*'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
+  - 'container/templates/frontend.Dockerfile'
 
 rust:
   - '.github/workflows/pre-merge.yml'

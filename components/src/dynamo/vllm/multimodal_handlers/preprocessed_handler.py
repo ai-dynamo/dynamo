@@ -158,10 +158,10 @@ class PreprocessedHandler(ProcessMixIn):
         for encode_res in encode_res_gen:
             async for response in encode_res:
                 logger.debug(f"Received response from encode worker: {response}")
-                output = vLLMMultimodalRequest.model_validate_json(response.data())
+                output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
                 worker_request.multimodal_inputs.extend(output.multimodal_inputs)
 
-        response_generator = await self.pd_worker_client.round_robin(
+        response_generator = await self.pd_worker_client.round_robin(  # type: ignore[call-arg]
             worker_request.model_dump_json(), context=context
         )
 
@@ -180,7 +180,7 @@ class PreprocessedHandler(ProcessMixIn):
             async for resp in response_generator:
                 # Deserialize the response from the engine
                 # Creates correct vLLM objects for each field
-                output = MyRequestOutput.model_validate_json(resp.data())
+                output = MyRequestOutput.model_validate_json(resp.data())  # type: ignore[attr-defined]
 
                 # OpenAIServingChat.chat_completion_stream_generator() method expects a RequestOutput object
                 res = RequestOutput(
@@ -287,7 +287,7 @@ class ECProcessorHandler(PreprocessedHandler):
         engine_args: AsyncEngineArgs,
         encoder_worker_client: Client,
         pd_worker_client: Client,
-        prompt_template: str = None,
+        prompt_template: str | None = None,
     ):
         """
         Initialize the ECConnector processor.
@@ -398,7 +398,7 @@ class ECProcessorHandler(PreprocessedHandler):
         )
 
         # Send single request to PD worker with ALL images
-        response_generator = await self.pd_worker_client.round_robin(
+        response_generator = await self.pd_worker_client.round_robin(  # type: ignore[call-arg]
             worker_request.model_dump_json(), context=context
         )
 

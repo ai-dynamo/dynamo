@@ -361,6 +361,12 @@ pub mod build {
 pub mod mocker {
     /// Enable structured KV cache allocation/eviction trace logs (set to "1" or "true" to enable)
     pub const DYN_MOCKER_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
+
+    /// Use the original direct() code path in the mocker request dispatch.
+    ///
+    /// This path is race-prone during startup; prefer leaving it unset unless you are
+    /// explicitly trying to reproduce the original behavior.
+    pub const DYN_MOCKER_SYNC_DIRECT: &str = "DYN_MOCKER_SYNC_DIRECT";
 }
 
 /// Testing environment variables
@@ -463,6 +469,7 @@ mod tests {
             build::OUT_DIR,
             // Mocker
             mocker::DYN_MOCKER_KV_CACHE_TRACE,
+            mocker::DYN_MOCKER_SYNC_DIRECT,
             // Testing
             testing::DYN_QUEUED_UP_PROCESSING,
             testing::DYN_SOAK_RUN_DURATION,
