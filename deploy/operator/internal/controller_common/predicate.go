@@ -234,41 +234,6 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 	return false
 }
 
-// DetectCRDAvailability checks if a specific CRD (Kind) exists within an API group version.
-// Unlike detectAPIGroupAvailability which checks entire API groups, this checks for a specific
-// resource within a group — needed when multiple CRDs share the same API group (e.g. nvidia.com).
-func DetectCRDAvailability(ctx context.Context, mgr ctrl.Manager, groupVersion string, kind string) bool {
-	logger := log.FromContext(ctx)
-
-	cfg := mgr.GetConfig()
-	if cfg == nil {
-		logger.Info("CRD detection failed, no config available", "kind", kind)
-		return false
-	}
-
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
-	if err != nil {
-		logger.Error(err, "CRD detection failed, could not create discovery client", "kind", kind)
-		return false
-	}
-
-	resources, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
-	if err != nil {
-		logger.Info("CRD not available (group version not found)", "kind", kind, "groupVersion", groupVersion)
-		return false
-	}
-
-	for _, r := range resources.APIResources {
-		if r.Kind == kind {
-			logger.Info("CRD is available", "kind", kind, "groupVersion", groupVersion)
-			return true
-		}
-	}
-
-	logger.Info("CRD not available", "kind", kind, "groupVersion", groupVersion)
-	return false
-}
-
 // For DGD, pass in the meta annotations
 // For DCD, pass in the spec annotations
 func (c Config) IsK8sDiscoveryEnabled(annotations map[string]string) bool {

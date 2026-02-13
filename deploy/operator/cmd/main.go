@@ -677,17 +677,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	if commonController.DetectCRDAvailability(mainCtx, mgr, "nvidia.com/v1alpha1", "DynamoCheckpoint") {
-		if err = (&controller.CheckpointReconciler{
-			Client:   mgr.GetClient(),
-			Config:   ctrlConfig,
-			Recorder: mgr.GetEventRecorderFor("checkpoint"),
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "DynamoCheckpoint")
-			os.Exit(1)
-		}
-	} else {
-		setupLog.Info("DynamoCheckpoint CRD not installed, skipping checkpoint controller")
+	if err = (&controller.CheckpointReconciler{
+		Client:   mgr.GetClient(),
+		Config:   ctrlConfig,
+		Recorder: mgr.GetEventRecorderFor("checkpoint"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoCheckpoint")
+		os.Exit(1)
 	}
 
 	// Set webhooks enabled flag in config
