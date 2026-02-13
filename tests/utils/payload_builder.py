@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Union
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
 from tests.utils.payloads import (
+    AnthropicMessagesPayload,
+    AnthropicMessagesStreamPayload,
     CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
@@ -524,6 +526,59 @@ def responses_stream_payload_default(
             "input": TEXT_PROMPT,
             "stream": True,
             "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def anthropic_messages_payload_default(
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 200,
+    temperature: float = 0.0,
+) -> AnthropicMessagesPayload:
+    """Create a default Anthropic Messages API payload (non-streaming)."""
+    return AnthropicMessagesPayload(
+        body={
+            "max_tokens": max_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": TEXT_PROMPT,
+                }
+            ],
+            "temperature": temperature,
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def anthropic_messages_stream_payload_default(
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 200,
+    temperature: float = 0.0,
+) -> AnthropicMessagesStreamPayload:
+    """Create a default Anthropic Messages API streaming payload."""
+    return AnthropicMessagesStreamPayload(
+        body={
+            "max_tokens": max_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": TEXT_PROMPT,
+                }
+            ],
+            "stream": True,
             "temperature": temperature,
         },
         repeat_count=repeat_count,
