@@ -68,11 +68,11 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Use SGLang's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend. Cannot be used with --custom-jinja-template.",
     },
-    "force-sglang-stream-output": {
-        "flags": ["--force-sglang-stream-output"],
+    "stream-output": {
+        "flags": ["--stream-output"],
         "action": "store_true",
         "default": False,
-        "help": "Force SGLang's stream_output=True for disjoint token streaming. When enabled, SGLang sends only new tokens per update instead of cumulative tokens, which may improve performance for some workloads but can introduce overhead for others. Default is False (use SGLang's default behavior with manual slicing).",
+        "help": "Enable SGLang's stream_output=True for disjoint token streaming. When enabled, SGLang sends only new tokens per update instead of cumulative tokens, which may improve performance for some workloads but can introduce overhead for others. Default is False (use SGLang's default behavior with manual slicing).",
     },
     "multimodal-processor": {
         "flags": ["--multimodal-processor"],
@@ -177,7 +177,7 @@ class DynamoArgs:
 
     # preprocessing options
     use_sglang_tokenizer: bool = False
-    force_sglang_stream_output: bool = False
+    stream_output: bool = False
 
     # multimodal options
     multimodal_processor: bool = False
@@ -568,8 +568,8 @@ async def parse_args(args: list[str]) -> Config:
     # instead of cumulative tokens. This can reduce copying overhead for some workloads,
     # but may increase streaming frequency overhead for others.
     # When False (default), Dynamo handles token slicing manually.
-    if parsed_args.force_sglang_stream_output:
-        logging.info("Forcing SGLang stream_output=True for disjoint token streaming")
+    if parsed_args.stream_output:
+        logging.info("Enabling SGLang stream_output=True for disjoint token streaming")
         server_args.stream_output = True
 
     if parsed_args.use_sglang_tokenizer:
