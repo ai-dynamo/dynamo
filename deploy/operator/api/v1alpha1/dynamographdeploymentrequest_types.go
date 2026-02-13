@@ -49,7 +49,7 @@ type ConfigMapKeySelector struct {
 
 // ProfilingConfigSpec defines configuration for the profiling process.
 // This structure maps directly to the profile_sla.py config format.
-// See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
+// See dynamo/profiler/utils/profiler_argparse.py for the complete schema.
 type ProfilingConfigSpec struct {
 	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.
 	// The profiler will validate the configuration and report any errors.

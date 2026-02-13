@@ -17,6 +17,9 @@ pub struct RouterConfigOverride {
     #[builder(default)]
     #[validate(range(min = 0.0))]
     pub router_temperature: Option<f64>,
+
+    #[builder(default)]
+    pub assume_kv_reuse: Option<bool>,
 }
 
 /// KV Router configuration parameters
@@ -137,6 +140,7 @@ impl KvRouterConfig {
         &self,
         tokens: &[u32],
         block_size: u32,
+        config_override: Option<&RouterConfigOverride>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -147,7 +151,12 @@ impl KvRouterConfig {
             return Some(Vec::new());
         }
 
-        if self.router_assume_kv_reuse {
+        // Use override if provided, otherwise use default config
+        let assume_kv_reuse = config_override
+            .and_then(|cfg| cfg.assume_kv_reuse)
+            .unwrap_or(self.router_assume_kv_reuse);
+
+        if assume_kv_reuse {
             // Compute actual block hashes and sequence hashes
             let block_hashes = compute_block_hash_for_seq(tokens, block_size, None);
             Some(compute_seq_hash_for_block(&block_hashes))

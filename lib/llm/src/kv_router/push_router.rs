@@ -115,6 +115,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     worker,
                     lora_name,
+                    request.router_config_override.as_ref(),
                 )
                 .await;
         } else {
