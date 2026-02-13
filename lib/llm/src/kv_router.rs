@@ -771,17 +771,70 @@ impl KvPushRouter {
         };
 
         let Some(id) = preselected_id else {
+            let extra_args = request.extra_args.as_ref();
+
+            let routing_token_ids_owned = extra_args
+                .and_then(|args| args.get("routing_token_ids"))
+                .and_then(|raw_tokens| {
+                    serde_json::from_value::<Vec<u32>>(raw_tokens.clone())
+                        .map_err(|e| {
+                            tracing::warn!(
+                                request_id = %context_id,
+                                error = %e,
+                                "Invalid routing_token_ids in request.extra_args; using request.token_ids"
+                            );
+                            e
+                        })
+                        .ok()
+                });
+            let routing_token_ids = routing_token_ids_owned
+                .as_deref()
+                .unwrap_or(&request.token_ids);
+            let total_blocks = routing_token_ids
+                .len()
+                .div_ceil(self.chooser.block_size() as usize);
+
+            let block_mm_infos = extra_args
+                .and_then(|extra_args| extra_args.get("block_mm_infos"))
+                .and_then(|raw_infos| {
+                    serde_json::from_value::<Vec<Option<BlockExtraInfo>>>(raw_infos.clone())
+                        .map_err(|e| {
+                            tracing::warn!(
+                                request_id = %context_id,
+                                error = %e,
+                                "Invalid block_mm_infos in request.extra_args; ignoring MM block info"
+                            );
+                            e
+                        })
+                        .ok()
+                });
+
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
                     Some(context_id),
-                    &request.token_ids,
-                    None,
+                    routing_token_ids,
+                    block_mm_infos.as_deref(),
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,
                 )
                 .await?;
+
+            if !is_query_only {
+                tracing::info!(
+                    request_id = %context_id,
+                    worker_id = best_worker.worker_id,
+                    dp_rank = best_worker.dp_rank,
+                    overlap_blocks = overlap_amount,
+                    total_blocks = total_blocks,
+                    "[ROUTING] Best: worker_{} dp_rank={} with {}/{} blocks overlap",
+                    best_worker.worker_id,
+                    best_worker.dp_rank,
+                    overlap_amount,
+                    total_blocks,
+                );
+            }
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,

@@ -1314,6 +1314,9 @@ class KvPushRouter:
         router_config_override: Optional[JsonLike] = None,
         worker_id: Optional[int] = None,
         dp_rank: Optional[int] = None,
+        extra_args: Optional[JsonLike] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        multi_modal_data: Optional[JsonLike] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1332,6 +1335,14 @@ class KvPushRouter:
                     the request will be routed to the specific (worker_id, dp_rank) pair.
                     If only dp_rank is set, the router will select the best worker but
                     force routing to the specified dp_rank.
+            extra_args: Optional extra request arguments to include in the
+                       PreprocessedRequest.
+            block_mm_infos: Optional block-level multimodal metadata aligned to
+                           request blocks. When provided, this is forwarded via
+                           extra_args and used by the router for MM-aware worker
+                           selection in the non-preselected path.
+            multi_modal_data: Optional multimodal payload map to preserve image/video
+                             data for downstream model execution.
 
         Returns:
             An async iterator yielding generation responses

@@ -6,10 +6,8 @@ MM Router Handler - Routes requests to best vLLM worker based on KV cache overla
 """
 
 import logging
-from copy import deepcopy
 from typing import Any, AsyncGenerator
 
-from dynamo._core import compute_block_hash_for_seq_py
 from dynamo.llm import KvPushRouter
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -29,7 +27,7 @@ class MMRouterHandler:
     def __init__(
         self,
         client: Client,
-        kv_push_router: KvPushRouter | None,
+        kv_push_router: KvPushRouter,
         instance_ids: list[int],
         tokenizer: Any,
         processor: Any,
@@ -100,16 +98,12 @@ class MMRouterHandler:
                 image_ranges=processed.image_ranges,
             )
 
-            # Compute block hashes WITH mm_info
-            local_hashes = compute_block_hash_for_seq_py(
-                processed.tokens, self.block_size, block_mm_infos
-            )
-
+            routing_tokens = processed.tokens
+            routing_blocks = (len(routing_tokens) + self.block_size - 1) // self.block_size
             logger.debug(
-                f"MM request: {len(processed.tokens)} tokens, "
-                f"{len(image_urls)} images, {len(local_hashes)} blocks"
+                f"MM request: {len(routing_tokens)} routing tokens, "
+                f"{len(image_urls)} images, {routing_blocks} routing blocks"
             )
-            expanded_tokens = processed.tokens
         else:
             # Text-only: rely on frontend-preprocessed token_ids (ModelInput.Tokens contract)
             tokens = request.get("token_ids")
@@ -118,87 +112,46 @@ class MMRouterHandler:
                     "Missing or empty token_ids in preprocessed request for text-only routing"
                 )
 
-            local_hashes = compute_block_hash_for_seq_py(tokens, self.block_size, None)
-
+            routing_tokens = tokens
+            routing_blocks = (len(routing_tokens) + self.block_size - 1) // self.block_size
             logger.debug(
-                f"Text request: {len(tokens)} tokens, {len(local_hashes)} blocks"
+                f"Text request: {len(routing_tokens)} routing tokens, {routing_blocks} routing blocks"
             )
-            expanded_tokens = tokens
             block_mm_infos = None
 
-        total_blocks = len(local_hashes)
+        # Route and generate through KvPushRouter with explicit fields.
+        # We pass:
+        # - execution payload (token_ids + multi_modal_data)
+        # - routing payload (routing_token_ids + block_mm_infos)
+        # so generate() can select worker internally while preserving MM correctness.
+        token_ids = request.get("token_ids")
+        if not token_ids:
+            raise ValueError("Missing or empty token_ids in preprocessed request")
 
-        # Find best worker based on KV cache overlap
-        best_worker_id, dp_rank = await self._find_best_worker(
-            expanded_tokens,
-            block_mm_infos,
-            total_blocks=total_blocks,
+        raw_extra_args = request.get("extra_args")
+        if raw_extra_args is not None and not isinstance(raw_extra_args, dict):
+            logger.warning(
+                "request.extra_args is not a dict; replacing with routing-only extra_args"
+            )
+            extra_args: dict[str, Any] = {}
+        else:
+            extra_args = dict(raw_extra_args or {})
+        extra_args["routing_token_ids"] = routing_tokens
+
+        stream = await self.kv_push_router.generate(
+            token_ids=token_ids,
+            model=request["model"],
+            stop_conditions=request.get("stop_conditions"),
+            sampling_options=request.get("sampling_options"),
+            output_options=request.get("output_options"),
+            router_config_override=request.get("router_config_override"),
+            extra_args=extra_args,
+            block_mm_infos=block_mm_infos,
+            multi_modal_data=request.get("multi_modal_data"),
         )
-
-        logger.info(
-            f"Routing to worker {best_worker_id} (dp_rank={dp_rank}, "
-            f"mm={'yes' if image_urls else 'no'})"
-        )
-
-        # If router is unavailable, fallback to direct forwarding.
-        if self.kv_push_router is None:
-            async for response in await self.client.direct(request, best_worker_id):
-                yield response.data()
-            return
-
-        # Route and generate through KvPushRouter while preserving the full
-        # PreprocessedRequest payload (especially multi_modal_data for Qwen mRoPE).
-        routed_request = deepcopy(request)
-        routing = routed_request.get("routing") or {}
-        routing["backend_instance_id"] = best_worker_id
-        routing["dp_rank"] = dp_rank
-        routed_request["routing"] = routing
-
-        stream = await self.kv_push_router.generate_from_request(routed_request)
 
         async for response in stream:
             yield response
-
-    async def _find_best_worker(
-        self,
-        routing_tokens: list[int],
-        block_mm_infos: list[dict | None] | None = None,
-        total_blocks: int = 0,
-    ) -> tuple[int, int]:
-        """
-        Find the worker with the highest KV cache overlap.
-
-        Args:
-            routing_tokens: Token IDs used for routing
-            block_mm_infos: Optional block-level MM metadata aligned with routing_tokens
-
-        Returns:
-            Tuple of (worker_id, dp_rank)
-        """
-        if not self.instance_ids:
-            raise ValueError("No workers available")
-
-        if self.kv_push_router is None:
-            logger.warning("No KvPushRouter available, using first worker")
-            return self.instance_ids[0], 0
-
-        try:
-            best_worker_id, dp_rank, overlap_blocks = await self.kv_push_router.best_worker(
-                token_ids=routing_tokens,
-                block_mm_infos=block_mm_infos,
-            )
-
-            logger.info(
-                "[ROUTING] "
-                f"Best: worker_{best_worker_id} dp_rank={dp_rank} "
-                f"with {overlap_blocks}/{total_blocks} blocks overlap"
-            )
-
-            return best_worker_id, dp_rank
-
-        except Exception as e:
-            logger.warning(f"KvPushRouter query failed: {e}, using first worker")
-            return self.instance_ids[0], 0
 
     def update_instance_ids(self, instance_ids: list[int]) -> None:
         """Update the list of available worker instance IDs."""
