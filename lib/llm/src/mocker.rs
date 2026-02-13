@@ -398,7 +398,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             active_requests.remove(&request_uuid);
         });
 
-        // Create a simple UnboundedReceiverStream which is naturally Send + Sync
         let stream = UnboundedReceiverStream::new(stream_rx);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
@@ -418,41 +417,33 @@ impl AnnotatedMockEngine {
         let inner_clone = inner.clone();
 
         // Start background task to wait for component service and start the engine
+        let cancel_token = distributed_runtime.primary_token();
         tokio::spawn(async move {
-            loop {
-                // Try to create component
-                let Ok(namespace) = distributed_runtime.namespace(&endpoint_id.namespace) else {
-                    tracing::debug!("Namespace not available yet, retrying...");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                };
-
-                let Ok(component) = namespace.component(&endpoint_id.component) else {
-                    tracing::debug!("Component not available yet, retrying...");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                };
-
-                // Check if service is available by trying to list instances
-                let Ok(instances) = component.list_instances().await else {
-                    tracing::debug!("Cannot list instances yet, retrying...");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                };
-
-                if instances.is_empty() {
-                    tracing::debug!("No instances available yet, retrying...");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+            let component = loop {
+                if cancel_token.is_cancelled() {
+                    tracing::debug!("Mocker engine startup cancelled");
+                    return;
                 }
 
-                tracing::debug!("Component service is now available, starting mocker engine");
+                let ready = distributed_runtime
+                    .namespace(&endpoint_id.namespace)
+                    .and_then(|ns| ns.component(&endpoint_id.component))
+                    .ok();
 
-                // Start the engine with the component
-                if let Err(e) = inner_clone.start(component).await {
-                    tracing::error!("Failed to start mocker engine: {e}");
+                if let Some(comp) = ready
+                    && let Ok(instances) = comp.list_instances().await
+                    && !instances.is_empty()
+                {
+                    break comp;
                 }
-                break;
+
+                tracing::debug!("Component service not available yet, retrying...");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+
+            tracing::debug!("Component service is now available, starting mocker engine");
+            if let Err(e) = inner_clone.start(component).await {
+                tracing::error!("Failed to start mocker engine: {e}");
             }
         });
 
