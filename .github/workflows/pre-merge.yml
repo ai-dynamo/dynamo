@@ -199,39 +199,16 @@ jobs:
         python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
         deactivate
 
-  # classify-workflow-errors job disabled - now handled by centralized classify-all-errors.yml workflow
-  # classify-workflow-errors:
-  #   name: Classify Workflow Errors
-  #   runs-on: ubuntu-latest
-  #   if: always() && !cancelled()
-  #   needs: [changed-files, pre-commit, rust-tests, rust-clippy]
-  #   permissions:
-  #     contents: read
-  #     checks: write
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Set up Python
-  #     uses: actions/setup-python@v5
-  #     with:
-  #       python-version: '3.10'
-  #
-  #     - name: Classify All Workflow Errors
-  #       env:
-  #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-  #         API_FORMAT: "openai"
-  #         API_BASE_URL: "https://inference-api.nvidia.com/v1"
-  #         ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
-  #         ENABLE_ERROR_CLASSIFICATION: "true"
-  #         ENABLE_GITHUB_ANNOTATIONS: "true"
-  #         ENABLE_PR_COMMENTS: "false"  # Disabled in per-workflow jobs (no permissions)
-  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #         ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
-  #         OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
-  #       run: |
-  #         sudo apt-get update && sudo apt-get install -y python3-venv || true
-  #         python3 -m venv /tmp/error-classification-venv
-  #         . /tmp/error-classification-venv/bin/activate
-  #         pip install -r opensearch_upload/requirements.txt
-  #         python3 .github/workflows/classify_workflow_errors.py || echo "⚠️  Classification failed but continuing"
+  classify-workflow-errors:
+    if: always() && !cancelled()
+    needs: [changed-files, pre-commit, rust-tests, rust-clippy]
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write  # Required for PR comments
+    uses: ./.github/workflows/classify-workflow-errors-reusable.yml
+    with:
+      enable_pr_comments: 'true'
+      max_parallel_jobs: '5'
+      python_version: '3.11'
+    secrets: inherit
