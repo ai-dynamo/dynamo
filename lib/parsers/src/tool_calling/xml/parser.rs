@@ -143,6 +143,9 @@ fn normalize_tool_call_block(block: &str, config: &XmlParserConfig) -> String {
         &config.parameter_end_token,
     ] {
         if let Some(after_bracket) = token.strip_prefix('<') {
+            if after_bracket.is_empty() {
+                continue;
+            }
             let mut fixed = String::with_capacity(result.len() + 16);
             let mut search_from = 0;
 
