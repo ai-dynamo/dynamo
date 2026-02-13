@@ -112,7 +112,22 @@ class WorkloadSpec(BaseModel):
     )
 
 
+class OptimizationType(str, Enum):
+    """High-level optimization objective when explicit SLA targets are not provided."""
+
+    THROUGHPUT = "throughput"
+    LATENCY = "latency"
+
+
 class SLASpec(BaseModel):
+    """Service-level agreement targets.
+
+    Provide exactly one of:
+    - ``ttft`` + ``itl`` (explicit latency targets)
+    - ``e2e_latency`` (end-to-end latency target)
+    - ``optimization_type`` (high-level objective without explicit targets)
+    """
+
     ttft: Optional[float] = Field(
         default=None,
         description="Target Time-To-First-Token in milliseconds.",
@@ -126,17 +141,28 @@ class SLASpec(BaseModel):
         description="Target end-to-end request latency in milliseconds. "
         "Alternative to specifying ttft + itl.",
     )
+    optimization_type: Optional[OptimizationType] = Field(
+        default=None,
+        description="High-level optimization objective: 'throughput' or 'latency'. "
+        "Use when explicit SLA targets (ttft+itl or e2e_latency) are not known.",
+    )
 
     @model_validator(mode="after")
     def _validate_sla_option(self) -> "SLASpec":
         has_ttft_itl = self.ttft is not None and self.itl is not None
         has_e2e = self.e2e_latency is not None
+        has_opt = self.optimization_type is not None
 
-        if not has_ttft_itl and not has_e2e:
-            raise ValueError("SLA must specify either (ttft and itl) or e2e_latency.")
-        if has_ttft_itl and has_e2e:
+        options_count = sum([has_ttft_itl, has_e2e, has_opt])
+        if options_count == 0:
             raise ValueError(
-                "SLA must specify either (ttft and itl) or e2e_latency, not both."
+                "SLA must specify exactly one of: (ttft and itl), e2e_latency, "
+                "or optimization_type."
+            )
+        if options_count > 1:
+            raise ValueError(
+                "SLA must specify exactly one of: (ttft and itl), e2e_latency, "
+                "or optimization_type — not multiple."
             )
         if (self.ttft is not None) != (self.itl is not None):
             raise ValueError("ttft and itl must both be provided together.")
