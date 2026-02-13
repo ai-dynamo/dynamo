@@ -9,8 +9,8 @@ This directory contains recipes for deploying DeepSeek-R1 using vLLM in a disagg
 
 | Recipe | GPUs | Nodes | Architecture | Model Precision | Manifest |
 |--------|------|-------|-------------|-----------------|----------|
-| Hopper | 32 (16 prefill + 16 decode) | 4× H100/H200 | DP16 + EP | BF16/FP8 | `deploy_hopper_16gpu.yaml` |
-| GB200  | 16 (8 prefill + 8 decode)   | 4× GB200     | DP8 + EP  | FP4 (NVFP4) | `deploy_gb200_16gpu.yaml` |
+| Hopper | 32 (16 prefill + 16 decode) | 4× H200 (or 8× H100) | DEP16 | FP8 | `deploy_hopper_16gpu.yaml` |
+| GB200  | 16 (8 prefill + 8 decode)   | 4× GB200              | DEP8  | FP4 (NVFP4) | `deploy_gb200_16gpu.yaml` |
 
 ---
 
@@ -57,16 +57,16 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ```
 
 This will populate:
-- `/model-cache/deepseek-r1` (BF16 weights, used by Hopper recipe)
+- `/model-cache/deepseek-r1` (FP8 weights, used by Hopper recipe)
 - `/model-cache/deepseek-r1-fp4` (NVFP4 weights, used by GB200 recipe)
 
 ---
 
-### Hopper Deployment (32× H100/H200)
+### Hopper Deployment (32× H200)
 
-Deploys across 4 Hopper nodes (32 GPUs total: 16 for prefill, 16 for decode) using 16-way Data-Expert Parallel with BF16/FP8 precision.
+Deploys across 4 H200 nodes (32 GPUs total: 16 for prefill, 16 for decode) using DEP16 (16-way Data-Expert Parallel) with FP8 precision. For H100, double the node count (8× H100 nodes) due to lower memory per GPU.
 
-**Requirements**: 4 nodes × 8 H100/H200 GPUs, InfiniBand with IBGDA enabled.
+**Requirements**: 4 nodes × 8 H200 GPUs (or 8× H100 nodes), InfiniBand with IBGDA enabled.
 
 ```bash
 kubectl apply -f ./deploy_hopper_16gpu.yaml -n ${NAMESPACE}
@@ -82,7 +82,7 @@ kubectl apply -f ./deploy_hopper_16gpu.yaml -n ${NAMESPACE}
 
 ### GB200 Deployment (16× GB200)
 
-Deploys across 4 GB200 nodes (16 GPUs total: 8 for prefill, 8 for decode) using 8-way Data-Expert Parallel with NVFP4 precision for native Blackwell FP4 tensor core support.
+Deploys across 4 GB200 nodes (16 GPUs total: 8 for prefill, 8 for decode) using DEP8 (8-way Data-Expert Parallel) with NVFP4 precision for native Blackwell FP4 tensor core support.
 
 **Requirements**: 4 nodes × 4 GB200 GPUs with NVLink-C2C connectivity.
 
