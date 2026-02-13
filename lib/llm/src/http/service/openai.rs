@@ -51,6 +51,7 @@ use crate::protocols::openai::{
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
@@ -1706,6 +1707,87 @@ pub fn images_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(images))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
+async fn videos(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateVideoRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    let request_id = get_or_create_request_id(request.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
+
+    // Videos are typically not streamed, so we default to non-streaming
+    let streaming = false;
+
+    // Get the model name from the request (video generation model)
+    let model = request.model.clone();
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    // Get the video generation engine
+    let engine = state
+        .manager()
+        .get_videos_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    // this will increment the inflight gauge for the model
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Videos, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    // issue the generate call on the engine
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate videos"))?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Videos are typically returned as a single response (non-streaming)
+    // so we fold the stream into a single response
+    let response = NvVideosResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
+            ErrorMessage::internal_server_error("Failed to fold videos stream")
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Videos endpoint
+/// If no path is provided, the default path is `/v1/videos`
+pub fn videos_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/videos".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(videos))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);

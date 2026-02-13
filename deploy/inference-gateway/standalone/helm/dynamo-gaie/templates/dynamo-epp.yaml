@@ -19,7 +19,6 @@
 {{- $useDynamo    := default false .Values.epp.useDynamo -}}
 {{- $resolvedDynNs := (include "dynamo-gaie.dynamoNamespace" .) | trim -}}
 {{- $ns           := ternary (required "set dynamoGraphDeploymentName when epp.useDynamo=true" $resolvedDynNs) "" $useDynamo -}}
-{{- $kv           := default "16" .Values.epp.dynamo.kvBlockSize -}}
 {{- $useEtcd      := default false .Values.epp.dynamo.useEtcd -}}
 {{- $eppImage     := required "extension.image is required - set via --set-string extension.image=$EPP_IMAGE or in values file" .Values.extension.image }}
 
@@ -113,8 +112,6 @@ spec:
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYN_NAMESPACE
             value: "{{ $ns }}"
-          - name: DYN_KV_BLOCK_SIZE
-            value: "{{ $kv }}"
           - name: USE_STREAMING
             value: "true"
           # HuggingFace token for downloading model config files

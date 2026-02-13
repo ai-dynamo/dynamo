@@ -21,7 +21,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -183,92 +182,6 @@ func TestIsDeploymentReady(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsDeploymentReady(tt.args.deployment); got != tt.want {
 				t.Errorf("IsDeploymentReady() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-type mockEtcdStorage struct {
-	deleteKeysFunc func(ctx context.Context, prefix string) error
-}
-
-func (m *mockEtcdStorage) DeleteKeys(ctx context.Context, prefix string) error {
-	return m.deleteKeysFunc(ctx, prefix)
-}
-
-func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
-	type fields struct {
-		EtcdStorage etcdStorage
-		Config      controller_common.Config
-	}
-	type args struct {
-		ctx                       context.Context
-		dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "delete etcd keys",
-			fields: fields{
-				EtcdStorage: &mockEtcdStorage{
-					deleteKeysFunc: func(ctx context.Context, prefix string) error {
-						if prefix == "/default/components/service1" {
-							return nil
-						}
-						return fmt.Errorf("invalid prefix: %s", prefix)
-					},
-				},
-				Config: controller_common.Config{DiscoveryBackend: "etcd"},
-			},
-			args: args{
-				ctx: context.Background(),
-				dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-					Spec: v1alpha1.DynamoComponentDeploymentSpec{
-						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							DynamoNamespace: &[]string{"default"}[0],
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "delete etcd keys (error)",
-			fields: fields{
-				EtcdStorage: &mockEtcdStorage{
-					deleteKeysFunc: func(ctx context.Context, prefix string) error {
-						return fmt.Errorf("invalid prefix: %s", prefix)
-					},
-				},
-				Config: controller_common.Config{DiscoveryBackend: "etcd"},
-			},
-			args: args{
-				ctx: context.Background(),
-				dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-					Spec: v1alpha1.DynamoComponentDeploymentSpec{
-						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							DynamoNamespace: &[]string{"default"}[0],
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := &DynamoComponentDeploymentReconciler{
-				EtcdStorage: tt.fields.EtcdStorage,
-				Config:      tt.fields.Config,
-			}
-			if err := r.FinalizeResource(tt.args.ctx, tt.args.dynamoComponentDeployment); (err != nil) != tt.wantErr {
-				t.Errorf("DynamoComponentDeploymentReconciler.FinalizeResource() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -521,10 +434,9 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 
 func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.T) {
 	type fields struct {
-		Client      client.Client
-		Recorder    record.EventRecorder
-		Config      controller_common.Config
-		EtcdStorage etcdStorage
+		Client   client.Client
+		Recorder record.EventRecorder
+		Config   controller_common.Config
 	}
 	type args struct {
 		ctx context.Context
@@ -635,10 +547,9 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 			r := &DynamoComponentDeploymentReconciler{
-				Client:      tt.fields.Client,
-				Recorder:    tt.fields.Recorder,
-				Config:      tt.fields.Config,
-				EtcdStorage: tt.fields.EtcdStorage,
+				Client:   tt.fields.Client,
+				Recorder: tt.fields.Recorder,
+				Config:   tt.fields.Config,
 			}
 			got, got1, err := r.generateVolcanoPodGroup(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
@@ -669,7 +580,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		Client                client.Client
 		Recorder              record.EventRecorder
 		Config                controller_common.Config
-		EtcdStorage           etcdStorage
 		DockerSecretRetriever *mockDockerSecretRetriever
 	}
 	type args struct {
@@ -1173,7 +1083,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				Client:                fakeKubeClient, // Use the fake client
 				Recorder:              tt.fields.Recorder,
 				Config:                tt.fields.Config,
-				EtcdStorage:           tt.fields.EtcdStorage,
 				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}
@@ -1238,10 +1147,9 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	// Set up reconciler
 	recorder := record.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:      fakeKubeClient,
-		Recorder:    recorder,
-		Config:      controller_common.Config{},
-		EtcdStorage: nil,
+		Client:   fakeKubeClient,
+		Recorder: recorder,
+		Config:   controller_common.Config{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1346,10 +1254,9 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 
 	recorder := record.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:      fakeKubeClient,
-		Recorder:    recorder,
-		Config:      controller_common.Config{},
-		EtcdStorage: nil,
+		Client:   fakeKubeClient,
+		Recorder: recorder,
+		Config:   controller_common.Config{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1680,10 +1587,9 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			// Set up reconciler
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
-				EtcdStorage: nil,
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+				Config:   controller_common.Config{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1849,10 +1755,9 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			// Set up reconciler
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
-				EtcdStorage: nil,
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+				Config:   controller_common.Config{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil

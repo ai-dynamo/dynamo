@@ -49,6 +49,7 @@ struct StateFlags {
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
+    videos_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
 }
@@ -60,6 +61,7 @@ impl StateFlags {
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
@@ -80,6 +82,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Images => self
                 .images_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Videos => self
+                .videos_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
@@ -115,6 +120,7 @@ impl State {
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
+                videos_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
@@ -509,6 +515,7 @@ impl HttpServiceConfigBuilder {
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
+        let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -519,6 +526,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
+        endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
