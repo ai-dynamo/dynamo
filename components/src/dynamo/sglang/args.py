@@ -323,7 +323,9 @@ async def parse_args(args: list[str]) -> Config:
     if endpoint is None:
         if dynamo_config.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
-        elif getattr(dynamo_config, "image_diffusion_worker", False):
+        elif dynamo_config.image_diffusion_worker:
+            endpoint = f"dyn://{namespace}.backend.generate"
+        elif dynamo_config.video_generation_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
@@ -400,32 +402,38 @@ async def parse_args(args: list[str]) -> Config:
     # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
     # contain code to download a model, it should only parse the args.
 
-    # For diffusion workers, create a minimal dummy ServerArgs since diffusion
+    # For diffusion/video workers, create a minimal dummy ServerArgs since diffusion
     # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
     image_diffusion_worker = dynamo_config.image_diffusion_worker
+    video_generation_worker = dynamo_config.video_generation_worker
 
-    if image_diffusion_worker:
-        logging.info(f"Image diffusion worker detected with model: {model_path}")
+    if image_diffusion_worker or video_generation_worker:
+        worker_type = (
+            "image diffusion" if image_diffusion_worker else "video generation"
+        )
+        logging.info(
+            f"{worker_type.title()} worker detected with model: {model_path}, creating minimal ServerArgs stub"
+        )
+        # Create a minimal ServerArgs-like object that bypasses model config loading
+        # Diffusion/video workers don't actually use ServerArgs - they use DiffGenerator
+        import types
 
-        # Need to use ServerArgs not intended for sglang[diffusion], multimodal_gen has its own ServerArgs.
-        server_args = ServerArgs("none")  # HACK: Avoid triggering __post_init__
-
+        server_args = types.SimpleNamespace()
+        # Copy over any attrs that might be needed, but avoid triggering __post_init__
         server_args.model_path = model_path
         server_args.served_model_name = parsed_args.served_model_name
         server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
         server_args.log_level = getattr(parsed_args, "log_level", "info")
+        server_args.skip_tokenizer_init = True
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
+        server_args.tp_size = getattr(parsed_args, "tp_size", 1)
+        server_args.dp_size = getattr(parsed_args, "dp_size", 1)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
-        server_args.tp_size = getattr(parsed_args, "tensor_parallel_size", 1)
-        server_args.dp_size = getattr(parsed_args, "data_parallel_size", 1)
-
-        parsed_args.use_sglang_tokenizer = True
-        parsed_args.endpoint_types = "images"
-
+        server_args.load_format = None
         logging.info(
-            f"Created stub ServerArgs for diffusion: model_path={server_args.model_path}"
+            f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)

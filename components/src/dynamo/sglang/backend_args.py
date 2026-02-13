@@ -104,6 +104,20 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=None,
             help="Key to select from nested disaggregation configuration file (e.g., 'prefill', 'decode').",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--video-generation-worker",
+            env_var="DYN_SGL_VIDEO_GENERATION_WORKER",
+            default=False,
+            help="Run as video generation worker for video generation (T2V/I2V).",
+        )
+        add_argument(
+            g,
+            flag_name="--video-generation-fs-url",
+            env_var="DYN_SGL_VIDEO_GENERATION_FS_URL",
+            default=None,
+            help="Filesystem URL for storing generated videos using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
+        )
 
 
 class DynamoSGLangConfig(ConfigBase):
@@ -120,6 +134,9 @@ class DynamoSGLangConfig(ConfigBase):
 
     disagg_config: Optional[str] = None
     disagg_config_key: Optional[str] = None
+
+    video_generation_worker: bool
+    video_generation_fs_url: Optional[str] = None
 
     def validate(self) -> None:
         pass

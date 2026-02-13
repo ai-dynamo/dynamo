@@ -78,7 +78,6 @@ def parse_args() -> Config:
     Returns:
         Config: Parsed configuration object.
     """
-
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
