@@ -20,9 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - gcp-dev-tester-gpu-1-v1
-          - gcp-dev-tester-gpu-2-v1
-          - gcp-dev-tester-gpu-4-v1
+          - prod-tester-gb200-4-v1
     steps:
       - name: Check GPUs (inside Docker)
         run: |
