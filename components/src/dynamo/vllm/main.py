@@ -28,7 +28,6 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisherConfig,
     fetch_llm,
     register_llm,
 )
@@ -55,7 +54,7 @@ from dynamo.vllm.multimodal_handlers import (
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
-from .args import Config, overwrite_args, parse_args
+from .args import Config, parse_args
 from .chrek import get_checkpoint_config
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
@@ -99,7 +98,6 @@ async def graceful_shutdown(runtime, shutdown_event):
 async def worker():
     config = parse_args()
 
-    overwrite_args(config)
     dump_config(config.dump_config_to, config)
 
     # Name the model. Use either the full path (vllm and sglang do the same),
@@ -342,14 +340,14 @@ def setup_kv_event_publisher(
                 f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
             )
 
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.connection_id(),
+        kv_publisher = KvEventPublisher(
+            component=component,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
+            zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
         )
-        kv_publisher = KvEventPublisher(component=component, zmq_config=zmq_config)
         kv_publishers.append(kv_publisher)
 
         logger.info(
@@ -494,8 +492,8 @@ async def register_vllm_model(
 
     # Add tool/reasoning parsers for decode models
     if model_type != ModelType.Prefill:
-        runtime_config.tool_call_parser = config.tool_call_parser
-        runtime_config.reasoning_parser = config.reasoning_parser
+        runtime_config.tool_call_parser = config.dyn_tool_call_parser
+        runtime_config.reasoning_parser = config.dyn_reasoning_parser
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
@@ -785,14 +783,14 @@ async def init(
         await _handle_non_leader_node(config.engine_args.data_parallel_rank)
         return
 
-    # Parse endpoint types from --dyn-endpoint-types flag
-    model_type = parse_endpoint_types(config.dyn_endpoint_types)
-    logger.info(f"Registering model with endpoint types: {config.dyn_endpoint_types}")
+    # Parse endpoint types from --endpoint-types flag
+    model_type = parse_endpoint_types(config.endpoint_types)
+    logger.info(f"Registering model with endpoint types: {config.endpoint_types}")
 
     model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
 
     # Warn if custom template provided but chat endpoint not enabled
-    if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+    if config.custom_jinja_template and "chat" not in config.endpoint_types:
         logger.warning(
             "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
