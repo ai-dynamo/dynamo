@@ -54,6 +54,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
         # Video generation-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
+        self._generate_lock = asyncio.Lock()  # Serialize generator access
         self.fs = fs
         self.fs_url = config.dynamo_args.video_generation_fs_url
 
@@ -201,7 +202,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             "num_inference_steps": num_inference_steps,
             "save_output": False,  # We handle saving ourselves
             "guidance_scale": guidance_scale,
-            "seed": seed if seed else random.randint(0, 1000000),
+            "seed": seed if seed is not None else random.randint(0, 1000000),
         }
 
         # Add image_path for I2V if provided
@@ -213,11 +214,14 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             f"{num_inference_steps} steps, request_id={request_id}"
         )
 
-        # Run in thread pool to avoid blocking event loop
-        result = await asyncio.to_thread(
-            self.generator.generate,
-            sampling_params_kwargs=args,
-        )
+        # Serialize access -- DiffGenerator has mutable state (CUDA graph
+        # caches, shared config objects) and is not thread-safe.
+        async with self._generate_lock:
+            # Run in thread pool to avoid blocking event loop
+            result = await asyncio.to_thread(
+                self.generator.generate,
+                sampling_params_kwargs=args,
+            )
 
         # Result contains 'frames' with list of frames
         frames = result.get("frames", [])
