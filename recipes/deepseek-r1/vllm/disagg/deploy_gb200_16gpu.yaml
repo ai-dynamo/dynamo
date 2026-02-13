@@ -1,0 +1,244 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-R1 (FP4) with vLLM — Disaggregated Prefill/Decode on 16x GB200
+#
+# Architecture: 4 GB200 nodes (4 GPUs each), 16 GPUs total
+#   - Prefill: 8 GPUs (2 nodes), DP+EP with FlashInfer AllToAllV (MNNVL-native)
+#   - Decode:  8 GPUs (2 nodes), DP+EP with FlashInfer AllToAllV (MNNVL-native)
+#
+# Uses NVIDIA's FP4-quantized DeepSeek-R1 checkpoint for native Blackwell
+# FP4 tensor core support. Achieves ~26K prefill TPGS and ~10K decode TPGS.
+#
+# Prerequisites:
+#   - 4x GB200 nodes with NVLink-C2C connectivity
+#   - Model weights downloaded to PVC at /model-cache/deepseek-r1-fp4
+#     (use recipes/deepseek-r1/model-cache/ to provision)
+
+# ComputeDomain provides IMEX channel access for MNNVL (multi-node NVLink)
+# numNodes = total nodes across all workers (decode nodeCount here)
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: vllm-dsr1-gb200-compute-domain
+spec:
+  numNodes: 2
+  channel:
+    resourceClaimTemplate:
+      name: vllm-dsr1-gb200-compute-domain-channel
+---
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-dsr1-gb200
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      extraPodSpec:
+        containers: []
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "user-workload"
+            effect: "NoSchedule"
+          - key: "dedicated"
+            operator: "Equal"
+            value: "user-workload"
+            effect: "NoExecute"
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        requests:
+          cpu: "130"
+          memory: "850Gi"
+        limits:
+          cpu: "130"
+          memory: "850Gi"
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      sharedMemory:
+        size: 800Gi
+      extraPodSpec:
+        containers: []
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: vllm-dsr1-gb200-compute-domain-channel
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "user-workload"
+            effect: "NoSchedule"
+          - key: "dedicated"
+            operator: "Equal"
+            value: "user-workload"
+            effect: "NoExecute"
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 600
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          workingDir: /workspace/dynamo
+          env:
+            # --- Blackwell FP4 kernel optimizations ---
+            - name: VLLM_USE_FLASHINFER_MOE_FP4
+              value: "1"
+            - name: VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+              value: "1"
+            - name: VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING
+              value: "0"
+            - name: VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
+              value: "2048"
+            # --- MoE / Expert Parallel ---
+            - name: VLLM_USE_DEEP_GEMM
+              value: "1"
+            - name: VLLM_MOE_DP_CHUNK_SIZE
+              value: "512"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+              value: "1"
+            # --- NVLink-C2C / Multi-node NVLink ---
+            - name: NCCL_MNNVL_ENABLE
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_DEBUG
+              value: "WARN"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |-
+              python3 -m dynamo.vllm \
+                --model /model-cache/deepseek-r1-fp4 \
+                --served-model-name deepseek-ai/DeepSeek-R1 \
+                --all2all-backend flashinfer_all2allv \
+                --data-parallel-hybrid-lb \
+                --tensor-parallel-size 1 \
+                --data-parallel-size 8 \
+                --enable-expert-parallel \
+                --block-size 1 \
+                --max-model-len 16384 \
+                --async-scheduling \
+                --enable-eplb \
+                --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
+                --max-num-seqs 512 \
+                --compilation_config '{"pass_config":{"fuse_norm_quant":true,"eliminate_noops":true},"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    # prefill:
+    #   componentType: worker
+    #   subComponentType: prefill
+    #   replicas: 1
+    #   multinode:
+    #     nodeCount: 2
+    #   resources:
+    #     requests:
+    #       cpu: "130"
+    #       memory: "850Gi"
+    #     limits:
+    #       cpu: "130"
+    #       memory: "850Gi"
+    #       gpu: "4"
+    #   volumeMounts:
+    #     - name: model-cache
+    #       mountPoint: /model-cache
+    #   sharedMemory:
+    #     size: 800Gi
+    #   extraPodSpec:
+    #     mainContainer:
+    #       startupProbe:
+    #         httpGet:
+    #           path: /health
+    #           port: 9090
+    #         periodSeconds: 10
+    #         timeoutSeconds: 10
+    #         failureThreshold: 600
+    #       image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+    #       workingDir: /workspace/dynamo
+    #       env:
+    #         # --- Blackwell FP4 kernel optimizations ---
+    #         - name: VLLM_USE_FLASHINFER_MOE_FP4
+    #           value: "1"
+    #         - name: VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+    #           value: "1"
+    #         - name: VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING
+    #           value: "0"
+    #         - name: VLLM_ENABLE_MOE_DP_CHUNK
+    #           value: "0"
+    #         # --- MoE / Expert Parallel ---
+    #         - name: VLLM_USE_DEEP_GEMM
+    #           value: "1"
+    #         - name: VLLM_SKIP_P2P_CHECK
+    #           value: "1"
+    #         - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+    #           value: "1"
+    #         # --- NVLink-C2C / Multi-node NVLink ---
+    #         - name: NCCL_MNNVL_ENABLE
+    #           value: "1"
+    #         - name: NCCL_CUMEM_ENABLE
+    #           value: "1"
+    #         - name: GLOO_SOCKET_IFNAME
+    #           value: eth0
+    #       command:
+    #         - python3
+    #         - -m
+    #         - dynamo.vllm
+    #       args:
+    #         - --model
+    #         - /model-cache/deepseek-r1-fp4
+    #         - --is-prefill-worker
+    #         - --served-model-name
+    #         - deepseek-ai/DeepSeek-R1
+    #         - --all2all-backend
+    #         - flashinfer_all2allv
+    #         - --data-parallel-hybrid-lb
+    #         - --tensor-parallel-size
+    #         - "1"
+    #         - --data-parallel-size
+    #         - "8"
+    #         - --enable-expert-parallel
+    #         - --block-size
+    #         - "1"
+    #         - --max-model-len
+    #         - "16384"
+    #         - --enable-dbo
+    #         - --dbo-decode-token-threshold
+    #         - "32"
+    #         - --async-scheduling
+    #         - --enable-eplb
+    #         - --eplb-config
+    #         - '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}'
+    #         - --max-num-seqs
+    #         - "512"
