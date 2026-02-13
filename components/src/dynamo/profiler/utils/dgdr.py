@@ -16,7 +16,7 @@ class Backend(str, Enum):
     AUTO = "auto"
 
 
-class SweepMode(str, Enum):
+class SearchStrategy(str, Enum):
     """Controls profiling thoroughness."""
 
     RAPID = "rapid"
@@ -232,13 +232,18 @@ class AugmentedDGDR(BaseModel):
         ...,
         description="Service-level agreement targets.",
     )
-    sweep: SweepMode = Field(
-        default=SweepMode.RAPID,
-        description="Overall sweep thoroughness: rapid or thorough.",
+    search_strategy: SearchStrategy = Field(
+        default=SearchStrategy.RAPID,
+        description="Overall search strategy: rapid or thorough.",
     )
     features: FeaturesSpec = Field(
         default_factory=FeaturesSpec,
         description="Feature toggles (planner, mocker, etc.).",
+    )
+    auto_apply: bool = Field(
+        default=True,
+        description="If true, automatically create and apply the generated DGD after profiling. "
+        "If false, store results for user inspection via GUI.",
     )
 
     @model_validator(mode="after")
