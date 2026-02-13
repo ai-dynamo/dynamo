@@ -167,7 +167,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
             help="How to route the request.",
-            choices=["round-robin", "random", "kv"],
+            choices=["round-robin", "random", "kv", "direct"],
         )
         add_argument(
             g,

@@ -280,7 +280,6 @@ impl OpenAIPreprocessor {
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
-                enable_local_updates: nvext.enable_local_updates,
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump: hints.and_then(|h| h.latency_sensitivity),
                 lora_name,

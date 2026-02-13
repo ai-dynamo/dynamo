@@ -48,7 +48,6 @@ struct WorkerSelection {
 struct RequestGuard {
     chooser: Arc<KvRouter>,
     context_id: String,
-    handle_local_updates: bool,
     tracker: Option<Arc<RequestTracker>>,
     request_metrics: Arc<RouterRequestMetrics>,
     cumulative_osl: usize,
@@ -59,9 +58,7 @@ struct RequestGuard {
 impl RequestGuard {
     async fn finish(&mut self) {
         self.record_metrics();
-        if self.handle_local_updates
-            && let Err(e) = self.chooser.free(&self.context_id).await
-        {
+        if let Err(e) = self.chooser.free(&self.context_id).await {
             tracing::warn!("Failed to free request {}: {e}", self.context_id);
         }
         self.freed = true;
@@ -86,7 +83,7 @@ impl RequestGuard {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
-        if !self.freed && self.handle_local_updates {
+        if !self.freed {
             let chooser = self.chooser.clone();
             let context_id = self.context_id.clone();
             let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -112,15 +109,13 @@ impl KvPushRouter {
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
     ///
-    /// When `is_query_only` is false and `handle_local_updates` is true, this also registers
-    /// the request with the scheduler via `add_request`.
+    /// When `is_query_only` is false, this also registers the request with the scheduler via `add_request`.
     async fn select_worker(
         &self,
         context_id: &str,
         request: &PreprocessedRequest,
         phase: RequestPhase,
         is_query_only: bool,
-        handle_local_updates: bool,
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
@@ -172,7 +167,7 @@ impl KvPushRouter {
             .get_overlap_blocks(&request.token_ids, worker)
             .await?;
 
-        if !is_query_only && handle_local_updates {
+        if !is_query_only {
             self.chooser
                 .add_request(
                     context_id.to_string(),
@@ -234,15 +229,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
-        // Determine if this router should handle local state updates (add_request, free, etc.)
-        // Default is true (router handles bookkeeping). Set to false for GAIE Stage 2 where
-        // an external orchestrator (e.g., EPP sidecar) handles bookkeeping via C FFI.
-        let handle_local_updates = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.enable_local_updates)
-            .unwrap_or(true);
-
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
             .tracker
@@ -252,13 +238,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let block_size = self.chooser.block_size() as usize;
         let selection = self
-            .select_worker(
-                &context_id,
-                &request,
-                phase,
-                is_query_only,
-                handle_local_updates,
-            )
+            .select_worker(&context_id, &request, phase, is_query_only)
             .await?;
         let WorkerSelection {
             instance_id,
@@ -335,8 +315,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .routing
             .as_ref()
             .and_then(|r| r.expected_output_tokens);
-        let track_output_blocks =
-            self.chooser.kv_router_config().router_track_output_blocks && handle_local_updates;
+        let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
         let (mut backend_input, context) = request.into_parts();
@@ -360,7 +339,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut guard = RequestGuard {
                 chooser: chooser.clone(),
                 context_id: context_id.clone(),
-                handle_local_updates,
                 tracker: tracker.clone(),
                 request_metrics: request_metrics.clone(),
                 cumulative_osl: 0,
@@ -385,7 +363,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         };
 
-                        if handle_local_updates && !prefill_marked {
+                        if !prefill_marked {
+                            // Only mark prefill completed when we receive actual tokens,
+                            // not empty bootstrap info (token_ids: []) from disaggregated prefill
                             let has_tokens = item.data.as_ref()
                                 .map(|d| !d.token_ids.is_empty())
                                 .unwrap_or(false);
@@ -449,5 +429,50 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             guard.finish().await;
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
+    }
+}
+
+/// A direct routing wrapper for `RouterMode::Direct`.
+///
+/// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
+/// then routes directly to the specified worker. Used when an external router
+/// (e.g., EPP) handles worker selection.
+pub struct DirectRoutingRouter {
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+}
+
+impl DirectRoutingRouter {
+    pub fn new(inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>) -> Self {
+        DirectRoutingRouter { inner }
+    }
+
+    /// Extract worker ID from request routing hints.
+    /// Returns an error if no worker ID is found (required in direct routing mode).
+    fn get_worker_id(request: &PreprocessedRequest) -> Result<u64, Error> {
+        let routing = request.routing.as_ref();
+        let worker_id = routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id));
+
+        worker_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Worker ID required (--direct-route) but none found in request. \
+                 Expected decode_worker_id or backend_instance_id to be set by external router (e.g., EPP)."
+            )
+        })
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for DirectRoutingRouter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let worker_id = Self::get_worker_id(&request)?;
+
+        tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");
+
+        self.inner.direct(request, worker_id).await
     }
 }
