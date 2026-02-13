@@ -34,7 +34,7 @@ The Dynamo Frontend is the API gateway for serving LLM inference requests. It pr
 python -m dynamo.frontend --http-port 8000
 ```
 
-This starts an OpenAI-compatible HTTP server with integrated preprocessing and routing. Backends are auto-discovered when they call `register_llm`.
+This starts an OpenAI-compatible HTTP server with integrated preprocessing and routing. Backends are auto-discovered when they call `register_model`.
 
 ### KServe gRPC Frontend
 
