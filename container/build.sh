@@ -104,7 +104,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="45d7022cc33903509fd8045bbc577d77dd1d3e2f" # 1.3.0rc1
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="b464c750567e0b1b35712084fda1e575d85fb97c" # 1.3.0rc3
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -113,11 +113,11 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.3.0rc1"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.3.0rc3"
 # TensorRT-LLM wheels on PyPI might not be compatible with the NGC PyTorch.
 # For incompatible versions, we install the wheel from the NGC image during the Docker build.
 # The following versions are not ABI compatible with the NGC PyTorch.
-TRTLLM_ABI_INCOMPATIBLE_VERSIONS=("1.3.0rc1")
+TRTLLM_ABI_INCOMPATIBLE_VERSIONS=("1.3.0rc3")
 TENSORRTLLM_PIP_WHEEL=""
 TRTLLM_WHEEL_IMAGE=""
 
