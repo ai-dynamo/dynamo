@@ -450,7 +450,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         // Convert stop_sequences -> stop
         let stop = req
             .stop_sequences
-            .map(|seqs| dynamo_async_openai::types::Stop::StringArray(seqs));
+            .map(dynamo_async_openai::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
             inner: dynamo_async_openai::types::CreateChatCompletionRequest {
