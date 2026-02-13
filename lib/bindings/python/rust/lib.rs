@@ -170,15 +170,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::kv::ZmqKvEventListener>()?;
-    m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
-    m.add_class::<llm::kv::KvPushRouter>()?;
-    m.add_class::<llm::kv::KvPushRouterStream>()?;
+    m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -987,10 +985,7 @@ impl Client {
                 _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
+            Ok(AsyncResponseStream::new(rx, annotated))
         })
     }
 
@@ -1024,10 +1019,7 @@ impl Client {
                 _ => client.random(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
+            Ok(AsyncResponseStream::new(rx, annotated))
         })
     }
 
@@ -1068,10 +1060,7 @@ impl Client {
 
             tokio::spawn(process_stream(stream, tx));
 
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
+            Ok(AsyncResponseStream::new(rx, annotated))
         })
     }
 }
@@ -1106,9 +1095,21 @@ async fn process_stream(
 }
 
 #[pyclass]
-struct AsyncResponseStream {
+pub(crate) struct AsyncResponseStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
     annotated: bool,
+}
+
+impl AsyncResponseStream {
+    pub(crate) fn new(
+        rx: tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>,
+        annotated: bool,
+    ) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
+            annotated,
+        }
+    }
 }
 
 #[pymethods]
