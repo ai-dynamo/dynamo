@@ -32,6 +32,7 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
+pub mod queue;
 pub mod recorder;
 pub mod scheduler;
 pub mod sequence;
@@ -53,7 +54,7 @@ use crate::{
             compute_block_hash_for_seq,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
-        sequence::SequenceError,
+        sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
 };
@@ -315,6 +316,7 @@ impl KvRouter {
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
+            kv_router_config.router_queue_threshold,
         )
         .await?;
 
@@ -371,6 +373,7 @@ impl KvRouter {
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        priority_jump: f64,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
 
@@ -404,6 +407,7 @@ impl KvRouter {
                 router_config_override,
                 update_states,
                 lora_name,
+                priority_jump,
             )
             .await?;
         let total_elapsed = start.elapsed();
@@ -458,15 +462,15 @@ impl KvRouter {
 
         if let Err(e) = self
             .scheduler
-            .add_request(
-                request_id.clone(),
-                maybe_seq_hashes,
-                isl_tokens,
-                overlap_blocks,
+            .add_request(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: maybe_seq_hashes,
+                isl: isl_tokens,
+                overlap: overlap_blocks,
                 expected_output_tokens,
                 worker,
                 lora_name,
-            )
+            })
             .await
         {
             tracing::warn!("Failed to add request {request_id}: {e}");
@@ -555,7 +559,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = match request {
             RouterRequest::New { tokens } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true, None)
+                    .find_best_match(Some(&context_id), &tokens, None, true, None, 0.0)
                     .await?;
 
                 RouterResponse::New {

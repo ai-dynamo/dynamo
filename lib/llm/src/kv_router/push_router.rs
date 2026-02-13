@@ -21,7 +21,10 @@ use crate::{
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
     preprocessor::PreprocessedRequest,
-    protocols::common::{llm_backend::LLMEngineOutput, timing::RequestPhase},
+    protocols::common::{
+        llm_backend::LLMEngineOutput,
+        timing::{RequestPhase, RequestTracker},
+    },
 };
 
 pub struct KvPushRouter {
@@ -34,6 +37,66 @@ struct WorkerSelection {
     instance_id: u64,
     dp_rank: u32,
     overlap_amount: u32,
+}
+
+/// Drop guard that ensures `free()` and final metrics are recorded even if the
+/// response stream is dropped without being polled to completion.
+///
+/// In the happy path, `finish().await` runs cleanup inline in the async context.
+/// If the stream is dropped early (e.g., client disconnect, consumer drop), the
+/// `Drop` impl fires and spawns a task to call `free()`.
+struct RequestGuard {
+    chooser: Arc<KvRouter>,
+    context_id: String,
+    tracker: Option<Arc<RequestTracker>>,
+    request_metrics: Arc<RouterRequestMetrics>,
+    cumulative_osl: usize,
+    metrics_recorded: bool,
+    freed: bool,
+}
+
+impl RequestGuard {
+    async fn finish(&mut self) {
+        self.record_metrics();
+        if let Err(e) = self.chooser.free(&self.context_id).await {
+            tracing::warn!("Failed to free request {}: {e}", self.context_id);
+        }
+        self.freed = true;
+    }
+
+    fn record_metrics(&mut self) {
+        if self.metrics_recorded {
+            return;
+        }
+        self.metrics_recorded = true;
+        if let Some(ref tracker) = self.tracker {
+            tracker.record_finish();
+            tracker.record_osl(self.cumulative_osl);
+            self.request_metrics
+                .output_sequence_tokens
+                .observe(self.cumulative_osl as f64);
+        }
+        self.request_metrics.requests_total.inc();
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.record_metrics();
+        if !self.freed {
+            let chooser = self.chooser.clone();
+            let context_id = self.context_id.clone();
+            let Ok(handle) = tokio::runtime::Handle::try_current() else {
+                tracing::warn!("No tokio runtime for drop guard free of request {context_id}");
+                return;
+            };
+            handle.spawn(async move {
+                if let Err(e) = chooser.free(&context_id).await {
+                    tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
+                }
+            });
+        }
+    }
 }
 
 impl KvPushRouter {
@@ -56,6 +119,7 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
+        let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
 
@@ -79,6 +143,7 @@ impl KvPushRouter {
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,
+                    priority_jump,
                 )
                 .await?;
 
@@ -267,14 +332,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
-        // Wrap stream with lifecycle management (mark_prefill_completed, free)
-        // In direct routing mode, an external caller (e.g., EPP) handles bookkeeping via C FFI.
+        // Wrap stream with lifecycle management (mark_prefill_completed, free).
+        // RequestGuard ensures free() and final metrics run even if the stream is
+        // dropped without being polled to completion (e.g., client disconnect).
         let wrapped_stream = Box::pin(async_stream::stream! {
+            let mut guard = RequestGuard {
+                chooser: chooser.clone(),
+                context_id: context_id.clone(),
+                tracker: tracker.clone(),
+                request_metrics: request_metrics.clone(),
+                cumulative_osl: 0,
+                metrics_recorded: false,
+                freed: false,
+            };
             let mut prefill_marked = false;
             let mut first_token_recorded = false;
-
-            // Output block tracking state
-            let mut cumulative_osl: usize = 0;
             let mut current_total_blocks = isl_tokens.div_ceil(block_size);
 
             loop {
@@ -309,7 +381,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             .map(|d| d.token_ids.len())
                             .unwrap_or(0);
 
-                        // Record first token time on tracker when actual tokens arrive
                         if !first_token_recorded && new_tokens > 0 {
                             if let Some(ref tracker) = tracker {
                                 tracker.record_first_token();
@@ -322,16 +393,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             first_token_recorded = true;
                         }
 
-                        cumulative_osl += new_tokens;
+                        guard.cumulative_osl += new_tokens;
 
-                        // Track output blocks if enabled
                         if track_output_blocks {
-                            let new_total_blocks = (isl_tokens + cumulative_osl).div_ceil(block_size);
+                            let new_total_blocks = (isl_tokens + guard.cumulative_osl).div_ceil(block_size);
                             if new_total_blocks > current_total_blocks {
-                                // New block boundary crossed - add output block with decay
-                                // Clamp eot to min 1 to avoid division by zero, and result to min 0.0
                                 let decay_fraction = expected_output_tokens.map(|eot| {
-                                    (1.0 - (cumulative_osl as f64 / eot.max(1) as f64)).max(0.0)
+                                    (1.0 - (guard.cumulative_osl as f64 / eot.max(1) as f64)).max(0.0)
                                 });
                                 if let Err(e) = chooser.add_output_block(&context_id, decay_fraction).await {
                                     tracing::warn!(
@@ -339,9 +407,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     );
                                 }
 
-                                // Update tracker and observe avg ITL at each block boundary
                                 if let Some(ref tracker) = tracker {
-                                    tracker.record_osl(cumulative_osl);
+                                    tracker.record_osl(guard.cumulative_osl);
                                     tracker.record_finish();
                                     if let Some(avg_itl) = tracker.avg_itl_ms() {
                                         request_metrics
@@ -359,21 +426,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            // Record final aggregate metrics (histograms sampled once per request)
-            if let Some(ref tracker) = tracker {
-                tracker.record_finish();
-                tracker.record_osl(cumulative_osl);
-
-                request_metrics
-                    .output_sequence_tokens
-                    .observe(cumulative_osl as f64);
-            }
-            request_metrics.requests_total.inc();
-
-            if let Err(e) = chooser.free(&context_id).await
-            {
-                tracing::warn!("Failed to free request {context_id}: {e}");
-            }
+            guard.finish().await;
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }

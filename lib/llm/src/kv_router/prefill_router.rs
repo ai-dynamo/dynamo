@@ -278,10 +278,15 @@ impl PrefillRouter {
             (id, dp_rank)
         } else {
             // Use shared worker selection logic (update_states=false for peek behavior)
-            // Extract LORA name from routing hints
+            // Extract LORA name and priority jump from routing hints
             let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
+            let priority_jump = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.priority_jump)
+                .unwrap_or(0.0);
             match self
-                .query_prefill_worker(&req.token_ids, false, lora_name)
+                .query_prefill_worker(&req.token_ids, false, lora_name, priority_jump)
                 .instrument(tracing::info_span!("query_prefill_worker"))
                 .await
             {
@@ -473,6 +478,7 @@ impl PrefillRouter {
         token_ids: &[u32],
         update_states: bool,
         lora_name: Option<String>,
+        priority_jump: f64,
     ) -> Result<(u64, u32)> {
         let prefill_router = self
             .prefill_router
@@ -483,7 +489,7 @@ impl PrefillRouter {
             InnerPrefillRouter::KvRouter(r) => {
                 let (worker, _overlap) = r
                     .chooser
-                    .find_best_match(None, token_ids, None, update_states, lora_name)
+                    .find_best_match(None, token_ids, None, update_states, lora_name, priority_jump)
                     .await?;
                 Ok((worker.worker_id, worker.dp_rank))
             }

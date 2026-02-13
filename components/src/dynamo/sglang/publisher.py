@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import sglang as sgl
 import zmq
 import zmq.asyncio
-from prometheus_client import CollectorRegistry
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
 
 if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
     from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 
 from dynamo.common.utils.prometheus import (
@@ -27,10 +27,6 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Component, Endpoint
 from dynamo.sglang.args import Config
-
-# Create a dedicated registry for dynamo_component metrics
-# This ensures these metrics are isolated and can be exposed via their own callback
-DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
@@ -284,7 +280,7 @@ class DynamoSglangPublisher:
 
 def setup_prometheus_registry(
     engine: sgl.Engine, generate_endpoint: Endpoint, config: Config
-) -> CollectorRegistry:
+) -> "CollectorRegistry":
     """Set up Prometheus registry for SGLang metrics collection.
 
     SGLang uses multiprocess architecture where metrics are stored in shared memory.
@@ -355,14 +351,19 @@ async def setup_sgl_metrics(
     # Always register the Dynamo component metrics callback (total_blocks,
     # gpu_cache_usage, model_load_time). These use a dedicated registry that
     # doesn't need MultiProcessCollector or PROMETHEUS_MULTIPROC_DIR.
+    # Import CollectorRegistry lazily to avoid importing prometheus_client
+    # before set_prometheus_multiproc_dir() has been called.
+    from prometheus_client import CollectorRegistry
+
+    dynamo_component_registry = CollectorRegistry()
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
-        registry=DYNAMO_COMPONENT_REGISTRY,
+        registry=dynamo_component_registry,
     )
 
     # Create all Dynamo component gauges using the dedicated registry
     component_gauges = LLMBackendMetrics(
-        registry=DYNAMO_COMPONENT_REGISTRY,
+        registry=dynamo_component_registry,
         model_name=engine.server_args.served_model_name,
         component_name=config.dynamo_args.component,
     )
