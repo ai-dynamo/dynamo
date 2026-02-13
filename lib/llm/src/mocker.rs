@@ -6,20 +6,19 @@
 //! The core mocker logic lives in the `dynamo-mocker` crate.
 //! This module provides the runtime-dependent engine wrapper.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use dashmap::DashMap;
 use futures::StreamExt;
 use rand::Rng;
-use tokio::sync::{Mutex, OnceCell, mpsc};
+use tokio::sync::{Notify, OnceCell, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::config::environment_names::mocker as env_mocker;
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::{
     component::Component,
@@ -35,16 +34,13 @@ use dynamo_kv_router::protocols::KvCacheEvent;
 
 // Re-export from dynamo-mocker for convenience
 use dynamo_mocker::bootstrap::{BootstrapServer, connect_to_prefill};
-use dynamo_mocker::protocols::{OutputSignal, WorkerType};
+use dynamo_mocker::protocols::OutputSignal;
 pub use dynamo_mocker::{
     DirectRequest, KvCacheEventSink, MockEngineArgs, MockEngineArgsBuilder, Scheduler, bootstrap,
     evictor, kv_manager, perf_model, protocols, running_mean, scheduler, sequence,
 };
 
 pub const MOCKER_COMPONENT: &str = "mocker";
-
-static MOCKER_DIRECT_SYNC: LazyLock<bool> =
-    LazyLock::new(|| dynamo_runtime::config::env_is_truthy(env_mocker::DYN_MOCKER_SYNC_DIRECT));
 
 /// Wrapper to adapt KvEventPublisher to the KvCacheEventSink trait
 struct KvEventSinkAdapter(KvEventPublisher);
@@ -63,10 +59,10 @@ fn generate_random_token() -> TokenIdType {
 }
 
 /// AsyncEngine wrapper around the Scheduler that generates random character tokens
-#[derive(Clone)]
 pub struct MockVllmEngine {
-    active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
-    request_senders: Arc<OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>>,
+    active_requests: Arc<DashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>,
+    request_senders: OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>,
+    senders_ready: Notify,
     engine_args: MockEngineArgs,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
@@ -74,11 +70,12 @@ pub struct MockVllmEngine {
 
 impl MockVllmEngine {
     /// Create a new MockVllmEngine with the given parameters
-    pub fn new(args: MockEngineArgs) -> Self {
+    pub fn new(engine_args: MockEngineArgs) -> Self {
         Self {
-            active_requests: Arc::new(Mutex::new(HashMap::new())),
-            request_senders: Arc::new(OnceCell::new()),
-            engine_args: args,
+            active_requests: Arc::new(DashMap::new()),
+            request_senders: OnceCell::new(),
+            senders_ready: Notify::new(),
+            engine_args,
             bootstrap_server: Arc::new(OnceCell::new()),
         }
     }
@@ -98,7 +95,7 @@ impl MockVllmEngine {
         }
 
         // Start bootstrap server for prefill workers in disaggregated mode
-        if self.engine_args.worker_type == WorkerType::Prefill
+        if self.engine_args.is_prefill()
             && let Some(port) = self.engine_args.bootstrap_port
         {
             let server = BootstrapServer::start(port, cancel_token.clone()).await?;
@@ -106,10 +103,7 @@ impl MockVllmEngine {
             tracing::info!(port = port, "Bootstrap server started for prefill worker");
         }
 
-        // Determine if we need KV event publishers (prefix caching enabled and not decode worker)
-        let needs_kv_publisher = self.engine_args.enable_prefix_caching
-            && self.engine_args.worker_type != WorkerType::Decode;
-
+        let needs_kv_publisher = self.engine_args.needs_kv_publisher();
         if needs_kv_publisher {
             tracing::info!(
                 "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
@@ -135,43 +129,34 @@ impl MockVllmEngine {
         Ok(())
     }
 
-    /// Send a request to the appropriate scheduler.
-    ///
-    /// Set `DYN_MOCKER_SYNC_DIRECT=1` to use the original direct path.
-    /// - `DYN_MOCKER_SYNC_DIRECT=1` (original, race-condition prone):  922/1000 pass
-    /// - `DYN_MOCKER_SYNC_DIRECT=0` (use timeout to wait for init):   1000/1000 pass
+    /// Send a request to the appropriate scheduler, waiting for initialization if needed.
     pub async fn direct(&self, request: DirectRequest, dp_rank: usize) {
-        // `direct()` can be called before `start_schedulers()` finishes populating
-        // `request_senders` under load. The original path panics immediately; the
-        // default path waits briefly for initialization to complete.
-        if *MOCKER_DIRECT_SYNC {
-            let senders = self.request_senders.get().expect("Not initialized");
+        if let Some(senders) = self.request_senders.get() {
             let _ = senders[dp_rank].send(request);
             return;
         }
 
-        // Poll request_senders until initialized (or time out) to avoid the startup race.
-        let start = std::time::Instant::now();
-        loop {
-            if let Some(senders) = self.request_senders.get() {
-                let _ = senders[dp_rank].send(request);
-                return;
-            }
-            // We can parameterize the timeout to be more flexible.
-            // For example, on production this could be very short, but in a
-            // CPU-heavy test environment, this should be very high.
-            if start.elapsed() > Duration::from_secs(10) {
-                panic!("Scheduler initialization timed out after 10s");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        // Register the waiter *before* re-checking to avoid a TOCTOU race
+        // where `start_schedulers` sets + notifies between our check and subscribe.
+        let notified = self.senders_ready.notified();
+        if let Some(senders) = self.request_senders.get() {
+            let _ = senders[dp_rank].send(request);
+            return;
         }
+        notified.await;
+
+        let senders = self
+            .request_senders
+            .get()
+            .expect("must be set after notify");
+        let _ = senders[dp_rank].send(request);
     }
 
     /// Create schedulers and spawn their background tasks for distributing token notifications
     fn start_schedulers(
         &self,
         args: MockEngineArgs,
-        active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
+        active_requests: Arc<DashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>,
         component: Option<Component>,
         cancel_token: CancellationToken,
     ) -> Vec<Scheduler> {
@@ -230,18 +215,13 @@ impl MockVllmEngine {
                                 break; // Channel closed
                             };
 
-                            // Notify the specific request that a token was generated
-                            let active = active_requests_clone.lock().await;
-                            if let Some(request_tx) = active.get(&signal.uuid) {
+                            if let Some(request_tx) = active_requests_clone.get(&signal.uuid) {
                                 let _ = request_tx.send(signal);
                             }
                         }
                         _ = cancel_token_cloned.cancelled() => {
                             tracing::info!("Scheduler output task cancelled, clearing active requests");
-                            // Clear all active requests to unblock waiting request handlers
-                            // This will cause their request_rx.recv() to return None
-                            let mut active = active_requests_clone.lock().await;
-                            active.clear();
+                            active_requests_clone.clear();
                             break;
                         }
                     }
@@ -249,10 +229,11 @@ impl MockVllmEngine {
             });
         }
 
-        // Set the senders once
+        // Set the senders once and notify waiters
         self.request_senders
             .set(senders)
             .expect("Already initialized");
+        self.senders_ready.notify_waiters();
 
         schedulers
     }
@@ -347,7 +328,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         // - Prefill: complete_room() is called after first token (see below)
         let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
         if let Some(bootstrap_info) = &request.bootstrap_info
-            && self.engine_args.worker_type == WorkerType::Decode
+            && self.engine_args.is_decode()
         {
             connect_to_prefill(
                 &bootstrap_info.bootstrap_host,
@@ -360,8 +341,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
 
-        // For prefill workers, override max_tokens to 1
-        let is_prefill = self.engine_args.worker_type == WorkerType::Prefill;
+        let is_prefill = self.engine_args.is_prefill();
         let max_output_tokens = if is_prefill {
             1
         } else {
@@ -380,10 +360,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         };
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
-        {
-            let mut active = self.active_requests.lock().await;
-            active.insert(request_uuid, request_tx);
-        }
+        self.active_requests.insert(request_uuid, request_tx);
 
         // Send the request to the appropriate scheduler based on dp_rank
         self.direct(direct_request, dp_rank as usize).await;
@@ -413,24 +390,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
                         let output = LLMEngineOutput {
                             token_ids: vec![token_id],
-                            tokens: None,  // Let backend handle detokenization
-                            text: None,
-                            output_type: Default::default(),
-                            content_parts: None,
-                            cum_log_probs: None,
-                            log_probs: None,
-                            top_logprobs: None,
-                            finish_reason: None,
-                            stop_reason: None,
-                            index: None,
-                            // Add dummy disaggregated_params for prefill workers
-                            disaggregated_params: if is_prefill {
-                                Some(serde_json::json!("dummy"))
-                            } else {
-                                None
-                            },
-                            extra_args: None,
-                            completion_usage: None,
+                            disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
+                            ..Default::default()
                         };
 
                         // Prefill: after first token, mark room complete (unblocks decode)
@@ -465,9 +426,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 }
             }
 
-            // Clean up: remove this request from active requests
-            let mut active = active_requests.lock().await;
-            active.remove(&request_uuid);
+            active_requests.remove(&request_uuid);
         });
 
         // Create a simple UnboundedReceiverStream which is naturally Send + Sync
