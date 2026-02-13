@@ -5,7 +5,7 @@
 #
 # Start a frontend node. This runs:
 # - OpenAI HTTP server.
-# - Auto-discovery: Watches etcd for engine/worker registration (via `register_llm`).
+# - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
 # - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv, direct).
 #
