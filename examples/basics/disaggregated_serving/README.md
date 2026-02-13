@@ -31,14 +31,14 @@ Before running this example, ensure you have the following services running:
 You can start these services using Docker Compose:
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ## Components
 
 - [Frontend](/components/src/dynamo/frontend/README.md) - HTTP API endpoint that receives requests and forwards them to the decode worker
-- [vLLM Prefill Worker](/docs/backends/vllm/README.md) - Specialized worker for prefill phase execution
-- [vLLM Decode Worker](/docs/backends/vllm/README.md) - Specialized worker that handles requests and decides between local/remote prefill
+- [vLLM Prefill Worker](/docs/pages/backends/vllm/README.md) - Specialized worker for prefill phase execution
+- [vLLM Decode Worker](/docs/pages/backends/vllm/README.md) - Specialized worker that handles requests and decides between local/remote prefill
 
 ```mermaid
 ---
@@ -137,7 +137,7 @@ In each terminal, press `Ctrl+C` to stop:
 Stop the etcd and NATS services:
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml down
+docker compose -f deploy/docker-compose.yml down
 ```
 
 ## Understand

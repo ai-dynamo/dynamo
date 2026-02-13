@@ -34,19 +34,18 @@ Learn fundamental Dynamo concepts through these introductory examples:
 
 These examples show how Dynamo broadly works using major inference engines.
 
-If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Examples Backends](../examples/backends/) directory:
-- **[vLLM](backends/vllm/)** – vLLM-specific deployment and configuration
-- **[SGLang](backends/sglang/)** – SGLang integration examples and workflows
-- **[TensorRT-LLM](backends/trtllm/)** – TensorRT-LLM workflows and optimizations
+If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Examples Backends](/examples/backends/) directory:
+- **[vLLM](/examples/backends/vllm/)** – vLLM-specific deployment and configuration
+- **[SGLang](/examples/backends/sglang/)** – SGLang integration examples and workflows
+- **[TensorRT-LLM](/examples/backends/trtllm/)** – TensorRT-LLM workflows and optimizations
 
 ## Deployment Examples
 
 Platform-specific deployment guides for production environments:
 
-- **[Amazon EKS](deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
-- **[Azure AKS](deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
-- **[Amazon ECS](deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
-- **[Router Standalone](deployments/router_standalone/)** - Standalone router deployment patterns
+- **[Amazon EKS](/examples/deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
+- **[Azure AKS](/examples/deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
+- **[Amazon ECS](/examples/deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
 - **Google GKE** - _Coming soon_
 
 ## Runtime Examples
@@ -83,4 +82,4 @@ If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll a
 | **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
 | **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
 
-See the [Kubernetes Installation Guide](/docs/kubernetes/installation_guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.
+See the [Kubernetes Installation Guide](/docs/pages/kubernetes/installation-guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.

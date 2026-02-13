@@ -5,31 +5,27 @@
 
 import argparse
 import json
-import logging
 import os
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import matplotlib
 
 matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
-
-# Setup logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
+from common import (
+    add_common_args,
+    get_common_aiperf_flags,
+    resolve_tokenizer,
+    setup_logger,
 )
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
+
+logger = setup_logger(__name__)
 
 
 def get_aiperf_cmd(
     model,
-    tokenizer,  # Add tokenizer parameter
+    tokenizer,
     prefix_ratio,
     isl,
     osl,
@@ -39,23 +35,25 @@ def get_aiperf_cmd(
     num_prefix_prompts,
     artifact_dir,
     url="http://localhost:8888",
+    use_expected_osl=False,
 ):
     """Build aiperf command based on prefix ratio"""
     prefix_length = int(isl * prefix_ratio)
     synthetic_input_length = int(isl * (1 - prefix_ratio))
 
-    return [
+    # Build nvext JSON with optional agent_hints.osl
+    nvext_dict = {"ignore_eos": True}
+    if use_expected_osl:
+        nvext_dict["agent_hints"] = {"osl": osl}
+    nvext_json = json.dumps({"nvext": nvext_dict})
+
+    cmd = [
         "aiperf",
         "profile",
         "--model",
         model,
         "--tokenizer",
-        tokenizer,  # Use the tokenizer parameter instead of model
-        "--endpoint-type",
-        "chat",
-        "--endpoint",
-        "v1/chat/completions",
-        "--streaming",
+        tokenizer,
         "--url",
         url,
         "--synthetic-input-tokens-mean",
@@ -67,9 +65,7 @@ def get_aiperf_cmd(
         "--output-tokens-stddev",
         str(round(osl / 4)),
         "--extra-inputs",
-        "ignore_eos:true",
-        "--extra-inputs",
-        '{"nvext":{"ignore_eos":true}}',
+        nvext_json,
         "--concurrency",
         str(concurrency),
         "--request-count",
@@ -84,11 +80,11 @@ def get_aiperf_cmd(
         str(num_prefix_prompts),
         "--artifact-dir",
         artifact_dir,
-        "-H",
-        "Authorization: Bearer NOT USED",
-        "-H",
-        "Accept: text/event-stream",
+        "--dataset-sampling-strategy",
+        "shuffle",
     ]
+    cmd.extend(get_common_aiperf_flags())
+    return cmd
 
 
 def get_aiperf_result(artifact_dir: str) -> dict:
@@ -108,9 +104,9 @@ def get_aiperf_result(artifact_dir: str) -> dict:
         return json.load(f)
 
 
-def run_benchmark_single_url(
+def run_benchmark(
     model,
-    tokenizer,  # Add tokenizer parameter
+    tokenizer,
     prefix_ratio,
     isl,
     osl,
@@ -118,13 +114,21 @@ def run_benchmark_single_url(
     concurrency,
     seed,
     num_prefix_prompts,
-    artifact_dir,
+    output_dir,
     url,
+    use_expected_osl=False,
 ) -> Optional[Dict]:
-    """Run aiperf benchmark for a single URL"""
+    """Run aiperf benchmark for a specific prefix ratio"""
+    logger.info(
+        f"Running benchmark with prefix_ratio={prefix_ratio}, seed={seed}, url={url}"
+    )
+
+    artifact_dir = f"{output_dir}/prefix_ratio_{prefix_ratio}_seed_{seed}"
+    os.makedirs(artifact_dir, exist_ok=True)
+
     aiperf_cmd = get_aiperf_cmd(
         model,
-        tokenizer,  # Pass tokenizer parameter
+        tokenizer,
         prefix_ratio,
         isl,
         osl,
@@ -134,173 +138,27 @@ def run_benchmark_single_url(
         num_prefix_prompts,
         artifact_dir,
         url,
+        use_expected_osl,
     )
 
-    logger.info(f"Running command for URL {url}: {' '.join(aiperf_cmd)}")
+    logger.info(f"Command: {' '.join(aiperf_cmd)}")
 
     try:
-        # Run aiperf and let it output directly to terminal
         subprocess.run(aiperf_cmd, check=True)
-
-        logger.info(f"AIPerf profiling completed successfully for URL {url}")
-
-        aiperf_result = get_aiperf_result(artifact_dir)
-        return aiperf_result
-
+        logger.info("AIPerf profiling completed successfully")
+        return get_aiperf_result(artifact_dir)
     except subprocess.CalledProcessError as e:
-        logger.error(f"AIPerf failed for URL {url} with error code: {e.returncode}")
+        logger.error(f"AIPerf failed with error code: {e.returncode}")
         return None
-
-
-def aggregate_results(results: List[Optional[Dict]]) -> Optional[Dict]:
-    """Aggregate results from multiple URLs"""
-    if not results:
-        return None
-
-    # For TTFT, we take the average across all URLs
-    # For throughput, we sum across all URLs (total system throughput)
-    ttft_values = [r["time_to_first_token"]["avg"] for r in results if r is not None]
-    throughput_values = [
-        r["output_token_throughput"]["avg"] for r in results if r is not None
-    ]
-
-    if not ttft_values or not throughput_values:
-        return None
-
-    aggregated = {
-        "time_to_first_token": {"avg": sum(ttft_values) / len(ttft_values)},
-        "output_token_throughput": {
-            "avg": sum(throughput_values)  # Total throughput across all URLs
-        },
-    }
-
-    return aggregated
-
-
-def run_benchmark(
-    model,
-    tokenizer,  # Add tokenizer parameter
-    prefix_ratio,
-    isl,
-    osl,
-    requests,
-    concurrency,
-    seed,
-    num_prefix_prompts,
-    output_dir,
-    urls,
-) -> Optional[Dict]:
-    """Run aiperf benchmark for a specific prefix ratio"""
-    logger.info(
-        f"Running benchmark with prefix_ratio={prefix_ratio}, seed={seed}, URLs={urls}"
-    )
-
-    # If single URL, maintain existing behavior
-    if isinstance(urls, str):
-        urls = [urls]
-
-    if len(urls) == 1:
-        artifact_dir = f"{output_dir}/prefix_ratio_{prefix_ratio}_seed_{seed}"
-        os.makedirs(artifact_dir, exist_ok=True)
-
-        return run_benchmark_single_url(
-            model,
-            tokenizer,  # Pass tokenizer parameter
-            prefix_ratio,
-            isl,
-            osl,
-            requests,
-            concurrency,
-            seed,
-            num_prefix_prompts,
-            artifact_dir,
-            urls[0],
-        )
-
-    # Multiple URLs: split requests and concurrency
-    num_urls = len(urls)
-    base_requests_per_url = requests // num_urls
-    remainder_requests = requests % num_urls
-    base_concurrency_per_url = max(1, concurrency // num_urls)
-
-    # Launch parallel processes
-    processes = []
-    artifact_dirs = []
-
-    for i, url in enumerate(urls):
-        # Distribute remainder requests to first few URLs
-        url_requests = base_requests_per_url + (1 if i < remainder_requests else 0)
-
-        artifact_dir = f"{output_dir}/prefix_ratio_{prefix_ratio}_seed_{seed}_url_{i}"
-        os.makedirs(artifact_dir, exist_ok=True)
-        artifact_dirs.append(artifact_dir)
-
-        aiperf_cmd = get_aiperf_cmd(
-            model,
-            tokenizer,  # Pass tokenizer parameter
-            prefix_ratio,
-            isl,
-            osl,
-            url_requests,
-            base_concurrency_per_url,
-            seed,
-            num_prefix_prompts,
-            artifact_dir,
-            url,
-        )
-
-        logger.info(f"Launching process for URL {url}: {' '.join(aiperf_cmd)}")
-
-        # Run process without capturing output - let it stream to terminal
-        process = subprocess.Popen(aiperf_cmd)
-        processes.append((process, url, artifact_dir))
-
-    # Wait for all processes to complete and collect results
-    results: List[Optional[Dict]] = []
-    for process, url, artifact_dir in processes:
-        return_code = process.wait()
-
-        if return_code == 0:
-            logger.info(f"AIPerf completed successfully for URL {url}")
-
-            try:
-                aiperf_result = get_aiperf_result(artifact_dir)
-                results.append(aiperf_result)
-            except Exception as e:
-                logger.error(f"Failed to get results for URL {url}: {e}")
-                results.append(None)
-        else:
-            logger.error(f"AIPerf failed for URL {url} with error code: {return_code}")
-            results.append(None)
-
-    # Aggregate results
-    return aggregate_results(results)
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Benchmark prefix ratios and plot results"
     )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Model name",
-    )
-    parser.add_argument(
-        "--tokenizer",
-        type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Tokenizer name (defaults to model)",
-    )
-    parser.add_argument(
-        "--url",
-        type=str,
-        nargs="+",  # Accept multiple URLs
-        default=["http://localhost:8000"],
-        # default=["http://localhost:8090", "http://localhost:8090"],
-        help="Server URL(s). Can specify multiple URLs for parallel benchmarking",
-    )
+
+    add_common_args(parser)
+
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -312,7 +170,6 @@ def main():
     parser.add_argument("--osl", type=int, default=200, help="Output sequence length")
     parser.add_argument("--requests", type=int, default=200, help="Number of requests")
     parser.add_argument("--concurrency", type=int, default=20, help="Concurrency level")
-    parser.add_argument("--seed", type=int, default=0, help="Initial random seed")
     parser.add_argument(
         "--prefix-ratios",
         type=float,
@@ -322,14 +179,19 @@ def main():
     )
 
     args = parser.parse_args()
+    resolve_tokenizer(args)
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Store results
     prefix_ratios = []
-    ttft_values = []
-    throughput_values = []
+    ttft_p25_values = []
+    ttft_p50_values = []
+    ttft_p75_values = []
+    itl_p25_values = []
+    itl_p50_values = []
+    itl_p75_values = []
 
     current_seed = args.seed
 
@@ -346,54 +208,87 @@ def main():
             current_seed,
             args.num_prefix_prompts,
             args.output_dir,
-            args.url,  # Now passing list of URLs
+            args.url,
+            args.use_expected_osl,
         )
 
         if result is not None:
-            ttft = result["time_to_first_token"]["avg"]
-            throughput = result["output_token_throughput"]["avg"]
+            ttft = result["time_to_first_token"]
+            itl = result["inter_token_latency"]
 
             prefix_ratios.append(prefix_ratio)
-            ttft_values.append(ttft)
-            throughput_values.append(throughput)
+            ttft_p25_values.append(ttft["p25"])
+            ttft_p50_values.append(ttft["p50"])
+            ttft_p75_values.append(ttft["p75"])
+            itl_p25_values.append(itl["p25"])
+            itl_p50_values.append(itl["p50"])
+            itl_p75_values.append(itl["p75"])
 
             logger.info(
-                f"Prefix ratio {prefix_ratio}: TTFT={ttft:.2f}ms, Throughput={throughput:.2f} tokens/s"
+                f"Prefix ratio {prefix_ratio}: TTFT p50={ttft['p50']:.2f}ms (p25={ttft['p25']:.2f}, p75={ttft['p75']:.2f}), "
+                f"ITL p50={itl['p50']:.2f}ms (p25={itl['p25']:.2f}, p75={itl['p75']:.2f})"
             )
 
         current_seed += 1
 
     # Create plots
-    if prefix_ratios and ttft_values and throughput_values:
-        # Plot TTFT vs Prefix Ratio
+    if prefix_ratios and ttft_p50_values and itl_p50_values:
         plt.figure(figsize=(12, 5))
 
+        # Plot TTFT vs Prefix Ratio with shaded p25-p75 region
         plt.subplot(1, 2, 1)
-        plt.plot(prefix_ratios, ttft_values, "bo-", linewidth=2, markersize=8)
+        plt.fill_between(
+            prefix_ratios,
+            ttft_p25_values,
+            ttft_p75_values,
+            alpha=0.3,
+            color="blue",
+            label="p25-p75",
+        )
+        plt.plot(
+            prefix_ratios,
+            ttft_p50_values,
+            "bo-",
+            linewidth=2,
+            markersize=8,
+            label="p50",
+        )
         plt.xlabel("Prefix Ratio")
         plt.ylabel("Time to First Token (ms)")
         plt.title("TTFT vs Prefix Ratio")
         plt.grid(True, alpha=0.3)
-        for i, (pr, ttft) in enumerate(zip(prefix_ratios, ttft_values)):
+        plt.legend()
+        for i, (pr, p50) in enumerate(zip(prefix_ratios, ttft_p50_values)):
             plt.annotate(
-                f"{ttft:.1f}ms",
-                (pr, ttft),
+                f"{p50:.1f}ms",
+                (pr, p50),
                 textcoords="offset points",
                 xytext=(0, 10),
                 ha="center",
             )
 
-        # Plot Throughput vs Prefix Ratio
+        # Plot ITL vs Prefix Ratio with shaded p25-p75 region
         plt.subplot(1, 2, 2)
-        plt.plot(prefix_ratios, throughput_values, "ro-", linewidth=2, markersize=8)
+        plt.fill_between(
+            prefix_ratios,
+            itl_p25_values,
+            itl_p75_values,
+            alpha=0.3,
+            color="red",
+            label="p25-p75",
+        )
+        plt.plot(
+            prefix_ratios, itl_p50_values, "ro-", linewidth=2, markersize=8, label="p50"
+        )
         plt.xlabel("Prefix Ratio")
-        plt.ylabel("Output Token Throughput (tokens/s)")
-        plt.title("Throughput vs Prefix Ratio")
+        plt.ylabel("Inter-Token Latency (ms)")
+        plt.title("ITL vs Prefix Ratio")
         plt.grid(True, alpha=0.3)
-        for i, (pr, thpt) in enumerate(zip(prefix_ratios, throughput_values)):
+        plt.legend()
+        for i, (pr, p50) in enumerate(zip(prefix_ratios, itl_p50_values)):
             plt.annotate(
-                f"{thpt:.1f}",
-                (pr, thpt),
+                f"{p50:.1f}ms",
+                (pr, p50),
                 textcoords="offset points",
                 xytext=(0, 10),
                 ha="center",
@@ -409,8 +304,12 @@ def main():
         # Save results to JSON
         results_data = {
             "prefix_ratios": prefix_ratios,
-            "ttft_values": ttft_values,
-            "throughput_values": throughput_values,
+            "ttft_p25_values": ttft_p25_values,
+            "ttft_p50_values": ttft_p50_values,
+            "ttft_p75_values": ttft_p75_values,
+            "itl_p25_values": itl_p25_values,
+            "itl_p50_values": itl_p50_values,
+            "itl_p75_values": itl_p75_values,
             "config": {
                 "model": args.model,
                 "tokenizer": args.tokenizer,

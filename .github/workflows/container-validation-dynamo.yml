@@ -65,25 +65,41 @@ jobs:
       - name: Define Image Tag
         id: define_image_tag
         run: |
-          echo "image_tag=dynamo:latest" >> $GITHUB_OUTPUT
+          echo "image_tag=dynamo:latest-dev" >> $GITHUB_OUTPUT
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+          python ./container/render.py \
+              --target=dev \
+              --framework=dynamo \
+              --platform=amd64 \
+              --show-result \
+              --output-short-filename
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none --enable-kvbm --enable-media-ffmpeg
+          docker buildx build \
+            --progress=plain \
+            --tag ${{ steps.define_image_tag.outputs.image_tag }} \
+            -f ./container/rendered.Dockerfile \
+            --build-arg ENABLE_MEDIA_FFMPEG=true \
+            --build-arg ENABLE_KVBM=true \
+            --load .
       - name: Start services with docker-compose
         working-directory: ./deploy
         run: |
           docker compose up -d nats-server etcd-server
-      - name: Run Rust checks (block-manager + media-nixl + media-ffmpeg + integration tests)
+      - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
-                      cargo clippy --features block-manager,media-nixl,media-ffmpeg --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg && \
+                      cargo clippy --features block-manager,media-ffmpeg --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl && \
                       cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
         if: always()
@@ -97,7 +113,7 @@ jobs:
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest_parallel \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --mypy --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} -n 4 -m \"${{ env.PYTEST_MARKS }}\""
+            bash -c "pytest --mypy --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} --durations=10 -n 4 -m \"${{ env.PYTEST_MARKS }}\""
       - name: Copy parallel test report from Container
         if: always()
         run: |
@@ -109,7 +125,7 @@ jobs:
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --mypy --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" "
+            bash -c "pytest --mypy --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ env.PYTEST_MARKS }}\" "
       - name: Copy test report from test Container
         if: always()
         run: |

@@ -18,34 +18,65 @@
 package validation
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+)
+
+const (
+	// maxCombinedResourceNameLength is the maximum allowed combined length for Grove resource names.
+	// This constraint comes from Grove's PodCliqueSet webhook validation which enforces a 45-character
+	// limit on the combined length of PodCliqueSet name + PodCliqueScalingGroup name + PodClique name.
+	// Pod names follow formats like: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
+	// The random string and hyphens consume additional characters, leaving 45 for the resource names.
+	maxCombinedResourceNameLength = 45
 )
 
 // DynamoGraphDeploymentValidator validates DynamoGraphDeployment resources.
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentValidator struct {
 	deployment *nvidiacomv1alpha1.DynamoGraphDeployment
+	mgr        ctrl.Manager // Optional: for API group detection via discovery client
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
 func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
 		deployment: deployment,
+		mgr:        nil,
+	}
+}
+
+// NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
+func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
+	return &DynamoGraphDeploymentValidator{
+		deployment: deployment,
+		mgr:        mgr,
 	}
 }
 
 // Validate performs stateless validation on the DynamoGraphDeployment.
+// Context is required for operations that may need to query the cluster (e.g., CRD checks).
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) Validate() (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	// Validate that at least one service is specified
 	if len(v.deployment.Spec.Services) == 0 {
 		return nil, fmt.Errorf("spec.services must have at least one service")
+	}
+
+	// Validate annotations
+	if err := v.validateAnnotations(); err != nil {
+		return nil, err
 	}
 
 	// Validate PVCs
@@ -53,11 +84,16 @@ func (v *DynamoGraphDeploymentValidator) Validate() (admission.Warnings, error) 
 		return nil, err
 	}
 
+	// Validate restart
+	if err := v.validateRestart(); err != nil {
+		return nil, err
+	}
+
 	var allWarnings admission.Warnings
 
 	// Validate each service
 	for serviceName, service := range v.deployment.Spec.Services {
-		warnings, err := v.validateService(serviceName, service)
+		warnings, err := v.validateService(ctx, serviceName, service)
 		if err != nil {
 			return nil, err
 		}
@@ -76,6 +112,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 
 	// Validate immutable fields
 	if err := v.validateImmutableFields(old, &warnings); err != nil {
+		return warnings, err
+	}
+
+	// Validate service topology is unchanged (service names must remain the same)
+	if err := v.validateServiceTopology(old); err != nil {
 		return warnings, err
 	}
 
@@ -117,6 +158,48 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 
 	return errors.Join(errs...)
 
+}
+
+// validateServiceTopology ensures the set of service names remains unchanged.
+// Users can modify service specifications, but cannot add or remove services.
+// This maintains graph topology immutability while allowing configuration updates.
+func (v *DynamoGraphDeploymentValidator) validateServiceTopology(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	oldServices := getServiceNames(old.Spec.Services)
+	newServices := getServiceNames(v.deployment.Spec.Services)
+
+	added := difference(newServices, oldServices)
+	removed := difference(oldServices, newServices)
+
+	// Fast path: no changes
+	if len(added) == 0 && len(removed) == 0 {
+		return nil
+	}
+
+	// Sort for deterministic error messages
+	sort.Strings(added)
+	sort.Strings(removed)
+
+	// Build descriptive error message
+	var errMsg string
+	switch {
+	case len(added) > 0 && len(removed) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services added: %v, services removed: %v",
+			added, removed)
+	case len(added) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services added: %v",
+			added)
+	case len(removed) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services removed: %v",
+			removed)
+	}
+
+	return errors.New(errMsg)
 }
 
 // validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
@@ -170,11 +253,86 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 
 // validateService validates a single service configuration using SharedSpecValidator.
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
+	// Validate service name length constraints for Grove PodCliqueSet naming
+	// Only validate when Grove pathway may be in use
+	if v.isGrovePathway() {
+		if err := v.validateServiceNameLength(serviceName, service); err != nil {
+			return nil, err
+		}
+	}
+
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
 	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
-	sharedValidator := NewSharedSpecValidator(service, fieldPath)
-	return sharedValidator.Validate()
+	calculatedNamespace := v.deployment.GetDynamoNamespaceForService(service)
+
+	var sharedValidator *SharedSpecValidator
+	if v.mgr != nil {
+		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr)
+	} else {
+		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
+	}
+
+	return sharedValidator.Validate(ctx)
+}
+
+// validateServiceNameLength validates that the service name combined with the DGD name
+// won't exceed Grove's 45-character limit for resource naming.
+//
+// Grove generates PodCliqueSet resources with the following naming patterns:
+// - PodCliqueSet name: DGD name (e.g., "vllm-agg")
+// - For multinode services:
+//   - PodCliqueScalingGroup name: lowercase(serviceName) (e.g., "vllmprefillworker")
+//   - PodClique names: lowercase(serviceName + "-ldr") and lowercase(serviceName + "-wkr")
+//
+// - For single-node services:
+//   - PodClique name: lowercase(serviceName)
+//
+// The combined length of these names must not exceed 45 characters.
+func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
+	dgdName := v.deployment.Name
+	lowerServiceName := strings.ToLower(serviceName)
+
+	// Check if this is a multinode service
+	isMultinode := service.GetNumberOfNodes() > 1
+
+	if isMultinode {
+		// For multinode: PodCliqueSet name + PodCliqueScalingGroup name + PodClique name (with leader suffix)
+		// The PodClique name is serviceName + "-ldr" (using GroveRoleSuffixLeader)
+		leaderPodCliqueName := lowerServiceName + "-" + consts.GroveRoleSuffixLeader
+		combinedLength := len(dgdName) + len(lowerServiceName) + len(leaderPodCliqueName)
+
+		if combinedLength > maxCombinedResourceNameLength {
+			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
+				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
+				"For multinode services, the combined length of DGD name + service name + service name with role suffix (e.g., '%s-ldr') must not exceed %d characters",
+				serviceName, combinedLength, maxCombinedResourceNameLength,
+				dgdName, len(dgdName), serviceName, len(serviceName),
+				lowerServiceName, maxCombinedResourceNameLength)
+		}
+	} else {
+		// For single-node: PodCliqueSet name + PodClique name
+		combinedLength := len(dgdName) + len(lowerServiceName)
+
+		if combinedLength > maxCombinedResourceNameLength {
+			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
+				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
+				"The combined length of DGD name + service name must not exceed %d characters",
+				serviceName, combinedLength, maxCombinedResourceNameLength,
+				dgdName, len(dgdName), serviceName, len(serviceName),
+				maxCombinedResourceNameLength)
+		}
+	}
+
+	return nil
+}
+
+// isGrovePathway determines if Grove pathway may be used for this deployment.
+// Grove is used when the nvidia.com/enable-grove annotation is NOT explicitly set to "false".
+// This is a conservative check - if Grove might be used, we validate the name length constraints.
+func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
+	return v.deployment.Annotations == nil ||
+		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
 }
 
 // validatePVCs validates the PVC configurations.
@@ -213,4 +371,104 @@ func (v *DynamoGraphDeploymentValidator) validatePVC(index int, pvc *nvidiacomv1
 	}
 
 	return err
+}
+
+func (v *DynamoGraphDeploymentValidator) validateRestart() error {
+	if v.deployment.Spec.Restart == nil {
+		return nil
+	}
+
+	restart := v.deployment.Spec.Restart
+
+	var err error
+	if restart.ID == "" {
+		err = errors.Join(err, fmt.Errorf("spec.restart.id is required"))
+	}
+
+	return errors.Join(err, v.validateRestartStrategyOrder())
+}
+
+func (v *DynamoGraphDeploymentValidator) validateRestartStrategyOrder() error {
+	restart := v.deployment.Spec.Restart
+	if restart.Strategy == nil || len(restart.Strategy.Order) == 0 {
+		return nil
+	}
+
+	if restart.Strategy.Type == nvidiacomv1alpha1.RestartStrategyTypeParallel {
+		return errors.New("spec.restart.strategy.order cannot be specified when strategy is parallel")
+	}
+
+	var err error
+
+	uniqueOrder := getUnique(restart.Strategy.Order)
+
+	if len(uniqueOrder) != len(restart.Strategy.Order) {
+		err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order must be unique"))
+	}
+
+	if len(uniqueOrder) != len(v.deployment.Spec.Services) {
+		err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order must have the same number of unique services as the deployment"))
+	}
+
+	for _, serviceName := range uniqueOrder {
+		if _, exists := v.deployment.Spec.Services[serviceName]; !exists {
+			err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order contains unknown service: %s", serviceName))
+		}
+	}
+
+	return err
+}
+
+// validateAnnotations validates known DGD annotations have valid values.
+func (v *DynamoGraphDeploymentValidator) validateAnnotations() error {
+	annotations := v.deployment.GetAnnotations()
+	if annotations == nil {
+		return nil
+	}
+
+	var errs []error
+
+	// Validate operator origin version is valid semver (if present)
+	if value, exists := annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+		if _, err := semver.NewVersion(value); err != nil {
+			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be valid semver",
+				consts.KubeAnnotationDynamoOperatorOriginVersion, value))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func getUnique[T comparable](slice []T) []T {
+	seen := make(map[T]struct{}, len(slice))
+	uniqueSlice := make([]T, 0, len(slice))
+	for _, element := range slice {
+		if _, exists := seen[element]; !exists {
+			seen[element] = struct{}{}
+			uniqueSlice = append(uniqueSlice, element)
+		}
+	}
+	return uniqueSlice
+}
+
+// getServiceNames extracts service names from a services map.
+// Returns a set-like map for efficient lookup and comparison.
+func getServiceNames(services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) map[string]struct{} {
+	names := make(map[string]struct{}, len(services))
+	for name := range services {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+// difference returns elements in set a that are not in set b (a - b).
+// This is used to find added or removed services.
+func difference(a, b map[string]struct{}) []string {
+	var result []string
+	for name := range a {
+		if _, exists := b[name]; !exists {
+			result = append(result, name)
+		}
+	}
+	return result
 }

@@ -4,8 +4,8 @@ This example demonstrates running Dynamo across multiple nodes with **KV-aware r
 
 For more information about the core concepts, see:
 
-- [Dynamo Disaggregated Serving](../../../docs/design_docs/disagg_serving.md)
-- [KV Cache Routing Architecture](../../../docs/router/kv_cache_routing.md)
+- [Dynamo Disaggregated Serving](../../../docs/pages/design-docs/disagg-serving.md)
+- [KV Cache Routing](../../../docs/pages/components/router/README.md)
 
 ## Architecture Overview
 
@@ -65,7 +65,7 @@ This is particularly beneficial for:
 - **Similar queries**: Common prefixes are computed once and reused
 - **Batch processing**: Related requests can be routed to workers with shared context
 
-For detailed technical information about how KV routing works, see the [KV Cache Routing Architecture documentation](../../../docs/router/kv_cache_routing.md).
+For detailed technical information about how KV routing works, see the [Router Guide](../../../docs/pages/components/router/router-guide.md).
 
 ## Prerequisites
 
@@ -82,13 +82,13 @@ Note the IP address of this node - you'll need it for worker configuration.
 
 ### 2. Software Requirements
 
-Install Dynamo with [SGLang](https://docs.sglang.ai/) support:
+Install Dynamo with [SGLang](https://docs.sglang.io/) support:
 
 ```bash
 pip install ai-dynamo[sglang]
 ```
 
-For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../../docs/backends/sglang/README.md).
+For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../../docs/pages/backends/sglang/README.md).
 
 ### 3. Network Requirements
 
@@ -97,6 +97,7 @@ Ensure the following ports are accessible between nodes:
 - **2379**: etcd client port
 - **4222**: NATS client port
 - **8000**: Frontend HTTP port (only needed on frontend node)
+- **${DISAGG_BOOTSTRAP_PORT}**: SGLang disaggregation bootstrap port (set in Step 1; must be reachable across nodes)
 - **High-speed interconnect**: For optimal NIXL performance (InfiniBand, RoCE, or high-bandwidth Ethernet)
 
 ### 4. Hardware Setup
@@ -128,6 +129,9 @@ export INFRA_NODE_IP=<INFRA_NODE_IP>
 export ETCD_ENDPOINTS=http://${INFRA_NODE_IP}:2379
 export NATS_SERVER=nats://${INFRA_NODE_IP}:4222
 export DYN_LOG=debug  # Enable debug logging to see routing decisions
+# Use a fixed, reachable port for the disaggregation bootstrap server
+# Pick any free port and ensure it's open between nodes
+export DISAGG_BOOTSTRAP_PORT=32963
 ```
 
 ### Step 2: Launch Replica 1 (Node 1)
@@ -141,8 +145,10 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
     --tp 1 \
+    --host 0.0.0.0 \
     --trust-remote-code \
     --skip-tokenizer-init \
+    --disaggregation-bootstrap-port ${DISAGG_BOOTSTRAP_PORT} \
     --disaggregation-mode prefill \
     --disaggregation-transfer-backend nixl &
 
@@ -151,8 +157,10 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
     --tp 1 \
+    --host 0.0.0.0 \
     --trust-remote-code \
     --skip-tokenizer-init \
+    --disaggregation-bootstrap-port ${DISAGG_BOOTSTRAP_PORT} \
     --disaggregation-mode decode \
     --disaggregation-transfer-backend nixl
 ```
@@ -161,6 +169,8 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
 >
 > - `CUDA_VISIBLE_DEVICES`: Controls which GPU each worker uses (0 and 1 for different > GPUs)
 > - `--page-size 16`: Sets the KV cache block size - must be identical across all workers
+> - `--host 0.0.0.0`: Exposes the SGLang bootstrap server on all interfaces so other nodes can reach it
+> - `--disaggregation-bootstrap-port`: Uses the fixed port you set in `DISAGG_BOOTSTRAP_PORT`; ensure this port is open between nodes
 > - `--disaggregation-mode`: Separates prefill (prompt processing) from decode (token > generation)
 > - `--disaggregation-transfer-backend nixl`: Enables high-speed GPU-to-GPU transfers
 > - `--skip-tokenizer-init`: Avoids duplicate tokenizer loading since the frontend > handles tokenization
@@ -176,8 +186,10 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
     --tp 1 \
+    --host 0.0.0.0 \
     --trust-remote-code \
     --skip-tokenizer-init \
+    --disaggregation-bootstrap-port ${DISAGG_BOOTSTRAP_PORT} \
     --disaggregation-mode prefill \
     --disaggregation-transfer-backend nixl &
 
@@ -187,8 +199,10 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
     --tp 1 \
+    --host 0.0.0.0 \
     --trust-remote-code \
     --skip-tokenizer-init \
+    --disaggregation-bootstrap-port ${DISAGG_BOOTSTRAP_PORT} \
     --disaggregation-mode decode \
     --disaggregation-transfer-backend nixl
 ```
@@ -461,7 +475,7 @@ python -m dynamo.frontend \
     --router-temperature 0.0     # Temperature for probabilistic routing (0 = deterministic)
 ```
 
-For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [KV Cache Routing documentation](../../../docs/router/kv_cache_routing.md).
+For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [Router Guide](../../../docs/pages/components/router/router-guide.md).
 
 ## Cleanup
 

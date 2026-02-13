@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import binascii
+import io
 import logging
 import os
 import tempfile
@@ -11,21 +14,25 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
-from vllm.inputs import TextPrompt, TokensPrompt
+import torch
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from dynamo._core import Context
+import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelType,
-    ZmqKvEventPublisher,
     lora_name_to_id,
-    register_llm,
-    unregister_llm,
+    register_model,
+    unregister_model,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -239,19 +246,25 @@ class BaseWorkerHandler(ABC):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         self.runtime = runtime
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publishers: list[ZmqKvEventPublisher] | None = None
+        self.kv_publishers: list[KvEventPublisher] | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
-        self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
+        self.enable_frontend_decoding = enable_frontend_decoding
+        # NIXL connector for frontend decoding - lazy initialized
+        self._nixl_connector = None
+        self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
@@ -268,19 +281,114 @@ class BaseWorkerHandler(ABC):
             tokenizer = engine.tokenizer
         self.input_param_manager = InputParamManager(tokenizer)
 
+        # Store shutdown event for graceful shutdown monitoring
+        self.shutdown_event = shutdown_event
+
+    async def sleep(self, body: dict) -> dict:
+        """Sleep the engine to release GPU memory and unregister from discovery.
+
+        Args:
+            body: Dict with optional 'level' key (1=weights only, 2=weights+buffers, 3=everything)
+
+        Order of operations:
+        1. Unregister from discovery - stop accepting new requests
+        2. Sleep engine - safe now that no new requests will arrive
+        """
+        level = body.get("level", 1)
+        try:
+            # Step 1: Unregister endpoint instance FIRST to stop new requests from arriving
+            try:
+                await self.generate_endpoint.unregister_endpoint_instance()
+                logger.info(
+                    "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
+                )
+            except Exception as unreg_err:
+                logger.warning(
+                    f"[Sleep] Failed to unregister endpoint from discovery: {unreg_err}"
+                )
+
+            # Step 2: Now safe to sleep - no new requests will be routed here
+            await self.engine_client.sleep(level)
+
+            return {"status": "ok", "message": f"Engine slept (level={level})"}
+        except Exception as e:
+            logger.error(f"Failed to sleep engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def wake_up(self, body: dict) -> dict:
+        """Wake the engine to restore GPU memory and re-register to discovery.
+
+        Args:
+            body: Dict with optional 'tags' key (e.g., ["weights", "kv_cache"]). None wakes all.
+
+        Order of operations:
+        1. Wake engine - restore GPU memory
+        2. Re-register endpoint instance - allow frontend to route requests here again
+        """
+        tags = body.get("tags")
+        try:
+            # Step 1: Wake engine first - must be ready before accepting requests
+            await self.engine_client.wake_up(tags)
+
+            # Step 2: Re-register endpoint instance to discovery so frontend can route to us again
+            try:
+                await self.generate_endpoint.register_endpoint_instance()
+                logger.info(
+                    "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
+                )
+            except Exception as reg_err:
+                logger.warning(
+                    f"[Wake] Failed to re-register endpoint to discovery: {reg_err}"
+                )
+
+            return {"status": "ok", "message": f"Engine woke (tags={tags})"}
+        except Exception as e:
+            logger.error(f"Failed to wake up engine: {e}")
+            return {"status": "error", "message": str(e)}
+
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
         raise NotImplementedError
 
     async def _monitor_abort(self, context, request_id, is_prefill):
-        """Background task that monitors for context cancellation and aborts the request."""
+        """
+        Background task that monitors for context cancellation and shutdown.
+        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        """
         try:
-            await context.async_killed_or_stopped()
-            # If we reach here, the context was stopped or killed
+            # Build list of futures/tasks to wait for
+            wait_for = [context.async_killed_or_stopped()]
+            shutdown_task = None
+
+            if self.shutdown_event:
+                # Create task for shutdown monitoring and add to wait list
+                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+                wait_for.append(shutdown_task)
+
+            # Wait for whichever happens first
+            done, pending = await asyncio.wait(
+                wait_for,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel the pending task/future
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # Abort the request
             await self.engine_client.abort(request_id)
             logger.debug(
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
+
+            # Check which event triggered and raise GeneratorExit if shutdown
+            if shutdown_task and shutdown_task in done:
+                raise GeneratorExit("Engine was shut down during generation.")
+
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
@@ -289,18 +397,24 @@ class BaseWorkerHandler(ABC):
 
     @asynccontextmanager
     async def _abort_monitor(self, context, request_id, is_prefill=False):
-        """Context manager that creates and automatically cleans up an abort monitoring task."""
+        """
+        Context manager that creates and automatically cleans up an abort monitoring task.
+        If shutdown event was triggered, raises GeneratorExit on exit.
+        """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
             yield task
         finally:
-            # Cancel the abort monitoring task when exiting the context
+            # Clean up the abort monitoring task
             if not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+            else:
+                # If the task completed, check if it raised GeneratorExit
+                task.result()
 
     async def clear_kv_blocks(self, request=None):
         try:
@@ -457,7 +571,7 @@ class BaseWorkerHandler(ABC):
                             }
 
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                            await register_llm(
+                            await register_model(
                                 model_input=ModelInput.Tokens,
                                 model_type=ModelType.Chat | ModelType.Completions,
                                 endpoint=self.generate_endpoint,
@@ -577,7 +691,7 @@ class BaseWorkerHandler(ABC):
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
                         try:
-                            await unregister_llm(
+                            await unregister_model(
                                 endpoint=self.generate_endpoint,
                                 lora_name=lora_name,
                             )
@@ -674,6 +788,146 @@ class BaseWorkerHandler(ABC):
             except Exception as e:
                 logger.warning(f"Failed to clean up temp directory: {e}")
 
+    def _decode_prompt_embeds(self, prompt_embeds_base64: str):
+        """
+        Decode base64-encoded prompt embeddings in PyTorch format.
+
+        Format: PyTorch tensor serialized with torch.save() and base64-encoded.
+
+        Args:
+            prompt_embeds_base64: Base64-encoded PyTorch tensor
+
+        Returns:
+            torch.Tensor: Decoded prompt embeddings with preserved shape and dtype
+
+        Raises:
+            ValueError: If decoding fails or format is invalid
+        """
+        try:
+            # Step 1: Decode base64 to bytes
+            embeds_bytes = base64.b64decode(prompt_embeds_base64)
+
+            # Step 2: Load PyTorch tensor from bytes
+            buffer = io.BytesIO(embeds_bytes)
+            embeddings_tensor = torch.load(buffer, weights_only=True)
+
+            # Step 3: Validate it's a tensor
+            if not isinstance(embeddings_tensor, torch.Tensor):
+                raise ValueError(
+                    f"prompt_embeds must be a torch.Tensor, got {type(embeddings_tensor)}"
+                )
+
+            logger.debug(
+                f"Decoded PyTorch format embeddings: shape={embeddings_tensor.shape}, "
+                f"dtype={embeddings_tensor.dtype}, size={len(embeds_bytes)} bytes"
+            )
+
+            return embeddings_tensor
+
+        except binascii.Error as e:
+            logger.error(f"Invalid base64 encoding in prompt_embeds: {e}")
+            raise ValueError(f"Invalid base64 encoding in prompt_embeds: {e}")
+        except Exception as e:
+            logger.error(f"Failed to decode prompt_embeds: {e}")
+            raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
+
+    def _create_prompt_from_embeddings(
+        self, prompt_embeds_base64: str
+    ) -> tuple[EmbedsPrompt, int, torch.Tensor]:
+        """
+        Decode prompt embeddings and create EmbedsPrompt for vLLM.
+
+        Args:
+            prompt_embeds_base64: Base64-encoded PyTorch tensor
+
+        Returns:
+            Tuple of (EmbedsPrompt, sequence_length, tensor) where:
+            - EmbedsPrompt: The vLLM prompt input
+            - sequence_length: Extracted from tensor shape for usage statistics
+            - tensor: The decoded tensor (for logging shape/dtype)
+
+        Raises:
+            ValueError: If decoding fails or tensor is invalid
+        """
+        embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
+
+        # Extract sequence length from tensor shape for usage reporting
+        # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
+        if embeddings_tensor.dim() == 2:
+            sequence_length = embeddings_tensor.shape[0]
+        elif embeddings_tensor.dim() == 3:
+            sequence_length = embeddings_tensor.shape[1]
+        else:
+            # Fallback for unexpected shapes
+            sequence_length = embeddings_tensor.shape[0]
+
+        # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
+        prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
+
+        return prompt, sequence_length, embeddings_tensor
+
+    async def _load_image_batch(
+        self, image_mm_items: list[Dict[str, Any]]
+    ) -> list[Any]:
+        """
+        Load a batch of images from multimodal data items.
+
+        Supports two paths:
+        1. Url variant: Download and decode image from URL (default)
+        2. Decoded variant: Read pre-decoded image via NIXL RDMA (requires --frontend-decoding)
+
+        Args:
+            image_mm_items: List of multimodal data items for images
+        Returns:
+            List of loaded image data
+        Raises:
+            Exception: If any image fails to load
+        """
+        image_futures = []
+
+        for item in image_mm_items:
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                # URL path: download and decode in Python backend
+                url = item[URL_VARIANT_KEY]
+                image_futures.append(self.image_loader.load_image(url))
+                logger.debug(f"Preparing to load image from URL: {url[:80]}...")
+            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
+                if self.enable_frontend_decoding:
+                    async with self._nixl_connector_lock:
+                        if self._nixl_connector is None:
+                            self._nixl_connector = nixl_connect.Connector()
+                            await self._nixl_connector.initialize()
+
+                    metadata = item[DECODED_VARIANT_KEY]
+                    image_futures.append(
+                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
+                    )
+                else:
+                    logger.error(
+                        "Received Decoded multimodal data but --frontend-decoding not enabled. "
+                        "Use --frontend-decoding flag to enable NIXL RDMA image transfer."
+                    )
+                    raise ValueError("Could not load decoded media from frontend")
+
+        # Process images in parallel
+        results = await asyncio.gather(*image_futures, return_exceptions=True)
+        loaded_images = []
+        collective_exceptions = ""
+        for media_item, result in zip(image_mm_items, results):
+            if isinstance(result, Exception):
+                source = media_item.get(URL_VARIANT_KEY, "decoded")
+                logger.error(f"Failed to load image from {source[:80]}...: {result}")
+                collective_exceptions += (
+                    f"Failed to load image from {source[:80]}...: {result}\n"
+                )
+                continue
+            loaded_images.append(result)
+
+        if collective_exceptions:
+            raise Exception(collective_exceptions)
+
+        return loaded_images
+
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
@@ -694,25 +948,7 @@ class BaseWorkerHandler(ABC):
         vllm_mm_data = {}
 
         # Process image_url entries
-        images = []
-        for item in mm_map.get(IMAGE_URL_KEY, []):
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
-                url = item[URL_VARIANT_KEY]
-                try:
-                    # ImageLoader supports both data: and http(s): URLs with caching
-                    image = await self.image_loader.load_image(url)
-                    images.append(image)
-                    logger.debug(f"Loaded image from URL: {url[:80]}...")
-                except Exception:
-                    logger.exception(f"Failed to load image from {url[:80]}...")
-                    raise
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
-                # Will contain NIXL metadata for direct memory access
-                # TODO: Implement NIXL read when PRs merge
-                logger.warning(
-                    "Decoded multimodal data not yet supported in standard worker"
-                )
+        images = await self._load_image_batch(mm_map.get(IMAGE_URL_KEY, []))
 
         if images:
             # vLLM expects single image or list
@@ -725,20 +961,95 @@ class BaseWorkerHandler(ABC):
 
         return vllm_mm_data if vllm_mm_data else None
 
+    def _build_prompt_from_request(
+        self,
+        request: Dict[str, Any],
+        request_id: str,
+        multi_modal_data: Dict[str, Any] | None,
+        log_prefix: str = "",
+    ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
+        """
+        Build a prompt from request, handling both prompt_embeds and token_ids.
+
+        Args:
+            request: The request dict containing either prompt_embeds or token_ids
+            request_id: Request ID for logging
+            multi_modal_data: Optional multimodal data to attach to TokensPrompt
+            log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
+
+        Returns:
+            Tuple of (prompt, embedding_sequence_length, error_dict) where:
+            - On success: (prompt, embedding_sequence_length or None, None)
+            - On failure: (None, None, error_dict to yield)
+        """
+        embedding_sequence_length = None
+
+        if "prompt_embeds" in request and request["prompt_embeds"]:
+            try:
+                (
+                    prompt,
+                    embedding_sequence_length,
+                    tensor,
+                ) = self._create_prompt_from_embeddings(request["prompt_embeds"])
+                logger.info(
+                    f"{log_prefix}Using prompt embeddings: shape={tensor.shape}, "
+                    f"dtype={tensor.dtype}, sequence_length={embedding_sequence_length}, "
+                    f"request_id={request_id}"
+                )
+                return prompt, embedding_sequence_length, None
+            except Exception as e:
+                logger.error(
+                    f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
+                    f"{request_id}: {e}"
+                )
+                return (
+                    None,
+                    None,
+                    {
+                        "finish_reason": f"error: Invalid prompt_embeds: {e}",
+                        "token_ids": [],
+                    },
+                )
+        else:
+            # Normal path: use token IDs
+            prompt = TokensPrompt(
+                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+            )
+            return prompt, embedding_sequence_length, None
+
     @staticmethod
-    def _build_completion_usage(request_output: RequestOutput) -> Dict[str, Any]:
+    def _build_completion_usage(
+        request_output: RequestOutput,
+        embedding_sequence_length: int | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Build completion usage statistics.
+
+        Args:
+            request_output: vLLM RequestOutput object
+            embedding_sequence_length: If using prompt embeddings, the sequence length
+                                     extracted from the embeddings tensor shape
+
+        Returns:
+            Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
+        """
+        # Determine prompt token count:
+        # - For embeddings: use embedding_sequence_length from tensor shape
+        # - For normal text: use len(prompt_token_ids)
+        if embedding_sequence_length is not None:
+            prompt_tokens = embedding_sequence_length
+        elif request_output.prompt_token_ids:
+            prompt_tokens = len(request_output.prompt_token_ids)
+        else:
+            prompt_tokens = None
+
+        completion_tokens = len(request_output.outputs[0].token_ids)
+
         return {
-            "prompt_tokens": (
-                len(request_output.prompt_token_ids)
-                if request_output.prompt_token_ids
-                else None
-            ),
-            "completion_tokens": len(request_output.outputs[0].token_ids),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "total_tokens": (
-                len(request_output.prompt_token_ids)
-                + len(request_output.outputs[0].token_ids)
-                if request_output.prompt_token_ids
-                else None
+                prompt_tokens + completion_tokens if prompt_tokens is not None else None
             ),
             "prompt_tokens_details": (
                 {"cached_tokens": request_output.num_cached_tokens}
@@ -807,19 +1118,39 @@ class BaseWorkerHandler(ABC):
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
-    def _build_trace_headers(self, context: Context) -> dict[str, str] | None:
+    @staticmethod
+    def _log_with_lora_context(
+        message: str,
+        request_id: str,
+        lora_request=None,
+        level: str = "debug",
+        **kwargs,
+    ) -> None:
         """
-        Build trace headers from context for propagation to vLLM engine.
-        """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
+        Log a message with optional LoRA context.
 
-        # W3C Trace Context format: {version}-{trace_id}-{parent_id}-{trace_flags}
-        # version: 00, trace_flags: 01 (sampled)
-        # TODO: properly propagate the trace-flags from current span.
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+        Args:
+            message: Base message to log (can include {lora_info} placeholder)
+            request_id: Request ID for correlation
+            lora_request: Optional LoRA request object
+            level: Log level ("debug" or "info")
+            **kwargs: Additional format arguments for the message
+        """
+        if lora_request:
+            lora_info = f" with LoRA {lora_request.lora_name}"
+        else:
+            lora_info = ""
+
+        formatted_message = message.format(
+            request_id=request_id,
+            lora_info=lora_info,
+            **kwargs,
+        )
+
+        if level == "info":
+            logger.info(formatted_message)
+        else:
+            logger.debug(formatted_message)
 
     async def generate_tokens(
         self,
@@ -828,19 +1159,16 @@ class BaseWorkerHandler(ABC):
         request_id,
         data_parallel_rank=None,
         lora_request=None,
+        embedding_sequence_length=None,
         trace_headers=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
-            if lora_request:
-                logger.debug(
-                    f"Starting token generation for request {request_id} with LoRA: "
-                    f"{lora_request.lora_name} (ID: {lora_request.lora_int_id})"
-                )
-            else:
-                logger.debug(
-                    f"Starting token generation for request {request_id} (no LoRA)"
-                )
+            self._log_with_lora_context(
+                "Starting token generation for request {request_id}{lora_info}",
+                request_id,
+                lora_request,
+            )
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -851,60 +1179,55 @@ class BaseWorkerHandler(ABC):
             )
 
             num_output_tokens_so_far = 0
-            try:
-                async for res in gen:
-                    # res is vllm's RequestOutput
+            async for res in gen:
+                # res is vllm's RequestOutput
 
-                    if not res.outputs:
-                        if lora_request:
-                            logger.debug(
-                                f"Request {request_id} with LoRA {lora_request.lora_name} "
-                                "returned no outputs"
-                            )
-                        yield {"finish_reason": "error", "token_ids": []}
-                        break
-
-                    output = res.outputs[0]
-                    next_total_toks = len(output.token_ids)
-                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-
-                    # Extract logprobs for new tokens if available
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far
+                if not res.outputs:
+                    self._log_with_lora_context(
+                        "Request {request_id}{lora_info} returned no outputs",
+                        request_id,
+                        lora_request,
                     )
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
+                    # Use string format "error: message" for consistency with vLLM's string-based finish_reason
+                    # Rust will parse this into FinishReason::Error(message)
+                    yield {
+                        "finish_reason": "error: No outputs from vLLM engine",
+                        "token_ids": [],
+                    }
+                    break
 
-                    if output.finish_reason:
-                        out["finish_reason"] = output.finish_reason
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res
-                        )
-                        # Log completion with LoRA info (debug level to avoid log spam)
-                        if lora_request:
-                            logger.debug(
-                                f"Completed token generation for request {request_id} with LoRA "
-                                f"{lora_request.lora_name}: {next_total_toks} output tokens, "
-                                f"finish_reason={output.finish_reason}"
-                            )
-                        else:
-                            logger.debug(
-                                f"Completed token generation for request {request_id}: "
-                                f"{next_total_toks} output tokens, finish_reason={output.finish_reason}"
-                            )
-                    if output.stop_reason:
-                        out["stop_reason"] = output.stop_reason
-                    yield out
-                    num_output_tokens_so_far = next_total_toks
-            except asyncio.CancelledError:
-                # raise EngineShGeneratorExit when engine exits so that frontend can migrate the request
-                raise GeneratorExit(
-                    "Decode engine was shut down during token generation"
-                ) from None
+                output = res.outputs[0]
+                next_total_toks = len(output.token_ids)
+                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                # Extract logprobs for new tokens if available
+                log_probs, top_logprobs = self._extract_logprobs(
+                    output, num_output_tokens_so_far
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
+                if output.finish_reason:
+                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
+                    out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
+                        request_output=res,
+                        embedding_sequence_length=embedding_sequence_length,
+                    )
+                    # Log completion with LoRA info (debug level to avoid log spam)
+                    self._log_with_lora_context(
+                        "Completed token generation for request {request_id}{lora_info}: "
+                        "{output_tokens} output tokens, finish_reason={finish_reason}",
+                        request_id,
+                        lora_request,
+                        output_tokens=next_total_toks,
+                        finish_reason=output.finish_reason,
+                    )
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+                yield out
+                num_output_tokens_so_far = next_total_toks
 
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
@@ -925,6 +1248,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         super().__init__(
             runtime,
@@ -936,6 +1261,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            shutdown_event,
+            enable_frontend_decoding,
         )
 
     async def generate(self, request, context):
@@ -957,9 +1284,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
-        prompt = TokensPrompt(
-            prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+        # Build prompt from request (handles both prompt_embeds and token_ids)
+        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+            request, request_id, multi_modal_data
         )
+        if error is not None:
+            yield error
+            return
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
@@ -1004,10 +1335,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logger.debug(
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
+        dp_rank = request.get("routing", {}).get("dp_rank")
 
-        dp_rank = request.get("dp_rank", None)
-
-        trace_headers = self._build_trace_headers(context)
+        trace_headers = build_trace_headers(context)
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -1017,6 +1347,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     data_parallel_rank=dp_rank,
                     lora_request=lora_request,
+                    embedding_sequence_length=embedding_sequence_length,
                     trace_headers=trace_headers,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
@@ -1048,11 +1379,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params
         )
 
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
-        trace_headers = self._build_trace_headers(context)
+        trace_headers = build_trace_headers(context)
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -1092,7 +1423,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "role": "assistant",
                             "content": delta_text,
                         },
-                        "finish_reason": output.finish_reason,
+                        "finish_reason": normalize_finish_reason(output.finish_reason),
                     }
 
                     chunk = {
@@ -1102,6 +1433,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "model": "unknown",
                         "choices": [choice_data],
                     }
+
+                    if output.finish_reason:
+                        chunk["usage"] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                        )
 
                     yield chunk
 
@@ -1124,6 +1460,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         super().__init__(
             runtime,
@@ -1135,6 +1473,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            shutdown_event,
+            enable_frontend_decoding,
         )
 
     async def generate(self, request, context):
@@ -1151,10 +1491,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
-        token_ids = request["token_ids"]
-        prompt = TokensPrompt(
-            prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+        # Build prompt from request (handles both prompt_embeds and token_ids)
+        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+            request, request_id, multi_modal_data, log_prefix="Prefill "
         )
+        if error is not None:
+            # Prefill errors need disaggregated_params field
+            error["disaggregated_params"] = None
+            yield error
+            return
 
         # Build sampling params from request using shared utility
         sampling_params = build_sampling_params(
@@ -1202,9 +1547,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
             )
 
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
 
-        trace_headers = self._build_trace_headers(context)
+        trace_headers = build_trace_headers(context)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -1222,35 +1567,33 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
-            try:
-                async for res in gen:
-                    logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+            async for res in gen:
+                logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
-                    token_ids = res.outputs[0].token_ids if res.outputs else []
+                token_ids = res.outputs[0].token_ids if res.outputs else []
 
-                    output: Dict[str, Any] = {
-                        "token_ids": list(token_ids),
-                        "disaggregated_params": (
-                            {"kv_transfer_params": res.kv_transfer_params}
-                            if res.kv_transfer_params
-                            else None
-                        ),
-                        "completion_usage": BaseWorkerHandler._build_completion_usage(
-                            request_output=res
-                        ),
-                    }
+                output: Dict[str, Any] = {
+                    "token_ids": list(token_ids),
+                    "disaggregated_params": (
+                        {"kv_transfer_params": res.kv_transfer_params}
+                        if res.kv_transfer_params
+                        else None
+                    ),
+                    "completion_usage": BaseWorkerHandler._build_completion_usage(
+                        request_output=res,
+                        embedding_sequence_length=embedding_sequence_length,
+                    ),
+                }
 
-                    # Log prefill completion with LoRA info
-                    if lora_request:
-                        logger.info(
-                            f"Prefill completed for request {request_id} with LoRA {lora_request.lora_name}: "
-                            f"generated {len(token_ids)} token(s), "
-                            f"has_kv_params={res.kv_transfer_params is not None}"
-                        )
+                # Log prefill completion with LoRA info
+                self._log_with_lora_context(
+                    "Prefill completed for request {request_id}{lora_info}: "
+                    "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                    request_id,
+                    lora_request,
+                    level="info" if lora_request else "debug",
+                    token_count=len(token_ids),
+                    has_kv_params=res.kv_transfer_params is not None,
+                )
 
-                    yield output
-            except asyncio.CancelledError:
-                # raise the error because we cannot migrate prefill requests
-                raise GeneratorExit(
-                    "Prefill engine was shut down during token generation"
-                ) from None
+                yield output

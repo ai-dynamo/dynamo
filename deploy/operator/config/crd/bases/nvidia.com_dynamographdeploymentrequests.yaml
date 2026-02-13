@@ -144,8 +144,8 @@ spec:
                   description: |-
                     EnableGpuDiscovery controls whether the profiler should automatically discover GPU
                     resources from the Kubernetes cluster nodes. When enabled, the profiler will override
-                    any manually specified hardware configuration (min_num_gpus_per_engine, max_num_gpus_per_engine,
-                    num_gpus_per_node) with values detected from the cluster.
+                    any manually specified hardware configuration (minNumGpusPerEngine, maxNumGpusPerEngine,
+                    numGpusPerNode) with values detected from the cluster.
                     Requires cluster-wide node access permissions - only available with cluster-scoped operators.
                   type: boolean
                 model:
@@ -184,6 +184,13 @@ spec:
                       required:
                         - name
                       type: object
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.
+                        For example, to schedule on ARM64 nodes, use {"kubernetes.io/arch": "arm64"}.
+                      type: object
                     outputPVC:
                       description: |-
                         OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.
@@ -210,7 +217,7 @@ spec:
                             Claims lists the names of resources, defined in spec.resourceClaims,
                             that are used by this container.
 
-                            This is an alpha field and requires enabling the
+                            This field depends on the
                             DynamicResourceAllocation feature gate.
 
                             This field is immutable. It can only be set for containers.
@@ -427,7 +434,7 @@ spec:
                 profilingResults:
                   description: |-
                     ProfilingResults contains a reference to the ConfigMap holding profiling data.
-                    Format: "configmap/<name>"
+                    Format: "configmap/\<name\>"
                   type: string
                 state:
                   description: |-

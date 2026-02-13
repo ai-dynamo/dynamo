@@ -45,19 +45,21 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 )
 
 const (
-	// State constants
-	StateEmpty             = ""
-	StatePending           = "Pending"
-	StateProfiling         = "Profiling"
-	StateDeploying         = "Deploying"
-	StateReady             = "Ready"
-	StateDeploymentDeleted = "DeploymentDeleted"
-	StateFailed            = "Failed"
+	// DGDR state constants
+	DGDRStateEmpty             = ""
+	DGDRStatePending           = "Pending"
+	DGDRStateProfiling         = "Profiling"
+	DGDRStateDeploying         = "Deploying"
+	DGDRStateReady             = "Ready"
+	DGDRStateDeploymentDeleted = "DeploymentDeleted"
+	DGDRStateFailed            = "Failed"
 
 	// Condition types
 	ConditionTypeValidation      = "Validation"
@@ -116,13 +118,15 @@ const (
 	// Volume names
 	VolumeNameProfilingConfig = "profiling-config"
 	VolumeNameProfilingOutput = "profiling-output"
+	VolumeNameModelCache      = "model-cache"
 
 	// Volume paths
-	ProfilingOutputPath       = "/data"
-	ProfilingOutputFile       = "config_with_planner.yaml"
-	ProfilingOutputFileMocker = "mocker_config_with_planner.yaml"
-	ProfilingConfigPath       = "/config"
-	ProfilingConfigFile       = "disagg.yaml"
+	ProfilingOutputPath        = "/data"
+	ProfilingOutputFile        = "config_with_planner.yaml"
+	ProfilingOutputFileMocker  = "mocker_config_with_planner.yaml"
+	ProfilingConfigPath        = "/config"
+	ProfilingConfigFile        = "disagg.yaml"
+	DefaultModelCacheMountPath = "/opt/model-cache"
 
 	// Command line arguments
 	ArgModel   = "--model"
@@ -152,6 +156,7 @@ const (
 	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
 	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
 	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
+	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
 
 	// Validation messages
 	ValidationErrorModelRequired  = "model is required"
@@ -163,30 +168,92 @@ const (
 	BackendVLLM   = "vllm"
 	BackendSGLang = "sglang"
 	BackendTRTLLM = "trtllm"
+
+	// Profiling config field names
+	ConfigKeyDeployment = "deployment"
+	ConfigKeyModelCache = "modelCache"
+	ConfigKeyPVCName    = "pvcName"
+	ConfigKeyPVCPath    = "pvcPath"
+	ConfigKeyMountPath  = "mountPath"
 )
 
 // shell script template for the output copier sidecar
 const sidecarScriptTemplate = `
 set -e
 set -o pipefail
-# Wait for the profiler container to complete, not just for the file to exist
-# This ensures we capture the final config, not intermediate results
+
+# Wait for profiler container to terminate (no timeout - profiling can take hours)
 echo "Waiting for profiler to complete..."
+START_TIME=$(date +%s)
+LAST_PROGRESS_LOG=$START_TIME
+PROGRESS_INTERVAL=300
+
 while true; do
-  # Check if profiler container has finished (either Completed or Error state)
-  # Use kubectl to check the pod's container status
-  STATUS=$(kubectl get pod $HOSTNAME -n {{.Namespace}} -o jsonpath='{.status.containerStatuses[?(@.name=="profiler")].state}' 2>/dev/null || echo "")
-  if echo "$STATUS" | grep -q "terminated"; then
-    echo "Profiler container has terminated"
+  CURRENT_TIME=$(date +%s)
+  ELAPSED=$((CURRENT_TIME - START_TIME))
+
+  # Log progress every 5 minutes
+  if [ $((CURRENT_TIME - LAST_PROGRESS_LOG)) -ge $PROGRESS_INTERVAL ]; then
+    echo "Still waiting... ($(($ELAPSED / 60)) minutes elapsed)"
+    LAST_PROGRESS_LOG=$CURRENT_TIME
+  fi
+
+  # Check if profiler container terminated
+  CONTAINER_STATUS=$(kubectl get pod $HOSTNAME -n {{.Namespace}} -o jsonpath='{.status.containerStatuses[?(@.name=="profiler")].state}' 2>/dev/null || echo "")
+  if echo "$CONTAINER_STATUS" | grep -q "terminated"; then
+    echo "Profiler terminated (ran for $(($ELAPSED / 60)) minutes)"
     break
   fi
   sleep 5
 done
 
-# Now wait for the output file to exist
-echo "Waiting for output file {{.OutputPath}}/{{.OutputFile}}..."
-while [ ! -f {{.OutputPath}}/{{.OutputFile}} ]; do sleep 2; done
-echo "Output file found, creating ConfigMap..."
+# Check profiler status file (2 minute timeout)
+echo "Checking profiler status..."
+STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
+TIMEOUT=120
+CHECK_START=$(date +%s)
+
+# Wait for status file to exist
+while [ ! -f "$STATUS_FILE" ]; do
+  ELAPSED=$(($(date +%s) - CHECK_START))
+  if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo "ERROR: Status file not found after ${TIMEOUT}s"
+    exit 1
+  fi
+  sleep 2
+done
+
+# Read and parse status from YAML file
+STATUS=$(grep "^status:" "$STATUS_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
+
+if [ -z "$STATUS" ]; then
+  echo "ERROR: Invalid status file format"
+  exit 1
+fi
+
+# Check status value
+case "$STATUS" in
+  success)
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    echo "Profiler succeeded: $MESSAGE"
+    ;;
+  failed)
+    ERROR=$(grep "^error:" "$STATUS_FILE" | sed 's/^error: *//' | tr -d '"' | tr -d "'")
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    echo "ERROR: Profiler failed: ${ERROR:-$MESSAGE}"
+    exit 1
+    ;;
+  running)
+    echo "ERROR: Profiler still running (unexpected)"
+    exit 1
+    ;;
+  *)
+    echo "ERROR: Unknown status: $STATUS"
+    exit 1
+    ;;
+esac
+
+echo "Creating ConfigMap..."
 
 # Start building ConfigMap YAML with DGD spec
 cat >/tmp/cm.yaml <<EOF
@@ -208,6 +275,12 @@ if [ -f {{.OutputPath}}/{{.MockerOutputFile}} ]; then
   echo "  {{.MockerOutputFile}}: |" >> /tmp/cm.yaml
   sed 's/^/    /' {{.OutputPath}}/{{.MockerOutputFile}} >> /tmp/cm.yaml
   echo "Added mocker config to ConfigMap"
+fi
+
+# Add profiler status file for debugging
+if [ -f {{.OutputPath}}/profiler_status.yaml ]; then
+  echo "  profiler_status.yaml: |" >> /tmp/cm.yaml
+  sed 's/^/    /' {{.OutputPath}}/profiler_status.yaml >> /tmp/cm.yaml
 fi
 
 # Note: Profiling data (raw_data.npz converted to JSON) is included in the
@@ -285,8 +358,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	// Check for spec changes (immutability enforcement)
 	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
 		// Spec changed after initial processing
-		if dgdr.Status.State == StateProfiling || dgdr.Status.State == StateDeploying ||
-			dgdr.Status.State == StateReady || dgdr.Status.State == StateDeploymentDeleted {
+		if dgdr.Status.State == DGDRStateProfiling || dgdr.Status.State == DGDRStateDeploying ||
+			dgdr.Status.State == DGDRStateReady || dgdr.Status.State == DGDRStateDeploymentDeleted {
 			logger.Info("Spec change detected in immutable state",
 				"state", dgdr.Status.State,
 				"observedGeneration", dgdr.Status.ObservedGeneration,
@@ -302,23 +375,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	}
 	// State machine: handle different states
 	switch dgdr.Status.State {
-	case StateEmpty:
+	case DGDRStateEmpty:
 		return r.handleInitialState(ctx, dgdr)
-	case StatePending:
+	case DGDRStatePending:
 		return r.handlePendingState(ctx, dgdr)
-	case StateProfiling:
+	case DGDRStateProfiling:
 		return r.handleProfilingState(ctx, dgdr)
-	case StateDeploying:
+	case DGDRStateDeploying:
 		return r.handleDeployingState(ctx, dgdr)
-	case StateReady:
+	case DGDRStateReady:
 		return r.handleReadyState(ctx, dgdr)
-	case StateDeploymentDeleted:
+	case DGDRStateDeploymentDeleted:
 		return r.handleDeploymentDeletedState(ctx, dgdr)
-	case StateFailed:
+	case DGDRStateFailed:
 		return r.handleFailedState(ctx, dgdr)
 	default:
 		logger.Info("Unknown state", "state", dgdr.Status.State)
-		return r.updateStateAndRequeue(ctx, dgdr, StateFailed, MessageInvalidState)
+		return r.updateStateAndRequeue(ctx, dgdr, DGDRStateFailed, MessageInvalidState)
 	}
 }
 
@@ -330,7 +403,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 	// Validate the spec
 	if err := r.validateSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonValidationFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, StateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
 	}
 
 	// Set observedGeneration to track the spec we're processing
@@ -341,7 +414,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 
 	// Initialize status
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonInitialized, MessageInitialized)
-	return r.updateStateAndRequeue(ctx, dgdr, StatePending, MessageInitialized)
+	return r.updateStateAndRequeue(ctx, dgdr, DGDRStatePending, MessageInitialized)
 }
 
 // handlePendingState starts the profiling process
@@ -352,7 +425,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	// Create profiling job (online or AIC)
 	if err := r.createProfilingJob(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonProfilingJobFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, StateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
 
 	// Record event with appropriate message
@@ -363,7 +436,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	}
 
 	// Update to Profiling state with Running status
-	return r.updateStateWithCondition(ctx, dgdr, StateProfiling, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
+	return r.updateStateWithCondition(ctx, dgdr, DGDRStateProfiling, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
 }
 
 // handleProfilingState monitors profiling progress and generates spec when complete
@@ -377,7 +450,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	if err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, err.Error())
 		// Job failed - transition to Failed state
-		return r.updateStateWithCondition(ctx, dgdr, StateFailed, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
 	}
 
 	if !completed {
@@ -398,7 +471,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// Retrieve profiling results and generate spec
 	if err := r.generateDGDSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, StateFailed, ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
 	}
 
 	// Record spec generation event
@@ -420,11 +493,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// If autoApply is enabled, transition to Deploying state
 	if dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying state")
-		return r.updateStateWithCondition(ctx, dgdr, StateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
+		return r.updateStateWithCondition(ctx, dgdr, DGDRStateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
 	}
 
 	// Otherwise, transition to Ready state
-	return r.updateStateWithCondition(ctx, dgdr, StateReady, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecAvailable)
+	return r.updateStateWithCondition(ctx, dgdr, DGDRStateReady, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecAvailable)
 }
 
 // handleReadyState handles DGDR in Ready state
@@ -457,11 +530,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 	dgdr.Status.Deployment.State = dgd.Status.State
 
 	// Check if DGD degraded from Ready
-	if dgd.Status.State != "Ready" {
+	if dgd.Status.State != string(DGDStateReady) {
 		logger.Info("DGD degraded, transitioning back to Deploying",
 			"dgdState", dgd.Status.State)
 
-		dgdr.Status.State = StateDeploying
+		dgdr.Status.State = DGDRStateDeploying
 
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDegraded,
 			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, dgd.Status.State))
@@ -485,7 +558,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	if !dgdr.Spec.AutoApply {
 		// Shouldn't be in this state without autoApply
 		logger.Info("AutoApply not enabled, transitioning to Ready")
-		dgdr.Status.State = StateReady
+		dgdr.Status.State = DGDRStateReady
 		return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 	}
 
@@ -514,9 +587,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	dgdr.Status.Deployment.State = dgd.Status.State
 
 	// Check if DGD is Ready
-	if dgd.Status.State == "Ready" {
+	if dgd.Status.State == string(DGDStateReady) {
 		logger.Info("DGD is Ready, transitioning to Ready state")
-		dgdr.Status.State = StateReady
+		dgdr.Status.State = DGDRStateReady
 
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonDeploymentReady,
 			fmt.Sprintf(MessageDeploymentReady, dgd.Name))
@@ -544,8 +617,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	logger := log.FromContext(ctx)
 	logger.Info("DGD was deleted by user, transitioning to DeploymentDeleted state")
 
-	dgdr.Status.State = StateDeploymentDeleted
-	dgdr.Status.Deployment.State = "Deleted"
+	dgdr.Status.State = DGDRStateDeploymentDeleted
+	dgdr.Status.Deployment.State = ""
 
 	r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDeleted,
 		fmt.Sprintf(MessageDeploymentDeleted, dgdr.Status.Deployment.Name))
@@ -657,7 +730,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 				Name:      dgdName,
 				Namespace: dgdNamespace,
-				State:     "Pending",
+				State:     string(DGDStatePending),
 				Created:   true,
 			}
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
@@ -670,7 +743,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 		Name:      dgdName,
 		Namespace: dgdNamespace,
-		State:     "Pending",
+		State:     string(DGDStatePending),
 		Created:   true,
 	}
 
@@ -796,6 +869,10 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 	}
 
 	if sweep, ok := config["sweep"].(map[string]interface{}); ok {
+		// Check camelCase first (preferred), then snake_case (backwards compat)
+		if useAIC, exists := sweep["useAiConfigurator"].(bool); exists {
+			return !useAIC
+		}
 		if useAIC, exists := sweep["use_ai_configurator"].(bool); exists {
 			return !useAIC
 		}
@@ -849,6 +926,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 
 		if _, exists := cm.Data[key]; !exists {
 			return fmt.Errorf(MessageConfigMapKeyNotFound, key, cm.Name)
+		}
+	}
+
+	// Validate model cache PVC if provided
+	modelCachePVC, _ := extractModelCachePVCConfig(dgdr)
+	if modelCachePVC != "" {
+		pvc := &corev1.PersistentVolumeClaim{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      modelCachePVC,
+			Namespace: dgdr.Namespace,
+		}, pvc)
+
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf(MessageModelCachePVCNotFound, modelCachePVC, dgdr.Namespace)
+			}
+			return err
 		}
 	}
 
@@ -959,6 +1053,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			})
 		}
 
+		// Add model cache PVC mount if configured in profilingConfig.config.deployment
+		modelCachePVC, modelCacheMountPath := extractModelCachePVCConfig(dgdr)
+		if modelCachePVC != "" {
+			logger.Info("Mounting model cache PVC to profiler pod", "pvc", modelCachePVC, "mountPath", modelCacheMountPath)
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      VolumeNameModelCache,
+				MountPath: modelCacheMountPath,
+				ReadOnly:  true,
+			})
+		}
+
 		// Profiler args: pass the config as an inline YAML string via --profile-config
 		profilerArgs := []string{
 			"--profile-config", string(configYAML),
@@ -977,7 +1082,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		profilerContainer := corev1.Container{
 			Name:         ContainerNameProfiler,
 			Image:        imageName,
-			Command:      []string{"python", "-m", "benchmarks.profiler.profile_sla"},
+			Command:      []string{"python", "-m", "dynamo.profiler.profile_sla"},
 			Args:         profilerArgs,
 			Env:          profilerEnv,
 			VolumeMounts: volumeMounts,
@@ -1064,6 +1169,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			})
 		}
 
+		// Add model cache PVC volume if configured
+		if modelCachePVC != "" {
+			volumes = append(volumes, corev1.Volume{
+				Name: VolumeNameModelCache,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: modelCachePVC,
+						ReadOnly:  true,
+					},
+				},
+			})
+		}
+
 		// Limit retries to prevent infinite loop
 		backoffLimit := int32(3)
 
@@ -1092,6 +1210,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Apply tolerations if specified in the DGDR
 		if len(dgdr.Spec.ProfilingConfig.Tolerations) > 0 {
 			podSpec.Tolerations = dgdr.Spec.ProfilingConfig.Tolerations
+		}
+
+		// Apply nodeSelector if specified in the DGDR
+		if len(dgdr.Spec.ProfilingConfig.NodeSelector) > 0 {
+			podSpec.NodeSelector = dgdr.Spec.ProfilingConfig.NodeSelector
 		}
 
 		job := &batchv1.Job{
@@ -1191,6 +1314,41 @@ func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nv
 	}
 
 	return configYAML, nil
+}
+
+// extractModelCachePVCConfig extracts model cache PVC settings from the profiling config.
+// Returns (pvcName, mountPath) - both empty if not configured.
+func extractModelCachePVCConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (string, string) {
+	if dgdr.Spec.ProfilingConfig.Config == nil {
+		return "", ""
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+		return "", ""
+	}
+
+	deployment, ok := config[ConfigKeyDeployment].(map[string]interface{})
+	if !ok {
+		return "", ""
+	}
+
+	modelCache, ok := deployment[ConfigKeyModelCache].(map[string]interface{})
+	if !ok {
+		return "", ""
+	}
+
+	pvcName, _ := modelCache[ConfigKeyPVCName].(string)
+	if pvcName == "" {
+		return "", ""
+	}
+
+	mountPath, _ := modelCache[ConfigKeyMountPath].(string)
+	if mountPath == "" {
+		mountPath = DefaultModelCacheMountPath
+	}
+
+	return pvcName, mountPath
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed
@@ -1464,6 +1622,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateStateWithCondition(
 func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
+		Named(consts.ResourceTypeDynamoGraphDeploymentRequest).
 		Owns(&batchv1.Job{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the job
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1497,5 +1656,5 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 			}),
 		).                                                                          // Watch DGDs created by this controller (via label)
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
-		Complete(r)
+		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentRequest))
 }

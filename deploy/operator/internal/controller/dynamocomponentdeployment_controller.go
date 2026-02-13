@@ -34,10 +34,12 @@ import (
 
 	"emperror.dev/errors"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -74,7 +76,6 @@ type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
 	Config                commonController.Config
-	EtcdStorage           etcdStorage
 	DockerSecretRetriever dockerSecretRetriever
 }
 
@@ -153,7 +154,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		validator := webhookvalidation.NewDynamoComponentDeploymentValidator(dynamoComponentDeployment)
-		if _, validationErr := validator.Validate(); validationErr != nil {
+		if _, validationErr := validator.Validate(ctx); validationErr != nil {
 			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
 
 			// Set validation error condition
@@ -307,6 +308,16 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		return ComponentReconcileResult{}, fmt.Errorf("failed to create or update the deployment: %w", err)
 	}
 
+	logger.V(1).Info("Deployment sync completed",
+		"deploymentModified", deploymentModified,
+		"deploymentName", deployment.Name,
+		"deploymentGeneration", deployment.Generation,
+		"deploymentObservedGeneration", deployment.Status.ObservedGeneration,
+		"deploymentReplicas", deployment.Status.Replicas,
+		"deploymentUpdatedReplicas", deployment.Status.UpdatedReplicas,
+		"deploymentAvailableReplicas", deployment.Status.AvailableReplicas,
+		"deploymentReadyReplicas", deployment.Status.ReadyReplicas)
+
 	serviceReplicaStatus := &v1alpha1.ServiceReplicaStatus{
 		ComponentKind:     v1alpha1.ComponentKindDeployment,
 		ComponentName:     deployment.Name,
@@ -317,7 +328,6 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	}
 
 	if IsDeploymentReady(deployment) {
-		logger.Info("Deployment is ready. Setting available status condition to true.")
 		return ComponentReconcileResult{
 			modified:             deploymentModified,
 			status:               metav1.ConditionTrue,
@@ -449,15 +459,33 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
-	condition := metav1.Condition{
+	availableCondition := metav1.Condition{
 		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
 		Status:  componentReconcileResult.status,
 		Reason:  componentReconcileResult.reason,
 		Message: componentReconcileResult.message,
 	}
 
-	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, condition)
+	var componentReadyReason, componentReadyMessage string
+	if componentReconcileResult.status == metav1.ConditionTrue {
+		componentReadyReason = "ComponentReady"
+		componentReadyMessage = "DynamoComponent is ready"
+	} else {
+		componentReadyReason = "ComponentNotReady"
+		componentReadyMessage = "DynamoComponent is not ready"
+	}
+
+	componentReadyCondition := metav1.Condition{
+		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+		Status:  componentReconcileResult.status,
+		Reason:  componentReadyReason,
+		Message: componentReadyMessage,
+	}
+
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, availableCondition)
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, componentReadyCondition)
 	dynamoComponentDeployment.Status.Service = componentReconcileResult.serviceReplicaStatus
+	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
 
 	err := r.Status().Update(ctx, dynamoComponentDeployment)
 	if err != nil {
@@ -727,14 +755,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Finalizing the DynamoComponentDeployment", "dynamoComponentDeployment", dynamoComponentDeployment)
-	if dynamoComponentDeployment.Spec.ServiceName != "" && dynamoComponentDeployment.Spec.DynamoNamespace != nil && *dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-		logger.Info("Deleting the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
-		err := r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *dynamoComponentDeployment.Spec.DynamoNamespace, dynamoComponentDeployment.Spec.ServiceName))
-		if err != nil {
-			logger.Error(err, "Failed to delete the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
-			return err
-		}
-	}
+
 	return nil
 }
 
@@ -763,9 +784,11 @@ func IsDeploymentReady(deployment *appsv1.Deployment) bool {
 	// 1. ObservedGeneration: Deployment controller has observed the latest configuration
 	// 2. UpdatedReplicas: All replicas have been updated to the latest version
 	// 3. AvailableReplicas: All desired replicas are available (schedulable and healthy)
+	// 4. Replicas: Total replicas equals desired (no surge pods remaining from rolling update)
 	if status.ObservedGeneration < deployment.Generation ||
 		status.UpdatedReplicas < desiredReplicas ||
-		status.AvailableReplicas < desiredReplicas {
+		status.AvailableReplicas < desiredReplicas ||
+		status.Replicas != desiredReplicas {
 		return false
 	}
 	// Finally, check for the DeploymentAvailable condition
@@ -1180,7 +1203,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS)
+	// Resolve checkpoint for this component
+	var checkpointInfo *checkpoint.CheckpointInfo
+	if opt.dynamoComponentDeployment.Spec.Checkpoint != nil && opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to resolve checkpoint")
+		}
+		checkpointInfo = info
+	}
+
+	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
@@ -1232,6 +1265,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if extraPodMetadata != nil {
 		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
 		maps.Copy(podLabels, extraPodMetadata.Labels)
+	}
+
+	// Propagate restart annotation to pod template to trigger rolling restart
+	// This is the same mechanism used by kubectl rollout restart
+	if restartAt, exists := resourceAnnotations[commonconsts.RestartAnnotation]; exists {
+		podAnnotations[commonconsts.RestartAnnotation] = restartAt
 	}
 
 	if podSpec.ServiceAccountName == "" {
@@ -1298,8 +1337,11 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 
 	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace,
+		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,    // e.g. "worker"
+		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // result of ComputeDynamoNamespace(k8sNamespace, dgdName)
+		// The original user provided component name (the service map key, e.g. "VllmDecodeWorker" in the DGD).
+		// Needed to disambiguate amongst distinct components with the same component type within a DGD (e.g prefill/decode workers).
+		commonconsts.KubeLabelDynamoComponent: opt.dynamoComponentDeployment.Spec.ServiceName,
 	}
 	// // If using LeaderWorkerSet, modify selector to only target leaders
 	if opt.dynamoComponentDeployment.IsMultinode() {
@@ -1310,21 +1352,28 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 	if isK8sDiscovery {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
-	}
-	// Discovery is enabled for non frontend components
-	if isK8sDiscovery && !opt.dynamoComponentDeployment.IsFrontendComponent() {
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
 	var servicePort corev1.ServicePort
-	if opt.dynamoComponentDeployment.IsFrontendComponent() {
+	switch opt.dynamoComponentDeployment.Spec.ComponentType {
+	case commonconsts.ComponentTypeFrontend:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoServicePortName,
 			Port:       commonconsts.DynamoServicePort,
 			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}
-	} else { // TODO: only for worker components
+	case commonconsts.ComponentTypeEPP:
+		// EPP exposes the gRPC endpoint for InferencePool communication
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.EPPGRPCPortName,
+			Port:       commonconsts.EPPGRPCPort,
+			TargetPort: intstr.FromInt(commonconsts.EPPGRPCPort),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	default:
+		// Worker and other components use the system port for metrics/health
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoSystemPortName,
 			Port:       commonconsts.DynamoSystemPort,
@@ -1368,6 +1417,7 @@ type IngressConfig struct {
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	m := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1401,7 +1451,9 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
-	return m.Complete(r)
+	// Wrap with metrics collection
+	observedReconciler := observability.NewObservedReconciler(r, commonconsts.ResourceTypeDynamoComponentDeployment)
+	return m.Complete(observedReconciler)
 }
 
 func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {

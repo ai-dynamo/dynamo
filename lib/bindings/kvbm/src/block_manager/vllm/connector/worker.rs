@@ -25,6 +25,7 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub trait Worker: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
@@ -251,9 +252,17 @@ impl Worker for KvConnectorWorker {
         // - for each action in the metadata, add the action to the request slot
         // - send the list of actions to the engine to track completion
 
-        for slot in metadata.new_slots {
-            debug_assert!(!self.connector.has_slot(&slot), "slot already exists");
-            self.connector.create_slot(slot)?;
+        for slot_info in &metadata.new_slots {
+            debug_assert!(
+                !self.connector.has_slot(&slot_info.request_id),
+                "slot already exists"
+            );
+            // Create slot with expected immediate ops count BEFORE any operations arrive.
+            // This ensures proper completion tracking and avoids race conditions in TP>1.
+            self.connector.create_slot_with_immediate_ops(
+                slot_info.request_id.clone(),
+                slot_info.expected_immediate_ops,
+            )?;
         }
 
         let mut onboarding_operations = Vec::new();
@@ -309,7 +318,7 @@ impl Worker for KvConnectorWorker {
         if self.layers_complete == self.kv_cache_layers.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
 
-            tracing::info!(
+            tracing::trace!(
                 iteration = self.iteration,
                 num_operations = offloading_operations.len(),
                 "All layers complete, enqueuing {} offload operations",
@@ -475,6 +484,7 @@ impl PyKvConnectorWorker {
         Ok(Self { connector_worker })
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     pub fn register_kv_caches(
         &mut self,

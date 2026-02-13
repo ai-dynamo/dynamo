@@ -105,6 +105,13 @@ pub struct CreateCompletionRequest {
     /// Note that <|endoftext|> is the document separator that the model sees during training, so if a prompt is not specified the model will generate as if from the beginning of a new document.
     pub prompt: Prompt,
 
+    /// Base64-encoded PyTorch tensor containing pre-computed embeddings.
+    /// At least one of prompt or prompt_embeds is required.
+    /// If both are provided, prompt_embeds takes precedence.
+    /// Maximum size: 10MB decoded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_embeds: Option<String>,
+
     /// The suffix that comes after a completion of inserted text.
     ///
     /// This parameter is only supported for `gpt-3.5-turbo-instruct`.

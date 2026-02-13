@@ -156,8 +156,13 @@ def run_serve_deployment(
                     payload=payload.body,
                     timeout=payload.timeout,
                     method=payload.method,
+                    stream=payload.http_stream,
                 )
                 server_process.check_response(payload, response)
+
+            # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
+            if hasattr(payload, "final_validation"):
+                payload.final_validation()
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

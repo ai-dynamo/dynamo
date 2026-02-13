@@ -20,6 +20,10 @@ const (
 	DynamoSystemPort     = 9090
 	DynamoSystemPortName = "system"
 
+	// EPP (Endpoint Picker Plugin) ports
+	EPPGRPCPort     = 9002
+	EPPGRPCPortName = "grpc"
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
@@ -67,12 +71,19 @@ const (
 	ComponentTypeWorker       = "worker"
 	ComponentTypePrefill      = "prefill"
 	ComponentTypeDecode       = "decode"
+	ComponentTypeEPP          = "epp"
 	ComponentTypeDefault      = "default"
 	PlannerServiceAccountName = "planner-serviceaccount"
+	EPPServiceAccountName     = "epp-serviceaccount"
+	EPPClusterRoleName        = "epp-cluster-role"
 
 	DefaultIngressSuffix = "local"
 
 	DefaultGroveTerminationDelay = 15 * time.Minute
+
+	// Operator origin version: stamped on DGD at creation time by mutating webhook.
+	// Records which operator version created the resource, enabling version-gated behavior changes.
+	KubeAnnotationDynamoOperatorOriginVersion = "nvidia.com/dynamo-operator-origin-version"
 
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
@@ -95,6 +106,74 @@ const (
 	GroveRoleSuffixWorker = "wkr"
 
 	MainContainerName = "main"
+
+	RestartAnnotation = "nvidia.com/restartAt"
+
+	// Resource type constants - match Kubernetes Kind names
+	// Used consistently across controllers, webhooks, and metrics
+	ResourceTypeDynamoGraphDeployment               = "DynamoGraphDeployment"
+	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
+	ResourceTypeDynamoModel                         = "DynamoModel"
+	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
+	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
+
+	// Resource state constants - used in status reporting and metrics
+	ResourceStateReady    = "ready"
+	ResourceStateNotReady = "not_ready"
+	ResourceStateUnknown  = "unknown"
+
+	// Checkpoint/restore constants
+	// CROSS-REFERENCE: Some constants below are duplicated in the chrek package at
+	// deploy/chrek/pkg/config/constants.go. If you change a value here, update there too.
+
+	// Kubernetes labels
+	KubeLabelCheckpointSource = "nvidia.com/checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
+	KubeLabelCheckpointHash   = "nvidia.com/checkpoint-hash"   // Checkpoint identity hash for deduplication
+	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"   // DynamoCheckpoint CR name reference
+
+	// Environment variables injected into pods
+	EnvCheckpointStorageType  = "DYN_CHECKPOINT_STORAGE_TYPE"   // Storage backend (pvc, s3, oci) — checkpoint job pods only
+	EnvCheckpointLocation     = "DYN_CHECKPOINT_LOCATION"       // Full checkpoint URI — future S3/OCI; for PVC, use PATH+HASH instead
+	EnvCheckpointPath         = "DYN_CHECKPOINT_PATH"           // Base checkpoint directory (e.g., /checkpoints) — PVC restored pods
+	EnvCheckpointHash         = "DYN_CHECKPOINT_HASH"           // Identity hash — all checkpoint-related pods
+	EnvCheckpointSignalFile   = "DYN_CHECKPOINT_SIGNAL_FILE"    // Signal file path — checkpoint job pods
+	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
+	EnvRestoreMarkerFile      = "DYN_RESTORE_MARKER_FILE"       // Restore marker path — injected into restore and checkpoint job pods
+	EnvSkipWaitForCheckpoint  = "SKIP_WAIT_FOR_CHECKPOINT"      // Skip polling, check once — restored/DGD pods
+	// Checkpoint pod-internal constants
+	CheckpointVolumeName               = "checkpoint-storage"  // Pod-internal volume name for checkpoint PVC
+	CheckpointSignalVolumeName         = "checkpoint-signal"   // Pod-internal volume name for signal hostPath
+	CheckpointSignalMountPath          = "/checkpoint-signal"  // Mount path for signal volume inside pods
+	SignalFileCleanupInitContainerName = "cleanup-signal-file" // Init container that removes stale signal files before job starts
+
+	// SeccompProfilePath is the localhost seccomp profile that blocks io_uring syscalls.
+	// Deployed to nodes by the chrek DaemonSet init container.
+	SeccompProfilePath = "profiles/block-iouring.json"
+
+	// Pod identity (Downward API) ---
+	// After CRIU restore, env vars contain stale values from the checkpoint pod.
+	// The Downward API files at /etc/podinfo always reflect the current pod.
+	PodInfoVolumeName = "podinfo"
+	PodInfoMountPath  = "/etc/podinfo"
+
+	// Downward API field paths
+	PodInfoFieldPodName      = "metadata.name"
+	PodInfoFieldPodUID       = "metadata.uid"
+	PodInfoFieldPodNamespace = "metadata.namespace"
+
+	// Downward API file names for DGD annotations
+	PodInfoFileDynNamespace        = "dyn_namespace"
+	PodInfoFileDynComponent        = "dyn_component"
+	PodInfoFileDynParentDGDName    = "dyn_parent_dgd_name"
+	PodInfoFileDynParentDGDNS      = "dyn_parent_dgd_namespace"
+	PodInfoFileDynDiscoveryBackend = "dyn_discovery_backend"
+
+	// Annotation keys for DGD info (exposed via Downward API)
+	AnnotationDynNamespace        = "nvidia.com/dyn-namespace"
+	AnnotationDynComponent        = "nvidia.com/dyn-component"
+	AnnotationDynParentDGDName    = "nvidia.com/dyn-parent-dgd-name"
+	AnnotationDynParentDGDNS      = "nvidia.com/dyn-parent-dgd-namespace"
+	AnnotationDynDiscoveryBackend = "nvidia.com/dyn-discovery-backend"
 )
 
 type MultinodeDeploymentType string

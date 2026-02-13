@@ -5,22 +5,18 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{DiscoveryInstance, DiscoveryQuery};
-
-/// Key for organizing metadata internally
-/// Format: "namespace/component/endpoint"
-fn make_endpoint_key(namespace: &str, component: &str, endpoint: &str) -> String {
-    format!("{namespace}/{component}/{endpoint}")
-}
+use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery};
 
 /// Metadata stored on each pod and exposed via HTTP endpoint
 /// This struct holds all discovery registrations for this pod instance
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryMetadata {
-    /// Registered endpoint instances (key: "namespace/component/endpoint")
+    /// Registered endpoint instances (key: path string from EndpointInstanceId::to_path())
     endpoints: HashMap<String, DiscoveryInstance>,
-    /// Registered model card instances (key: "namespace/component/endpoint")
+    /// Registered model card instances (key: path string from ModelCardInstanceId::to_path())
     model_cards: HashMap<String, DiscoveryInstance>,
+    /// Registered event channel instances (key: path string from EventChannelInstanceId::to_path())
+    event_channels: HashMap<String, DiscoveryInstance>,
 }
 
 impl DiscoveryMetadata {
@@ -29,62 +25,103 @@ impl DiscoveryMetadata {
         Self {
             endpoints: HashMap::new(),
             model_cards: HashMap::new(),
+            event_channels: HashMap::new(),
         }
     }
 
     /// Register an endpoint instance
     pub fn register_endpoint(&mut self, instance: DiscoveryInstance) -> Result<()> {
-        if let DiscoveryInstance::Endpoint(ref inst) = instance {
-            let key = make_endpoint_key(&inst.namespace, &inst.component, &inst.endpoint);
-            self.endpoints.insert(key, instance);
-            Ok(())
-        } else {
-            anyhow::bail!("Cannot register non-endpoint instance as endpoint")
+        match instance.id() {
+            DiscoveryInstanceId::Endpoint(key) => {
+                self.endpoints.insert(key.to_path(), instance);
+                Ok(())
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot register non-endpoint instance as endpoint")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot register EventChannel instance as endpoint")
+            }
         }
     }
 
     /// Register a model card instance
     pub fn register_model_card(&mut self, instance: DiscoveryInstance) -> Result<()> {
-        if let DiscoveryInstance::Model {
-            ref namespace,
-            ref component,
-            ref endpoint,
-            ..
-        } = instance
-        {
-            let key = make_endpoint_key(namespace, component, endpoint);
-            self.model_cards.insert(key, instance);
-            Ok(())
-        } else {
-            anyhow::bail!("Cannot register non-model-card instance as model card")
+        match instance.id() {
+            DiscoveryInstanceId::Model(key) => {
+                self.model_cards.insert(key.to_path(), instance);
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot register non-model-card instance as model card")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot register EventChannel instance as model card")
+            }
         }
     }
 
     /// Unregister an endpoint instance
     pub fn unregister_endpoint(&mut self, instance: &DiscoveryInstance) -> Result<()> {
-        if let DiscoveryInstance::Endpoint(inst) = instance {
-            let key = make_endpoint_key(&inst.namespace, &inst.component, &inst.endpoint);
-            self.endpoints.remove(&key);
-            Ok(())
-        } else {
-            anyhow::bail!("Cannot unregister non-endpoint instance as endpoint")
+        match instance.id() {
+            DiscoveryInstanceId::Endpoint(key) => {
+                self.endpoints.remove(&key.to_path());
+                Ok(())
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot unregister non-endpoint instance as endpoint")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot unregister EventChannel instance as endpoint")
+            }
         }
     }
 
     /// Unregister a model card instance
     pub fn unregister_model_card(&mut self, instance: &DiscoveryInstance) -> Result<()> {
-        if let DiscoveryInstance::Model {
-            namespace,
-            component,
-            endpoint,
-            ..
-        } = instance
-        {
-            let key = make_endpoint_key(namespace, component, endpoint);
-            self.model_cards.remove(&key);
-            Ok(())
-        } else {
-            anyhow::bail!("Cannot unregister non-model-card instance as model card")
+        match instance.id() {
+            DiscoveryInstanceId::Model(key) => {
+                self.model_cards.remove(&key.to_path());
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot unregister non-model-card instance as model card")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot unregister EventChannel instance as model card")
+            }
+        }
+    }
+
+    /// Register an event channel instance
+    pub fn register_event_channel(&mut self, instance: DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::EventChannel(key) => {
+                self.event_channels.insert(key.to_path(), instance);
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot register Endpoint instance as event channel")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot register Model instance as event channel")
+            }
+        }
+    }
+
+    /// Unregister an event channel instance
+    pub fn unregister_event_channel(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::EventChannel(key) => {
+                self.event_channels.remove(&key.to_path());
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot unregister Endpoint instance as event channel")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot unregister Model instance as event channel")
+            }
         }
     }
 
@@ -98,11 +135,17 @@ impl DiscoveryMetadata {
         self.model_cards.values().cloned().collect()
     }
 
-    /// Get all registered instances (endpoints and model cards)
+    /// Get all registered event channels
+    pub fn get_all_event_channels(&self) -> Vec<DiscoveryInstance> {
+        self.event_channels.values().cloned().collect()
+    }
+
+    /// Get all registered instances (endpoints, model cards, and event channels)
     pub fn get_all(&self) -> Vec<DiscoveryInstance> {
         self.endpoints
             .values()
             .chain(self.model_cards.values())
+            .chain(self.event_channels.values())
             .cloned()
             .collect()
     }
@@ -119,6 +162,9 @@ impl DiscoveryMetadata {
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. } => self.get_all_model_cards(),
+
+            // EventChannel queries now return actual event channels
+            DiscoveryQuery::EventChannels(_) => self.get_all_event_channels(),
         };
 
         filter_instances(all_instances, query)
@@ -215,6 +261,27 @@ fn filter_instances(
                 _ => false,
             })
             .collect(),
+
+        // EventChannel queries - unified filtering with optional scope filters
+        DiscoveryQuery::EventChannels(query) => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::EventChannel {
+                    namespace: ns,
+                    component: comp,
+                    topic: t,
+                    ..
+                } => {
+                    // Filter by namespace if specified
+                    query.namespace.as_ref().is_none_or(|qns| qns == ns)
+                        // Filter by component if specified
+                        && query.component.as_ref().is_none_or(|qc| qc == comp)
+                        // Filter by topic if specified
+                        && query.topic.as_ref().is_none_or(|qt| qt == t)
+                }
+                _ => false,
+            })
+            .collect(),
     }
 }
 
@@ -299,6 +366,7 @@ impl MetadataSnapshot {
 mod tests {
     use super::*;
     use crate::component::{Instance, TransportType};
+    use crate::discovery::EventChannelQuery;
 
     #[test]
     fn test_metadata_serde() {
@@ -391,5 +459,99 @@ mod tests {
         assert_eq!(metadata.get_all_endpoints().len(), 3);
         assert_eq!(metadata.get_all_model_cards().len(), 2);
         assert_eq!(metadata.get_all().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_event_channel_registration() {
+        use crate::discovery::EventTransport;
+
+        let mut metadata = DiscoveryMetadata::new();
+
+        // Register event channels
+        for i in 0..3 {
+            let instance = DiscoveryInstance::EventChannel {
+                namespace: "test".to_string(),
+                component: "comp1".to_string(),
+                topic: "test-topic".to_string(),
+                instance_id: i,
+                transport: EventTransport::zmq(format!("tcp://localhost:{}", 5000 + i)),
+            };
+            metadata.register_event_channel(instance).unwrap();
+        }
+
+        // Test get_all_event_channels
+        assert_eq!(metadata.get_all_event_channels().len(), 3);
+
+        // Test get_all includes event channels
+        assert_eq!(metadata.get_all().len(), 3);
+
+        // Test filter by all event channels
+        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(EventChannelQuery::all()));
+        assert_eq!(filtered.len(), 3);
+
+        // Test filter by component
+        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(
+            EventChannelQuery::component("test", "comp1"),
+        ));
+        assert_eq!(filtered.len(), 3);
+
+        // Test filter with non-matching query
+        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(
+            EventChannelQuery::component("other", "comp1"),
+        ));
+        assert_eq!(filtered.len(), 0);
+
+        // Test unregister
+        let instance = DiscoveryInstance::EventChannel {
+            namespace: "test".to_string(),
+            component: "comp1".to_string(),
+            topic: "test-topic".to_string(),
+            instance_id: 0,
+            transport: EventTransport::zmq("tcp://localhost:5000"),
+        };
+        metadata.unregister_event_channel(&instance).unwrap();
+        assert_eq!(metadata.get_all_event_channels().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_mixed_instances() {
+        use crate::discovery::EventTransport;
+
+        let mut metadata = DiscoveryMetadata::new();
+
+        // Register one of each type
+        let endpoint = DiscoveryInstance::Endpoint(Instance {
+            namespace: "test".to_string(),
+            component: "comp1".to_string(),
+            endpoint: "ep1".to_string(),
+            instance_id: 1,
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
+        });
+        metadata.register_endpoint(endpoint).unwrap();
+
+        let model = DiscoveryInstance::Model {
+            namespace: "test".to_string(),
+            component: "comp1".to_string(),
+            endpoint: "ep1".to_string(),
+            instance_id: 2,
+            card_json: serde_json::json!({"model": "test"}),
+            model_suffix: None,
+        };
+        metadata.register_model_card(model).unwrap();
+
+        let event_channel = DiscoveryInstance::EventChannel {
+            namespace: "test".to_string(),
+            component: "comp1".to_string(),
+            topic: "test-topic".to_string(),
+            instance_id: 3,
+            transport: EventTransport::zmq("tcp://localhost:5000"),
+        };
+        metadata.register_event_channel(event_channel).unwrap();
+
+        // Verify get_all returns all three
+        assert_eq!(metadata.get_all().len(), 3);
+        assert_eq!(metadata.get_all_endpoints().len(), 1);
+        assert_eq!(metadata.get_all_model_cards().len(), 1);
+        assert_eq!(metadata.get_all_event_channels().len(), 1);
     }
 }

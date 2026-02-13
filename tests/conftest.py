@@ -51,17 +51,53 @@ def pytest_configure(config):
         "multimodal: marks tests as multimodal (image/video) tests",
         "slow: marks tests as known to be slow",
         "h100: marks tests to run on H100",
+        "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
         "router: marks tests for router component",
         "planner: marks tests for planner component",
         "kvbm: marks tests for KV behavior and model determinism",
         "kvbm_v2: marks tests using KVBM V2",
+        "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
         "model: model id used by a test or parameter",
         "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
         "k8s: marks tests as requiring Kubernetes",
         "fault_tolerance: marks tests as fault tolerance tests",
+        "deploy: marks tests as deployment tests",
+        # Third-party plugin markers
+        "timeout: test timeout in seconds (pytest-timeout plugin)",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add shared command-line options for all tests.
+
+    Shared options that apply across multiple test suites are defined here.
+    Suite-specific options (e.g., deploy, fault-tolerance) are defined in
+    their respective subdirectory conftest.py files.
+    """
+    # -------------------------------------------------------------------------
+    # Shared Deployment Options (used by multiple test suites)
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--image",
+        type=str,
+        default=None,
+        help="Container image to use for deployment (overrides YAML default)",
+    )
+    parser.addoption(
+        "--namespace",
+        type=str,
+        default=None,  # No default here - subdirectories provide their own
+        help="Kubernetes namespace for deployment",
+    )
+    parser.addoption(
+        "--skip-service-restart",
+        action="store_true",
+        default=None,  # None = use fixture's default behavior
+        help="Skip restarting NATS and etcd services before deployment. "
+        "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -167,7 +203,10 @@ def predownload_models(pytestconfig):
     else:
         # Fallback to original behavior if extraction failed
         download_models()
+
+    os.environ["HF_HUB_OFFLINE"] = "1"
     yield
+    os.environ.pop("HF_HUB_OFFLINE", None)
 
 
 @pytest.fixture(scope="session")
@@ -183,7 +222,13 @@ def predownload_tokenizers(pytestconfig):
     else:
         # Fallback to original behavior if extraction failed
         download_models(ignore_weights=True)
+
+    # Skip redundant HuggingFace API calls in worker subprocesses since
+    # tokenizers are already cached. This avoids flaky timeouts from slow
+    # HF API responses (the RepoInfo fetch still happens even for cached models).
+    os.environ["HF_HUB_OFFLINE"] = "1"
     yield
+    os.environ.pop("HF_HUB_OFFLINE", None)
 
 
 @pytest.fixture(autouse=True)
@@ -275,7 +320,7 @@ class EtcdServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
+            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
             health_check_ports=[port],
             data_dir=data_dir,
             log_dir=request.node.name,
@@ -297,7 +342,7 @@ class EtcdServer(ManagedProcess):
 
 
 class NatsServer(ManagedProcess):
-    def __init__(self, request, port=4222, timeout=300):
+    def __init__(self, request, port=4222, timeout=300, disable_jetstream=False):
         # Allocate a free port if port is 0
         use_random_port = port == 0
         if use_random_port:
@@ -308,25 +353,61 @@ class NatsServer(ManagedProcess):
         self.use_random_port = use_random_port  # Track if we allocated the port
         self._request = request  # Store for restart
         self._timeout = timeout
-        data_dir = tempfile.mkdtemp(prefix="nats_")
+        self._disable_jetstream = disable_jetstream
+        data_dir = tempfile.mkdtemp(prefix="nats_") if not disable_jetstream else None
         command = [
             "nats-server",
-            "-js",
             "--trace",
-            "--store_dir",
-            data_dir,
             "-p",
             str(port),
         ]
+        if not disable_jetstream and data_dir:
+            command.extend(["-js", "--store_dir", data_dir])
         super().__init__(
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
+            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
             data_dir=data_dir,
             health_check_ports=[port],
+            health_check_funcs=[self._nats_ready],
             log_dir=request.node.name,
         )
+
+    def _nats_ready(self, timeout: float = 5) -> bool:
+        """Verify NATS server is ready by connecting and optionally checking JetStream."""
+        import asyncio
+
+        import nats
+
+        async def check():
+            try:
+                nc = await nats.connect(
+                    f"nats://localhost:{self.port}",
+                    connect_timeout=min(timeout, 2),
+                )
+                try:
+                    if not self._disable_jetstream:
+                        # Verify JetStream is initialized
+                        js = nc.jetstream()
+                        await js.account_info()
+                    return True
+                finally:
+                    await nc.close()
+            except Exception:
+                return False
+
+        # Handle both sync and async contexts
+        try:
+            asyncio.get_running_loop()  # Check if we're in async context
+            # Already in async context - run in a thread to avoid blocking
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, check()).result(timeout=timeout)
+        except RuntimeError:
+            # No running loop - safe to use asyncio.run()
+            return asyncio.run(check())
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated port when server exits."""
@@ -343,9 +424,10 @@ class NatsServer(ManagedProcess):
         """Stop the NATS server for restart. Does not release port or clean up fully."""
         _logger.info(f"Stopping NATS server on port {self.port}")
         self._terminate_process_group()
-        if self.proc:
+        proc = self.proc  # type: ignore[has-type]
+        if proc is not None:
             try:
-                self.proc.wait(timeout=10)
+                proc.wait(timeout=10)
             except Exception as e:
                 _logger.warning(f"Error waiting for NATS process to stop: {e}")
             self.proc = None
@@ -353,130 +435,130 @@ class NatsServer(ManagedProcess):
     def start(self):
         """Restart a stopped NATS server with fresh state."""
         _logger.info(f"Starting NATS server on port {self.port} with fresh state")
-        # Clean up old data directory and create fresh one
-        if self.data_dir:
-            shutil.rmtree(self.data_dir, ignore_errors=True)
-        self.data_dir = tempfile.mkdtemp(prefix="nats_")
+        # Clean up old data directory and create fresh one (only if JetStream enabled)
+        if not self._disable_jetstream:
+            old_data_dir = self.data_dir  # type: ignore[has-type]
+            if old_data_dir is not None:
+                shutil.rmtree(old_data_dir, ignore_errors=True)
+            self.data_dir = tempfile.mkdtemp(prefix="nats_")
 
-        # Rebuild command with new data_dir
+        # Rebuild command
         self.command = [
             "nats-server",
-            "-js",
             "--trace",
-            "--store_dir",
-            self.data_dir,
             "-p",
             str(self.port),
         ]
+        if not self._disable_jetstream and self.data_dir:
+            self.command.extend(["-js", "--store_dir", self.data_dir])
 
         self._start_process()
-        self._check_ports(self._timeout)
+        elapsed = self._check_ports(self._timeout)
+        self._check_funcs(self._timeout - elapsed)
 
 
 class SharedManagedProcess:
-    """Base class for ManagedProcess with file-based reference counting for multi-process sharing."""
+    """Base class for persistent shared processes across pytest-xdist workers.
+
+    Simplified design: first worker starts the process on a dynamic port, it lives forever
+    (until the container dies). No ref counting, no teardown. Subsequent workers just
+    reuse via port check. This eliminates race conditions and simplifies the logic.
+    """
 
     def __init__(
         self,
         request,
         tmp_path_factory,
         resource_name: str,
-        port: int,
+        start_port: int,
         timeout: int = 300,
     ):
         self.request = request
-        self.port = port
+        self.start_port = start_port
+        self.port: Optional[int] = None  # Set when entering context
         self.timeout = timeout
         self.resource_name = resource_name
         self._server: Optional[ManagedProcess] = None
-        self._owns_process = False
 
-        root_tmp = Path(tempfile.gettempdir()) / "pytest_ref_counting"
+        root_tmp = Path(tempfile.gettempdir()) / "pytest_shared_services"
         root_tmp.mkdir(parents=True, exist_ok=True)
 
-        self.ref_file = root_tmp / f"pytest_{resource_name}_{port}_ref_count"
-        self.lock_file = str(self.ref_file) + ".lock"
+        self.port_file = root_tmp / f"{resource_name}_port"
+        self.lock_file = str(self.port_file) + ".lock"
 
-    def _create_server(self) -> ManagedProcess:
+    def _create_server(self, port: int) -> ManagedProcess:
         """Create the underlying server instance. Must be implemented by subclasses."""
         raise NotImplementedError
 
-    def _read_ref_count(self) -> int:
-        """Read current reference count."""
-        if self.ref_file.exists():
+    def _is_port_in_use(self, port: int) -> bool:
+        """Check if a port is in use (i.e., a process is listening on it)."""
+        import socket
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(("localhost", port))
+            sock.close()
+            return result == 0  # 0 means connection succeeded (port in use)
+        except Exception:
+            return False
+
+    def _read_port(self) -> Optional[int]:
+        """Read stored port from file."""
+        if self.port_file.exists():
             try:
-                return int(self.ref_file.read_text().strip())
+                return int(self.port_file.read_text().strip())
             except (ValueError, IOError):
-                return 0
-        return 0
+                return None
+        return None
 
-    def _write_ref_count(self, count: int):
-        """Write reference count atomically."""
-        self.ref_file.write_text(str(count))
-
-    def _increment_ref_count(self) -> int:
-        """Increment reference count and return new count."""
-        count = self._read_ref_count()
-        count += 1
-        self._write_ref_count(count)
-        return count
-
-    def _decrement_ref_count(self) -> int:
-        """Decrement reference count and return new count."""
-        count = self._read_ref_count()
-        count = max(0, count - 1)
-        self._write_ref_count(count)
-        return count
+    def _write_port(self, port: int):
+        """Write port to file."""
+        self.port_file.write_text(str(port))
 
     def __enter__(self):
         with FileLock(self.lock_file):
-            ref_count = self._increment_ref_count()
-            if ref_count == 1:
-                # First reference - start the process
-                self._server = self._create_server()
-                self._server.__enter__()
-                self._owns_process = True
-                logging.info(f"[{self.resource_name}] Started process (ref_count=1)")
-            else:
-                # Process already running, just track reference
-                self._owns_process = False
+            stored_port = self._read_port()
+
+            # Check if a process is already running on the stored port
+            if stored_port is not None and self._is_port_in_use(stored_port):
+                # Reuse existing process
+                self.port = stored_port
                 logging.info(
-                    f"[{self.resource_name}] Reusing existing process (ref_count={ref_count})"
+                    f"[{self.resource_name}] Reusing existing process on port {self.port}"
+                )
+            else:
+                # Start new process
+                if stored_port is not None:
+                    logging.warning(
+                        f"[{self.resource_name}] Stale port file: port {stored_port} not in use, starting fresh"
+                    )
+                self.port = allocate_port(self.start_port)
+                self._write_port(self.port)
+                self._server = self._create_server(self.port)
+                self._server.__enter__()
+                logging.info(
+                    f"[{self.resource_name}] Started process on port {self.port}"
                 )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        with FileLock(self.lock_file):
-            ref_count = self._decrement_ref_count()
-            if ref_count == 0 and self._owns_process:
-                # Last reference - stop the process
-                if self._server:
-                    self._server.__exit__(exc_type, exc_val, exc_tb)
-                logging.info(f"[{self.resource_name}] Stopped process (ref_count=0)")
-            elif ref_count == 0:
-                # Last reference but we don't own it - shouldn't happen, but clean up ref file
-                if self.ref_file.exists():
-                    self.ref_file.unlink()
-                logging.warning(
-                    f"[{self.resource_name}] Ref count reached 0 but we don't own process"
-                )
-            else:
-                logging.info(
-                    f"[{self.resource_name}] Released reference (ref_count={ref_count})"
-                )
+        # Never tear down - let the process live until the container dies.
+        # This avoids race conditions and simplifies the logic.
+        pass
 
 
 class SharedEtcdServer(SharedManagedProcess):
     """EtcdServer with file-based reference counting for multi-process sharing."""
 
-    def __init__(self, request, tmp_path_factory, port=2379, timeout=300):
-        super().__init__(request, tmp_path_factory, "etcd", port, timeout)
+    def __init__(self, request, tmp_path_factory, start_port=2380, timeout=300):
+        super().__init__(request, tmp_path_factory, "etcd", start_port, timeout)
         # Create a log directory for session-scoped servers
         self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
 
-    def _create_server(self) -> ManagedProcess:
+    def _create_server(self, port: int) -> ManagedProcess:
         """Create EtcdServer instance."""
-        server = EtcdServer(self.request, port=self.port, timeout=self.timeout)
+        server = EtcdServer(self.request, port=port, timeout=self.timeout)
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
         return server
@@ -485,26 +567,39 @@ class SharedEtcdServer(SharedManagedProcess):
 class SharedNatsServer(SharedManagedProcess):
     """NatsServer with file-based reference counting for multi-process sharing."""
 
-    def __init__(self, request, tmp_path_factory, port=4222, timeout=300):
-        super().__init__(request, tmp_path_factory, "nats", port, timeout)
+    def __init__(
+        self,
+        request,
+        tmp_path_factory,
+        start_port=4223,
+        timeout=300,
+        disable_jetstream=False,
+    ):
+        super().__init__(request, tmp_path_factory, "nats", start_port, timeout)
         # Create a log directory for session-scoped servers
         self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
+        self._disable_jetstream = disable_jetstream
 
-    def _create_server(self) -> ManagedProcess:
+    def _create_server(self, port: int) -> ManagedProcess:
         """Create NatsServer instance."""
-        server = NatsServer(self.request, port=self.port, timeout=self.timeout)
+        server = NatsServer(
+            self.request,
+            port=port,
+            timeout=self.timeout,
+            disable_jetstream=self._disable_jetstream,
+        )
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
         return server
 
 
 @pytest.fixture
-def store_kv(request):
+def discovery_backend(request):
     """
-    KV store for runtime. Defaults to "etcd".
+    Discovery backend for runtime. Defaults to "etcd".
 
-    To iterate over multiple stores in a test:
-        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+    To iterate over multiple backends in a test:
+        @pytest.mark.parametrize("discovery_backend", ["file", "etcd"], indirect=True)
         def test_example(runtime_services):
             ...
     """
@@ -524,25 +619,46 @@ def request_plane(request):
     return getattr(request, "param", "nats")
 
 
-@pytest.fixture()
-def runtime_services(request, store_kv, request_plane):
+@pytest.fixture
+def durable_kv_events(request):
     """
-    Start runtime services (NATS and/or etcd) based on store_kv and request_plane.
+    Whether to use durable KV events via JetStream. Defaults to False (NATS Core mode).
 
-    - If store_kv != "etcd", etcd is not started (returns None)
+    When False (default):
+    - NATS server starts without JetStream (-js flag omitted) for faster startup
+    - Workers use local indexer mode (NATS Core / fire-and-forget events)
+
+    When True:
+    - NATS server starts with JetStream for durable KV event distribution
+    - Workers use --durable-kv-events flag to publish to JetStream
+
+    To use JetStream mode:
+        @pytest.mark.parametrize("durable_kv_events", [True], indirect=True)
+        def test_example(runtime_services_dynamic_ports):
+            ...
+    """
+    return getattr(request, "param", False)
+
+
+@pytest.fixture()
+def runtime_services(request, discovery_backend, request_plane):
+    """
+    Start runtime services (NATS and/or etcd) based on discovery_backend and request_plane.
+
+    - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    if request_plane == "nats" and store_kv == "etcd":
+    if request_plane == "nats" and discovery_backend == "etcd":
         with NatsServer(request) as nats_process:
             with EtcdServer(request) as etcd_process:
                 yield nats_process, etcd_process
     elif request_plane == "nats":
         with NatsServer(request) as nats_process:
             yield nats_process, None
-    elif store_kv == "etcd":
+    elif discovery_backend == "etcd":
         with EtcdServer(request) as etcd_process:
             yield None, etcd_process
     else:
@@ -550,7 +666,9 @@ def runtime_services(request, store_kv, request_plane):
 
 
 @pytest.fixture()
-def runtime_services_dynamic_ports(request, store_kv, request_plane):
+def runtime_services_dynamic_ports(
+    request, discovery_backend, request_plane, durable_kv_events
+):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
     This fixture actually allocates dynamic ports by passing port=0 to the servers.
@@ -562,9 +680,10 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
     - Each pytest-xdist worker runs tests in a separate process, so env vars do not
       leak across workers.
 
-    - If store_kv != "etcd", etcd is not started (returns None)
+    - If discovery_backend != "etcd", etcd is not started (returns None)
     - NATS is always started when etcd is used, because KV events require NATS
       regardless of the request_plane (tcp/nats only affects request transport)
+    - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -572,24 +691,42 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
-    if store_kv == "etcd":
-        with NatsServer(request, port=0) as nats_process:
+    # When durable_kv_events=False (default), disable JetStream for faster startup
+    if discovery_backend == "etcd":
+        with NatsServer(
+            request, port=0, disable_jetstream=not durable_kv_events
+        ) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
-                # Set environment variables for Rust/Python runtime to use. Note that xdist (parallel execution)
-                # will launch isolated tests in a new process, so no need to worry about environment pollution.
+                # Save original env vars (may be set by session-scoped fixture)
+                orig_nats = os.environ.get("NATS_SERVER")
+                orig_etcd = os.environ.get("ETCD_ENDPOINTS")
+
+                # Set environment variables for this test's dynamic ports
                 os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
                 os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
 
                 yield nats_process, etcd_process
 
-                # No test should rely on these variables after the test, but clean up just in case.
-                os.environ.pop("NATS_SERVER", None)
-                os.environ.pop("ETCD_ENDPOINTS", None)
+                # Restore original env vars (or remove if they weren't set)
+                if orig_nats is not None:
+                    os.environ["NATS_SERVER"] = orig_nats
+                else:
+                    os.environ.pop("NATS_SERVER", None)
+                if orig_etcd is not None:
+                    os.environ["ETCD_ENDPOINTS"] = orig_etcd
+                else:
+                    os.environ.pop("ETCD_ENDPOINTS", None)
     elif request_plane == "nats":
-        with NatsServer(request, port=0) as nats_process:
+        with NatsServer(
+            request, port=0, disable_jetstream=not durable_kv_events
+        ) as nats_process:
+            orig_nats = os.environ.get("NATS_SERVER")
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
             yield nats_process, None
-            os.environ.pop("NATS_SERVER", None)
+            if orig_nats is not None:
+                os.environ["NATS_SERVER"] = orig_nats
+            else:
+                os.environ.pop("NATS_SERVER", None)
     else:
         yield None, None
 
@@ -598,21 +735,27 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
 def runtime_services_session(request, tmp_path_factory):
     """Session-scoped fixture that provides shared NATS and etcd instances for all tests.
 
-    Uses file-based reference counting to coordinate between pytest-xdist worker processes.
-    Only the first worker starts services, and only the last worker tears them down.
+    Uses file locking to coordinate between pytest-xdist worker processes.
+    First worker starts services on dynamic ports, subsequent workers reuse them.
+    Services are never torn down (live until container dies) to avoid race conditions.
 
-    WARNING: may not be parallel/xdist safe.
-    - This fixture shares one NATS + one etcd across many tests (and across xdist workers).
-    - It is only safe if tests fully isolate state (e.g. unique namespaces) and do not
-      assume exclusive access to global streams/keys/ports.
-    - Prefer `runtime_services_dynamic_ports` for true per-test isolation in parallel runs.
+    This fixture is xdist-safe when tests use unique namespaces (e.g. random suffixes)
+    and do not assume exclusive access to global streams/keys.
 
-    TODO: once nothing uses `runtime_services_session`, make the per-test dynamic ports
-    behavior the default for router/frontend integration tests.
+    For tests that need to restart NATS (e.g. indexer sync), use `runtime_services_dynamic_ports`
+    which provides per-test isolated instances.
     """
     with SharedNatsServer(request, tmp_path_factory) as nats:
         with SharedEtcdServer(request, tmp_path_factory) as etcd:
+            # Set environment variables for Rust/Python runtime to use
+            os.environ["NATS_SERVER"] = f"nats://localhost:{nats.port}"
+            os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd.port}"
+
             yield nats, etcd
+
+            # Clean up environment variables
+            os.environ.pop("NATS_SERVER", None)
+            os.environ.pop("ETCD_ENDPOINTS", None)
 
 
 @pytest.fixture

@@ -28,6 +28,8 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -47,7 +49,7 @@ type ConfigMapKeySelector struct {
 
 // ProfilingConfigSpec defines configuration for the profiling process.
 // This structure maps directly to the profile_sla.py config format.
-// See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
+// See dynamo/profiler/utils/profiler_argparse.py for the complete schema.
 type ProfilingConfigSpec struct {
 	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.
 	// The profiler will validate the configuration and report any errors.
@@ -87,6 +89,11 @@ type ProfilingConfigSpec struct {
 	// For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
 	// +kubebuilder:validation:Optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.
+	// For example, to schedule on ARM64 nodes, use {"kubernetes.io/arch": "arm64"}.
+	// +kubebuilder:validation:Optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
@@ -146,8 +153,8 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
 	// resources from the Kubernetes cluster nodes. When enabled, the profiler will override
-	// any manually specified hardware configuration (min_num_gpus_per_engine, max_num_gpus_per_engine,
-	// num_gpus_per_node) with values detected from the cluster.
+	// any manually specified hardware configuration (minNumGpusPerEngine, maxNumGpusPerEngine,
+	// numGpusPerNode) with values detected from the cluster.
 	// Requires cluster-wide node access permissions - only available with cluster-scoped operators.
 	// +kubebuilder:default=false
 	// +kubebuilder:validation:Optional
@@ -214,7 +221,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
 	// ProfilingResults contains a reference to the ConfigMap holding profiling data.
-	// Format: "configmap/<name>"
+	// Format: "configmap/\<name\>"
 	// +kubebuilder:validation:Optional
 	ProfilingResults string `json:"profilingResults,omitempty"`
 
@@ -271,6 +278,14 @@ type DynamoGraphDeploymentRequest struct {
 // SetState updates the State field in the DGDR status.
 func (s *DynamoGraphDeploymentRequest) SetState(state string) {
 	s.Status.State = state
+}
+
+// GetState returns the current lifecycle state
+func (d *DynamoGraphDeploymentRequest) GetState() string {
+	if d.Status.State == "" {
+		return consts.ResourceStateUnknown
+	}
+	return d.Status.State
 }
 
 // GetSpec returns the spec of this DGDR as a generic interface.

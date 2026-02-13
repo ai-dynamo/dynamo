@@ -12,7 +12,7 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 /container/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners @ai-dynamo/dynamo-deploy-codeowners
 
 # Examples
-/examples/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners
+/examples/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners @ai-dynamo/dynamo-deploy-codeowners
 /examples/multimodal/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # Dynamo deploy
@@ -26,7 +26,9 @@ CODEOWNERS @ai-dynamo/Devops
 
 # Planner
 /components/src/dynamo/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
-/benchmarks/profiler/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/components/src/dynamo/global_router/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/examples/hierarchical_planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/components/src/dynamo/profiler/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /tests/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # recipes

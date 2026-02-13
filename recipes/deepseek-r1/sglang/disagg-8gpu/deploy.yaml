@@ -14,7 +14,6 @@ spec:
       create: false
   services:
     Frontend:
-      dynamoNamespace: sgl-dsr1-8gpu
       componentType: frontend
       replicas: 1
       volumeMounts:
@@ -22,10 +21,10 @@ spec:
           mountPoint: /opt/model
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
     decode:
-      dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
+      subComponentType: decode
       replicas: 1
       resources:
         limits:
@@ -37,7 +36,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
           workingDir: /workspace
           command:
             - python3
@@ -60,12 +59,16 @@ spec:
             - decode
             - --disaggregation-bootstrap-port
             - "30001"
+            - --mem-fraction-static
+            - "0.75"
             - --host
             - 0.0.0.0
             - --prefill-round-robin-balance
+            - --watchdog-timeout
+            - "3600"
     prefill:
-      dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       resources:
         limits:
@@ -77,7 +80,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0
           workingDir: /workspace
           command:
             - python3
@@ -97,7 +100,11 @@ spec:
             - prefill
             - --disaggregation-bootstrap-port
             - "30001"
+            - --mem-fraction-static
+            - "0.75"
             - --host
             - 0.0.0.0
             - --load-balance-method
             - round_robin
+            - --watchdog-timeout
+            - "3600"

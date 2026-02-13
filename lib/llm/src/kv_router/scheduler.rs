@@ -1,36 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::discovery::RuntimeConfigsWithNotify;
+use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "bench")]
+use std::time::Instant;
+use tokio::sync::Notify;
 
-use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
-use super::indexer::OverlapScores;
-use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
+use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use super::queue::SchedulerQueue;
+use super::sequence::{ActiveSequencesMultiWorker, SequenceError, SequenceRequest};
 
-use crate::tokens::SequenceHash;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KVHitRateEvent {
-    pub worker_id: WorkerId,
-    #[serde(default)]
-    pub dp_rank: DpRank,
-    pub isl_blocks: usize,
-    pub overlap_blocks: u32,
-}
+use dynamo_tokens::SequenceHash;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
@@ -45,11 +37,11 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
-    #[error("all workers busy")]
-    AllWorkersBusy,
-
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
+
+    #[error("failed to initialize event publisher: {0}")]
+    InitFailed(String),
 }
 
 #[derive(Debug)]
@@ -69,6 +61,10 @@ pub struct SchedulingRequest {
     pub router_config_override: Option<RouterConfigOverride>,
     // Whether to update scheduler states (false for query_instance_id requests)
     pub update_states: bool,
+    // LORA adapter name extracted from request.model field
+    pub lora_name: Option<String>,
+    /// Priority jump in seconds; decreases effective arrival time in the queue.
+    pub priority_jump: f64,
     // Option to take it out to send the response without moving the struct
     resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
@@ -90,171 +86,174 @@ impl SchedulingRequest {
 pub struct KvScheduler {
     request_tx: tokio::sync::mpsc::Sender<SchedulingRequest>,
     slots: Arc<ActiveSequencesMultiWorker>,
+    queue: Arc<SchedulerQueue>,
 }
 
 impl KvScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
-        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
+        workers_with_configs: RuntimeConfigWatch,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
-        router_uuid: String,
+        router_id: u64,
+        worker_type: &'static str,
+        queue_threshold: Option<f64>,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
-        // Get initial workers from DashMap for slot initialization.
-        // ModelManager guarantees at least one worker is present before KvRouter::new() is called.
-        let initial_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_with_configs
-            .configs
-            .iter()
-            .map(|r| (*r.key(), r.value().clone()))
-            .collect();
+        // Get initial workers from watch receiver.
+        // Caller must ensure at least one worker is present (via wait_for).
+        let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
+            workers_with_configs.borrow().clone();
 
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            component.clone(),
-            block_size as usize,
-            initial_workers,
-            replica_sync,
-            router_uuid,
-        ));
+        let slots = Arc::new(
+            ActiveSequencesMultiWorker::new(
+                component.clone(),
+                block_size as usize,
+                initial_workers,
+                replica_sync,
+                router_id,
+                worker_type,
+            )
+            .await
+            .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
+        );
 
-        // Spawn background task to sync slots with DashMap when notified of changes.
-        // ModelManager's watcher updates the DashMap and notifies; we wait on notify here.
+        // Spawn background task to sync slots when the watch value changes.
         let slots_monitor = slots.clone();
-        let workers_monitor = workers_with_configs.clone();
+        let mut monitor_rx = workers_with_configs.clone();
         let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("KvScheduler workers monitoring task started");
-            let mut last_workers: HashSet<WorkerId> = HashSet::new();
+            let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
 
             loop {
-                // Wait for notification or cancellation
                 tokio::select! {
                     _ = monitor_cancel_token.cancelled() => {
                         tracing::trace!("KvScheduler workers monitoring task shutting down");
                         break;
                     }
-                    _ = workers_monitor.notify.notified() => {}
+                    result = monitor_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                            break;
+                        }
+                    }
                 }
 
-                // Get current workers from DashMap
-                let current_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> =
-                    workers_monitor
-                        .configs
-                        .iter()
-                        .map(|r| (*r.key(), r.value().clone()))
-                        .collect();
-                let current_worker_ids: HashSet<WorkerId> =
-                    current_workers.keys().copied().collect();
+                let current_workers = monitor_rx.borrow_and_update().clone();
 
-                // Only update slots if workers have changed
-                if current_worker_ids != last_workers {
-                    slots_monitor.update_workers(current_workers);
-                    last_workers = current_worker_ids;
+                if current_workers != last_workers {
+                    slots_monitor.update_workers(current_workers.clone());
+                    last_workers = current_workers;
                 }
             }
         });
 
         let slots_clone = slots.clone();
-        let workers_scheduler = workers_with_configs.clone();
+        let scheduler_rx = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
-        let ns_clone = component.namespace().clone();
+
+        // Create queue with shared notify for waking the scheduler loop
+        let ready_notify = Arc::new(Notify::new());
+        let queue = Arc::new(SchedulerQueue::new(
+            slots.clone(),
+            workers_with_configs.clone(),
+            ready_notify.clone(),
+            queue_threshold,
+        ));
+        let queue_clone = queue.clone();
 
         // Background task to handle scheduling requests
         tokio::spawn(async move {
             let mut request_rx = request_rx;
+            let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
             tracing::trace!("scheduler background task started");
 
             loop {
-                // Check for cancellation at beginning of loop
-                if scheduler_cancel_token.is_cancelled() {
-                    tracing::trace!("scheduler background task shutting down");
-                    break;
+                // Use select! to wait on: new request, ready_notify, periodic recheck, or cancellation
+                tokio::select! {
+                    _ = scheduler_cancel_token.cancelled() => {
+                        tracing::trace!("scheduler background task shutting down");
+                        break;
+                    }
+                    request = request_rx.recv() => {
+                        let Some(request) = request else {
+                            tracing::warn!("scheduler shutdown");
+                            break;
+                        };
+                        tracing::trace!("received request to be scheduled");
+                        queue_clone.enqueue(request).await;
+                    }
+                    _ = ready_notify.notified() => {
+                        // Woken by update() after prefill_complete/free - just continue to drain ready queue
+                    }
+                    _ = recheck_interval.tick() => {
+                        // Periodic recheck to prevent requests stuck in pending
+                        queue_clone.update().await;
+                    }
                 }
 
-                // Wait for a new request
-                let Some(mut request) = request_rx.recv().await else {
-                    tracing::warn!("scheduler shutdown");
-                    break;
-                };
-                tracing::trace!("received request to be scheduled");
+                // Drain ALL ready requests (each iteration uses fresh slot state)
+                while let Some(mut request) = queue_clone.try_dequeue().await {
+                    let (decode_blocks, prefill_tokens) = slots_clone
+                        .potential_blocks_and_tokens(
+                            request.token_seq.clone(),
+                            request.isl_tokens,
+                            request.overlaps.clone(),
+                        )
+                        .await;
+                    request.decode_blocks = decode_blocks;
+                    request.prefill_tokens = prefill_tokens;
 
-                let (decode_blocks, prefill_tokens) = slots_clone
-                    .potential_blocks_and_tokens(
-                        request.token_seq.clone(),
-                        request.isl_tokens,
-                        request.overlaps.clone(),
-                    )
-                    .await;
-                request.decode_blocks = decode_blocks;
-                request.prefill_tokens = prefill_tokens;
+                    // Read the current workers configuration from watch receiver
+                    let workers: HashMap<WorkerId, ModelRuntimeConfig> =
+                        scheduler_rx.borrow().clone();
 
-                // Read the current workers configuration from DashMap
-                let workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_scheduler
-                    .configs
-                    .iter()
-                    .map(|r| (*r.key(), r.value().clone()))
-                    .collect();
+                    match selector.select_worker(&workers, &request, block_size) {
+                        Ok(selection) => {
+                            let response = SchedulingResponse {
+                                best_worker: selection.worker,
+                                overlap_blocks: selection.overlap_blocks,
+                            };
+                            request.respond(response);
 
-                match selector.select_worker(&workers, &request, block_size) {
-                    Ok(selection) => {
-                        let event = KVHitRateEvent {
-                            worker_id: selection.worker.worker_id,
-                            dp_rank: selection.worker.dp_rank,
-                            isl_blocks: selection.required_blocks as usize,
-                            overlap_blocks: selection.overlap_blocks,
-                        };
-                        if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
-                            tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
+                            // Skip state update if not requested
+                            if !request.update_states {
+                                continue;
+                            }
+
+                            let Some(request_id) = request.maybe_request_id else {
+                                tracing::error!(
+                                    "No request_id provided to add_request to the slot tracker"
+                                );
+                                continue;
+                            };
+
+                            if let Err(e) = slots_clone
+                                .add_request(SequenceRequest {
+                                    request_id: request_id.clone(),
+                                    token_sequence: request.token_seq,
+                                    isl: request.isl_tokens,
+                                    overlap: selection.overlap_blocks,
+                                    expected_output_tokens: None,
+                                    worker: selection.worker,
+                                    lora_name: request.lora_name.clone(),
+                                })
+                                .await
+                            {
+                                tracing::warn!("Failed to add request {request_id}: {e}");
+                            }
                         }
-
-                        let response = SchedulingResponse {
-                            best_worker: selection.worker,
-                            overlap_blocks: selection.overlap_blocks,
-                        };
-                        request.respond(response);
-
-                        // Skip state update if not requested
-                        if !request.update_states {
-                            continue;
+                        Err(KvSchedulerError::NoEndpoints) => {
+                            tracing::warn!("no endpoints available, dropping request");
                         }
-
-                        let Some(request_id) = request.maybe_request_id else {
-                            tracing::error!(
-                                "No request_id provided to add_request to the slot tracker"
-                            );
-                            continue;
-                        };
-
-                        if let Err(e) = slots_clone
-                            .add_request(
-                                request_id.clone(),
-                                request.token_seq,
-                                request.isl_tokens,
-                                selection.overlap_blocks,
-                                selection.worker,
-                            )
-                            .await
-                        {
-                            tracing::warn!("Failed to add request {request_id}: {e}");
+                        Err(e) => {
+                            tracing::error!("error scheduling request: {:?}", e);
                         }
-                    }
-                    Err(KvSchedulerError::NoEndpoints) => {
-                        tracing::trace!("no endpoints available; waiting for endpoints update");
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        continue;
-                    }
-                    // TODO: this is not actually hooked up
-                    Err(KvSchedulerError::AllWorkersBusy) => {
-                        tracing::trace!("all workers busy; waiting for more capacity");
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::error!("error scheduling request: {:?}", e);
-                        break;
                     }
                 }
             }
@@ -262,9 +261,14 @@ impl KvScheduler {
             tracing::trace!("background endpoint subscriber shutting down");
         });
 
-        Ok(KvScheduler { request_tx, slots })
+        Ok(KvScheduler {
+            request_tx,
+            slots,
+            queue,
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
         maybe_request_id: Option<String>,
@@ -273,7 +277,12 @@ impl KvScheduler {
         overlaps: OverlapScores,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
     ) -> Result<WorkerWithDpRank, KvSchedulerError> {
+        #[cfg(feature = "bench")]
+        let start = Instant::now();
+
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             maybe_request_id,
@@ -284,41 +293,68 @@ impl KvScheduler {
             prefill_tokens: HashMap::new(),
             router_config_override: router_config_override.cloned(),
             update_states,
-            resp_tx: Some(resp_tx), // Wrap in Some()
+            lora_name,
+            priority_jump,
+            resp_tx: Some(resp_tx),
         };
 
         self.request_tx
             .send(request)
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+
+        #[cfg(feature = "bench")]
+        let send_elapsed = start.elapsed();
+
         let response = resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
 
+        #[cfg(feature = "bench")]
+        let total_elapsed = start.elapsed();
+        #[cfg(feature = "bench")]
+        tracing::info!(
+            isl_tokens,
+            send_us = send_elapsed.as_micros() as u64,
+            total_us = total_elapsed.as_micros() as u64,
+            "scheduler.schedule completed"
+        );
+
         Ok(response.best_worker)
     }
 
-    pub async fn add_request(
-        &self,
-        request_id: String,
-        token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
-        worker: WorkerWithDpRank,
-    ) -> Result<(), SequenceError> {
-        self.slots
-            .add_request(request_id, token_sequence, isl, overlap, worker)
-            .await
+    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        self.slots.add_request(req).await
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots
             .mark_prefill_completed(&request_id.to_string())
-            .await
+            .await?;
+        self.queue.update().await;
+        Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string()).await
+        self.slots.free(&request_id.to_string()).await?;
+        self.queue.update().await;
+        Ok(())
+    }
+
+    /// Get the worker type for this scheduler ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.slots.worker_type()
+    }
+
+    pub async fn add_output_block(
+        &self,
+        request_id: &str,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SequenceError> {
+        self.slots
+            .add_output_block(&request_id.to_string(), decay_fraction)
+            .await
     }
 
     pub async fn get_potential_loads(
@@ -352,6 +388,11 @@ impl KvScheduler {
         }
 
         loads
+    }
+
+    /// Get active request counts grouped by LORA name
+    pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
+        self.slots.get_active_lora_counts()
     }
 }
 
@@ -445,7 +486,7 @@ impl DefaultWorkerSelector {
 impl WorkerSelector for DefaultWorkerSelector {
     fn select_worker(
         &self,
-        workers: &HashMap<WorkerId, Option<ModelRuntimeConfig>>,
+        workers: &HashMap<WorkerId, ModelRuntimeConfig>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
@@ -464,15 +505,19 @@ impl WorkerSelector for DefaultWorkerSelector {
 
         let mut worker_logits = HashMap::new();
 
+        // Use override if provided, otherwise use default config
+        let overlap_weight = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.overlap_score_weight)
+            .unwrap_or(self.kv_router_config.overlap_score_weight);
+
         // Calculate logits for each worker with dp_rank
         // Outer loop: iterate over all workers from runtime config
         // Inner loop: iterate over all dp_ranks for each worker
         for (worker_id, config) in workers.iter() {
-            // Get data_parallel_size from runtime config
-            // data_parallel_size defaults to 1 in ModelRuntimeConfig
-            let data_parallel_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1); // Fallback if config is None
+            let data_parallel_size = config.data_parallel_size;
 
-            // Iterate over all dp_ranks for this worker
             for dp_rank in 0..data_parallel_size {
                 let worker = WorkerWithDpRank::new(*worker_id, dp_rank);
 
@@ -488,13 +533,6 @@ impl WorkerSelector for DefaultWorkerSelector {
                     .get(&worker)
                     .unwrap_or(&(potential_prefill_block.floor() as usize))
                     as f64;
-
-                // Use override if provided, otherwise use default config
-                let overlap_weight = request
-                    .router_config_override
-                    .as_ref()
-                    .and_then(|cfg| cfg.overlap_score_weight)
-                    .unwrap_or(self.kv_router_config.overlap_score_weight);
 
                 // Calculate logit (lower is better)
                 let logit = overlap_weight * potential_prefill_block + decode_block;
@@ -521,20 +559,20 @@ impl WorkerSelector for DefaultWorkerSelector {
         let candidates = softmax_sample(&worker_logits, temperature);
 
         // If multiple candidates (tied), use tree size as tie-breaker
-        // If tree sizes are also equal, min_by_key uses HashMap iteration order (pseudo-random)
+        // If tree sizes are also equal, use random selection to avoid bias
         let best_worker = if candidates.len() > 1 {
             tracing::info!("Multiple workers tied with same logit, using tree size as tie-breaker");
-            *candidates
+            let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = candidates
                 .iter()
-                .min_by_key(|worker| {
-                    request
-                        .overlaps
-                        .tree_sizes
-                        .get(worker)
-                        .copied()
-                        .unwrap_or(0)
-                })
-                .expect("candidates should not be empty")
+                .map(|w| (request.overlaps.tree_sizes.get(w).copied().unwrap_or(0), w))
+                .collect();
+
+            if tree_sizes.iter().all(|(s, _)| *s == tree_sizes[0].0) {
+                let idx = rand::rng().random_range(0..candidates.len());
+                candidates[idx]
+            } else {
+                *tree_sizes.iter().min_by_key(|(s, _)| *s).unwrap().1
+            }
         } else {
             candidates[0]
         };
@@ -546,7 +584,6 @@ impl WorkerSelector for DefaultWorkerSelector {
         // this is a runtime config set on a per worker basis, not per dp-rank
         let total_blocks_info = workers
             .get(&best_worker.worker_id)
-            .and_then(|cfg| cfg.as_ref())
             .and_then(|cfg| cfg.total_kv_blocks)
             .map(|blocks| format!(", total blocks: {}", blocks))
             .unwrap_or_default();

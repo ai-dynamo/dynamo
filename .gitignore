@@ -2,6 +2,7 @@
 .vs/
 .vscode/
 .helix
+*rendered.Dockerfile
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
@@ -57,6 +58,7 @@ tensorrtllm_checkpoints/
 tensorrtllm_engines/
 api_server_models/
 server/
+!lib/gpu_memory_service/server/
 # Replay/Snapshot test artifacts
 *.new
 lib/llm/tests/data/sample-models/models--meta-llama--Llama-3.1-70B-Instruct/
@@ -100,6 +102,11 @@ generated-values.yaml
 **/.devcontainer/.env
 TensorRT-LLM
 
+# The Linux kernel generates core dump files when a process crashes (receives signals
+# like SIGSEGV, SIGABRT, SIGBUS, etc.). The Linux container's /proc/sys/kernel/core_pattern
+# determines the filename (typically core or core.<pid>)
+core
+
 # Ruler Generated Files
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
@@ -107,6 +114,9 @@ TensorRT-LLM
 /.claude
 /CLAUDE.md
 /CLAUDE.md.bak
+
+# AI generated worklogs
+worklogs/
 
 # Benchmarks
 benchmarks/results
@@ -118,3 +128,6 @@ profiling_results*
 # Node.js
 node_modules/
 package-lock.json
+
+# Compiled static libraries
+*.a

@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
-#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -35,18 +34,21 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
 
-    /// Controls whether the router should manage local bookkeeping (add_request,
-    /// mark_prefill_completed, free) for this request.
-    ///
-    /// - `None` or `Some(true)`: Router handles bookkeeping locally (default behavior)
-    /// - `Some(false)`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enable_local_updates: Option<bool>,
-
     /// Expected number of output tokens for this request.
     /// Used as a hint for routing decisions to estimate resource requirements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_output_tokens: Option<u32>,
+
+    /// LORA adapter name for this request.
+    /// Used for LORA-aware routing and tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_name: Option<String>,
+
+    /// Priority jump in seconds for queue ordering.
+    /// A positive value decreases the effective arrival time, moving the request
+    /// ahead in the scheduler queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_jump: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -73,7 +75,6 @@ pub struct PrefillResult {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
-    #[cfg(feature = "media-nixl")]
     Decoded(RdmaMediaDataDescriptor),
 }
 
@@ -89,6 +90,12 @@ pub struct PreprocessedRequest {
 
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
+
+    /// Base64-encoded PyTorch tensor containing pre-computed embeddings
+    /// If provided, this takes precedence over token_ids for inference
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_embeds: Option<String>,
 
     // Multimodal data
     #[builder(default)]

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import contextlib
+import json
 import logging
 import os
 import socket
@@ -19,7 +20,8 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
-from dynamo.llm import fetch_llm
+from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
 
@@ -33,12 +35,6 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--endpoint"],
         "type": str,
         "help": f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: {DEFAULT_ENDPOINT}",
-    },
-    "migration-limit": {
-        "flags": ["--migration-limit"],
-        "type": int,
-        "default": 0,
-        "help": "Maximum number of times a request may be migrated to a different engine worker",
     },
     "tool-call-parser": {
         "flags": ["--dyn-tool-call-parser"],
@@ -102,12 +98,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Dump debug config to the specified file path. If not specified, the config will be dumped to stdout at INFO level.",
     },
-    "store-kv": {
-        "flags": ["--store-kv"],
+    "discovery-backend": {
+        "flags": ["--discovery-backend"],
         "type": str,
-        "choices": ["etcd", "file", "mem"],
-        "default": os.environ.get("DYN_STORE_KV", "etcd"),
-        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        "choices": ["kubernetes", "etcd", "file", "mem"],
+        "default": os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        "help": "Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     },
     "request-plane": {
         "flags": ["--request-plane"],
@@ -116,12 +112,42 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         "help": "Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     },
-    "enable-local-indexer": {
-        "flags": ["--enable-local-indexer"],
+    "event-plane": {
+        "flags": ["--event-plane"],
         "type": str,
-        "choices": ["true", "false"],
-        "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
-        "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+        "choices": ["nats", "zmq"],
+        "default": os.environ.get("DYN_EVENT_PLANE", "nats"),
+        "help": "Determines how events are published [nats|zmq]",
+    },
+    "durable-kv-events": {
+        "flags": ["--durable-kv-events"],
+        "action": "store_true",
+        "default": os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        "help": "Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
+    },
+    "image-diffusion-worker": {
+        "flags": ["--image-diffusion-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as image diffusion worker for image generation",
+    },
+    "image-diffusion-fs-url": {
+        "flags": ["--image-diffusion-fs-url"],
+        "type": str,
+        "default": None,
+        "help": "Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
+    },
+    "video-generation-worker": {
+        "flags": ["--video-generation-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as video generation worker for video generation (T2V/I2V)",
+    },
+    "video-generation-fs-url": {
+        "flags": ["--video-generation-fs-url"],
+        "type": str,
+        "default": None,
+        "help": "Filesystem URL for storing generated videos using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
     },
 }
 
@@ -131,9 +157,9 @@ class DynamoArgs:
     namespace: str
     component: str
     endpoint: str
-    migration_limit: int
-    store_kv: str
+    discovery_backend: str
     request_plane: str
+    event_plane: str
 
     # tool and reasoning parser options
     tool_call_parser: Optional[str] = None
@@ -153,10 +179,24 @@ class DynamoArgs:
 
     # embedding options
     embedding_worker: bool = False
+
+    # diffusion language model options (derived from server_args.dllm_algorithm)
+    diffusion_worker: bool = False
+
     # config dump options
     dump_config_to: Optional[str] = None
     # local indexer option
-    enable_local_indexer: bool = False
+    enable_local_indexer: bool = True
+    # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
+    use_kv_events: bool = False
+
+    # image diffusion options
+    image_diffusion_worker: bool = False
+    image_diffusion_fs_url: Optional[str] = None
+
+    # video generation options
+    video_generation_worker: bool = False
+    video_generation_fs_url: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -189,6 +229,7 @@ class Config:
 def _preprocess_for_encode_config(
     config: Config,
 ) -> Dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+    """Convert Config object to dictionary for encoding."""
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
@@ -198,47 +239,13 @@ def _preprocess_for_encode_config(
     }
 
 
-def _set_parser(
-    sglang_str: Optional[str],
-    dynamo_str: Optional[str],
-    arg_name: str = "tool-call-parser",
-) -> Optional[str]:
-    """Resolve parser name from SGLang and Dynamo arguments.
-
-    Args:
-        sglang_str: Parser value from SGLang argument.
-        dynamo_str: Parser value from Dynamo argument.
-        arg_name: Name of the parser argument for logging.
-
-    Returns:
-        Resolved parser name, preferring Dynamo's value if both set.
-
-    Raises:
-        ValueError: If parser name is not valid.
-    """
-    # If both are present, give preference to dynamo_str
-    if sglang_str is not None and dynamo_str is not None:
-        logging.warning(
-            f"--dyn-{arg_name} and --{arg_name} are both set. Giving preference to --dyn-{arg_name}"
-        )
-        return dynamo_str
-    # If dynamo_str is not set, use try to use sglang_str if it matches with the allowed parsers
-    elif sglang_str is not None:
-        logging.warning(f"--dyn-{arg_name} is not set. Using --{arg_name}.")
-        if arg_name == "tool-call-parser" and sglang_str not in get_tool_parser_names():
-            raise ValueError(
-                f"--{arg_name} is not a valid tool call parser. Valid parsers are: {get_tool_parser_names()}"
-            )
-        elif (
-            arg_name == "reasoning-parser"
-            and sglang_str not in get_reasoning_parser_names()
-        ):
-            raise ValueError(
-                f"--{arg_name} is not a valid reasoning parser. Valid parsers are: {get_reasoning_parser_names()}"
-            )
-        return sglang_str
-    else:
-        return dynamo_str
+def _validate_parser_flags(
+    sglang_val: Optional[str], dynamo_val: Optional[str], name: str
+) -> None:
+    """Validate that --{name} (SGLang) and --dyn-{name} (Dynamo) are not both set."""
+    if sglang_val and dynamo_val:
+        logging.error(f"Cannot use both --{name} and --dyn-{name}.")
+        sys.exit(1)
 
 
 def _extract_config_section(
@@ -335,7 +342,12 @@ async def parse_args(args: list[str]) -> Config:
         if "choices" in info:
             kwargs["choices"] = info["choices"]
         if "action" in info:
-            kwargs["action"] = info["action"]
+            action = info["action"]
+            # Handle string "BooleanOptionalAction" for dict-based config
+            if action == "BooleanOptionalAction":
+                kwargs["action"] = argparse.BooleanOptionalAction
+            else:
+                kwargs["action"] = action
 
         parser.add_argument(*info["flags"], **kwargs)
 
@@ -350,6 +362,13 @@ async def parse_args(args: list[str]) -> Config:
     # SGLang args
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
+
+    # Add "gms" to --load-format choices so it passes argparse validation.
+    # The actual loader class is set in main.py when load_format == "gms".
+    for action in parser._actions:
+        if getattr(action, "dest", None) == "load_format" and action.choices:
+            action.choices = list(action.choices) + ["gms"]
+            break
 
     # Handle config file if present
     temp_config_file = None  # Track temp file for cleanup
@@ -369,15 +388,27 @@ async def parse_args(args: list[str]) -> Config:
             # Remove --config-key from args (not recognized by SGLang)
             args = args[:key_index] + args[key_index + 2 :]
 
-        # Extract boolean actions from the parser to handle them correctly in YAML
-        boolean_actions = []
-        for action in parser._actions:
-            if hasattr(action, "dest") and hasattr(action, "action"):
-                if action.action in ["store_true", "store_false"]:
-                    boolean_actions.append(action.dest)
+        # Merge config file arguments with CLI arguments.
+        # ConfigArgumentMerger API changed after SGLang v0.5.7:
+        # - New API (post-v0.5.7): accepts parser= for proper store_true detection
+        # - Old API (v0.5.7 and earlier): only accepts boolean_actions=
+        # We use inspect.signature to detect the API rather than version checking
+        # since unreleased builds may have the new API while still reporting v0.5.7.
+        # Related upstream issue: https://github.com/sgl-project/sglang/issues/16256
+        # Upstream fix PR: https://github.com/sgl-project/sglang/pull/16638
+        import inspect
 
-        # Merge config file arguments with CLI arguments
-        config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
+        sig = inspect.signature(ConfigArgumentMerger.__init__)
+        if "parser" in sig.parameters:
+            config_merger = ConfigArgumentMerger(parser=parser)
+        else:
+            # Legacy path: extract store_true actions manually
+            boolean_actions = [
+                action.dest
+                for action in parser._actions
+                if isinstance(action, argparse._StoreTrueAction)
+            ]
+            config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
         args = config_merger.merge_config_with_args(args)
 
     parsed_args = parser.parse_args(args)
@@ -408,6 +439,10 @@ async def parse_args(args: list[str]) -> Config:
     if endpoint is None:
         if parsed_args.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
+        elif getattr(parsed_args, "image_diffusion_worker", False):
+            endpoint = f"dyn://{namespace}.backend.generate"
+        elif getattr(parsed_args, "video_generation_worker", False):
+            endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
             and parsed_args.disaggregation_mode == "prefill"
@@ -426,26 +461,24 @@ async def parse_args(args: list[str]) -> Config:
             endpoint = f"dyn://{namespace}.backend.generate"
 
     # Always parse the endpoint (whether auto-generated or user-provided)
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        logging.error(
-            f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        sys.exit(1)
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+        endpoint
+    )
 
-    parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
-
-    tool_call_parser = _set_parser(
+    # Validate parser flags: error if both --{name} and --dyn-{name} are set.
+    # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
+    _validate_parser_flags(
         parsed_args.tool_call_parser,
         parsed_args.dyn_tool_call_parser,
         "tool-call-parser",
     )
-    reasoning_parser = _set_parser(
+    _validate_parser_flags(
         parsed_args.reasoning_parser,
         parsed_args.dyn_reasoning_parser,
         "reasoning-parser",
     )
+    tool_call_parser = parsed_args.dyn_tool_call_parser
+    reasoning_parser = parsed_args.dyn_reasoning_parser
 
     if parsed_args.custom_jinja_template and parsed_args.use_sglang_tokenizer:
         logging.error(
@@ -469,36 +502,65 @@ async def parse_args(args: list[str]) -> Config:
                 f"Custom Jinja template file not found: {expanded_template_path}"
             )
 
-    dynamo_args = DynamoArgs(
-        namespace=parsed_namespace,
-        component=parsed_component_name,
-        endpoint=parsed_endpoint_name,
-        migration_limit=parsed_args.migration_limit,
-        store_kv=parsed_args.store_kv,
-        request_plane=parsed_args.request_plane,
-        tool_call_parser=tool_call_parser,
-        reasoning_parser=reasoning_parser,
-        custom_jinja_template=expanded_template_path,
-        dyn_endpoint_types=parsed_args.dyn_endpoint_types,
-        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
-        multimodal_processor=parsed_args.multimodal_processor,
-        multimodal_encode_worker=parsed_args.multimodal_encode_worker,
-        multimodal_worker=parsed_args.multimodal_worker,
-        embedding_worker=parsed_args.embedding_worker,
-        dump_config_to=parsed_args.dump_config_to,
-        enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
-    )
-    logging.debug(f"Dynamo args: {dynamo_args}")
-
-    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
-    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
     model_path = parsed_args.model_path
+    # Name the model
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
+    # Download the model if necessary using modelexpress.
+    # We don't set `parsed_args.model_path` to the local path fetch_model returns
+    # because sglang will send this to its pipeline-parallel workers, which may
+    # not have the local path.
+    # sglang will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
     if not os.path.exists(model_path):
-        parsed_args.model_path = await fetch_llm(model_path)
+        await fetch_model(model_path)
 
-    server_args = ServerArgs.from_cli_args(parsed_args)
+    # TODO: sglang downloads the model in `from_cli_args`, which means we had to
+    # fetch_model (download the model) here, in `parse_args`. `parse_args` should not
+    # contain code to download a model, it should only parse the args.
+
+    # For diffusion/video workers, create a minimal dummy ServerArgs since diffusion
+    # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
+    image_diffusion_worker = getattr(parsed_args, "image_diffusion_worker", False)
+    video_generation_worker = getattr(parsed_args, "video_generation_worker", False)
+
+    if image_diffusion_worker or video_generation_worker:
+        worker_type = (
+            "image diffusion" if image_diffusion_worker else "video generation"
+        )
+        logging.info(
+            f"{worker_type.title()} worker detected with model: {model_path}, creating minimal ServerArgs stub"
+        )
+        # Create a minimal ServerArgs-like object that bypasses model config loading
+        # Diffusion/video workers don't actually use ServerArgs - they use DiffGenerator
+        import types
+
+        server_args = types.SimpleNamespace()
+        # Copy over any attrs that might be needed, but avoid triggering __post_init__
+        server_args.model_path = model_path
+        server_args.served_model_name = parsed_args.served_model_name
+        server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
+        server_args.log_level = getattr(parsed_args, "log_level", "info")
+        server_args.skip_tokenizer_init = True
+        server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
+        server_args.tp_size = getattr(parsed_args, "tp_size", 1)
+        server_args.dp_size = getattr(parsed_args, "dp_size", 1)
+        server_args.speculative_algorithm = None
+        server_args.disaggregation_mode = None
+        server_args.dllm_algorithm = False
+        server_args.load_format = None
+        logging.info(
+            f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
+        )
+    else:
+        server_args = ServerArgs.from_cli_args(parsed_args)
+
+    # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
+    # tokens since last output), not cumulative tokens. When stream_output=True,
+    # SGLang sends disjoint segments which Dynamo passes through directly.
+    # Force stream_output=True for optimal streaming performance.
+    server_args.stream_output = True
 
     if parsed_args.use_sglang_tokenizer:
         logging.info(
@@ -510,6 +572,51 @@ async def parse_args(args: list[str]) -> Config:
             "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
         )
         server_args.skip_tokenizer_init = True
+
+    # Derive use_kv_events from server_args.kv_events_config
+    # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)
+    use_kv_events = False
+    if server_args.kv_events_config:
+        try:
+            kv_cfg = json.loads(server_args.kv_events_config)
+            use_kv_events = kv_cfg.get("publisher", "null") != "null"
+        except json.JSONDecodeError:
+            logging.warning(
+                f"Failed to parse kv_events_config: {server_args.kv_events_config}"
+            )
+    logging.info(
+        f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
+    )
+
+    # Auto-detect diffusion worker mode if dllm_algorithm
+    diffusion_worker = server_args.dllm_algorithm is not None
+
+    dynamo_args = DynamoArgs(
+        namespace=parsed_namespace,
+        component=parsed_component_name,
+        endpoint=parsed_endpoint_name,
+        discovery_backend=parsed_args.discovery_backend,
+        request_plane=parsed_args.request_plane,
+        event_plane=parsed_args.event_plane,
+        tool_call_parser=tool_call_parser,
+        reasoning_parser=reasoning_parser,
+        custom_jinja_template=expanded_template_path,
+        dyn_endpoint_types=parsed_args.dyn_endpoint_types,
+        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
+        multimodal_processor=parsed_args.multimodal_processor,
+        multimodal_encode_worker=parsed_args.multimodal_encode_worker,
+        multimodal_worker=parsed_args.multimodal_worker,
+        embedding_worker=parsed_args.embedding_worker,
+        diffusion_worker=diffusion_worker,
+        image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
+        image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
+        video_generation_worker=getattr(parsed_args, "video_generation_worker", False),
+        video_generation_fs_url=getattr(parsed_args, "video_generation_fs_url", None),
+        dump_config_to=parsed_args.dump_config_to,
+        enable_local_indexer=not parsed_args.durable_kv_events,
+        use_kv_events=use_kv_events,
+    )
+    logging.debug(f"Dynamo args: {dynamo_args}")
 
     return Config(server_args, dynamo_args)
 
@@ -531,31 +638,6 @@ def reserve_free_port(host: str = "localhost") -> Generator[int, None, None]:
         yield port
     finally:
         sock.close()
-
-
-def parse_endpoint(endpoint: str) -> List[str]:
-    """Parse endpoint string into namespace, component, and endpoint parts.
-
-    Args:
-        endpoint: Endpoint string in 'dyn://namespace.component.endpoint' format.
-
-    Returns:
-        List of [namespace, component, endpoint] strings.
-
-    Raises:
-        ValueError: If endpoint format is invalid.
-    """
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        error_msg = (
-            f"Invalid endpoint format: '{endpoint}'. "
-            f"Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        logging.error(error_msg)
-        raise ValueError(error_msg)
-
-    return endpoint_parts
 
 
 def _reserve_disaggregation_bootstrap_port() -> int:

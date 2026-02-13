@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamo._core import DistributedRuntime, KvRouter, KvRouterConfig
 from tests.utils.managed_process import ManagedProcess
 
 if TYPE_CHECKING:
@@ -48,7 +48,9 @@ class KVRouterProcess(ManagedProcess):
         enforce_disagg: bool = False,
         blocks_threshold: float | None = None,
         tokens_threshold: float | None = None,
+        tokens_threshold_frac: float | None = None,
         request_plane: str = "nats",
+        durable_kv_events: bool = False,
     ):
         command = [
             "python3",
@@ -60,7 +62,7 @@ class KVRouterProcess(ManagedProcess):
             "kv",
             "--http-port",
             str(frontend_port),
-            "--store-kv",
+            "--discovery-backend",
             store_backend,
             "--namespace",
             namespace,
@@ -75,6 +77,14 @@ class KVRouterProcess(ManagedProcess):
         if tokens_threshold is not None:
             command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
 
+        if tokens_threshold_frac is not None:
+            command.extend(
+                ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
+            )
+
+        if durable_kv_events:
+            command.append("--durable-kv-events")
+
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
 
@@ -88,7 +98,7 @@ class KVRouterProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
             ],
             log_dir=request.node.name,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
         )
         self.port = frontend_port
 
@@ -178,7 +188,7 @@ async def wait_for_frontend_ready(
         2. Sends a test POST to /v1/chat/completions to verify the request pipeline is functional
 
     Use this when testing through the HTTP frontend server (dynamo.frontend).
-    For direct Python API testing with KvPushRouter, use wait_for_workers_ready() instead.
+    For direct Python API testing with KvRouter, use wait_for_workers_ready() instead.
 
     Args:
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
@@ -266,7 +276,7 @@ async def wait_for_frontend_ready(
 
 async def wait_for_workers_ready(
     endpoint,
-    router: KvPushRouter,
+    router: KvRouter,
     expected_num_workers: int,
     model_name: str,
 ) -> list[int]:
@@ -279,7 +289,7 @@ async def wait_for_workers_ready(
 
     Args:
         endpoint: The endpoint object to get the client from
-        router: The KvPushRouter to use for sending warmup requests
+        router: The KvRouter to use for sending warmup requests
         expected_num_workers: Number of workers to wait for
 
     Returns:
@@ -483,7 +493,7 @@ async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
 
 
 async def send_request_via_python_kv_router(
-    kv_python_router: KvPushRouter,
+    kv_python_router: KvRouter,
     model_name: str,
     token_ids: list,
     initial_wait: float,
@@ -518,6 +528,7 @@ async def send_request_via_python_kv_router(
     )
 
     # Retry loop sending request to worker with exponential backoff
+    stream = None
     for attempt in range(max_retries + 1):
         try:
             logger.debug(f"Sending request to {log_message} (attempt {attempt + 1})")
@@ -525,10 +536,10 @@ async def send_request_via_python_kv_router(
             stream = await kv_python_router.generate(
                 token_ids=token_ids,
                 model=model_name,
-                stop_conditions=stop_conditions,
-                sampling_options=sampling_options,
-                output_options=output_options,
-                router_config_override=router_config_override,
+                stop_conditions=stop_conditions,  # type: ignore[arg-type]
+                sampling_options=sampling_options,  # type: ignore[arg-type]
+                output_options=output_options,  # type: ignore[arg-type]
+                router_config_override=router_config_override,  # type: ignore[arg-type]
                 worker_id=worker_id,
                 dp_rank=dp_rank,
             )
@@ -546,6 +557,11 @@ async def send_request_via_python_kv_router(
                 raise RuntimeError(
                     f"Failed to connect to workers after {max_retries + 1} attempts"
                 ) from e
+
+    if stream is None:
+        raise RuntimeError(
+            f"Failed to get a valid stream from workers after {max_retries + 1} attempts"
+        )
 
     # Collect tokens and worker IDs from the SSE stream
     generated_tokens = []
@@ -593,7 +609,7 @@ async def send_request_via_python_kv_router(
         )
 
         logger.debug(
-            f"Successfully verified {max_tokens} tokens generated as expected via KvPushRouter with ignore_eos=True"
+            f"Successfully verified {max_tokens} tokens generated as expected via KvRouter with ignore_eos=True"
         )
 
     if return_worker_ids:
@@ -643,18 +659,16 @@ def _test_router_basic(
         AssertionError: If requests fail or frontend doesn't become ready
         TimeoutError: If frontend doesn't become ready within timeout
     """
-    try:
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        request_plane=request_plane,
+    ):
         # Start KV router frontend
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(
-            request,
-            block_size,
-            frontend_port,
-            engine_workers.namespace,
-            store_backend,
-            request_plane=request_plane,
-        )
-        kv_router.__enter__()
 
         frontend_url = f"http://localhost:{frontend_port}"
 
@@ -680,10 +694,6 @@ def _test_router_basic(
 
         logger.info(f"Successfully completed {num_requests} requests")
 
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
-
 
 def _test_router_two_routers(
     engine_workers,
@@ -693,6 +703,7 @@ def _test_router_two_routers(
     test_payload: dict,
     num_requests: int,
     store_backend: str = "etcd",
+    skip_consumer_verification: bool = False,
 ):
     """Test two KV routers with alternating requests and consumer lifecycle verification.
 
@@ -701,8 +712,8 @@ def _test_router_two_routers(
     This test:
     1. Starts two KV routers on different ports
     2. Sends requests alternating between the two routers
-    3. Verifies that both routers create durable consumers
-    4. Verifies consumers are cleaned up when routers exit
+    3. Verifies that both routers create durable consumers (unless skipped)
+    4. Verifies consumers are cleaned up when routers exit (unless skipped)
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -712,6 +723,7 @@ def _test_router_two_routers(
         test_payload: Test payload to send to /v1/chat/completions
         num_requests: Number of concurrent requests to send
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        skip_consumer_verification: Skip JetStream consumer verification (for NATS Core mode).
 
     Raises:
         AssertionError: If consumer lifecycle verification fails
@@ -846,8 +858,14 @@ def _test_router_two_routers(
             finally:
                 await nc.close()
 
-        # Run consumer lifecycle verification
-        asyncio.run(verify_consumer_lifecycle())
+        # Run consumer lifecycle verification (skip for NATS Core mode)
+        if skip_consumer_verification:
+            logger.info("Skipping JetStream consumer verification (NATS Core mode)")
+            # Clean up routers manually since we're not doing consumer verification
+            for kv_router in kv_routers:
+                kv_router.__exit__(None, None, None)
+        else:
+            asyncio.run(verify_consumer_lifecycle())
 
         # Clear the kv_routers list since we've already cleaned them up
         kv_routers = []
@@ -865,9 +883,9 @@ def _test_python_router_bindings(
     model_name: str,
     num_workers: int,
 ):
-    """Test KvPushRouter Python bindings with token streaming and config overrides.
+    """Test KvRouter Python bindings with token streaming and config overrides.
 
-    Assumes engine_workers are already initialized. This test creates a KvPushRouter
+    Assumes engine_workers are already initialized. This test creates a KvRouter
     Python object and sends three test requests to verify:
     1. Token streaming with full router config overrides (overlap_score_weight, router_temperature)
     2. Token streaming without any overrides (uses default config)
@@ -888,19 +906,17 @@ def _test_python_router_bindings(
     # Create KvRouterConfig with default settings
     kv_router_config = KvRouterConfig()
 
-    # Create KvPushRouter Python object
-    kv_push_router = KvPushRouter(
+    # Create KvRouter Python object
+    kv_router = KvRouter(
         endpoint=endpoint,
         block_size=block_size,
         kv_router_config=kv_router_config,
     )
 
-    logger.info("Created KvPushRouter Python object")
+    logger.info("Created KvRouter Python object")
 
     # Wait for workers to be ready
-    asyncio.run(
-        wait_for_workers_ready(endpoint, kv_push_router, num_workers, model_name)
-    )
+    asyncio.run(wait_for_workers_ready(endpoint, kv_router, num_workers, model_name))
 
     # Generate random token IDs (100 to 200 tokens)
     num_input_tokens = random.randint(100, 200)
@@ -918,7 +934,7 @@ def _test_python_router_bindings(
     logger.info(f"Testing with full router config overrides: {router_config_override}")
     asyncio.run(
         send_request_via_python_kv_router(
-            kv_python_router=kv_push_router,
+            kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids,
             initial_wait=1.0,
@@ -940,7 +956,7 @@ def _test_python_router_bindings(
     logger.info("Testing without router config overrides")
     asyncio.run(
         send_request_via_python_kv_router(
-            kv_python_router=kv_push_router,
+            kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:50],  # Use fewer tokens for second test,
             initial_wait=1.0,
@@ -963,7 +979,7 @@ def _test_python_router_bindings(
     logger.info(f"Testing with partial router config overrides: {partial_override}")
     asyncio.run(
         send_request_via_python_kv_router(
-            kv_python_router=kv_push_router,
+            kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:30],  # Use fewer tokens for third test,
             initial_wait=1.0,
@@ -981,7 +997,7 @@ def _test_python_router_bindings(
         )
     )
 
-    logger.info("KvPushRouter bindings test completed successfully")
+    logger.info("KvRouter bindings test completed successfully")
 
 
 def _test_router_query_instance_id(
@@ -1018,13 +1034,11 @@ def _test_router_query_instance_id(
         AssertionError: If annotation response structure is incorrect or contains generation content
     """
 
-    try:
+    with KVRouterProcess(
+        request, block_size, frontend_port, engine_workers.namespace, store_backend
+    ):
         # Start KV router (frontend)
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(
-            request, block_size, frontend_port, engine_workers.namespace, store_backend
-        )
-        kv_router.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
@@ -1146,10 +1160,6 @@ def _test_router_query_instance_id(
         logger.info(f"Decode Worker ID: {result['decode_worker_id']}")
         logger.info(f"Token count: {result['token_count']}")
 
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
-
 
 def _test_router_overload_503(
     engine_workers,
@@ -1176,42 +1186,17 @@ def _test_router_overload_503(
         AssertionError: If 503 response is not received when expected
     """
 
-    try:
-        logger.info(
-            f"Starting KV router frontend on port {frontend_port} with limited resources"
-        )
+    logger.info(
+        f"Starting KV router frontend on port {frontend_port} with limited resources"
+    )
 
-        # Custom command for router with limited block size
-        command = [
-            "python",
-            "-m",
-            "dynamo.frontend",
-            "--active-decode-blocks-threshold",
-            str(blocks_threshold),
-            "--kv-cache-block-size",
-            str(block_size),
-            "--router-mode",
-            "kv",
-            "--http-port",
-            str(frontend_port),
-        ]
-
-        kv_router = ManagedProcess(
-            command=command,
-            timeout=60,
-            display_output=True,
-            health_check_ports=[frontend_port],
-            health_check_urls=[
-                (
-                    f"http://localhost:{frontend_port}/v1/models",
-                    lambda r: r.status_code == 200,
-                )
-            ],
-            log_dir=request.node.name,
-            terminate_existing=False,
-        )
-        kv_router.__enter__()
-
+    with KVRouterProcess(
+        request=request,
+        block_size=block_size,
+        frontend_port=frontend_port,
+        namespace=engine_workers.namespace,
+        blocks_threshold=blocks_threshold,
+    ):
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
         # Custom payload for 503 test with more tokens to consume resources
@@ -1307,10 +1292,6 @@ def _test_router_overload_503(
 
         logger.info("Successfully verified 503 response when all workers are busy")
 
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
-
 
 def _test_router_indexers_sync(
     engine_workers,
@@ -1321,12 +1302,14 @@ def _test_router_indexers_sync(
     request_plane: str = "nats",
     test_nats_interruption: bool = False,
     nats_server: Optional["NatsServer"] = None,
+    durable_kv_events: bool = False,
+    router_event_threads: int = 1,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
     Assumes engine_workers are already initialized. This test:
-    1. Creates first KvPushRouter (with its own runtime) and sends 25 requests (triggers snapshot at threshold=20)
-    2. Creates second KvPushRouter (with its own runtime, should sync from NATS snapshot)
+    1. Creates first KvRouter (with its own runtime) and sends 25 requests (triggers snapshot at threshold=20)
+    2. Creates second KvRouter (with its own runtime, should sync from NATS snapshot)
     3. Sends 25 requests to second router
     4. Verifies NATS object store contains the snapshot
     5. Dumps states from both routers and compares them (should be identical)
@@ -1351,6 +1334,7 @@ def _test_router_indexers_sync(
         request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
         test_nats_interruption: If True, test NATS interruption recovery. Defaults to False.
         nats_server: NatsServer instance for stop/start (required if test_nats_interruption=True).
+        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
 
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
@@ -1361,7 +1345,11 @@ def _test_router_indexers_sync(
     # Use async to manage the test flow
     async def test_sync():
         # Create KvRouterConfig with lower snapshot threshold for testing
-        kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
+        kv_router_config = KvRouterConfig(
+            router_snapshot_threshold=20,
+            durable_kv_events=durable_kv_events,
+            router_event_threads=router_event_threads,
+        )
 
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
@@ -1405,23 +1393,21 @@ def _test_router_indexers_sync(
         component1 = namespace1.component(engine_workers.component_name)
         endpoint1 = component1.endpoint("generate")
 
-        kv_push_router1 = KvPushRouter(
+        kv_router1 = KvRouter(
             endpoint=endpoint1,
             block_size=block_size,
             kv_router_config=kv_router_config,
         )
 
         # Wait for workers to be ready
-        await wait_for_workers_ready(
-            endpoint1, kv_push_router1, num_workers, model_name
-        )
+        await wait_for_workers_ready(endpoint1, kv_router1, num_workers, model_name)
 
         # Send 25 requests to first router
         logger.info("Sending 25 requests to first router")
 
         # Send requests to first router
         successful1 = await send_requests_to_router(
-            kv_push_router1, 25, "Router 1", endpoint1
+            kv_router1, 25, "Router 1", endpoint1
         )
         assert (
             successful1 == 25
@@ -1438,7 +1424,7 @@ def _test_router_indexers_sync(
 
             logger.info("Sending 10 requests while NATS is down (via TCP)")
             successful_offline1 = await send_requests_to_router(
-                kv_push_router1, 10, "Router 1 (NATS down)", endpoint1
+                kv_router1, 10, "Router 1 (NATS down)", endpoint1
             )
             assert (
                 successful_offline1 == 10
@@ -1460,7 +1446,7 @@ def _test_router_indexers_sync(
         component2 = namespace2.component(engine_workers.component_name)
         endpoint2 = component2.endpoint("generate")
 
-        kv_push_router2 = KvPushRouter(
+        kv_router2 = KvRouter(
             endpoint=endpoint2,
             block_size=block_size,
             kv_router_config=kv_router_config,
@@ -1469,7 +1455,7 @@ def _test_router_indexers_sync(
         # Send 25 requests to second router with initial retry loop
         logger.info("Sending 25 requests to second router")
         successful2 = await send_requests_to_router(
-            kv_push_router2, 25, "Router 2", endpoint2
+            kv_router2, 25, "Router 2", endpoint2
         )
         assert (
             successful2 == 25
@@ -1486,7 +1472,7 @@ def _test_router_indexers_sync(
 
             logger.info("Sending 10 requests while NATS is down (via TCP)")
             successful_offline2 = await send_requests_to_router(
-                kv_push_router2, 10, "Router 2 (NATS down)", endpoint2
+                kv_router2, 10, "Router 2 (NATS down)", endpoint2
             )
             assert (
                 successful_offline2 == 10
@@ -1498,7 +1484,7 @@ def _test_router_indexers_sync(
 
             logger.info("Sending 5 more requests after NATS recovery")
             successful_recovery = await send_requests_to_router(
-                kv_push_router1, 5, "Router 1 (post-recovery)", endpoint1
+                kv_router1, 5, "Router 1 (post-recovery)", endpoint1
             )
             assert (
                 successful_recovery == 5
@@ -1561,8 +1547,8 @@ def _test_router_indexers_sync(
 
         # Dump states from both routers
         logger.info("Dumping states from both routers")
-        state1_json = await kv_push_router1.dump_events()
-        state2_json = await kv_push_router2.dump_events()
+        state1_json = await kv_router1.dump_events()
+        state2_json = await kv_router2.dump_events()
 
         # Parse JSON strings for comparison
         state1 = json.loads(state1_json)
@@ -1676,6 +1662,7 @@ def _test_router_decisions_disagg(
     test_payload: dict,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    durable_kv_events: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -1697,27 +1684,27 @@ def _test_router_decisions_disagg(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
         AssertionError: If prefill_worker_id is in decode_worker_ids (not true disagg)
     """
-    try:
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        decode_workers.namespace,
+        store_backend,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        durable_kv_events=durable_kv_events,
+    ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
         logger.info(
             f"Starting KV router frontend on port {frontend_port} for disagg test"
         )
-        kv_router = KVRouterProcess(
-            request,
-            block_size,
-            frontend_port,
-            decode_workers.namespace,
-            store_backend,
-            enforce_disagg=True,
-            request_plane=request_plane,
-        )
-        kv_router.__enter__()
 
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
@@ -1827,7 +1814,7 @@ def _test_router_decisions_disagg(
                         verify_response_timing(timing_info)
 
                     # Small delay between requests
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)
 
             return prefill_worker_ids, decode_worker_ids
 
@@ -1882,10 +1869,6 @@ def _test_router_decisions_disagg(
             f"  - Prefill worker is NOT in decode worker set {unique_decode_ids} (true disagg)"
         )
 
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
-
 
 def _test_router_decisions(
     engine_workers,
@@ -1895,6 +1878,8 @@ def _test_router_decisions(
     test_dp_rank: bool = False,
     block_size: int = BLOCK_SIZE,
     use_kv_events: bool = True,
+    durable_kv_events: bool = False,
+    router_event_threads: int = 1,
 ):
     """Validate KV cache prefix reuse and worker routing by sending requests diverging prefixes.
 
@@ -1915,6 +1900,7 @@ def _test_router_decisions(
         test_dp_rank: If True, also forces and validates dp_rank routing (for data parallel setups)
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with TTL-based expiration (--no-kv-events mode).
+        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
 
     Raises:
         AssertionError: If routing decisions don't follow KV cache prefix reuse as expected
@@ -1923,8 +1909,10 @@ def _test_router_decisions(
     kv_router_config = KvRouterConfig(
         router_snapshot_threshold=20,
         use_kv_events=use_kv_events,
+        durable_kv_events=durable_kv_events,
+        router_event_threads=router_event_threads,
     )
-    kv_push_router = KvPushRouter(
+    kv_router = KvRouter(
         endpoint=endpoint,
         block_size=block_size,
         kv_router_config=kv_router_config,
@@ -1932,29 +1920,13 @@ def _test_router_decisions(
 
     # Use async to manage the test flow
     async def test_sync():
-        # Calculate expected number of instances
-        # With data parallelism:
-        # - vLLM/SGLang: each DP rank registers as a separate instance
-        # - Mockers: all DP ranks share the same worker instance ID (instance_ids returns worker IDs)
-        if test_dp_rank:
-            if (
-                hasattr(engine_workers, "data_parallel_size")
-                and engine_workers.data_parallel_size is not None
-            ):
-                # vLLM/SGLang: each DP rank registers as a separate instance
-                expected_num_instances = (
-                    engine_workers.num_workers * engine_workers.data_parallel_size
-                )
-            else:
-                # Mockers with dp_size or no DP: instance_ids() returns worker IDs
-                expected_num_instances = engine_workers.num_workers
-        else:
-            expected_num_instances = engine_workers.num_workers
+        # Workers register one instance per process (not per dp_rank)
+        expected_num_instances = engine_workers.num_workers
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
             endpoint,
-            kv_push_router,
+            kv_router,
             expected_num_workers=expected_num_instances,
             model_name=model_name,
         )
@@ -2000,7 +1972,7 @@ def _test_router_decisions(
             logger.info(log_msg)
 
             result = await send_request_via_python_kv_router(
-                kv_python_router=kv_push_router,
+                kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=request,
                 initial_wait=1.0,
@@ -2028,7 +2000,7 @@ def _test_router_decisions(
             await asyncio.sleep(1)
 
         # Dump events from the router
-        events_json = await kv_push_router.dump_events()
+        events_json = await kv_router.dump_events()
         return events_json, forced_worker_id, forced_dp_rank, response_worker_ids
 
     # Run the async test
@@ -2177,20 +2149,18 @@ def _test_busy_threshold_endpoint(
     initial_active_decode_blocks_threshold = 0.9
     initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
 
-    try:
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        blocks_threshold=initial_active_decode_blocks_threshold,
+        tokens_threshold=initial_active_prefill_tokens_threshold,
+        request_plane=request_plane,
+    ):
         # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(
-            request,
-            block_size,
-            frontend_port,
-            engine_workers.namespace,
-            store_backend,
-            blocks_threshold=initial_active_decode_blocks_threshold,
-            tokens_threshold=initial_active_prefill_tokens_threshold,
-            request_plane=request_plane,
-        )
-        kv_router.__enter__()
 
         frontend_url = f"http://localhost:{frontend_port}"
         busy_threshold_url = f"{frontend_url}/busy_threshold"
@@ -2402,10 +2372,52 @@ def _test_busy_threshold_endpoint(
                         f"POST /busy_threshold (invalid tokens) response: {data}"
                     )
 
+                # Test 10: Set active_prefill_tokens_threshold_frac (fraction of max_num_batched_tokens)
+                test_frac_threshold = 0.8
+                logger.info(
+                    f"Testing POST /busy_threshold to set active_prefill_tokens_threshold_frac={test_frac_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold_frac": test_frac_threshold,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set frac) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_prefill_tokens_threshold_frac")
+                        == test_frac_threshold
+                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set frac) response: {data}")
+
+                # Test 11: Verify frac threshold appears in GET /busy_threshold list
+                logger.info(
+                    "Testing GET /busy_threshold to verify frac threshold in list"
+                )
+                async with session.get(busy_threshold_url) as response:
+                    assert (
+                        response.status == 200
+                    ), f"GET /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    thresholds = data.get("thresholds", [])
+                    model_entry = next(
+                        (t for t in thresholds if t["model"] == model_name), None
+                    )
+                    assert (
+                        model_entry is not None
+                    ), f"Expected model '{model_name}' in thresholds: {data}"
+                    assert (
+                        model_entry.get("active_prefill_tokens_threshold_frac")
+                        == test_frac_threshold
+                    ), f"Expected active_prefill_tokens_threshold_frac={test_frac_threshold}: {data}"
+                    logger.info(
+                        f"GET /busy_threshold (after set frac) response: {data}"
+                    )
+
                 logger.info("All busy_threshold endpoint tests passed!")
 
         asyncio.run(test_busy_threshold_api())
-
-    finally:
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)

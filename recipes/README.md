@@ -3,22 +3,39 @@
 Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
 
 > **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.
-> If not, follow the **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** first.
+> If not, follow the **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** first.
 
 ## Available Recipes
 
-| Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes |GAIE integration |
-|-------|-----------|------|------|------------|------------------|-------|------------------|
-| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ | ❌ |
+### Multi-Feature Recipe
+
+This recipe combines multiple Dynamo performance features (disaggregated serving + KV-aware routing):
+
+| Model | Framework | Configuration | GPUs | Features |
+|-------|-----------|---------------|------|----------|
+| **[Qwen3-32B](qwen3-32b/)** | vLLM | Disagg + KV-Router | 16x H200 | **Disaggregated Serving + KV-Aware Routing** — includes benchmark comparison with real-world Mooncake traces |
+
+### Aggregated & Disaggregated Recipes
+
+These recipes demonstrate aggregated or disaggregated serving:
+
+**GAIE Column**: Indicates whether the recipe includes integration with the [Gateway API Inference Extension (GAIE)](../deploy/inference-gateway/README.md) — a Kubernetes SIG project that extends the Gateway API for AI inference workloads, providing load balancing, model routing, and request management.
+
+| Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes | GAIE |
+|-------|-----------|------|------|------------|------------------|-------|------|
+| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ |
 | **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation | ❌ |
 | **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each | ❌ |
-| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GPU | ✅ | ✅ | FP8 quantization | ❌ |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x GPU | ✅ | ✅ | FP8 quantization | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x GPU | ✅ | ✅ | Prefill + Decode separation | ❌ |
+| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 16x GPU | ✅ | ✅ | MoE model, TP4×EP4 | ❌ |
+| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 16x GPU | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | TBD | ❌ | ❌ | Engine configs only, no K8s manifest | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 8x H200 | ✅*1 | ❌ | Benchmark recipe pending | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅*1 | ❌ | Benchmark recipe pending | ❌ |
-| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ |Multi-node: 8 decode + 1 prefill nodes | ❌ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅*1 | ❌ | TP=8 per worker, single-node | ❌ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅*1 | ❌ | TP=16 per worker, multi-node | ❌ |
+| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
+| **[DeepSeek-R1](deepseek-r1/vllm/disagg/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
 
 *1: Please use `deepseek-r1/model-cache/model-download-sglang.yaml` to download the model into the PVC.
 
@@ -50,8 +67,8 @@ Each complete recipe follows this standard structure:
 
 The recipes require the Dynamo Kubernetes Platform to be installed. Follow the installation guide:
 
-- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Quickstart (~10 minutes)
-- **[Detailed Installation Guide](../docs/kubernetes/installation_guide.md)** - Advanced options
+- **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** - Quickstart (~10 minutes)
+- **[Detailed Installation Guide](../docs/pages/kubernetes/installation-guide.md)** - Advanced options
 
 **2. GPU Cluster Requirements**
 
@@ -188,7 +205,12 @@ First, deploy the Dynamo Graph per instructions above.
 
 Then follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
 
-Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>` i.e. `nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:0.7.0rc2-amd64`
+Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<version>` e.g. `nvcr.io/nvidia/ai-dynamo/frontend:0.9.0`
+The recipe assumes you are using Kubernetes discovery backend and sets the `DYN_DISCOVERY_BACKEND` env variable in the epp deployment. If you want to use etcd enable the lines below and remove the DYN_DISCOVERY_BACKEND env var.
+```bash
+- name: ETCD_ENDPOINTS
+  value: "dynamo-platform-etcd.$(PLATFORM_NAMESPACE):2379" #  update dynamo-platform to appropriate namespace
+```
 
 ```bash
 export DEPLOY_PATH=llama-3-70b/vllm/agg/
@@ -267,18 +289,18 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 - Review pod logs: `kubectl logs <pod-name> -n ${NAMESPACE}`
 
 **For more troubleshooting:**
-- [Kubernetes Deployment Guide](../docs/kubernetes/README.md#troubleshooting)
-- [Observability Documentation](../docs/kubernetes/observability/)
+- [Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md#troubleshooting)
+- [Observability Documentation](../docs/pages/kubernetes/observability/)
 
 ## Related Documentation
 
-- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Platform installation and concepts
-- **[API Reference](../docs/kubernetes/api_reference.md)** - DynamoGraphDeployment CRD specification
-- **[vLLM Backend Guide](../docs/backends/vllm/README.md)** - vLLM-specific features
-- **[SGLang Backend Guide](../docs/backends/sglang/README.md)** - SGLang-specific features
-- **[TensorRT-LLM Backend Guide](../docs/backends/trtllm/README.md)** - TensorRT-LLM features
-- **[Observability](../docs/kubernetes/observability/)** - Monitoring and logging
-- **[Benchmarking Guide](../docs/benchmarks/benchmarking.md)** - Performance testing
+- **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** - Platform installation and concepts
+- **[API Reference](../docs/pages/kubernetes/api-reference.md)** - DynamoGraphDeployment CRD specification
+- **[vLLM Backend Guide](../docs/pages/backends/vllm/README.md)** - vLLM-specific features
+- **[SGLang Backend Guide](../docs/pages/backends/sglang/README.md)** - SGLang-specific features
+- **[TensorRT-LLM Backend Guide](../docs/pages/backends/trtllm/README.md)** - TensorRT-LLM features
+- **[Observability](../docs/pages/kubernetes/observability/)** - Monitoring and logging
+- **[Benchmarking Guide](../docs/pages/benchmarks/benchmarking.md)** - Performance testing
 
 ## Contributing
 

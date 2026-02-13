@@ -20,13 +20,14 @@ from vllm.outputs import RequestOutput
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 # To import example local module
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
+from utils.chat_message_utils import extract_user_text
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import (
     MultiModalInput,
@@ -203,15 +204,7 @@ class Processor(ProcessMixIn):
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
-        # Safely extract user text - find the text content item
-        user_text = None
-        for message in raw_request.messages:
-            for item in message.content:
-                if item.type == "text":
-                    user_text = item.text
-                    break
-        if user_text is None:
-            raise ValueError("No text content found in the request messages")
+        user_text = extract_user_text(raw_request.messages)
 
         prompt = template.replace("<prompt>", user_text)
 
@@ -325,7 +318,7 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     await encode_worker_client.wait_for_instances()
 
     # Register the endpoint as entrypoint to a model
-    await register_llm(
+    await register_model(
         ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
         ModelType.Chat,
         generate_endpoint,
