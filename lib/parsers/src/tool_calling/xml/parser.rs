@@ -126,6 +126,45 @@ fn extract_tool_calls(
     Ok((normal_text, calls))
 }
 
+/// Normalize a tool call block to fix common model output issues.
+///
+/// Some models (e.g., MiniMax-M2.5) occasionally drop the leading `<` from XML
+/// tags like `<invoke name=...>`, producing `invoke name=...>` instead. This
+/// function detects and repairs such malformations so the regex parser can match.
+fn normalize_tool_call_block(block: &str, config: &XmlParserConfig) -> String {
+    let mut result = block.to_string();
+
+    // For each token that starts with `<`, check if the block contains occurrences
+    // of the content after `<` that are NOT preceded by `<`. Fix by prepending `<`.
+    for token in [
+        &config.function_start_token,
+        &config.function_end_token,
+        &config.parameter_start_token,
+        &config.parameter_end_token,
+    ] {
+        if let Some(after_bracket) = token.strip_prefix('<') {
+            let mut fixed = String::with_capacity(result.len() + 16);
+            let mut search_from = 0;
+
+            while let Some(pos) = result[search_from..].find(after_bracket) {
+                let abs_pos = search_from + pos;
+                // Check if preceded by `<`
+                let has_bracket = abs_pos > 0 && result.as_bytes()[abs_pos - 1] == b'<';
+                fixed.push_str(&result[search_from..abs_pos]);
+                if !has_bracket {
+                    fixed.push('<');
+                }
+                fixed.push_str(after_bracket);
+                search_from = abs_pos + after_bracket.len();
+            }
+            fixed.push_str(&result[search_from..]);
+            result = fixed;
+        }
+    }
+
+    result
+}
+
 /// Parse a single tool call block
 /// Format: <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>
 fn parse_tool_call_block(
@@ -133,6 +172,9 @@ fn parse_tool_call_block(
     config: &XmlParserConfig,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<Vec<ToolCallResponse>> {
+    // Normalize block to fix common model output issues (e.g., missing `<` before tags)
+    let block = normalize_tool_call_block(block, config);
+
     // Build regex patterns based on config
     let function_start = regex::escape(&config.function_start_token);
     let function_end = regex::escape(&config.function_end_token);
@@ -151,7 +193,7 @@ fn parse_tool_call_block(
     let mut results = Vec::new();
 
     // Find all function blocks.
-    for func_cap in function_regex.captures_iter(block) {
+    for func_cap in function_regex.captures_iter(&block) {
         let function_name_raw = func_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let function_name = strip_quotes(function_name_raw);
         let function_body = func_cap.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -944,5 +986,54 @@ rust programming
         assert_eq!(args["param1"], "42");
         assert_eq!(args["param2"], "true");
         assert_eq!(args["param3"], "hello");
+    }
+
+    #[test]
+    fn test_normalize_missing_angle_bracket_minimax() {
+        // The MiniMax-M2.5 model sometimes drops the `<` before `invoke`.
+        // The normalization step should fix this.
+        use crate::tool_calling::config::ToolCallConfig;
+        use crate::tool_calling::config::ParserConfig;
+        let config = match ToolCallConfig::minimax_m2().parser_config {
+            ParserConfig::Xml(c) => c,
+            _ => panic!("Expected XML config"),
+        };
+
+        let input = r#"<minimax:tool_call>
+invoke name="get_weather">
+<parameter name="location">San Francisco</parameter>
+<parameter name="unit">celsius</parameter>
+</invoke>
+</minimax:tool_call>"#;
+
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1, "Should parse tool call even with missing < before invoke");
+        assert_eq!(calls[0].function.name, "get_weather");
+
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["location"], "San Francisco");
+        assert_eq!(args["unit"], "celsius");
+    }
+
+    #[test]
+    fn test_normalize_does_not_double_add_angle_bracket() {
+        // When `<` is already present, normalization should not add another one.
+        use crate::tool_calling::config::ToolCallConfig;
+        use crate::tool_calling::config::ParserConfig;
+        let config = match ToolCallConfig::minimax_m2().parser_config {
+            ParserConfig::Xml(c) => c,
+            _ => panic!("Expected XML config"),
+        };
+
+        let input = r#"<minimax:tool_call>
+<invoke name="get_weather">
+<parameter name="location">San Francisco</parameter>
+<parameter name="unit">celsius</parameter>
+</invoke>
+</minimax:tool_call>"#;
+
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
     }
 }

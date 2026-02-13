@@ -74,9 +74,13 @@ impl ReasoningParser for BasicReasoningParser {
         // Incrementally parse the streaming text
         self._buffer.push_str(text);
         let mut current_text = self._buffer.to_string();
-        // If the current text is a prefix of the think token, keep buffering
+        // If the current text is a prefix of the think token, keep buffering.
+        // Only buffer for start token if we haven't found it yet.
+        // Only buffer for end token if we're currently inside a reasoning block.
+        // After reasoning ends, all content passes through as normal text.
 
-        if self.think_start_token.starts_with(&current_text)
+        if !self.stripped_think_start
+            && self.think_start_token.starts_with(&current_text)
             && self.think_start_token.as_str() != current_text.as_str()
         {
             return ParserResult {
@@ -84,7 +88,8 @@ impl ReasoningParser for BasicReasoningParser {
                 reasoning_text: String::new(),
             };
         }
-        if self.think_end_token.starts_with(&current_text)
+        if self._in_reasoning
+            && self.think_end_token.starts_with(&current_text)
             && self.think_end_token.as_str() != current_text.as_str()
         {
             return ParserResult {
@@ -413,5 +418,61 @@ mod tests {
             .parse_reasoning_streaming_incremental(" <think>new reasoning</think> final", &[]);
         assert_eq!(result3.normal_text, " <think>new reasoning</think> final");
         assert_eq!(result3.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_post_reasoning_angle_bracket_not_buffered() {
+        // After reasoning ends, a standalone `<` should pass through immediately
+        // as normal text. It must NOT be buffered as a potential prefix of <think>
+        // or </think>, because that would cause the downstream tool call jail to
+        // miss the `<` (e.g., `<invoke` becomes `invoke`).
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        // Process a complete reasoning block
+        let r1 = parser
+            .parse_reasoning_streaming_incremental("<think>reasoning content</think>", &[]);
+        assert_eq!(r1.reasoning_text, "reasoning content");
+        assert_eq!(r1.normal_text, "");
+
+        // After reasoning ends, a lone `<` must pass through as normal text
+        let r2 = parser.parse_reasoning_streaming_incremental("<", &[]);
+        assert_eq!(r2.normal_text, "<");
+        assert_eq!(r2.reasoning_text, "");
+
+        // The next token should arrive independently (not merged with buffered `<`)
+        let r3 = parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
+        assert_eq!(r3.normal_text, "invoke name=\"get_weather\">");
+        assert_eq!(r3.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_post_reasoning_tool_call_xml_preserved() {
+        // Simulates the MiniMax tool call scenario: reasoning followed by XML tool call.
+        // The `<` in `<invoke` must not be consumed by the reasoning parser.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("<think>let me check", &[]);
+        assert_eq!(r1.reasoning_text, "let me check");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("</think>", &[]);
+        assert_eq!(r2.normal_text, "");
+        assert_eq!(r2.reasoning_text, "");
+
+        // Tool call markers should pass through completely
+        let r3 = parser.parse_reasoning_streaming_incremental("<minimax:tool_call>", &[]);
+        assert_eq!(r3.normal_text, "<minimax:tool_call>");
+
+        let r4 = parser.parse_reasoning_streaming_incremental("\n", &[]);
+        assert_eq!(r4.normal_text, "\n");
+
+        // `<` arriving as a separate token after reasoning must NOT be buffered
+        let r5 = parser.parse_reasoning_streaming_incremental("<", &[]);
+        assert_eq!(r5.normal_text, "<");
+
+        let r6 =
+            parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
+        assert_eq!(r6.normal_text, "invoke name=\"get_weather\">");
     }
 }
