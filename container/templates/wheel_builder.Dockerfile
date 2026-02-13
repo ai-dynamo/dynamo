@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #}
+# === BEGIN templates/wheel_builder.Dockerfile ===
 ##################################
 ##### Wheel Build Image ##########
 ##################################
@@ -325,7 +326,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
-COPY launch/ /opt/dynamo/launch/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
@@ -347,15 +347,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    FEATURES=""; \
-    if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
-    fi; \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        FEATURES="$FEATURES media-ffmpeg"; \
-    fi; \
-    if [ -n "$FEATURES" ]; then \
-        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \

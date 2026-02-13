@@ -3,7 +3,6 @@
 
 [workspace]
 members = [
-    "launch/dynamo-run",
     "lib/llm",
     "lib/runtime",
     "lib/config",
@@ -16,13 +15,10 @@ members = [
     "lib/parsers",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
-    "lib/engines/*",
     "lib/config",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
-# - launch/dynamo-run
-# - lib/engines/*
 default-members = [
     "lib/llm",
     "lib/runtime",

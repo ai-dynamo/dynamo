@@ -9,28 +9,20 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import sglang as sgl
 import zmq
 import zmq.asyncio
-from prometheus_client import CollectorRegistry
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
 
 if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
     from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
-from dynamo.llm import (
-    KvEventPublisher,
-    WorkerMetricsPublisher,
-    ZmqKvEventPublisherConfig,
-)
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Component, Endpoint
 from dynamo.sglang.args import Config
-
-# Create a dedicated registry for dynamo_component metrics
-# This ensures these metrics are isolated and can be exposed via their own callback
-DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
@@ -260,19 +252,17 @@ class DynamoSglangPublisher:
 
                 zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
 
-                zmq_config = ZmqKvEventPublisherConfig(
-                    worker_id=self.generate_endpoint.connection_id(),
-                    kv_block_size=self.server_args.page_size,
-                    zmq_endpoint=zmq_ep,
-                    enable_local_indexer=self.dynamo_args.enable_local_indexer,
-                    dp_rank=dp_rank,
-                )
                 logging.info(
                     f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} "
                     f"(connecting to {zmq_ep})"
                 )
                 publisher = KvEventPublisher(
-                    component=self.component, zmq_config=zmq_config
+                    component=self.component,
+                    kv_block_size=self.server_args.page_size,
+                    zmq_endpoint=zmq_ep,
+                    zmq_topic="",
+                    enable_local_indexer=self.dynamo_args.enable_local_indexer,
+                    dp_rank=dp_rank,
                 )
                 self.kv_publishers.append(publisher)
 
@@ -283,8 +273,8 @@ class DynamoSglangPublisher:
 
 
 def setup_prometheus_registry(
-    engine: sgl.Engine, generate_endpoint: Endpoint
-) -> CollectorRegistry:
+    engine: sgl.Engine, generate_endpoint: Endpoint, config: Config
+) -> "CollectorRegistry":
     """Set up Prometheus registry for SGLang metrics collection.
 
     SGLang uses multiprocess architecture where metrics are stored in shared memory.
@@ -304,6 +294,7 @@ def setup_prometheus_registry(
     Args:
         engine: The SGLang engine instance.
         generate_endpoint: The Dynamo endpoint for generation requests.
+        config: SGLang configuration including dynamo_args with namespace/component/endpoint.
 
     Returns:
         Configured CollectorRegistry with multiprocess support.
@@ -314,10 +305,15 @@ def setup_prometheus_registry(
     multiprocess.MultiProcessCollector(registry)
 
     # Register callback for SGLang metrics (sglang:* prefixed)
+    # Auto-label injection: hierarchy labels are added automatically
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
         metric_prefix_filters=["sglang:"],
+        namespace_name=config.dynamo_args.namespace,
+        component_name=config.dynamo_args.component,
+        endpoint_name=config.dynamo_args.endpoint,
+        model_name=engine.server_args.served_model_name,
     )
 
     return registry
@@ -344,19 +340,24 @@ async def setup_sgl_metrics(
     # SGLang only calls set_prometheus_multiproc_dir() when enable_metrics=True,
     # so MultiProcessCollector will crash without it.
     if engine.server_args.enable_metrics:
-        setup_prometheus_registry(engine, generate_endpoint)
+        setup_prometheus_registry(engine, generate_endpoint, config)
 
     # Always register the Dynamo component metrics callback (total_blocks,
     # gpu_cache_usage, model_load_time). These use a dedicated registry that
     # doesn't need MultiProcessCollector or PROMETHEUS_MULTIPROC_DIR.
+    # Import CollectorRegistry lazily to avoid importing prometheus_client
+    # before set_prometheus_multiproc_dir() has been called.
+    from prometheus_client import CollectorRegistry
+
+    dynamo_component_registry = CollectorRegistry()
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
-        registry=DYNAMO_COMPONENT_REGISTRY,
+        registry=dynamo_component_registry,
     )
 
     # Create all Dynamo component gauges using the dedicated registry
     component_gauges = LLMBackendMetrics(
-        registry=DYNAMO_COMPONENT_REGISTRY,
+        registry=dynamo_component_registry,
         model_name=engine.server_args.served_model_name,
         component_name=config.dynamo_args.component,
     )
