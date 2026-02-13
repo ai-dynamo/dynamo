@@ -40,6 +40,7 @@ use crate::{
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
+            videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
@@ -70,8 +71,9 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Chat,
     ModelType::Completions,
     ModelType::Embedding,
-    ModelType::TensorBased,
     ModelType::Images,
+    ModelType::Videos,
+    ModelType::TensorBased,
     ModelType::Prefill,
 ];
 
@@ -284,15 +286,17 @@ impl ModelWatcher {
         let chat_model_remove_err = self.manager.remove_chat_completions_model(&model_name);
         let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
         let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
-        let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
         let images_model_remove_err = self.manager.remove_images_model(&model_name);
+        let videos_model_remove_err = self.manager.remove_videos_model(&model_name);
+        let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
         let prefill_model_remove_err = self.manager.remove_prefill_model(&model_name);
 
         let mut chat_model_removed = false;
         let mut completions_model_removed = false;
         let mut embeddings_model_removed = false;
-        let mut tensor_model_removed = false;
         let mut images_model_removed = false;
+        let mut videos_model_removed = false;
+        let mut tensor_model_removed = false;
         let mut prefill_model_removed = false;
 
         if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
@@ -305,11 +309,14 @@ impl ModelWatcher {
         if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().is_empty() {
             embeddings_model_removed = true;
         }
-        if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
-            tensor_model_removed = true;
-        }
         if images_model_remove_err.is_ok() && self.manager.list_images_models().is_empty() {
             images_model_removed = true;
+        }
+        if videos_model_remove_err.is_ok() && self.manager.list_videos_models().is_empty() {
+            videos_model_removed = true;
+        }
+        if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
+            tensor_model_removed = true;
         }
         if prefill_model_remove_err.is_ok() && self.manager.list_prefill_models().is_empty() {
             prefill_model_removed = true;
@@ -318,18 +325,20 @@ impl ModelWatcher {
         if !chat_model_removed
             && !completions_model_removed
             && !embeddings_model_removed
-            && !tensor_model_removed
             && !images_model_removed
+            && !videos_model_removed
+            && !tensor_model_removed
             && !prefill_model_removed
         {
             tracing::debug!(
-                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, tensor_model_removed: {}, images_model_removed: {}, prefill_model_removed: {}",
+                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, images_model_removed: {}, videos_model_removed: {}, tensor_model_removed: {}, prefill_model_removed: {}",
                 model_name,
                 chat_model_removed,
                 completions_model_removed,
                 embeddings_model_removed,
-                tensor_model_removed,
                 images_model_removed,
+                videos_model_removed,
+                tensor_model_removed,
                 prefill_model_removed
             );
         } else {
@@ -337,8 +346,9 @@ impl ModelWatcher {
                 if ((chat_model_removed && *model_type == ModelType::Chat)
                     || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding)
-                    || (tensor_model_removed && *model_type == ModelType::TensorBased)
                     || (images_model_removed && *model_type == ModelType::Images)
+                    || (videos_model_removed && *model_type == ModelType::Videos)
+                    || (tensor_model_removed && *model_type == ModelType::TensorBased)
                     || (prefill_model_removed && *model_type == ModelType::Prefill))
                     && let Some(tx) = &self.model_update_tx
                 {
@@ -675,6 +685,19 @@ impl ModelWatcher {
                 checksum,
                 Arc::new(chat_router),
             )?;
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_videos() {
+            // Case: Text + Videos (video generation models)
+            // Takes text prompts as input, generates videos
+            let push_router = PushRouter::<
+                NvCreateVideoRequest,
+                Annotated<NvVideosResponse>,
+            >::from_client_with_threshold(
+                client, self.router_config.router_mode, None, None
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_videos_model(card.name(), checksum, engine)?;
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens

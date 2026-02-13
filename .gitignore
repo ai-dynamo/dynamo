@@ -115,6 +115,9 @@ core
 /CLAUDE.md
 /CLAUDE.md.bak
 
+# AI generated worklogs
+worklogs/
+
 # Benchmarks
 benchmarks/results
 profiling_results*
