@@ -166,8 +166,8 @@ class PlannerSpec(BaseModel):
     planner_pre_deployment_sweeping: Optional[PlannerPreDeploymentSweepMode] = Field(
         default=None,
         description="Pre-deployment sweeping mode for planner in-depth profiling. "
-        "None means no pre-deployment sweep, which means only load-based scaling in planner is possible."
-        "Rapid means using AIC to simulate the engine performance, requires AIC supporting model x backend x hardware combination."
+        "None means no pre-deployment sweep, which means only load-based scaling in planner is possible. "
+        "Rapid means using AIC to simulate the engine performance, requires AIC supporting model x backend x hardware combination. "
         "Thorough means using real GPUs to measure the engine performance, will take several hours."
         "If mocker is enabled, pre-deployment sweep is required.",
     )
