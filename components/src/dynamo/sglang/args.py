@@ -162,47 +162,6 @@ def _dump_disagg_config_section(disagg_config: dict[str, Any]) -> str:
     return temp_path
 
 
-def _apply_disagg_config_defaults(
-    parser: argparse.ArgumentParser,
-    section_data: dict[str, Any],
-    sglang_actions_by_dest: dict[str, argparse.Action],
-) -> set[str]:
-    """Apply disagg config values as parser defaults after validating keys/types."""
-    normalized: dict[str, Any] = {}
-    unknown_keys: list[str] = []
-    for key, value in section_data.items():
-        dest = key.replace("-", "_")
-        action = sglang_actions_by_dest.get(dest)
-        if action is None:
-            unknown_keys.append(key)
-            continue
-
-        is_bool_action = isinstance(
-            action,
-            (
-                argparse._StoreTrueAction,
-                argparse._StoreFalseAction,
-                argparse.BooleanOptionalAction,
-            ),
-        )
-        if is_bool_action and not isinstance(value, bool):
-            raise ValueError(
-                f"Disagg config key '{key}' must be a boolean, got {type(value).__name__}"
-            )
-        if action.choices is not None and value not in action.choices:
-            raise ValueError(
-                f"Disagg config key '{key}' has invalid value '{value}'. "
-                f"Valid choices: {list(action.choices)}"
-            )
-        normalized[dest] = value
-
-    if unknown_keys:
-        raise ValueError(f"Unknown keys in disagg config section: {unknown_keys}")
-
-    parser.set_defaults(**normalized)
-    return set(normalized.keys())
-
-
 async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.

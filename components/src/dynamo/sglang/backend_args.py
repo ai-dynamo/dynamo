@@ -136,4 +136,7 @@ class DynamoSGLangConfig(ConfigBase):
     video_generation_fs_url: Optional[str] = None
 
     def validate(self) -> None:
-        pass
+        if (self.disagg_config is not None) ^ (self.disagg_config_key is not None):
+            raise ValueError(
+                "Both 'disagg_config' and 'disagg_config_key' must be provided together."
+            )
