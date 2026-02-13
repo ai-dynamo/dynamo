@@ -130,24 +130,7 @@ const (
 	DefaultModelCacheMountPath = "/opt/model-cache"
 
 	// Command line arguments
-	ArgModel = "--model"
-
-	// Profiling config field names; note: will be removed in v1beta1
-	ConfigKeyHardware          = "hardware"
-	ConfigKeyEngine            = "engine"
-	ConfigKeyDeployment        = "deployment"
-	ConfigKeyOutputDir         = "output_dir"
-	ConfigKeyNumGpusPerNode    = "numGpusPerNode"
-	ConfigKeyGPUModel          = "gpuModel"
-	ConfigKeyGPUVramMib        = "gpuVramMib"
-	ConfigKeySystem            = "system"
-	ConfigKeyMinNumGpusPerEng  = "minNumGpusPerEngine"
-	ConfigKeyMaxNumGpusPerEng  = "maxNumGpusPerEngine"
-	ConfigKeyBackend           = "backend"
-	ConfigKeyConfig            = "config"
-	ConfigKeyNamespace         = "namespace"
-	ConfigKeyModel             = "model"
-	ConfigKeyDGDImage          = "dgd_image"
+	ArgModel   = "--model"
 	ArgBackend = "--backend"
 	ArgTTFT    = "--ttft"
 	ArgITL     = "--itl"
@@ -187,12 +170,26 @@ const (
 	BackendSGLang = "sglang"
 	BackendTRTLLM = "trtllm"
 
-	// Profiling config field names
-	ConfigKeyDeployment = "deployment"
-	ConfigKeyModelCache = "modelCache"
-	ConfigKeyPVCName    = "pvcName"
-	ConfigKeyPVCPath    = "pvcPath"
-	ConfigKeyMountPath  = "mountPath"
+	// Profiling config field names for v1alpha1; note: will be removed in v1beta1
+	ConfigKeyDeployment       = "deployment"
+	ConfigKeyModelCache       = "modelCache"
+	ConfigKeyPVCName          = "pvcName"
+	ConfigKeyPVCPath          = "pvcPath"
+	ConfigKeyMountPath        = "mountPath"
+	ConfigKeyHardware         = "hardware"
+	ConfigKeyEngine           = "engine"
+	ConfigKeyOutputDir        = "output_dir"
+	ConfigKeyNumGpusPerNode   = "numGpusPerNode"
+	ConfigKeyGPUModel         = "gpuModel"
+	ConfigKeyGPUVramMib       = "gpuVramMib"
+	ConfigKeySystem           = "system"
+	ConfigKeyMinNumGpusPerEng = "minNumGpusPerEngine"
+	ConfigKeyMaxNumGpusPerEng = "maxNumGpusPerEngine"
+	ConfigKeyBackend          = "backend"
+	ConfigKeyConfig           = "config"
+	ConfigKeyNamespace        = "namespace"
+	ConfigKeyModel            = "model"
+	ConfigKeyDGDImage         = "dgd_image"
 )
 
 // shell script template for the output copier sidecar
@@ -972,6 +969,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 	return nil
 }
 
+// toFloat64 converts a numeric value (int or float64) to float64.
+// Returns 0 if the value is neither int nor float64.
+func toFloat64(val interface{}) float64 {
+	switch v := val.(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	default:
+		return 0
+	}
+}
+
 // validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling
 func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
@@ -1005,8 +1015,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 			minGPUs, hasMin := engineConfig[ConfigKeyMinNumGpusPerEng]
 			maxGPUs, hasMax := engineConfig[ConfigKeyMaxNumGpusPerEng]
 			if hasMin && hasMax {
-				minVal, _ := minGPUs.(float64)
-				maxVal, _ := maxGPUs.(float64)
+				minVal := toFloat64(minGPUs)
+				maxVal := toFloat64(maxGPUs)
+
+				// Validate that min <= max
+				if minVal > maxVal {
+					return fmt.Errorf("invalid GPU range: %s (%v) cannot be greater than %s (%v)",
+						ConfigKeyMinNumGpusPerEng, minVal, ConfigKeyMaxNumGpusPerEng, maxVal)
+				}
+
 				hasExplicitGPURanges = minVal > 0 && maxVal > 0
 			}
 		}
@@ -1356,53 +1373,53 @@ func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nv
 	}
 
 	// Set deployment.namespace if not already set
-	deploymentVal, hasDeployment := config["deployment"]
+	deploymentVal, hasDeployment := config[ConfigKeyDeployment]
 	var deploymentConfig map[string]interface{}
 	if !hasDeployment || deploymentVal == nil {
 		deploymentConfig = make(map[string]interface{})
-		config["deployment"] = deploymentConfig
+		config[ConfigKeyDeployment] = deploymentConfig
 	} else {
 		var ok bool
 		deploymentConfig, ok = deploymentVal.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
+			return nil, fmt.Errorf("profilingConfig.config.%s must be an object, got %T", ConfigKeyDeployment, deploymentVal)
 		}
 	}
-	if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
-		deploymentConfig["namespace"] = dgdr.Namespace
+	if _, hasNamespace := deploymentConfig[ConfigKeyNamespace]; !hasNamespace {
+		deploymentConfig[ConfigKeyNamespace] = dgdr.Namespace
 	}
 
 	// Set deployment.model from spec.model
-	deploymentConfig["model"] = dgdr.Spec.Model
+	deploymentConfig[ConfigKeyModel] = dgdr.Spec.Model
 
 	// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
 	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
-		deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
+		deploymentConfig[ConfigKeyDGDImage] = dgdr.Spec.DeploymentOverrides.WorkersImage
 	}
 
 	// Set output_dir if not already set
-	if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
-		config["output_dir"] = ProfilingOutputPath
+	if _, hasOutputDir := config[ConfigKeyOutputDir]; !hasOutputDir {
+		config[ConfigKeyOutputDir] = ProfilingOutputPath
 	}
 
 	// Set engine.backend from spec.backend
-	engineVal, hasEngine := config["engine"]
+	engineVal, hasEngine := config[ConfigKeyEngine]
 	var engineConfig map[string]interface{}
 	if !hasEngine || engineVal == nil {
 		engineConfig = make(map[string]interface{})
-		config["engine"] = engineConfig
+		config[ConfigKeyEngine] = engineConfig
 	} else {
 		var ok bool
 		engineConfig, ok = engineVal.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
+			return nil, fmt.Errorf("profilingConfig.config.%s must be an object, got %T", ConfigKeyEngine, engineVal)
 		}
 	}
-	engineConfig["backend"] = dgdr.Spec.Backend
+	engineConfig[ConfigKeyBackend] = dgdr.Spec.Backend
 
 	// If ConfigMapRef is provided, set engine.config path
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
-		engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+		engineConfig[ConfigKeyConfig] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
 	}
 
 	// User-specified values take precedence over auto-discovered values
@@ -1420,18 +1437,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nv
 			}
 		}
 
-		if _, hasNumGpus := hardwareConfig["numGpusPerNode"]; !hasNumGpus {
-			hardwareConfig["numGpusPerNode"] = gpuInfo.GPUsPerNode
+		if _, hasNumGpus := hardwareConfig[ConfigKeyNumGpusPerNode]; !hasNumGpus {
+			hardwareConfig[ConfigKeyNumGpusPerNode] = gpuInfo.GPUsPerNode
 		}
-		if _, hasGpuModel := hardwareConfig["gpuModel"]; !hasGpuModel {
-			hardwareConfig["gpuModel"] = gpuInfo.Model
+		if _, hasGpuModel := hardwareConfig[ConfigKeyGPUModel]; !hasGpuModel {
+			hardwareConfig[ConfigKeyGPUModel] = gpuInfo.Model
 		}
-		if _, hasGpuVram := hardwareConfig["gpuVramMib"]; !hasGpuVram {
-			hardwareConfig["gpuVramMib"] = gpuInfo.VRAMPerGPU
+		if _, hasGpuVram := hardwareConfig[ConfigKeyGPUVramMib]; !hasGpuVram {
+			hardwareConfig[ConfigKeyGPUVramMib] = gpuInfo.VRAMPerGPU
 		}
 		if gpuInfo.System != "" {
-			if _, hasSystem := hardwareConfig["system"]; !hasSystem {
-				hardwareConfig["system"] = gpuInfo.System
+			if _, hasSystem := hardwareConfig[ConfigKeySystem]; !hasSystem {
+				hardwareConfig[ConfigKeySystem] = gpuInfo.System
 			}
 		}
 	}

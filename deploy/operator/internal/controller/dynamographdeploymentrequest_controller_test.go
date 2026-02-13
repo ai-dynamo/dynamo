@@ -122,10 +122,6 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 								"isl":  3000,
 								"osl":  5,
 							},
-							"hardware": map[string]interface{}{
-								"min_num_gpus_per_engine": 1,
-								"max_num_gpus_per_engine": 8,
-							},
 						}),
 					},
 				},
@@ -251,10 +247,6 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 								"isl":  3000,
 								"osl":  5,
 							},
-							"hardware": map[string]interface{}{
-								"min_num_gpus_per_engine": 1,
-								"max_num_gpus_per_engine": 8,
-							},
 						}),
 						ConfigMapRef: &nvidiacomv1alpha1.ConfigMapKeySelector{
 							Name: "test-config",
@@ -348,10 +340,6 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 								"itl":  1500.0,
 								"isl":  3000,
 								"osl":  5,
-							},
-							"hardware": map[string]interface{}{
-								"min_num_gpus_per_engine": 1,
-								"max_num_gpus_per_engine": 8,
 							},
 							"sweep": map[string]interface{}{
 								"use_ai_configurator": true,
@@ -1244,10 +1232,6 @@ var _ = Describe("DGDR Error Handling", func() {
 								"isl":  3000,
 								"osl":  5,
 							},
-							"hardware": map[string]interface{}{
-								"min_num_gpus_per_engine": 1,
-								"max_num_gpus_per_engine": 8,
-							},
 						}),
 					},
 				},
@@ -1642,14 +1626,26 @@ spec:
 			Expect(updated.Status.State).Should(Equal(DGDRStatePending))
 		})
 
-		It("Should fail validation when GPU discovery unavailable and no manual config", func() {
+		It("Should succeed with GPU discovery when cluster has GPU nodes", func() {
 			ctx := context.Background()
-			dgdrName := "test-dgdr-no-hardware"
+			dgdrName := "test-dgdr-with-autodiscovery"
 			namespace := defaultNamespace
 
-			// Don't create any GPU nodes - GPU discovery will fail
+			// Create a GPU node so GPU discovery can succeed
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "gpu-worker-autodiscovery",
+					Labels: map[string]string{
+						"nvidia.com/gpu.count":   "8",
+						"nvidia.com/gpu.product": "H100-SXM5-80GB",
+						"nvidia.com/gpu.memory":  "81920",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, node) }()
 
-			// Create DGDR WITHOUT hardware config and WITHOUT explicit GPU ranges
+			// Create DGDR WITHOUT hardware config - should use GPU discovery
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdrName,
@@ -1672,24 +1668,27 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			// Reconcile - should fail validation
+			// Reconcile - should succeed with GPU discovery
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      dgdrName,
 					Namespace: namespace,
 				},
 			})
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("GPU hardware info required"))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Should transition to Pending
+			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+			Expect(updated.Status.State).Should(Equal(DGDRStatePending))
 		})
 
-		It("Should pass validation with explicit GPU ranges (no hardware config needed)", func() {
+		It("Should pass validation with explicit GPU ranges without GPU discovery", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-explicit-ranges"
 			namespace := defaultNamespace
 
-			// Don't create GPU nodes - but provide explicit ranges
-
+			// Intentionally don't create GPU nodes to test that explicit ranges work without GPU discovery
 			// Create DGDR with explicit minNumGpusPerEngine/maxNumGpusPerEngine
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1707,6 +1706,9 @@ spec:
 								"engine": {
 									"minNumGpusPerEngine": 2,
 									"maxNumGpusPerEngine": 4
+								},
+								"hardware": {
+									"numGpusPerNode": 8
 								}
 							}`),
 						},
@@ -1717,7 +1719,7 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			// Reconcile - should succeed (explicit ranges bypass hardware requirement)
+			// Reconcile - should succeed (explicit ranges + minimal hardware bypass GPU discovery requirement)
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      dgdrName,

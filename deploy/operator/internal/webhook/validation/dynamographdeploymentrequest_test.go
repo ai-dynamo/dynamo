@@ -28,6 +28,7 @@ import (
 
 func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	validConfig := `{"engine": {"backend": "vllm"}, "deployment": {"model": "test-model"}}`
+	validConfigWithHardware := `{"engine": {"backend": "vllm"}, "deployment": {"model": "test-model"}, "hardware": {"numGpusPerNode": 8, "gpuModel": "H100-SXM5-80GB", "gpuVramMib": 81920}}`
 	configWithDifferentBackend := `{"engine": {"backend": "sglang"}}`
 	configWithDifferentModel := `{"deployment": {"model": "different-model"}}`
 	invalidYAML := `{invalid yaml`
@@ -140,7 +141,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						ProfilerImage: "profiler:latest",
 						Config: &apiextensionsv1.JSON{
-							Raw: []byte(validConfig),
+							Raw: []byte(validConfigWithHardware),
 						},
 					},
 				},
@@ -237,6 +238,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			errMsg:        "spec.profilingConfig.profilerImage is required\nspec.profilingConfig.config is required and must not be empty",
 			errContains:   true,
 		},
+		// TODO: Add test for invalid GPU range (min > max) validation
+		// The validation logic is in place (lines 148-152 of dynamographdeploymentrequest.go)
+		// but needs proper test coverage
 	}
 
 	for _, tt := range tests {

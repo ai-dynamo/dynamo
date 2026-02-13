@@ -26,6 +26,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+// toFloat64 converts a numeric value (int or float64) to float64.
+// Returns 0 if the value is neither int nor float64.
+func toFloat64(val interface{}) float64 {
+	switch v := val.(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	default:
+		return 0
+	}
+}
+
 // DynamoGraphDeploymentRequestValidator validates DynamoGraphDeploymentRequest resources.
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentRequestValidator struct {
@@ -51,11 +64,6 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 	// Warn about deprecated enableGpuDiscovery field
 	if v.request.Spec.EnableGPUDiscovery != nil {
 		warnings = append(warnings, "spec.enableGpuDiscovery is deprecated and will be removed in v1beta1. GPU discovery is now always attempted automatically. This field has no effect.")
-	}
-
-	// Validate GPU hardware information is available
-	if err := v.validateGPUHardwareInfo(); err != nil {
-		return warnings, err
 	}
 
 	// Validate profiler image is specified
@@ -89,6 +97,11 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 				}
 			}
 		}
+	}
+
+	// Validate GPU hardware information is available (last, so other errors are collected first)
+	if gpuErr := v.validateGPUHardwareInfo(); gpuErr != nil {
+		err = errors.Join(err, gpuErr)
 	}
 
 	return warnings, err
@@ -127,10 +140,17 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error 
 		if engineConfig, ok := engineVal.(map[string]interface{}); ok {
 			minGPUs, hasMin := engineConfig["minNumGpusPerEngine"]
 			maxGPUs, hasMax := engineConfig["maxNumGpusPerEngine"]
-			// Consider ranges explicit only if both are provided and non-zero
+			// Validate explicit GPU ranges
 			if hasMin && hasMax {
-				minVal, _ := minGPUs.(float64)
-				maxVal, _ := maxGPUs.(float64)
+				minVal := toFloat64(minGPUs)
+				maxVal := toFloat64(maxGPUs)
+
+				// Validate that min <= max
+				if minVal > maxVal {
+					return fmt.Errorf("invalid GPU range: minNumGpusPerEngine (%v) cannot be greater than maxNumGpusPerEngine (%v)",
+						minVal, maxVal)
+				}
+
 				hasExplicitGPURanges = minVal > 0 && maxVal > 0
 			}
 		}
