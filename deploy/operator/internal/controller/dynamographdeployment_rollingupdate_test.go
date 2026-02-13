@@ -369,11 +369,6 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 			status:   &nvidiacomv1alpha1.RollingUpdateStatus{Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted},
 			expected: false,
 		},
-		{
-			name:     "phase failed - not in progress",
-			status:   &nvidiacomv1alpha1.RollingUpdateStatus{Phase: nvidiacomv1alpha1.RollingUpdatePhaseFailed},
-			expected: false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -2664,22 +2659,6 @@ func TestReconcileRollingUpdate_NewRollingUpdate(t *testing.T) {
 	require.NoError(t, err)
 	// Should start a new rolling update (Pending) since computed hash DCDs don't exist
 	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
-}
-
-func TestReconcileRollingUpdate_FailedPhaseNoOp(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
-	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
-		Phase: nvidiacomv1alpha1.RollingUpdatePhaseFailed,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.reconcileRollingUpdate(context.Background(), dgd)
-	require.NoError(t, err)
-	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseFailed, dgd.Status.RollingUpdate.Phase)
 }
 
 func TestReconcileRollingUpdate_NonePhaseStartsRollout(t *testing.T) {

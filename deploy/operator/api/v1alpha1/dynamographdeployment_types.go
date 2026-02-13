@@ -165,7 +165,6 @@ const (
 	RollingUpdatePhasePending    RollingUpdatePhase = "Pending"
 	RollingUpdatePhaseInProgress RollingUpdatePhase = "InProgress"
 	RollingUpdatePhaseCompleted  RollingUpdatePhase = "Completed"
-	RollingUpdatePhaseFailed     RollingUpdatePhase = "Failed"
 	RollingUpdatePhaseNone       RollingUpdatePhase = ""
 )
 

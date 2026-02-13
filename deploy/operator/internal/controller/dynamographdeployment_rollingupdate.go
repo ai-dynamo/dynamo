@@ -222,8 +222,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		"prevWorkerHash", prevWorkerHash,
 		"newWorkerHash", newWorkerHash)
 
-	if (rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseCompleted ||
-		rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseFailed) && prevWorkerHash != newWorkerHash {
+	if (rollingUpdateStatus.Phase == nvidiacomv1alpha1.RollingUpdatePhaseCompleted) && prevWorkerHash != newWorkerHash {
 		// Check if DCDs with the new hash already exist and are serving.
 		// If so, this is just a stale annotation — update it without starting a new rollout.
 		newInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, newWorkerHash)
@@ -268,10 +267,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 	case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
 		// Cleanup is now done atomically in completeRollingUpdate, nothing to do here
 		logger.Info("Rolling update already completed")
-		return nil
-
-	case nvidiacomv1alpha1.RollingUpdatePhaseFailed:
-		logger.Info("Rolling update in failed state, manual intervention may be required")
 		return nil
 	}
 

@@ -240,10 +240,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		switch dynamoDeployment.Status.RollingUpdate.Phase {
 		case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
 			// Keep the reconcileResult state (should be Ready if resources are ready)
-		case nvidiacomv1alpha1.RollingUpdatePhaseFailed:
-			state = DGDStateFailed
-			reason = "rolling_update_failed"
-			message = "Rolling update failed"
 		case nvidiacomv1alpha1.RollingUpdatePhasePending, nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
 			// Rolling update in progress - resources are being transitioned
 			if state != DGDStateFailed {
