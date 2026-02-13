@@ -62,7 +62,7 @@ pub fn compute_time_bucket_stats(
     items: &[(Duration, Duration)],
     bucket_size_secs: u64,
 ) -> Vec<TimeBucketStats> {
-    if items.is_empty() {
+    if items.is_empty() || bucket_size_secs == 0 {
         return Vec::new();
     }
 

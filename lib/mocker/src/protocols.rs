@@ -103,6 +103,9 @@ impl ReasoningConfig {
             return 0;
         }
         let raw = (max_output_tokens as f64 * self.thinking_ratio).floor() as usize;
+        if raw == 0 {
+            return 0;
+        }
         raw.max(2).min(max_output_tokens)
     }
 

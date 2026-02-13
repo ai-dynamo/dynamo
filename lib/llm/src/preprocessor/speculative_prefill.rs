@@ -115,14 +115,14 @@ pub fn maybe_wrap_stream(
                 if let Some(ChatCompletionMessageContent::Text(ref text)) = choice.delta.content {
                     accumulated_text.push_str(text);
                 }
+                // Send accumulated text once we see finish_reason (works
+                // regardless of whether usage reporting is enabled).
+                if choice.finish_reason.is_some()
+                    && let Some(tx) = prefill_tx.take()
+                {
+                    let _ = tx.send(accumulated_text.clone());
+                }
             }
-        }
-
-        if item.event.as_deref() == Some(ANNOTATION_LLM_METRICS)
-            && item.data.is_none()
-            && let Some(tx) = prefill_tx.take()
-        {
-            let _ = tx.send(std::mem::take(&mut accumulated_text));
         }
 
         item
