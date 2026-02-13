@@ -9,8 +9,8 @@ This directory contains recipes for deploying DeepSeek-R1 using vLLM in a disagg
 
 | Recipe | GPUs | Nodes | Architecture | Model Precision | Manifest |
 |--------|------|-------|-------------|-----------------|----------|
-| Hopper | 32 (16 prefill + 16 decode) | 4× H200 (or 8× H100) | DEP16 | FP8 | `deploy_hopper_16gpu.yaml` |
-| GB200  | 16 (8 prefill + 8 decode)   | 4× GB200              | DEP8  | FP4 (NVFP4) | `deploy_gb200_16gpu.yaml` |
+| Hopper | 32 (16 prefill + 16 decode) | 4× H200 (or 8× H100) | DEP16 | FP8 | `deploy_hopper_prefill_dep16_decode_dep16.yaml` |
+| GB200  | 16 (8 prefill + 8 decode)   | 4× GB200              | DEP8  | FP4 (NVFP4) | `deploy_gb200_prefill_dep8_decode_dep8.yaml` |
 
 ---
 
@@ -69,7 +69,7 @@ Deploys across 4 H200 nodes (32 GPUs total: 16 for prefill, 16 for decode) using
 **Requirements**: 4 nodes × 8 H200 GPUs (or 8× H100 nodes), InfiniBand with IBGDA enabled.
 
 ```bash
-kubectl apply -f ./deploy_hopper_16gpu.yaml -n ${NAMESPACE}
+kubectl apply -f ./deploy_hopper_prefill_dep16_decode_dep16.yaml -n ${NAMESPACE}
 ```
 
 **Key settings**:
@@ -87,7 +87,7 @@ Deploys across 4 GB200 nodes (16 GPUs total: 8 for prefill, 8 for decode) using 
 **Requirements**: 4 nodes × 4 GB200 GPUs with NVLink-C2C connectivity.
 
 ```bash
-kubectl apply -f ./deploy_gb200_16gpu.yaml -n ${NAMESPACE}
+kubectl apply -f ./deploy_gb200_prefill_dep8_decode_dep8.yaml -n ${NAMESPACE}
 ```
 
 **Key settings**:
