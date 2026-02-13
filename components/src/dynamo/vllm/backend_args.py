@@ -3,12 +3,11 @@
 
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
-from typing import List, Optional
+from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
-from dynamo.common.utils.output_modalities import OutputModality
 
 from . import __version__
 
@@ -137,14 +136,6 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_STAGE_CONFIGS_PATH",
             default=None,
             help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
-        )
-        add_argument(
-            g,
-            flag_name="--output-modalities",
-            env_var="DYN_VLLM_OUTPUT_MODALITIES",
-            default=["text"],
-            help="Output modalities for omni mode (e.g., --output-modalities text image audio video).",
-            nargs="*",
         )
 
         # Video diffusion output
@@ -308,7 +299,6 @@ class DynamoVllmConfig(ConfigBase):
     # vLLM-Omni
     omni: bool
     stage_configs_path: Optional[str] = None
-    output_modalities: List[str]
 
     # Video diffusion output
     video_output_dir: str = "/tmp/dynamo_videos"  # noqa: S108
@@ -340,7 +330,6 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_omni_stage_config()
-        self._validate_output_modalities()
 
     def _validate_prefill_decode_exclusive(self) -> None:
         """Ensure at most one of is_prefill_worker and is_decode_worker is set."""
@@ -383,17 +372,4 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError(
                 "--stage-configs-path is only allowed when using --omni. "
                 "Specify a YAML file containing stage configurations for the multi-stage pipeline."
-            )
-
-    def _validate_output_modalities(self) -> None:
-        """Validate --output-modalities values."""
-        if not self.output_modalities:
-            return
-        valid = OutputModality.valid_names()
-        normalized = [m.lower() for m in self.output_modalities]
-        invalid = [m for m in normalized if m not in valid]
-        if invalid:
-            raise ValueError(
-                f"Invalid output modality: {', '.join(invalid)}. "
-                f"Valid options are: {', '.join(sorted(valid))}"
             )
