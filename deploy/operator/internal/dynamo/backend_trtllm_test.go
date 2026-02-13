@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -13,6 +14,105 @@ import (
 const (
 	mpiRunSecretName = "mpi-run-ssh-secret"
 )
+
+func TestShellQuoteForBashC(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Simple flag - no quoting needed",
+			input:    "--model-path",
+			expected: "--model-path",
+		},
+		{
+			name:     "Simple path - no quoting needed",
+			input:    "/usr/bin/python3",
+			expected: "/usr/bin/python3",
+		},
+		{
+			name:     "Empty string - no quoting needed",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "JSON override-engine-args (primary use case)",
+			input:    `{"load_format": "DUMMY", "tensor_parallel_size": 8}`,
+			expected: `"{\"load_format\": \"DUMMY\", \"tensor_parallel_size\": 8}"`,
+		},
+		{
+			name:     "String with dollar sign is escaped",
+			input:    "$HOME/path",
+			expected: `"\$HOME/path"`,
+		},
+		{
+			name:     "String with backtick is escaped",
+			input:    "hello `world`",
+			expected: "\"hello \\`world\\`\"",
+		},
+		{
+			name:     "Backslash is escaped first to avoid double-escaping",
+			input:    `path\to\file`,
+			expected: `"path\\to\\file"`,
+		},
+		{
+			name:     "Single quote breaks out of outer bash -c context",
+			input:    "it's",
+			expected: `"it'"'"'s"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := shellQuoteForBashC(tt.input)
+			if result != tt.expected {
+				t.Errorf("shellQuoteForBashC(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestShellQuoteForBashC_InLeaderCommand(t *testing.T) {
+	// End-to-end: verify that when setupLeaderContainer receives args with JSON
+	// (the actual --override-engine-args use case), the final command string
+	// contains properly quoted JSON that will survive bash -c shell parsing.
+	backend := &TRTLLMBackend{}
+	jsonArgs := `{"load_format": "DUMMY", "tensor_parallel_size": 8}`
+	container := &corev1.Container{
+		Command: []string{"python3", "-m", "dynamo.trtllm"},
+		Args:    []string{"--model-path", "deepseek-ai/DeepSeek-R1", "--override-engine-args", jsonArgs},
+	}
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Resources: &v1alpha1.Resources{
+			Requests: &v1alpha1.ResourceItem{GPU: "4"},
+		},
+	}
+
+	backend.setupLeaderContainer(container, 2, "dec", component, &GroveMultinodeDeployer{})
+
+	if len(container.Args) != 1 {
+		t.Fatalf("expected 1 arg, got %d", len(container.Args))
+	}
+	cmd := container.Args[0]
+
+	// The JSON arg must be double-quoted with escaped inner double quotes
+	// so it survives the outer bash -c '...' wrapper intact.
+	expectedQuotedJSON := `"{\"load_format\": \"DUMMY\", \"tensor_parallel_size\": 8}"`
+	if !strings.Contains(cmd, expectedQuotedJSON) {
+		t.Errorf("generated command does not contain properly quoted JSON.\nGot: %s\nWant substring: %s", cmd, expectedQuotedJSON)
+	}
+
+	// The --override-engine-args flag itself should appear unquoted (no special chars)
+	if !strings.Contains(cmd, "--override-engine-args "+expectedQuotedJSON) {
+		t.Errorf("--override-engine-args and its JSON value should be adjacent in the command.\nGot: %s", cmd)
+	}
+
+	// Verify the command is wrapped in bash -c with trtllm-llmapi-launch
+	if !strings.Contains(cmd, "bash -c 'trtllm-llmapi-launch") {
+		t.Errorf("command should contain bash -c 'trtllm-llmapi-launch wrapper.\nGot: %s", cmd)
+	}
+}
 
 func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 	tests := []struct {

@@ -17,6 +17,24 @@ type TRTLLMBackend struct {
 	MpiRunSecretName string
 }
 
+// shellQuoteForBashC quotes a string for safe use inside a single-quoted bash -c '...' command.
+// Since the outer context is already single-quoted, we CANNOT use single quotes here.
+// Instead, we use double quotes and escape characters that are special inside double quotes:
+// backslash, double quote, dollar sign, and backtick.
+// Any embedded single quotes are also escaped (\') since the result lives inside bash -c '...'.
+func shellQuoteForBashC(s string) string {
+	if strings.ContainsAny(s, " \t\n'\"\\{}[]$`!") {
+		escaped := s
+		escaped = strings.ReplaceAll(escaped, `\`, `\\`) // must be first
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+		escaped = strings.ReplaceAll(escaped, "`", "\\`")
+		escaped = strings.ReplaceAll(escaped, "'", `'"'"'`) // end single-quote, literal ', restart single-quote
+		return `"` + escaped + `"`
+	}
+	return s
+}
+
 func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Check for volumeMounts with useAsCompilationCache=true
 	for _, volumeMount := range component.VolumeMounts {
@@ -111,12 +129,15 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
-		var parts []string
-		parts = append(parts, container.Command...)
-		if len(container.Args) > 0 {
-			parts = append(parts, container.Args...)
+		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
+		var quotedParts []string
+		for _, part := range container.Command {
+			quotedParts = append(quotedParts, shellQuoteForBashC(part))
 		}
-		originalCommand = strings.Join(parts, " ")
+		for _, part := range container.Args {
+			quotedParts = append(quotedParts, shellQuoteForBashC(part))
+		}
+		originalCommand = strings.Join(quotedParts, " ")
 	} else if len(container.Args) > 0 {
 		// Shell command (sh -c): args contains the full command
 		originalCommand = strings.Join(container.Args, " ")

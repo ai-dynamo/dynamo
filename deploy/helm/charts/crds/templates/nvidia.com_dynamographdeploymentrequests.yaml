@@ -184,6 +184,13 @@ spec:
                       required:
                         - name
                       type: object
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.
+                        For example, to schedule on ARM64 nodes, use {"kubernetes.io/arch": "arm64"}.
+                      type: object
                     outputPVC:
                       description: |-
                         OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.
