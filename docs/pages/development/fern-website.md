@@ -1,3 +1,7 @@
+---
+title: Building and Publishing Docs
+---
+
 # How the Fern Documentation Website Works
 
 This document describes the architecture, workflows, and maintenance procedures for the

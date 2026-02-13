@@ -183,6 +183,12 @@ navigation:
       - page: KV Events for Custom Engines
         path: ../pages/integrations/kv-events-custom-engines.md
 
+  # ==================== Developer Guide ====================
+  - section: Developer Guide
+    contents:
+      - page: Building and Publishing Docs
+        path: ../pages/development/fern-website.md
+
   # ==================== Design Docs ====================
   - section: Design Docs
     contents:
