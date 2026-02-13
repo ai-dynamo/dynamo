@@ -11,11 +11,11 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.sglang.args import DynamoArgs
 
 
-async def _register_llm_with_runtime_config(
+async def _register_model_with_runtime_config(
     engine: sgl.Engine,
     endpoint: Endpoint,
     server_args: ServerArgs,
@@ -49,7 +49,7 @@ async def _register_llm_with_runtime_config(
             output_type = ModelType.Chat
 
     try:
-        await register_llm(
+        await register_model(
             input_type,
             output_type,
             endpoint,
@@ -231,7 +231,7 @@ async def _get_runtime_config(
         return runtime_config
 
 
-async def register_llm_with_readiness_gate(
+async def register_model_with_readiness_gate(
     engine: sgl.Engine,
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
@@ -254,7 +254,7 @@ async def register_llm_with_readiness_gate(
     Raises:
         RuntimeError: If model registration fails.
     """
-    registration_success = await _register_llm_with_runtime_config(
+    registration_success = await _register_model_with_runtime_config(
         engine,
         generate_endpoint,
         server_args,
@@ -295,7 +295,7 @@ async def register_image_diffusion_model(
     model_name = server_args.model_path
 
     try:
-        await register_llm(
+        await register_model(
             ModelInput.Text,
             ModelType.Images,
             endpoint,
@@ -335,7 +335,7 @@ async def register_video_generation_model(
     model_name = server_args.model_path
 
     try:
-        await register_llm(
+        await register_model(
             ModelInput.Text,
             ModelType.Videos,
             endpoint,

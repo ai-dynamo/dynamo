@@ -31,8 +31,8 @@ from dynamo.llm import (
     ModelInput,
     ModelType,
     lora_name_to_id,
-    register_llm,
-    unregister_llm,
+    register_model,
+    unregister_model,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -571,7 +571,7 @@ class BaseWorkerHandler(ABC):
                             }
 
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                            await register_llm(
+                            await register_model(
                                 model_input=ModelInput.Tokens,
                                 model_type=ModelType.Chat | ModelType.Completions,
                                 endpoint=self.generate_endpoint,
@@ -691,7 +691,7 @@ class BaseWorkerHandler(ABC):
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
                         try:
-                            await unregister_llm(
+                            await unregister_model(
                                 endpoint=self.generate_endpoint,
                                 lora_name=lora_name,
                             )
