@@ -117,14 +117,16 @@ spec:
             value: "{{ $kv }}"
           - name: USE_STREAMING
             value: "true"
+          {{- if .Values.epp.dynamo.hfTokenSecret }}
           # HuggingFace token for downloading model config files
           # Without this, HuggingFace rate-limits requests (429 Too Many Requests)
           - name: HF_TOKEN
             valueFrom:
               secretKeyRef:
-                name: hf-token-secret
+                name: {{ .Values.epp.dynamo.hfTokenSecret }}
                 key: HF_TOKEN
                 optional: true
+          {{- end }}
         {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}
@@ -138,6 +140,12 @@ spec:
           - containerPort: 9003
           - name: metrics
             containerPort: 9090
+        startupProbe:
+          grpc:
+            port: 9003
+            service: inference-extension
+          periodSeconds: 10
+          failureThreshold: 180
         livenessProbe:
           grpc:
             port: 9003
