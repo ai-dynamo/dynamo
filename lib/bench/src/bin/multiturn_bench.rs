@@ -8,14 +8,13 @@
 //! first token) and total request latency per turn, with configurable inter-turn
 //! exponential delay.
 //!
-//! Run with: cargo bench --package dynamo-llm --bench multiturn_bench --features kv-router-stress -- --help
-
-mod common;
+//! Run with: cargo run --package dynamo-bench --bin multiturn_bench -- --help
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::{ChatMessage, LatencyStats, fetch_model_name};
+use dynamo_bench::common::{ChatMessage, LatencyStats, fetch_model_name};
 use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
@@ -39,11 +38,11 @@ struct Args {
     model: Option<String>,
 
     /// Number of concurrent simulated users
-    #[arg(long, default_value = "4")]
+    #[arg(long, default_value = "10")]
     num_users: usize,
 
     /// Number of conversation turns per user
-    #[arg(long, default_value = "20")]
+    #[arg(long, default_value = "5")]
     num_turns: usize,
 
     /// Approximate user-prompt token count per turn (lorem ipsum)
@@ -51,7 +50,7 @@ struct Args {
     num_user_tokens: usize,
 
     /// Maximum completion tokens (output sequence length cap)
-    #[arg(long, default_value = "5000")]
+    #[arg(long, default_value = "1000")]
     max_completion_tokens: u32,
 
     /// Force generation to max tokens (ignore end-of-sequence)
@@ -59,7 +58,7 @@ struct Args {
     ignore_eos: bool,
 
     /// Mean inter-turn delay in milliseconds (exponential distribution)
-    #[arg(long, default_value = "10000")]
+    #[arg(long, default_value = "5000")]
     mean_delay_ms: u64,
 
     /// Enable speculative prefill via nvext
@@ -195,7 +194,7 @@ fn generate_lorem(rng: &mut StdRng, approx_tokens: usize) -> String {
     let word_count = (approx_tokens as f64 * 0.8) as usize;
     let mut words = Vec::with_capacity(word_count);
     for _ in 0..word_count {
-        let idx = rng.gen_range(0..LOREM_WORDS.len());
+        let idx = rng.random_range(0..LOREM_WORDS.len());
         words.push(LOREM_WORDS[idx]);
     }
     words.join(" ")
@@ -251,13 +250,12 @@ async fn consume_sse_stream(response: reqwest::Response) -> Result<(Duration, St
                     .and_then(|c| c.get("delta"))
                     .and_then(|d| d.get("content"))
                     .and_then(|c| c.as_str())
+                    && !text.is_empty()
                 {
-                    if !text.is_empty() {
-                        if first_token_time.is_none() {
-                            first_token_time = Some(Instant::now());
-                        }
-                        accumulated.push_str(text);
+                    if first_token_time.is_none() {
+                        first_token_time = Some(Instant::now());
                     }
+                    accumulated.push_str(text);
                 }
             }
         }
@@ -280,6 +278,7 @@ async fn run_user(
     model: String,
     args: Arc<Args>,
     user_id: usize,
+    progress: ProgressBar,
 ) -> Vec<TurnResult> {
     let mut rng = StdRng::seed_from_u64(args.seed.wrapping_add(user_id as u64));
     let mean_delay = args.mean_delay_ms as f64;
@@ -382,18 +381,19 @@ async fn run_user(
         };
 
         if args.verbose {
-            println!(
-                "  [user {}][turn {}/{}] ttft={}us  total={}us  ok={}",
+            progress.println(format!(
+                "  [user {}][turn {}/{}] ttft={:.1}ms  total={:.1}s  ok={}",
                 user_id,
                 turn + 1,
                 args.num_turns,
-                result.ttft_us,
-                result.total_latency_us,
+                result.ttft_us as f64 / 1000.0,
+                result.total_latency_us as f64 / 1_000_000.0,
                 result.success,
-            );
+            ));
         }
 
         results.push(result);
+        progress.inc(1);
 
         // Exponential inter-turn delay (skip after last turn)
         // Exp(1/mean) = -mean * ln(U), U ~ Uniform(0,1)
@@ -575,13 +575,24 @@ async fn main() -> Result<()> {
 
     let bench_start = Instant::now();
 
+    let total_turns = (args.num_users * args.num_turns) as u64;
+    let progress = ProgressBar::new(total_turns);
+    progress.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} turns ({eta})",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
+
     let handles: Vec<_> = (0..args.num_users)
         .map(|user_id| {
             let client = client.clone();
             let url = chat_url.clone();
             let model = model.clone();
             let args = args.clone();
-            tokio::spawn(async move { run_user(client, url, model, args, user_id).await })
+            let progress = progress.clone();
+            tokio::spawn(async move { run_user(client, url, model, args, user_id, progress).await })
         })
         .collect();
 
@@ -591,6 +602,7 @@ async fn main() -> Result<()> {
         let user_results = handle.await.context("user task panicked")?;
         all_results.extend(user_results);
     }
+    progress.finish_and_clear();
 
     let bench_elapsed = bench_start.elapsed();
     println!(

@@ -175,7 +175,11 @@ async fn prefill_task(
         .build()?;
 
     let context = PipelineContext::with_id(preprocessed, uuid::Uuid::new_v4().to_string());
-    let _ = next.generate(context).await;
+    // Drain the stream so the KV router's RequestGuard runs its full lifecycle
+    // (mark_prefill_completed, block tracking, free) instead of relying on drop.
+    if let Ok(mut stream) = next.generate(context).await {
+        while stream.next().await.is_some() {}
+    }
 
     Ok(())
 }

@@ -43,11 +43,6 @@ name = "kv_router_bench"
 harness = false
 required-features = ["kv-router-stress"]
 
-[[bench]]
-name = "multiturn_bench"
-harness = false
-required-features = ["kv-router-stress"]
-
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }

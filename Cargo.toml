@@ -12,6 +12,7 @@ members = [
     "lib/memory",
     "lib/async-openai",
     "lib/parsers",
+    "lib/bench",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/config",
@@ -27,6 +28,7 @@ default-members = [
     "lib/memory",
     "lib/async-openai",
     "lib/parsers",
+    "lib/bench",
     "lib/bindings/c",
 ]
 resolver = "3"
