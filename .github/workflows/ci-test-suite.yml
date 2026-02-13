@@ -940,8 +940,10 @@ jobs:
           # Set up Python virtual environment and install test dependencies
           python3 -m venv venv
           source venv/bin/activate
+          set -x
           pip install --upgrade pip
           pip install -r container/deps/requirements.test.txt
+          set +x
           # Create test-results directory
           mkdir -p test-results
           # Run the pytest command with JUnit XML output
