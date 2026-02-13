@@ -117,6 +117,14 @@ class SGLangProcess:
         self.worker_processes = []
         self.store_backend = store_backend
 
+        # Dynamically allocate unique system and KV event ports (one per worker)
+        # to avoid conflicts in parallel test runs.
+        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        request.addfinalizer(
+            lambda: deallocate_ports(self._system_ports + self._kv_event_ports)
+        )
+
         if sglang_args is None:
             sglang_args = {}
 
@@ -181,8 +189,8 @@ class SGLangProcess:
                 )
 
             # Add per-worker KV events config for ZMQ publishing
-            # Each worker needs a unique port to avoid conflicts
-            kv_events_port = 20080 + worker_idx
+            # Ports are dynamically allocated for xdist-safe parallel execution.
+            kv_events_port = self._kv_event_ports[worker_idx]
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
@@ -190,11 +198,16 @@ class SGLangProcess:
             if durable_kv_events:
                 command.append("--durable-kv-events")
 
+            # Each SGLang worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
+            # Ports are dynamically allocated for xdist-safe parallel execution.
+            system_port = self._system_ports[worker_idx]
+
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
                 "CUDA_VISIBLE_DEVICES": gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
+                "DYN_SYSTEM_PORT": str(system_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
 
@@ -219,13 +232,13 @@ class SGLangProcess:
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, kv_port={kv_events_port}) "
+                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created SGLang worker {worker_idx} on GPU {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, kv_port={kv_events_port}) "
+                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 

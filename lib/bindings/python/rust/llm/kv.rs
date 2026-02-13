@@ -1007,6 +1007,7 @@ impl KvPushRouter {
                     router_config_override.as_ref(),
                     update_states,
                     None, // lora_name not exposed in Python API yet
+                    0.0,
                 )
                 .await
                 .map_err(to_pyerr)?;
@@ -1051,7 +1052,7 @@ impl KvPushRouter {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids)
+                .get_potential_loads(&token_ids, None)
                 .await
                 .map_err(to_pyerr)?;
 
