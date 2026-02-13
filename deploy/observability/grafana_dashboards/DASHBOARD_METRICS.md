@@ -13,7 +13,7 @@ The dashboard is organized in **logical request flow order** (21 panels across 6
 - Avg Inter-Token Latency (x=0), Avg ISL/OSL (x=8), **Queued Requests** ⭐ (x=16)
 
 **Row 3: Prefill Workers** (The typical bottleneck! - y=16)
-- Prefill Queue Processing Time ⭐ (x=0), Throughput (x=8), Component Latency Comparison (x=16)
+- Prefill Worker Processing Time ⭐ (x=0), Prefill Worker Throughput (x=8), Component Latency Comparison (x=16)
 
 **Row 4: Decode Workers** (y=24)
 - Request Throughput (x=0), Avg Request Duration (x=8), KV Cache Utilization (%) (x=16)
@@ -22,10 +22,10 @@ The dashboard is organized in **logical request flow order** (21 panels across 6
 - KV Cache Blocks (Active/Total) ⭐ (x=0), GPU Compute Utilization (x=8), GPU Memory Used (x=16)
 
 **Row 6: NIXL Transfer Metrics** (y=40)
-- GPU Memory Bandwidth (NIXL %) (x=0), NVLink Bandwidth (GB/s) (x=8), Worker CPU Usage (x=16)
+- GPU Memory Bandwidth (x=0), NVLink Bandwidth (GB/s) (x=8), Worker CPU Usage (x=16)
 
-**Row 7: Node + NATS** (y=48)
-- Node CPU Utilization (x=0), NATS Message Throughput (x=8), NATS Data Transfer (x=16)
+**Row 7: Node + Worker** (y=48)
+- Node CPU Utilization (x=0), Worker Request Throughput (x=8), Worker Data Transfer (x=16)
 
 ⭐ = Key metrics for diagnosing TTFT bottlenecks
 
@@ -49,17 +49,17 @@ These metrics come from the DCGM (Data Center GPU Manager) exporter running as a
 | Panel | Metric | Formula | Description |
 |-------|--------|---------|-------------|
 | **GPU Compute Utilization** | `DCGM_FI_DEV_GPU_UTIL` | Raw value | GPU compute utilization percentage (0-100) for each GPU. Prefill workers show high utilization during prefill phase |
-| **GPU Memory Bandwidth (NIXL Transfers)** | `DCGM_FI_DEV_MEM_COPY_UTIL` | Raw value | GPU memory copy bandwidth utilization percentage (0-100). **Spikes indicate KV cache transfers over NIXL**. On single-node deployments, NIXL uses CUDA IPC (GPU→Host→Host→GPU) not direct GPU-to-GPU. Yellow threshold at 60%, red at 80% |
+| **GPU Memory Bandwidth** | `DCGM_FI_DEV_MEM_COPY_UTIL` | Raw value | GPU memory copy bandwidth utilization percentage (0-100). **Spikes indicate KV cache transfers over NIXL**. On single-node deployments, NIXL uses CUDA IPC (GPU→Host→Host→GPU) not direct GPU-to-GPU. Yellow threshold at 60%, red at 80% |
 | **NVLink Bandwidth (GB/s)** | `DCGM_FI_PROF_NVLINK_TX_BYTES` & `DCGM_FI_PROF_NVLINK_RX_BYTES` | `(rate(TX_BYTES[1m]) + rate(RX_BYTES[1m])) / 1e9` | NVLink transfer bandwidth in GB/s (rate of change) per GPU, measured from DCGM profiling metrics. Shows total bidirectional bandwidth (TX + RX). This includes intra-pod TP communication (TP=2 for prefill, TP=4 for decode). Low bandwidth (<1 GB/s) indicates inter-pod NIXL KV cache transfers may be using host memory copies instead of direct NVLink/GPUDirect. Yellow threshold at 5 GB/s, red at 10 GB/s |
 | **GPU Memory Used** | `DCGM_FI_DEV_FB_USED` | `value / 1024` | GPU framebuffer memory used in GB. Prefill workers allocate KV blocks on decode workers via NIXL |
 
 ### Prefill Worker Metrics (from Prefill Worker Pods)
-These metrics come from the prefill worker pods' system endpoints (port 9090). They track NATS-based queue processing for remote prefill requests.
+These metrics come from the prefill worker pods' system endpoints (port 9090). They track request processing for prefill operations.
 
 | Panel | Metric | Formula | Description |
 |-------|--------|---------|-------------|
-| **Prefill Queue - Processing Time** | `dynamo_component_nats_service_processing_ms_avg{service_name=~".*prefill.*"}` & `dynamo_component_nats_service_processing_ms_p99{...}` | Raw value (ms) | Average and P99 time spent processing prefill requests. **Includes prefill computation AND KV cache transfer over NIXL** |
-| **Prefill Queue - Throughput** | `dynamo_component_nats_service_requests_total{service_name=~".*prefill.*"}` | `rate(...[5m])` | Rate of prefill requests being processed via the NATS queue in requests/second |
+| **Prefill Worker Processing Time** | `dynamo_component_request_duration_seconds_{sum,count,bucket}{dynamo_component="prefill",dynamo_endpoint="generate"}` | `1000 * rate(sum[5m]) / rate(count[5m])` for avg, `histogram_quantile(0.99, ...)` for P99 | Average and P99 time (in ms) spent processing prefill requests. **Includes prefill computation AND KV cache transfer over NIXL** |
+| **Prefill Worker Throughput** | `dynamo_component_requests_total{dynamo_component="prefill",dynamo_endpoint="generate"}` | `rate(...[5m])` | Rate of prefill requests being processed in requests/second |
 
 ### Decode Worker Metrics (from Decode Worker Pods)
 These metrics come from the decode worker pods' system endpoints (port 9090). In disaggregated mode, decode workers receive KV cache from prefill workers and perform token generation.
@@ -69,7 +69,7 @@ These metrics come from the decode worker pods' system endpoints (port 9090). In
 | **Component Latency - Prefill vs Decode** | `dynamo_component_request_duration_seconds_{sum,count}{dynamo_component="prefill",dynamo_endpoint="generate"}` & `{dynamo_component="backend",dynamo_endpoint="generate"}` | `rate(sum[5m]) / rate(count[5m])` | Average request duration for prefill workers (includes NIXL transfer) vs decode workers (entire decode session for all output tokens) over the last 5 minutes. **Note**: Decode worker latency measures the FULL decode session duration, not just time to first token. Only shows `generate` endpoint (filters out `clear_kv_blocks` maintenance operations) |
 | **Decode Worker - Request Throughput** | `dynamo_component_requests_total{dynamo_component="backend"}` | `rate(...[5m])` | Rate of requests processed by decode workers in requests/second |
 | **Decode Worker - Avg Request Duration** | `dynamo_component_request_duration_seconds_{sum,count}{dynamo_component="backend"}` | `rate(sum[5m]) / rate(count[5m])` | Average time decode workers spend processing requests (decode phase only) over the last 5 minutes |
-| **KV Cache Utilization** | `dynamo_component_kvstats_gpu_cache_usage_percent` | Raw value (0-100%) | GPU memory utilization for KV cache storage of active requests. High values (>90%) indicate workers are at capacity and requests are queueing. **Note**: Only available for decode workers - prefill workers in disaggregated mode don't expose this metric. Monitor Prefill Queue Processing Time instead for prefill capacity |
+| **KV Cache Utilization** | `dynamo_component_kvstats_gpu_cache_usage_percent` | Raw value (0-100%) | GPU memory utilization for KV cache storage of active requests. High values (>90%) indicate workers are at capacity and requests are queueing. **Note**: Only available for decode workers - prefill workers in disaggregated mode don't expose this metric. Monitor Prefill Worker Processing Time instead for prefill capacity |
 | **KV Cache Blocks (Active/Total)** ⭐ | `dynamo_component_kvstats_active_blocks` & `dynamo_component_kvstats_total_blocks` | Raw values | Number of KV cache blocks in use vs total available for decode workers. When active approaches total, decode workers are at capacity. Shows numeric values (e.g., 2048/5297). **Note**: Only for decode workers |
 
 ### CPU Metrics (from cAdvisor and Node Exporter)
@@ -80,27 +80,26 @@ These metrics come from Kubernetes cAdvisor (container metrics) and Node Exporte
 | **Worker CPU Usage** | `container_cpu_usage_seconds_total{namespace="robert",pod=~".*worker.*",container="main"}` | `rate(...[5m])` | CPU cores used by worker pods. Value shows actual CPU consumption (e.g., 2.5 = 2.5 cores). Yellow at 30 cores, red at 50 cores |
 | **Node CPU Utilization** | `node_cpu_seconds_total{mode="idle"}` | `100 - (avg(rate(idle)) * 100)` | Overall node CPU utilization percentage. Shows aggregate CPU usage across all cores |
 
-### NATS Metrics (from Worker Pods)
-These metrics track NATS client communication from worker pods. NATS is used for the prefill queue in disaggregated mode - decode workers send prefill requests to prefill workers via NATS.
+### Worker Metrics (from Worker Pods)
+These metrics track request processing across all worker pods (prefill and decode).
 
 | Panel | Metric | Formula | Description |
 |-------|--------|---------|-------------|
-| **NATS Message Throughput** | `dynamo_component_nats_client_in_messages` & `dynamo_component_nats_client_out_messages` | `rate(...[5m])` | Messages per second sent and received by each worker. High throughput on prefill workers indicates active remote prefill processing |
-| **NATS Data Transfer** | `dynamo_component_nats_client_in_total_bytes` & `dynamo_component_nats_client_out_overhead_bytes` | `rate(...[5m])` | Bytes per second transferred over NATS. Shows network overhead of the prefill queue messaging |
+| **Worker Request Throughput** | `dynamo_component_requests_total{dynamo_endpoint="generate"}` | `rate(...[5m])` | Requests per second processed by each worker, broken down by component type (prefill, backend). Shows overall system throughput |
+| **Worker Data Transfer** | `dynamo_component_request_bytes_total` & `dynamo_component_response_bytes_total` | `rate(...[5m])` | Bytes per second transferred in requests (IN) and responses (OUT). Shows data throughput across worker pods |
 
 ## Metric Label Filters
 
 ### Component Name Filtering
-- **Prefill workers**: `component_name=~".*prefill.*"` or `service_name=~".*prefill.*"`
-- **Decode workers**: `component_name=~".*decode.*"` or `service_name=~".*backend.*"` or `service_name=~".*decode.*"`
-- **Dynamo component label**: Can also filter by `dynamo_component="prefill"` or `dynamo_component="backend"`
+- **Prefill workers**: `dynamo_component="prefill"`
+- **Decode workers**: `dynamo_component="backend"`
+- **All workers**: Filter by `dynamo_endpoint="generate"` to exclude maintenance operations like `clear_kv_blocks`
 
 ### Important Labels
 - `pod`: Specific pod name (e.g., `llama3-70b-disagg-sn-0-vllmprefillworker-hrnt5`)
 - `namespace`: Kubernetes namespace (e.g., `robert`)
-- `service_name`: NATS service name (e.g., `llama3-70b-disagg-sn_prefill`)
-- `component_name`: Component identifier
 - `dynamo_component`: Component type (`prefill`, `backend`, `frontend`)
+- `dynamo_endpoint`: Endpoint name (`generate`, `clear_kv_blocks`)
 - `gpu`: GPU index (0-7 for DCGM metrics)
 - `Hostname`: Node hostname (for DCGM metrics)
 
@@ -113,8 +112,8 @@ These metrics track NATS client communication from worker pods. NATS is used for
 
 ┌─────────────────┐
 │ Prefill Worker  │ ──► dynamo_component_* metrics (system port 9090)
-│     Pods        │     ├─ dynamo_component_nats_service_* (NATS queue)
-└─────────────────┘     └─ dynamo_component_request_* (component stats)
+│     Pods        │     ├─ dynamo_component_request_* (request stats)
+└─────────────────┘     └─ dynamo_component_*_bytes_total (data transfer)
                         └─ container_cpu_* metrics (cAdvisor)
 
 ┌─────────────────┐
@@ -216,7 +215,7 @@ The DCGM ServiceMonitor must be manually created (see `dcgm-servicemonitor.yaml`
    ```
 
 3. **Monitor indirect indicators in dashboard**:
-   - **Prefill Queue - Processing Time**: High avg (>5s) or P99 (>10s) indicates saturation
+   - **Prefill Worker Processing Time**: High avg (>5s) or P99 (>10s) indicates saturation
    - **Frontend Avg TTFT**: If much higher than Prefill Processing Time, indicates queueing
    - **Gap = TTFT - Prefill Processing Time** = Queue wait time
 
@@ -237,7 +236,7 @@ The DCGM ServiceMonitor must be manually created (see `dcgm-servicemonitor.yaml`
      - Request scheduling and batching
      - Tokenization (input/output processing)
      - KV cache management
-     - NATS communication (prefill queue)
+     - TCP/gRPC communication (request plane)
    - Expect moderate CPU usage (5-20 cores per worker)
    - GPU compute should dominate, not CPU
 
