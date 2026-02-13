@@ -308,8 +308,7 @@ def create_kv_events_config(
     if dynamo_config.is_decode_worker:
         logger.info(
             f"Decode worker detected (is_decode_worker={dynamo_config.is_decode_worker}): "
-            "kv_events_config disabled (decode workers don't publish KV events)",
-            dynamo_config.is_decode_worker,
+            f"kv_events_config disabled (decode workers don't publish KV events)"
         )
         return None
 
