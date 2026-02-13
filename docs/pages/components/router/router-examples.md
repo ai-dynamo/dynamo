@@ -377,11 +377,11 @@ class CustomEnginePublisher:
 #### Integration with Your Engine
 
 ```python
-from dynamo.llm import register_llm
+from dynamo.llm import register_model
 
 async def main():
     # Register your engine with Dynamo
-    component, endpoint = await register_llm(
+    component, endpoint = await register_model(
         model="my-model",
         generator=my_generate_fn,
     )
