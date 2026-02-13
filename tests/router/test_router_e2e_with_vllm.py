@@ -118,6 +118,17 @@ class VLLMProcess:
         self.worker_processes = []
         self.store_backend = store_backend
 
+        # Dynamically allocate unique system, KV event, and NIXL side-channel
+        # ports (one of each per worker) to avoid conflicts in parallel test runs.
+        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._nixl_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        request.addfinalizer(
+            lambda: deallocate_ports(
+                self._system_ports + self._kv_event_ports + self._nixl_ports
+            )
+        )
+
         if vllm_args is None:
             vllm_args = {}
 
@@ -202,13 +213,19 @@ class VLLMProcess:
             if durable_kv_events:
                 command.append("--durable-kv-events")
 
+            # Ports are dynamically allocated for xdist-safe parallel execution.
+            system_port = self._system_ports[worker_idx]
+            kv_event_port = self._kv_event_ports[worker_idx]
+            nixl_port = self._nixl_ports[worker_idx]
+
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
                 "CUDA_VISIBLE_DEVICES": gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
-                "DYN_VLLM_KV_EVENT_PORT": str(20080 + worker_idx),
-                "VLLM_NIXL_SIDE_CHANNEL_PORT": str(20090 + worker_idx),
+                "DYN_SYSTEM_PORT": str(system_port),
+                "DYN_VLLM_KV_EVENT_PORT": str(kv_event_port),
+                "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
 
@@ -233,13 +250,13 @@ class VLLMProcess:
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(gpu_mem={gpu_memory_utilization}) "
+                    f"(gpu_mem={gpu_memory_utilization}, system_port={system_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created vLLM worker {worker_idx} on GPU {gpu_device} "
-                    f"(gpu_mem={gpu_memory_utilization}) "
+                    f"(gpu_mem={gpu_memory_utilization}, system_port={system_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 

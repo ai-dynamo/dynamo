@@ -37,7 +37,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     is_prefill_worker: bool
     is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
-    store_kv: str
+    discovery_backend: str
     request_plane: str
     event_plane: str
     enable_local_indexer: bool = True
@@ -79,7 +79,6 @@ def parse_args() -> Config:
     Returns:
         Config: Parsed configuration object.
     """
-
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
@@ -317,8 +316,7 @@ def create_kv_events_config(
     if dynamo_config.is_decode_worker:
         logger.info(
             f"Decode worker detected (is_decode_worker={dynamo_config.is_decode_worker}): "
-            "kv_events_config disabled (decode workers don't publish KV events)",
-            dynamo_config.is_decode_worker,
+            f"kv_events_config disabled (decode workers don't publish KV events)"
         )
         return None
 

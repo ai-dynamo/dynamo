@@ -41,7 +41,7 @@ class DistributedRuntime:
     def __new__(
         cls,
         event_loop: Any,
-        store_kv: str,
+        discovery_backend: str,
         request_plane: str,
         enable_nats: Optional[bool] = None,
     ) -> "DistributedRuntime":
@@ -50,7 +50,7 @@ class DistributedRuntime:
 
         Args:
             event_loop: The asyncio event loop
-            store_kv: Key-value store backend ("etcd", "file", or "mem")
+            discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp", "http", or "nats")
             enable_nats: Whether to enable NATS for KV events. Defaults to True.
                         If request_plane is "nats", NATS is always enabled.
@@ -265,7 +265,7 @@ class ModelCardInstanceId:
         ...
 
 
-def compute_block_hash_for_seq_py(
+def compute_block_hash_for_seq(
     tokens: List[int],
     kv_block_size: int,
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
@@ -300,7 +300,7 @@ def compute_block_hash_for_seq_py(
         ...         "mm_hash": 0xDEADBEEF,
         ...     }]
         ... }
-        >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])
+        >>> hashes = compute_block_hash_for_seq(tokens, 32, [mm_info])
     """
 
     ...
@@ -694,24 +694,25 @@ class KvEventPublisher:
         kv_block_size: int = 0,
         dp_rank: int = 0,
         enable_local_indexer: bool = False,
-        zmq_config: Optional[ZmqKvEventPublisherConfig] = None,
+        zmq_endpoint: Optional[str] = None,
+        zmq_topic: Optional[str] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
 
-        When zmq_config is provided, the publisher subscribes to a ZMQ socket for
+        When zmq_endpoint is provided, the publisher subscribes to a ZMQ socket for
         incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
-        The zmq_config fields override kv_block_size, dp_rank, and enable_local_indexer.
 
-        When zmq_config is None, events are pushed manually via publish_stored/publish_removed.
+        When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
             component: The component to publish events for
             worker_id: The worker ID (unused, inferred from component)
-            kv_block_size: The KV block size (must be > 0; ignored if zmq_config is set)
-            dp_rank: The data parallel rank (defaults to 0; ignored if zmq_config is set)
-            enable_local_indexer: Enable worker-local KV indexer (ignored if zmq_config is set)
-            zmq_config: Optional ZMQ configuration for relay mode
+            kv_block_size: The KV block size (must be > 0)
+            dp_rank: The data parallel rank (defaults to 0)
+            enable_local_indexer: Enable worker-local KV indexer
+            zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
+            zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
         """
 
     def publish_stored(
@@ -750,28 +751,6 @@ class KvEventPublisher:
     def shutdown(self) -> None:
         """
         Shuts down the event publisher, stopping any background tasks.
-        """
-        ...
-
-class ZmqKvEventPublisherConfig:
-    def __init__(
-        self,
-        worker_id: int,
-        kv_block_size: int,
-        zmq_endpoint: str = "tcp://127.0.0.1:5557",
-        zmq_topic: str = "",
-        enable_local_indexer: bool = True,
-        dp_rank: int = 0
-    ) -> None:
-        """
-        ZMQ configuration for KvEventPublisher relay mode.
-
-        :param worker_id: The worker ID.
-        :param kv_block_size: The block size for the key-value store.
-        :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
-        :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
-        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to True.
-        :param dp_rank: The data parallel rank for this publisher. Defaults to 0.
         """
         ...
 
@@ -936,13 +915,14 @@ class ModelInput:
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
     Prefill: ModelType
     Images: ModelType
+    Videos: ModelType
     ...
 
 class RouterMode:
@@ -950,6 +930,7 @@ class RouterMode:
     RoundRobin: "RouterMode"
     Random: "RouterMode"
     KV: "RouterMode"
+    Direct: "RouterMode"
     ...
 
 class RouterConfig:
@@ -968,7 +949,7 @@ class RouterConfig:
         Create a RouterConfig.
 
         Args:
-            mode: The router mode (RoundRobin, Random, or KV)
+            mode: The router mode (RoundRobin, Random, KV, or Direct)
             config: Optional KV router configuration (used when mode is KV)
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
@@ -995,6 +976,7 @@ class KvRouterConfig:
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
+        router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 1,
     ) -> None:
         """
@@ -1011,7 +993,8 @@ class KvRouterConfig:
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
                 When enabled, the router adds placeholder blocks as tokens are generated
-                and applies fractional decay based on progress toward expected_output_tokens.
+                and applies fractional decay based on progress toward expected output
+                sequence length (agent_hints.osl in nvext).
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
@@ -1019,6 +1002,10 @@ class KvRouterConfig:
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: None).
+                When set, requests are queued if all workers exceed this fraction of
+                max_num_batched_tokens. Enables priority scheduling via latency_sensitivity hints.
+                If None, queueing is disabled and all requests go directly to the scheduler.
             router_event_threads: Number of event processing threads (default: 1).
                 When > 1, uses a concurrent radix tree with a thread pool.
         """
@@ -1337,9 +1324,9 @@ class ZmqKvEventListener:
         """
         ...
 
-class KvPushRouter:
+class KvRouter:
     """
-    A KV-aware push router that performs intelligent routing based on KV cache overlap.
+    A KV-aware router that performs intelligent routing based on KV cache overlap.
     """
 
     def __init__(
@@ -1349,7 +1336,7 @@ class KvPushRouter:
         kv_router_config: KvRouterConfig,
     ) -> None:
         """
-        Create a new KvPushRouter instance.
+        Create a new KvRouter instance.
 
         Args:
             endpoint: The endpoint to connect to for routing requests
