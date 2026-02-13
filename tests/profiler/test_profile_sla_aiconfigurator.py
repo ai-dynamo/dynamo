@@ -18,6 +18,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from dynamo.profiler.profile_sla import run_profile  # noqa: E402
+from dynamo.profiler.utils.defaults import SearchStrategy  # noqa: E402
 from dynamo.profiler.utils.model_info import ModelInfo  # noqa: E402
 
 pytestmark = [
@@ -71,6 +72,8 @@ class TestProfileSlaAiconfigurator:
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
+                self.search_strategy = SearchStrategy.THOROUGH
+                self.system = ""
                 # Provide minimal model_info to avoid HF queries
                 self.model_info = ModelInfo(
                     model_size=16384.0,
