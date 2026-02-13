@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Claude API client with prompt caching and rate limiting.
 Supports both Anthropic native API and OpenAI-compatible APIs (e.g., NVIDIA).
