@@ -26,7 +26,6 @@ default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 
 [dependencies]
-dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-parsers = { path = "../../parsers" }
 
@@ -75,7 +74,10 @@ prometheus = "0.14.0"
 
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dynamo-llm = { path = "../../llm", features = ["block-manager"] }
+dynamo-llm = { path = "../../llm" }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
 rstest = "0.25"
