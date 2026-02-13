@@ -16,12 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:0.8.0
-          env:
-            - name: DYN_KV_BLOCK_SIZE
-              value: "128"
-            - name: DYN_MODEL
-              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
       eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:
@@ -49,8 +44,15 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --router-mode
+            - direct
       envs:
         - name: HF_HOME
           value: /opt/models
@@ -79,7 +81,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:

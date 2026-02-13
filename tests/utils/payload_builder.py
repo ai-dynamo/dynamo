@@ -14,6 +14,8 @@ from tests.utils.payloads import (
     EmbeddingPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
+    ResponsesPayload,
+    ResponsesStreamPayload,
     SGLangMetricsPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
@@ -479,4 +481,53 @@ def completion_payload_with_logprobs(
         repeat_count=repeat_count,
         expected_log=[],
         expected_response=expected_response or ["AI", "knock", "joke"],
+    )
+
+
+def responses_payload_default(
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 200,
+    temperature: float = 0.0,
+) -> ResponsesPayload:
+    """Create a default Responses API payload (non-streaming).
+
+    For full compliance testing, use the OpenResponses bun CLI instead.
+    """
+    return ResponsesPayload(
+        body={
+            "input": TEXT_PROMPT,
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def responses_stream_payload_default(
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 200,
+    temperature: float = 0.0,
+) -> ResponsesStreamPayload:
+    """Create a default Responses API streaming payload.
+
+    For full compliance testing, use the OpenResponses bun CLI instead.
+    """
+    return ResponsesStreamPayload(
+        body={
+            "input": TEXT_PROMPT,
+            "stream": True,
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        },
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
     )
