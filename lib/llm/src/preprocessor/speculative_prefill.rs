@@ -84,7 +84,8 @@ pub fn maybe_wrap_stream(
     let enabled = request
         .nvext
         .as_ref()
-        .and_then(|ext| ext.speculative_prefill)
+        .and_then(|ext| ext.agent_hints.as_ref())
+        .and_then(|hints| hints.speculative_prefill)
         .unwrap_or(false);
 
     if !enabled {

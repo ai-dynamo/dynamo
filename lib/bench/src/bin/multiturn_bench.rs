@@ -104,6 +104,11 @@ struct MultiturnRequest {
 
 #[derive(Debug, Serialize)]
 struct NvExtBody {
+    agent_hints: AgentHintsBody,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentHintsBody {
     speculative_prefill: bool,
 }
 
@@ -307,7 +312,9 @@ async fn run_user(
             stream: true,
             nvext: if args.speculative_prefill {
                 Some(NvExtBody {
-                    speculative_prefill: true,
+                    agent_hints: AgentHintsBody {
+                        speculative_prefill: true,
+                    },
                 })
             } else {
                 None
