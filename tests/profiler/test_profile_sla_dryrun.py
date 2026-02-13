@@ -497,3 +497,71 @@ class TestProfileSLADryRun:
         # based on the model and GPU info from args
         auto_generate_search_space(trtllm_args_with_model_autogen)
         await run_profile(trtllm_args_with_model_autogen)
+
+    # Unit tests for search_strategy and system attributes
+    @pytest.mark.pre_merge
+    @pytest.mark.unit
+    @pytest.mark.gpu_0
+    def test_vllm_args_has_search_strategy(self, vllm_args):
+        """Test that vllm_args fixture has search_strategy attribute."""
+        assert hasattr(vllm_args, "search_strategy")
+        assert vllm_args.search_strategy == SearchStrategy.THOROUGH
+        assert hasattr(vllm_args, "system")
+        assert vllm_args.system == ""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.unit
+    @pytest.mark.gpu_0
+    def test_sglang_args_has_search_strategy(self, sglang_args):
+        """Test that sglang_args fixture has search_strategy attribute."""
+        assert hasattr(sglang_args, "search_strategy")
+        assert sglang_args.search_strategy == SearchStrategy.THOROUGH
+        assert hasattr(sglang_args, "system")
+        assert sglang_args.system == ""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.unit
+    @pytest.mark.gpu_0
+    def test_trtllm_args_has_search_strategy(self, trtllm_args):
+        """Test that trtllm_args fixture has search_strategy attribute."""
+        assert hasattr(trtllm_args, "search_strategy")
+        assert trtllm_args.search_strategy == SearchStrategy.THOROUGH
+        assert hasattr(trtllm_args, "system")
+        assert trtllm_args.system == ""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.unit
+    @pytest.mark.gpu_0
+    def test_sglang_moe_args_has_search_strategy(self, sglang_args_moe):
+        """Test that sglang_args_moe fixture has search_strategy attribute."""
+        assert hasattr(sglang_args_moe, "search_strategy")
+        assert sglang_args_moe.search_strategy == SearchStrategy.THOROUGH
+        assert hasattr(sglang_args_moe, "system")
+        assert sglang_args_moe.system == ""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.unit
+    @pytest.mark.gpu_0
+    def test_model_autogen_args_have_rapid_strategy(
+        self,
+        vllm_args_with_model_autogen,
+        sglang_args_with_model_autogen,
+        trtllm_args_with_model_autogen,
+    ):
+        """Test that model autogen fixtures have RAPID search strategy and GPU info."""
+        for args_fixture in [
+            vllm_args_with_model_autogen,
+            sglang_args_with_model_autogen,
+            trtllm_args_with_model_autogen,
+        ]:
+            assert hasattr(args_fixture, "search_strategy")
+            assert args_fixture.search_strategy == SearchStrategy.RAPID
+            assert hasattr(args_fixture, "system")
+            assert args_fixture.system == "h100_sxm"
+            # Verify GPU discovery attributes
+            assert hasattr(args_fixture, "num_gpus_per_node")
+            assert args_fixture.num_gpus_per_node == 8
+            assert hasattr(args_fixture, "gpu_model")
+            assert args_fixture.gpu_model == "H100-SXM5-80GB"
+            assert hasattr(args_fixture, "gpu_vram_mib")
+            assert args_fixture.gpu_vram_mib == 81920

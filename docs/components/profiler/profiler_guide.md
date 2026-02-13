@@ -641,6 +641,6 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 
 ## See Also
 
-- [DGDR Examples](../../profiler/deploy/) - Complete DGDR YAML examples
+- [DGDR Examples](../../../components/src/dynamo/profiler/deploy/) - Complete DGDR YAML examples
 - [DGDR API Reference](/docs/kubernetes/api_reference.md) - DGDR specification
 - [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/profiler_argparse.py) - Full CLI reference

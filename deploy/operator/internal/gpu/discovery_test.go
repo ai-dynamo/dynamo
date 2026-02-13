@@ -316,9 +316,9 @@ func TestExtractGPUInfoFromNode_MissingLabels(t *testing.T) {
 
 func TestInferHardwareSystem(t *testing.T) {
 	tests := []struct {
-		gpuProduct      string
-		expectedSystem  string
-		description     string
+		gpuProduct     string
+		expectedSystem string
+		description    string
 	}{
 		{"H100-SXM5-80GB", "h100_sxm", "H100 SXM variant"},
 		{"H100-PCIE-80GB", "h100_sxm", "H100 PCIe variant (mapped to SXM)"},
