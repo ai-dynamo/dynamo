@@ -646,10 +646,14 @@ impl
                     decode_req.bootstrap_info = Some(info);
                 }
 
-                // Set router_config_override for decode: overlap_score_weight = 0
+                // Set router_config_override for decode:
+                // - overlap_score_weight = 0 (no KV cache overlap scoring for decode)
+                // - assume_kv_reuse = false (generate random hashes since decode workers
+                //   may already have blocks cached from prefill transfer)
                 let existing_override = decode_req.router_config_override.take();
                 decode_req.router_config_override = Some(RouterConfigOverride {
                     overlap_score_weight: Some(0.0),
+                    assume_kv_reuse: Some(false),
                     ..existing_override.unwrap_or_default()
                 });
 
