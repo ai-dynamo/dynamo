@@ -64,8 +64,6 @@ class TestOutputModality:
         assert names == {"text", "image", "video", "audio"}
 
 
-
-
 class TestGetOutputModalities:
     """Tests for the get_output_modalities function."""
 
