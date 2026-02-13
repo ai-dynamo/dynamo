@@ -166,7 +166,7 @@ async def async_main():
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, enable_nats
+        loop, config.discovery_backend, config.request_plane, enable_nats
     )
 
     def signal_handler():

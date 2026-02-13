@@ -403,12 +403,12 @@ def temp_file_store():
 
 
 @pytest.fixture
-def store_kv(request):
+def discovery_backend(request):
     """
-    KV store for runtime. Defaults to "file".
+    Discovery backend for runtime. Defaults to "file".
 
-    To iterate over multiple stores in a test:
-        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+    To iterate over multiple backends in a test:
+        @pytest.mark.parametrize("discovery_backend", ["file", "etcd"], indirect=True)
         async def test_example(runtime):
             ...
     """
@@ -429,7 +429,7 @@ def request_plane(request):
 
 
 @pytest.fixture(scope="function", autouse=False)
-async def runtime(request, store_kv, request_plane):
+async def runtime(request, discovery_backend, request_plane):
     """
     Create a DistributedRuntime for testing.
 
@@ -440,11 +440,11 @@ async def runtime(request, store_kv, request_plane):
     Without @pytest.mark.forked in isolated mode, you will get "Worker already initialized"
     errors when multiple tests try to create runtimes in the same process.
 
-    The store_kv and request_plane can be customized by overriding their fixtures
+    The discovery_backend and request_plane can be customized by overriding their fixtures
     or using @pytest.mark.parametrize with indirect=True:
 
         @pytest.mark.forked
-        @pytest.mark.parametrize("store_kv", ["etcd"], indirect=True)
+        @pytest.mark.parametrize("discovery_backend", ["etcd"], indirect=True)
         async def test_with_etcd(runtime):
             ...
     """
@@ -469,6 +469,6 @@ This is required because DistributedRuntime is a process-level singleton.
             )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, store_kv, request_plane)
+    runtime = DistributedRuntime(loop, discovery_backend, request_plane)
     yield runtime
     runtime.shutdown()
