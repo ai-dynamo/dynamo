@@ -29,7 +29,7 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
-	clientv3 "go.etcd.io/etcd/client/v3"
+
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -59,7 +59,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/etcd"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -522,18 +521,6 @@ func main() {
 		"kai-scheduler", kaiSchedulerEnabled,
 	)
 
-	// Create etcd client
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:            []string{etcdAddr},
-		DialTimeout:          5 * time.Second,
-		DialKeepAliveTime:    10 * time.Second,
-		DialKeepAliveTimeout: 3 * time.Second,
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to create etcd client")
-		os.Exit(1)
-	}
-
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
 	// refresh whenever a secret is created/deleted/updated
 	// Set up informer
@@ -632,7 +619,6 @@ func main() {
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
 		Config:                ctrlConfig,
-		EtcdStorage:           etcd.NewStorage(cli),
 		DockerSecretRetriever: dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
