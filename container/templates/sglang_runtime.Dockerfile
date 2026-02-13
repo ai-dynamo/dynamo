@@ -89,7 +89,8 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
-        --requirement /mnt/local_src/container/deps/requirements.test.txt && \
+        --requirement /mnt/local_src/container/deps/requirements.test.txt \
+        sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
     #TODO: Temporary change until upstream sglang runtime image is updated
