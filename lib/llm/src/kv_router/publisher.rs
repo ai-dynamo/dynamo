@@ -1285,15 +1285,12 @@ mod test_event_processing {
 
     #[test]
     fn test_extra_keys_to_block_mm_infos() {
-        let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
-            .to_string();
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
         let infos = extra_keys_to_block_mm_infos(Some(vec![
             Some(vec![mm_hash.clone()]),
             None,
-            Some(vec![
-                "invalid".to_string(),
-                mm_hash,
-            ]),
+            Some(vec!["invalid".to_string(), mm_hash]),
         ]))
         .expect("expected parsed MM infos");
 
@@ -1311,8 +1308,8 @@ mod test_event_processing {
 
     #[test]
     fn test_seq_block_stored_field8_supports_extra_keys() {
-        let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
-            .to_string();
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
         let extra_keys_payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
@@ -1367,8 +1364,7 @@ mod test_event_processing {
             medium: Some("GPU".to_string()),
             lora_name: None,
             extra_keys: Some(vec![Some(vec![
-                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
-                    .to_string(),
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string(),
             ])]),
         })
         .unwrap();

@@ -455,7 +455,15 @@ impl RouterHandles {
         };
 
         self.decode_router
-            .find_best_match(None, tokens, config_override.as_ref(), false, None, 0.0)
+            .find_best_match(
+                None,
+                tokens,
+                None,
+                config_override.as_ref(),
+                false,
+                None,
+                0.0,
+            )
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");

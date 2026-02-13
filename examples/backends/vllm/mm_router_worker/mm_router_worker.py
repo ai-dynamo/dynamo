@@ -149,6 +149,7 @@ async def worker(runtime: DistributedRuntime) -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
     logger.info(f"Loading HuggingFace processor from {args.model}...")
+    # TODO: hf AutoProcessor may be slow than the vllm equivalent @zhongdaor
     processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
 
     # Create handler
