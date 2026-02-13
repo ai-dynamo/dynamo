@@ -144,18 +144,33 @@ class StreamProcessor:
     """Unified stream processing for SGLang responses"""
 
     @staticmethod
-    async def process_sglang_stream(stream_source) -> AsyncIterator[str]:
+    async def process_sglang_stream(
+        stream_source, stream_output: bool = False
+    ) -> AsyncIterator[str]:
         """Process SGLang stream output.
 
-        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
-        containing only new tokens since the last output. We pass these through directly.
+        When stream_output=True, SGLang sends disjoint segments containing only new
+        tokens since the last output. We pass these through directly.
+        When stream_output=False (default), SGLang sends cumulative tokens and we
+        perform manual slicing to extract only new tokens.
         """
+        # Track tokens for manual slicing when stream_output=False
+        num_output_tokens_so_far = 0
+
         try:
             async for res in stream_source:
                 try:
-                    # With stream_output=True, output_ids contains only new tokens (disjoint)
+                    output_ids = res["output_ids"]
+
+                    # Handle token slicing based on stream_output setting
+                    if stream_output:
+                        token_ids = output_ids
+                    else:
+                        token_ids = output_ids[num_output_tokens_so_far:]
+                        num_output_tokens_so_far = len(output_ids)
+
                     output = {
-                        "token_ids": res["output_ids"],
+                        "token_ids": token_ids,
                         "text": res.get("text", ""),
                         "finished": False,
                     }
@@ -335,7 +350,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_info["bootstrap_room"],
         )
 
-        async for output in StreamProcessor.process_sglang_stream(decode_stream):
+        async for output in StreamProcessor.process_sglang_stream(
+            decode_stream, self.config.server_args.stream_output
+        ):
             yield output
 
     async def _generate_aggregated(
@@ -369,7 +386,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                 stream=True,
             )
 
-            async for output in StreamProcessor.process_sglang_stream(agg_stream):
+            async for output in StreamProcessor.process_sglang_stream(
+                agg_stream, self.config.server_args.stream_output
+            ):
                 yield output
 
         except RuntimeError as e:

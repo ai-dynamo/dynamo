@@ -197,8 +197,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
-        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
-        containing only new tokens since the last output. We pass these through directly.
+        When stream_output=True, SGLang sends disjoint segments containing only new
+        tokens since the last output. We pass these through directly.
+        When stream_output=False (default), SGLang sends cumulative tokens and we
+        perform manual slicing to extract only new tokens.
 
         Args:
             stream_source: Async generator from engine.async_generate.
@@ -207,6 +209,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             Dict with token_ids and optional finish_reason.
         """
+        # Track tokens for manual slicing when stream_output=False
+        num_output_tokens_so_far = 0
+
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
@@ -230,7 +235,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         finish_reason["type"]
                     )
 
-                # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
                 # If request is not finished yet, but there are no outputs, return an error.
                 if not output_ids and not finish_reason:
@@ -238,8 +242,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         yield {"finish_reason": "error", "token_ids": []}
                     break
 
-                # Pass through disjoint token segments directly
-                out["token_ids"] = output_ids
+                if self.config.server_args.stream_output:
+                    out["token_ids"] = output_ids
+                else:
+                    out["token_ids"] = output_ids[num_output_tokens_so_far:]
+                    num_output_tokens_so_far = len(output_ids)
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
                     completion_tokens = res["meta_info"]["completion_tokens"]
