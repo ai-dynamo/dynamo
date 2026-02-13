@@ -115,7 +115,7 @@ jobs:
             --name ${{ env.CONTAINER_ID }}_pytest_parallel \
             -v "$(pwd)/container/deps:/tmp/deps:ro" \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "if command -v uv >/dev/null 2>&1; then uv pip install -q -r /tmp/deps/requirements.test.txt; else export PATH=\"\$HOME/.local/bin:\$PATH\" && pip install --user -q -r /tmp/deps/requirements.test.txt; fi && pytest --mypy --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} --durations=10 -n 4 -m \"${{ env.PYTEST_MARKS }}\""
+            bash -c "if command -v uv >/dev/null 2>&1; then uv pip install -r /tmp/deps/requirements.test.txt; else export PATH=\"\$HOME/.local/bin:\$PATH\" && pip install --user --break-system-packages -r /tmp/deps/requirements.test.txt; fi && pytest --mypy --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} --durations=10 -n 4 -m \"${{ env.PYTEST_MARKS }}\""
       - name: Copy parallel test report from Container
         if: always()
         run: |
@@ -129,7 +129,7 @@ jobs:
             --name ${{ env.CONTAINER_ID }}_pytest \
             -v "$(pwd)/container/deps:/tmp/deps:ro" \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "if command -v uv >/dev/null 2>&1; then uv pip install -q -r /tmp/deps/requirements.test.txt; else export PATH=\"\$HOME/.local/bin:\$PATH\" && pip install --user -q -r /tmp/deps/requirements.test.txt; fi && pytest --mypy --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ env.PYTEST_MARKS }}\" "
+            bash -c "if command -v uv >/dev/null 2>&1; then uv pip install -r /tmp/deps/requirements.test.txt; else export PATH=\"\$HOME/.local/bin:\$PATH\" && pip install --user --break-system-packages -r /tmp/deps/requirements.test.txt; fi && pytest --mypy --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ env.PYTEST_MARKS }}\" "
       - name: Copy test report from test Container
         if: always()
         run: |
