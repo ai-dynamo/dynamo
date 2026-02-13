@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Profiler
 ---
 
 # Profiler
@@ -77,7 +78,7 @@ profilingConfig:
 For advanced scenarios, run the profiler directly:
 
 ```bash
-python -m benchmarks.profiler.profile_sla \
+python -m dynamo.profiler.profile_sla \
   --backend vllm \
   --config path/to/disagg.yaml \
   --model meta-llama/Llama-3-8B \

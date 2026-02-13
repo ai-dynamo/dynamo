@@ -921,6 +921,7 @@ pub unsafe extern "C" fn dynamo_router_add_request(
                 None,
                 worker,
                 None, // lora_name not exposed in C API yet
+                None, // router_config_override not exposed in C API yet
             )
             .await;
 

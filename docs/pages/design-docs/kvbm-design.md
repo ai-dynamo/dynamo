@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: KVBM Design
 ---
 
 # KVBM Design
@@ -9,7 +10,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ## KVBM Components
 
-![Internal Components of Dynamo KVBM](/assets/img/kvbm-components.png)
+![Internal Components of Dynamo KVBM](../../assets/img/kvbm-components.png)
 
 
 *Internal Components of Dynamo KVBM*
@@ -40,7 +41,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ## KVBM Data Flows
 
-![KVBM Data Flows](/assets/img/kvbm-data-flows.png)
+![KVBM Data Flows](../../assets/img/kvbm-data-flows.png)
 
 
 *KVBM Data Flows from device to other memory hierarchies*
@@ -73,7 +74,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ## Internal Architecture Deep Dive
 
-![Internal architecture and key modules in the Dynamo KVBM](/assets/img/kvbm-internal-arch.png)
+![Internal architecture and key modules in the Dynamo KVBM](../../assets/img/kvbm-internal-arch.png)
 
 
 *Internal architecture and key modules in the Dynamo KVBM*
@@ -321,23 +322,23 @@ There are two components of the interface:
 - **Scheduler (Leader)**: Responsible for orchestration of KV block offload/onboard, builds metadata specifying transfer data to the workers. It also maintains hooks for handling asynchronous transfer completion.
 - **Worker**: Responsible for reading metadata built by the scheduler (leader), performs async onboarding/offloading at the end of the forward pass.
 
-![vLLM KVBM Integration](/assets/img/kvbm-integrations.png)
+![vLLM KVBM Integration](../../assets/img/kvbm-integrations.png)
 
 *Typical integration of KVBM with inference frameworks (vLLM shown as example)*
 
 ### Onboarding Operations
 
-![Onboarding blocks from Host to Device](/assets/img/kvbm-onboard-host2device.png)
+![Onboarding blocks from Host to Device](../../assets/img/kvbm-onboard-host2device.png)
 
 *Onboarding blocks from Host to Device*
 
-![Onboarding blocks from Disk to Device](/assets/img/kvbm-onboard-disk2device.png)
+![Onboarding blocks from Disk to Device](../../assets/img/kvbm-onboard-disk2device.png)
 
 *Onboarding blocks from Disk to Device*
 
 ### Offloading Operations
 
-![Offloading blocks from Device to Host & Disk](/assets/img/kvbm-offload.png)
+![Offloading blocks from Device to Host & Disk](../../assets/img/kvbm-offload.png)
 
 *Offloading blocks from Device to Host & Disk*
 

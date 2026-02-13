@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: KVBM
 ---
 
 # KV Block Manager (KVBM)
@@ -41,7 +42,7 @@ Offloading KV cache to CPU or storage is most effective when KV Cache exceeds GP
 
 ## Architecture
 
-![KVBM Architecture](/assets/img/kvbm-architecture.png)
+![KVBM Architecture](../../../assets/img/kvbm-architecture.png)
 *High-level layered architecture view of Dynamo KV Block Manager and how it interfaces with different components of the LLM inference ecosystem*
 
 KVBM has three primary logical layers:
