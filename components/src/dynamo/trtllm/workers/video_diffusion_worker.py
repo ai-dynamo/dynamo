@@ -12,7 +12,7 @@ import logging
 
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime
-from dynamo.trtllm.utils.trtllm_utils import Config
+from dynamo.trtllm.args import Config
 
 
 async def init_video_diffusion_worker(
@@ -43,7 +43,7 @@ async def init_video_diffusion_worker(
         store_kv=config.store_kv,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        model_path=config.model_path,
+        model_path=config.model,
         served_model_name=config.served_model_name,
         output_dir=config.output_dir,
         default_height=config.default_height,
@@ -78,7 +78,7 @@ async def init_video_diffusion_worker(
     handler = VideoGenerationHandler(component, engine, diffusion_config)
 
     # Register the model with Dynamo's discovery system
-    model_name = config.served_model_name or config.model_path
+    model_name = config.served_model_name or config.model
 
     # Use ModelType.Videos for video generation
     if not hasattr(ModelType, "Videos"):
@@ -97,7 +97,7 @@ async def init_video_diffusion_worker(
         ModelInput.Text,
         model_type,
         endpoint,
-        config.model_path,
+        config.model,
         model_name,
     )
 
