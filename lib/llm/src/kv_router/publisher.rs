@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -577,6 +578,26 @@ fn convert_event(
             block_mm_infos,
             ..
         } => {
+            // Reject self-referencing blocks: all block hashes (including parent) must be unique.
+            {
+                let mut seen = HashSet::with_capacity(block_hashes.len() + 1);
+                if let Some(parent) = parent_block_hash {
+                    seen.insert(parent.into_u64());
+                }
+                let has_duplicate = block_hashes.iter().any(|h| !seen.insert(h.into_u64()));
+                if has_duplicate {
+                    tracing::warn!(
+                        event_id,
+                        "Self-referencing block detected: duplicate hash in store event; dropping"
+                    );
+                    return KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank,
+                    };
+                }
+            }
+
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];
             let block_hashes_u64: Vec<u64> = block_hashes
                 .into_iter()
