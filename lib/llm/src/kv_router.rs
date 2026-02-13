@@ -41,7 +41,7 @@ pub mod worker_query;
 
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use prefill_router::PrefillRouter;
-pub use push_router::KvPushRouter;
+pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
 use crate::{
     discovery::RuntimeConfigWatch,
