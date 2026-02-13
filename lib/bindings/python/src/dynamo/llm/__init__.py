@@ -37,3 +37,8 @@ from dynamo._core import run_input
 from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError
+
+# Backward-compatible aliases
+fetch_llm = fetch_model
+register_llm = register_model
+unregister_llm = unregister_model

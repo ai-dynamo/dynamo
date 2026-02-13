@@ -1063,6 +1063,11 @@ async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
     """
     ...
 
+# Backward-compatible aliases (deprecated, use new names)
+fetch_llm = fetch_model
+register_llm = register_model
+unregister_llm = unregister_model
+
 class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
     ...
