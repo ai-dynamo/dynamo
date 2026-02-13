@@ -41,7 +41,7 @@ class DistributedRuntime:
     def __new__(
         cls,
         event_loop: Any,
-        store_kv: str,
+        discovery_backend: str,
         request_plane: str,
         enable_nats: Optional[bool] = None,
     ) -> "DistributedRuntime":
@@ -50,7 +50,7 @@ class DistributedRuntime:
 
         Args:
             event_loop: The asyncio event loop
-            store_kv: Key-value store backend ("etcd", "file", or "mem")
+            discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp", "http", or "nats")
             enable_nats: Whether to enable NATS for KV events. Defaults to True.
                         If request_plane is "nats", NATS is always enabled.
