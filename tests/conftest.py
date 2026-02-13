@@ -53,6 +53,7 @@ def pytest_configure(config):
         "h100: marks tests to run on H100",
         "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
         "router: marks tests for router component",
+        "router_benchmark: marks router benchmark tests (production models, benchmark profile)",
         "planner: marks tests for planner component",
         "kvbm: marks tests for KV behavior and model determinism",
         "kvbm_v2: marks tests using KVBM V2",
