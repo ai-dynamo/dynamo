@@ -1043,17 +1043,17 @@ class BaseWorkerHandler(ABC):
                         "token_ids": [],
                     },
                 )
-        else:
-            # Normal path: use token IDs
-            mm_uuids = _compute_mm_uuids(multi_modal_data)
-            prompt_kwargs = dict[str, Any](
-                prompt_token_ids=request["token_ids"],
-                multi_modal_data=multi_modal_data,
-            )
-            if mm_uuids is not None:
-                prompt_kwargs["multi_modal_uuids"] = mm_uuids
-            prompt = TokensPrompt(**prompt_kwargs)
-            return prompt, embedding_sequence_length, None
+        # Normal path: use token IDs
+        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        prompt_kwargs = dict[str, Any](
+            prompt_token_ids=request["token_ids"],
+            multi_modal_data=multi_modal_data,
+        )
+        if mm_uuids is not None:
+            prompt_kwargs["multi_modal_uuids"] = mm_uuids
+
+        prompt = TokensPrompt(**prompt_kwargs)
+        return prompt, embedding_sequence_length, None
 
     @staticmethod
     def _build_completion_usage(

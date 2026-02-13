@@ -767,17 +767,14 @@ enum RawKvEvent {
 }
 
 /// Parse MM hash from extra_keys string:
-/// - decimal u64 string: "1234567890"
-/// - hex digest string: first 16 hex chars interpreted as u64
+/// - Only accept canonical vLLM MM identifiers (64-char hex digest)
+/// - Convert by taking the first 16 hex chars as u64
 fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
-    if let Ok(n) = s.parse::<u64>() {
-        return Some(n);
-    }
-
-    if s.len() >= 16 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+    // extra_keys mixes MM identifiers with LoRA/cache_salt/prompt-embed metadata.
+    // Only MM identifiers should be mapped into BlockExtraInfo.
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
         return u64::from_str_radix(&s[..16], 16).ok();
     }
-
     None
 }
 
@@ -1255,28 +1252,35 @@ mod test_event_processing {
 
     #[test]
     fn test_parse_mm_hash_from_extra_key() {
-        assert_eq!(parse_mm_hash_from_extra_key("123"), Some(123));
         assert_eq!(
-            parse_mm_hash_from_extra_key("0123456789abcdef0011223344556677"),
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            ),
             Some(0x0123_4567_89ab_cdef)
         );
+        assert_eq!(parse_mm_hash_from_extra_key("123"), None);
         assert_eq!(parse_mm_hash_from_extra_key("not_a_hash"), None);
     }
 
     #[test]
     fn test_extra_keys_to_block_mm_infos() {
+        let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            .to_string();
         let infos = extra_keys_to_block_mm_infos(Some(vec![
-            Some(vec!["123".to_string()]),
+            Some(vec![mm_hash.clone()]),
             None,
             Some(vec![
                 "invalid".to_string(),
-                "0123456789abcdef0011223344556677".to_string(),
+                mm_hash,
             ]),
         ]))
         .expect("expected parsed MM infos");
 
         assert_eq!(infos.len(), 3);
-        assert_eq!(infos[0].as_ref().unwrap().mm_objects[0].mm_hash, 123);
+        assert_eq!(
+            infos[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
         assert!(infos[1].is_none());
         assert_eq!(
             infos[2].as_ref().unwrap().mm_objects[0].mm_hash,
@@ -1286,6 +1290,8 @@ mod test_event_processing {
 
     #[test]
     fn test_seq_block_stored_field8_supports_extra_keys() {
+        let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            .to_string();
         let extra_keys_payload = rmps::to_vec(&(
             "BlockStored",
             vec![10_u64],
@@ -1295,7 +1301,7 @@ mod test_event_processing {
             None::<u64>,
             None::<String>,
             None::<String>,
-            vec![Some(vec!["123".to_string()])],
+            vec![Some(vec![mm_hash])],
         ))
         .unwrap();
         let extra_keys_event: RawKvEvent = rmps::from_slice(&extra_keys_payload).unwrap();
@@ -1310,7 +1316,7 @@ mod test_event_processing {
         assert!(lora_name.is_none());
         assert_eq!(
             block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
-            123
+            0x0123_4567_89ab_cdef
         );
     }
 
@@ -1339,7 +1345,10 @@ mod test_event_processing {
             lora_id: None,
             medium: Some("GPU".to_string()),
             lora_name: None,
-            extra_keys: Some(vec![Some(vec!["123".to_string()])]),
+            extra_keys: Some(vec![Some(vec![
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+                    .to_string(),
+            ])]),
         })
         .unwrap();
 
@@ -1349,7 +1358,7 @@ mod test_event_processing {
         };
         assert_eq!(
             block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
-            123
+            0x0123_4567_89ab_cdef
         );
     }
 }
